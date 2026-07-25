@@ -60,6 +60,26 @@ public:
     void setText(const std::string& user, const std::string& scope,
                  const std::string& name, const std::string& value);   // 空值=删除
 
+    // ─── Named-card attribute API (Lua legacy compatibility) ───
+    // 旧版 Lua 的 getPlayerCard(uid, "卡名") 直接按卡名访问，而不是按群取当前绑定卡。
+    // 这些接口不改动任何群绑定，供兼容层精确复刻该语义。
+    std::optional<int> getAttrByName(const std::string& user, const std::string& cardName,
+                                     const std::string& name) const;
+    void setAttrByName(const std::string& user, const std::string& cardName,
+                       const std::string& name, int value);
+    bool eraseAttrByName(const std::string& user, const std::string& cardName,
+                         const std::string& name);
+    std::map<std::string, std::string> getTextsByName(const std::string& user,
+                                                       const std::string& cardName) const;
+    void setTextByName(const std::string& user, const std::string& cardName,
+                       const std::string& name, const std::string& value);
+    bool cardLockedByName(const std::string& user, const std::string& cardName,
+                          const std::string& key) const;
+    bool lockCardByName(const std::string& user, const std::string& cardName,
+                        const std::string& key);
+    bool unlockCardByName(const std::string& user, const std::string& cardName,
+                          const std::string& key);
+
     // ─── Multi-card management (.pc) ─────────────────────────────
 
     /// All of the user's card names ("" = default unnamed card), de-duplicated.

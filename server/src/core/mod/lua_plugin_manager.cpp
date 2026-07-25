@@ -169,12 +169,24 @@ static json luaToJson(lua_State* L, int idx, int depth = 0) {
 }
 
 // ── 人物卡 C 函数（getPlayerCard 对象代理 + getPlayerCardAttr/setPlayerCardAttr）──
-// 代理 __index：读字段 → jsonToLua。upvalue: 1=uid, 2=scope。
+// 代理 __index：读字段 → jsonToLua。upvalue: 1=uid, 2=群作用域或卡名, 3=是否按卡名。
+static bool playerCardByNameArg(lua_State* L, int arg, int overrideArg = 0) {
+    if (overrideArg > 0 && lua_gettop(L) >= overrideArg && lua_isboolean(L, overrideArg))
+        return lua_toboolean(L, overrideArg) != 0;
+    return lua_type(L, arg) == LUA_TSTRING;
+}
 static int card_index(lua_State* L) {
     auto* m = mgrOf(L);
     std::string uid = argStr(L, lua_upvalueindex(1)), scope = argStr(L, lua_upvalueindex(2));
+    const bool byName = lua_toboolean(L, lua_upvalueindex(3)) != 0;
     std::string key = argStr(L, 2);
     if (!m) { lua_pushnil(L); return 1; }
+    if (m->hasPlayerCardBridge()) {
+        json value;
+        if (m->playerCardRead(uid, scope, byName, key, value)) jsonToLua(L, value);
+        else lua_pushnil(L);
+        return 1;
+    }
     json j = json::parse(m->cardLoad(uid, scope), nullptr, false);
     if (j.is_object() && j.contains(key)) jsonToLua(L, j[key]); else lua_pushnil(L);
     return 1;
@@ -183,8 +195,13 @@ static int card_index(lua_State* L) {
 static int card_newindex(lua_State* L) {
     auto* m = mgrOf(L);
     std::string uid = argStr(L, lua_upvalueindex(1)), scope = argStr(L, lua_upvalueindex(2));
+    const bool byName = lua_toboolean(L, lua_upvalueindex(3)) != 0;
     std::string key = argStr(L, 2);
     if (!m || key.empty()) return 0;
+    if (m->hasPlayerCardBridge()) {
+        m->playerCardWrite(uid, scope, byName, key, luaToJson(L, 3));
+        return 0;
+    }
     json j = json::parse(m->cardLoad(uid, scope), nullptr, false);
     if (!j.is_object()) j = json::object();
     if (lua_isnil(L, 3)) j.erase(key); else j[key] = luaToJson(L, 3);
@@ -193,12 +210,29 @@ static int card_newindex(lua_State* L) {
 }
 static int l_getPlayerCard(lua_State* L) {
     std::string uid = argStr(L, 1), scope = argStr(L, 2); if (scope.empty()) scope = "0";
+    const bool byName = playerCardByNameArg(L, 2);
+    // 旧版返回 Actor，不是只可下标访问的裸表；这样 get/set/rollDice/lock/locked 等
+    // 方法也与 getPlayerCardAttr/setPlayerCardAttr 操作同一张真实人物卡。
+    lua_getglobal(L, "Actor");
+    if (lua_isfunction(L, -1)) {
+        lua_pushlstring(L, uid.data(), uid.size());
+        lua_pushlstring(L, scope.data(), scope.size());
+        lua_pushboolean(L, byName ? 1 : 0);
+        if (lua_pcall(L, 3, 1, 0) == LUA_OK) return 1;
+        DICE_LOG_ERROR("[lua] getPlayerCard Actor construction failed: {}", argStr(L, -1));
+        lua_pop(L, 1);
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pop(L, 1);
     lua_newtable(L);                                    // 代理表（空，读写全走元方法）
     lua_newtable(L);                                    // 元表
     lua_pushstring(L, uid.c_str()); lua_pushstring(L, scope.c_str());
-    lua_pushcclosure(L, card_index, 2); lua_setfield(L, -2, "__index");
+    lua_pushboolean(L, byName ? 1 : 0);
+    lua_pushcclosure(L, card_index, 3); lua_setfield(L, -2, "__index");
     lua_pushstring(L, uid.c_str()); lua_pushstring(L, scope.c_str());
-    lua_pushcclosure(L, card_newindex, 2); lua_setfield(L, -2, "__newindex");
+    lua_pushboolean(L, byName ? 1 : 0);
+    lua_pushcclosure(L, card_newindex, 3); lua_setfield(L, -2, "__newindex");
     lua_setmetatable(L, -2);
     return 1;
 }
@@ -206,6 +240,13 @@ static int l_getPlayerCardAttr(lua_State* L) {
     auto* m = mgrOf(L); if (!m) { lua_pushnil(L); return 1; }
     std::string uid = argStr(L, 1), scope = argStr(L, 2), attr = argStr(L, 3);
     if (scope.empty()) scope = "0";
+    const bool byName = playerCardByNameArg(L, 2, 5);
+    if (m->hasPlayerCardBridge()) {
+        json value;
+        if (m->playerCardRead(uid, scope, byName, attr, value)) { jsonToLua(L, value); return 1; }
+        if (lua_gettop(L) >= 4 && !lua_isnoneornil(L, 4)) { lua_pushvalue(L, 4); return 1; }
+        lua_pushnil(L); return 1;
+    }
     json j = json::parse(m->cardLoad(uid, scope), nullptr, false);
     if (j.is_object() && j.contains(attr)) { jsonToLua(L, j[attr]); return 1; }
     if (lua_gettop(L) >= 4 && !lua_isnoneornil(L, 4)) { lua_pushvalue(L, 4); return 1; }   // 默认值
@@ -215,7 +256,12 @@ static int l_setPlayerCardAttr(lua_State* L) {
     auto* m = mgrOf(L); if (!m) return 0;
     std::string uid = argStr(L, 1), scope = argStr(L, 2), attr = argStr(L, 3);
     if (scope.empty()) scope = "0";
+    const bool byName = playerCardByNameArg(L, 2, 5);
     if (attr.empty()) return 0;
+    if (m->hasPlayerCardBridge()) {
+        m->playerCardWrite(uid, scope, byName, attr, luaToJson(L, 4));
+        return 0;
+    }
     json j = json::parse(m->cardLoad(uid, scope), nullptr, false);
     if (!j.is_object()) j = json::object();
     if (lua_isnoneornil(L, 4)) j.erase(attr); else j[attr] = luaToJson(L, 4);
@@ -230,11 +276,23 @@ static int cardLockToggle(lua_State* L, bool on) {
     auto* m = mgrOf(L);
     std::string uid = argStr(L, 1), scope = argStr(L, 2), key = argStr(L, 3);
     if (!m || uid.empty() || key.empty()) { lua_pushboolean(L, 0); return 1; }
+    const bool byName = playerCardByNameArg(L, 2, 4);
+    if (m->hasPlayerCardBridge()) {
+        lua_pushboolean(L, m->playerCardLock(uid, scope, byName, key, on) ? 1 : 0);
+        return 1;
+    }
     lua_pushboolean(L, m->cardLock(uid, scope, key, on) ? 1 : 0);
     return 1;
 }
 static int l_lockPlayerCard(lua_State* L)   { return cardLockToggle(L, true); }
 static int l_unlockPlayerCard(lua_State* L) { return cardLockToggle(L, false); }
+static int l_isPlayerCardLocked(lua_State* L) {
+    auto* m = mgrOf(L);
+    std::string uid = argStr(L, 1), scope = argStr(L, 2), key = argStr(L, 3);
+    const bool byName = playerCardByNameArg(L, 2, 4);
+    lua_pushboolean(L, m && m->hasPlayerCardBridge() && m->playerCardLocked(uid, scope, byName, key));
+    return 1;
+}
 
 // ─── core C functions (复刻原版 DiceLua 全局，阶段一子集) ─────────
 static int l_log(lua_State* L) {
@@ -616,6 +674,7 @@ void LuaPluginManager::registerGlobals() {
         {"getPlayerCard", l_getPlayerCard}, {"getPlayerCardAttr", l_getPlayerCardAttr},
         {"setPlayerCardAttr", l_setPlayerCardAttr},
         {"lockPlayerCard", l_lockPlayerCard}, {"unlockPlayerCard", l_unlockPlayerCard},
+        {"isPlayerCardLocked", l_isPlayerCardLocked},
         {"askExtra", l_askExtra},                                  // 平台扩展查询（原版 DD::getExtra）
         {"__dnx_sd_load", l_sdLoad}, {"__dnx_sd_save", l_sdSave},  // SelfData 后端（bootstrap 用）
         {"__dnx_roll", l_rollExpr},                                // pc:rollDice 引擎桥
@@ -723,35 +782,35 @@ do
 
   -- ===== Actor（原版 metatable Actor：get/set/rollDice/locked/lock/unlock + 属性读写）=====
   local ActorMethods = {
-    get = function(a, k) return getPlayerCardAttr(rawget(a,'__u'), rawget(a,'__g'), k) end,
+    get = function(a, k) return getPlayerCardAttr(rawget(a,'__u'), rawget(a,'__g'), k, nil, rawget(a,'__n')) end,
     set = function(a, k, v)
       local u, g = rawget(a,'__u'), rawget(a,'__g')
       if type(k) == 'table' then
         local n = 0
-        for kk, vv in pairs(k) do setPlayerCardAttr(u, g, kk, vv); n = n + 1 end
+        for kk, vv in pairs(k) do setPlayerCardAttr(u, g, kk, vv, rawget(a,'__n')); n = n + 1 end
         return n
       end
-      setPlayerCardAttr(u, g, k, v); return 1
+      setPlayerCardAttr(u, g, k, v, rawget(a,'__n')); return 1
     end,
     rollDice = function(a, exp)
       local u, g = rawget(a,'__u'), rawget(a,'__g')
-      if not exp or exp == '' then exp = getPlayerCardAttr(u, g, '__DefaultDiceExp') or '1D' end
-      local face = tonumber(getPlayerCardAttr(u, g, '__DefaultDice')) or 100
+      if not exp or exp == '' then exp = getPlayerCardAttr(u, g, '__DefaultDiceExp', nil, rawget(a,'__n')) or '1D' end
+      local face = tonumber(getPlayerCardAttr(u, g, '__DefaultDice', nil, rawget(a,'__n'))) or 100
       return __dnx_roll(exp, face)
     end,
-    lock   = function(a, k) return lockPlayerCard(rawget(a,'__u'), rawget(a,'__g'), k) end,
-    unlock = function(a, k) return unlockPlayerCard(rawget(a,'__u'), rawget(a,'__g'), k) end,
-    locked = function(a, k) return false end,
+    lock   = function(a, k) return lockPlayerCard(rawget(a,'__u'), rawget(a,'__g'), k, rawget(a,'__n')) end,
+    unlock = function(a, k) return unlockPlayerCard(rawget(a,'__u'), rawget(a,'__g'), k, rawget(a,'__n')) end,
+    locked = function(a, k) return isPlayerCardLocked(rawget(a,'__u'), rawget(a,'__g'), k, rawget(a,'__n')) end,
   }
   local ActorM = {
     __index = function(a, k)
       if ActorMethods[k] then return ActorMethods[k] end
-      return getPlayerCardAttr(rawget(a,'__u'), rawget(a,'__g'), k)
+      return getPlayerCardAttr(rawget(a,'__u'), rawget(a,'__g'), k, nil, rawget(a,'__n'))
     end,
-    __newindex = function(a, k, v) setPlayerCardAttr(rawget(a,'__u'), rawget(a,'__g'), k, v) end,
+    __newindex = function(a, k, v) setPlayerCardAttr(rawget(a,'__u'), rawget(a,'__g'), k, v, rawget(a,'__n')) end,
   }
-  Actor = function(uid, gid)
-    local o = {}; rawset(o,'__u', tostring(uid)); rawset(o,'__g', (gid == nil or gid == '') and '0' or tostring(gid))
+  Actor = function(uid, gid, byName)
+    local o = {}; rawset(o,'__u', tostring(uid)); rawset(o,'__g', (gid == nil or gid == '') and '0' or tostring(gid)); rawset(o,'__n', byName == true)
     return setmetatable(o, ActorM)
   end
 
@@ -840,7 +899,7 @@ do
         if lazy[k] ~= nil then return lazy[k] end
         local v
         if k == 'at' or k == '@' then v = (uidS ~= '') and ('[CQ:at,qq='..uidS..']') or ''
-        elseif k == 'char' then v = Actor(uidS, gidS)
+        elseif k == 'char' then v = Actor(uidS, gidS, false)
         elseif k == 'pc' then v = rawget(t,'nick')
         elseif k == 'user' then
           local o = {}; rawset(o,'__id',uidS); rawset(o,'__nick',rawget(t,'nick') or ''); rawset(o,'__trust',trust or 0)
@@ -954,6 +1013,24 @@ void LuaPluginManager::cardDel(const std::string& uid, const std::string& scope)
         sqlite3_step(st);
     }
     sqlite3_finalize(st);
+}
+
+bool LuaPluginManager::playerCardRead(const std::string& uid, const std::string& selector,
+                                      bool byName, const std::string& key, nlohmann::json& out) const {
+    return playerCardRead_ && playerCardRead_(uid, selector, byName, key, out);
+}
+bool LuaPluginManager::playerCardWrite(const std::string& uid, const std::string& selector,
+                                       bool byName, const std::string& key, const nlohmann::json& value) const {
+    return playerCardWrite_ && playerCardWrite_(uid, selector, byName, key, value);
+}
+bool LuaPluginManager::playerCardLock(const std::string& uid, const std::string& selector,
+                                      bool byName, const std::string& key, bool on) const {
+    if (playerCardLock_) return playerCardLock_(uid, selector, byName, key, on);
+    return cardLock(uid, selector, key, on);
+}
+bool LuaPluginManager::playerCardLocked(const std::string& uid, const std::string& selector,
+                                        bool byName, const std::string& key) const {
+    return playerCardLocked_ && playerCardLocked_(uid, selector, byName, key);
 }
 
 std::string LuaPluginManager::cardLoad(const std::string& uid, const std::string& scope) const {

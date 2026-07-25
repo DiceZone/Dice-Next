@@ -18,6 +18,7 @@
 #include <mutex>
 #include <functional>
 #include <filesystem>
+#include <nlohmann/json_fwd.hpp>
 
 struct lua_State;
 struct sqlite3;
@@ -109,6 +110,31 @@ public:
     std::vector<std::pair<std::string, std::string>> cardAllOf(const std::string& uid) const;
     void        cardDel(const std::string& uid, const std::string& scope);
 
+    // 旧版 Lua 的 getPlayerCard* 直接操作骰娘人物卡；第二参数为字符串时表示卡名，
+    // 为数字/空值时表示群作用域并读取该群绑定卡。Lua 自己的 lua_card 表仍只供插件私有 JSON 数据使用。
+    using PlayerCardReadFn = std::function<bool(const std::string& uid, const std::string& selector,
+                                                bool byName, const std::string& key, nlohmann::json& out)>;
+    using PlayerCardWriteFn = std::function<bool(const std::string& uid, const std::string& selector,
+                                                 bool byName, const std::string& key, const nlohmann::json& value)>;
+    using PlayerCardLockFn = std::function<bool(const std::string& uid, const std::string& selector,
+                                                bool byName, const std::string& key, bool on)>;
+    using PlayerCardLockedFn = std::function<bool(const std::string& uid, const std::string& selector,
+                                                  bool byName, const std::string& key)>;
+    void setPlayerCardBridge(PlayerCardReadFn read, PlayerCardWriteFn write,
+                             PlayerCardLockFn lock, PlayerCardLockedFn locked) {
+        playerCardRead_ = std::move(read); playerCardWrite_ = std::move(write);
+        playerCardLock_ = std::move(lock); playerCardLocked_ = std::move(locked);
+    }
+    bool hasPlayerCardBridge() const { return static_cast<bool>(playerCardRead_) && static_cast<bool>(playerCardWrite_); }
+    bool playerCardRead(const std::string& uid, const std::string& selector, bool byName,
+                        const std::string& key, nlohmann::json& out) const;
+    bool playerCardWrite(const std::string& uid, const std::string& selector, bool byName,
+                         const std::string& key, const nlohmann::json& value) const;
+    bool playerCardLock(const std::string& uid, const std::string& selector, bool byName,
+                        const std::string& key, bool on) const;
+    bool playerCardLocked(const std::string& uid, const std::string& selector, bool byName,
+                          const std::string& key) const;
+
     // 卡片锁定桥接（原版 CharaCard::lock/unlock）：作用在「真人物卡」（.st 那套）上，
     // 由 main.cpp 注入。key="w" 锁写 / "r" 锁读；on=true 加锁。返回是否发生变化。
     using CardLockFn = std::function<bool(const std::string& uid, const std::string& scope,
@@ -150,6 +176,10 @@ public:
     HttpFetchFn httpFetch_;
     GroupGateFn groupGate_;   // 分群启停 gate（C#27 地基）
     CardLockFn  cardLockFn_;  // 卡片锁定桥接（真人物卡）
+    PlayerCardReadFn playerCardRead_;
+    PlayerCardWriteFn playerCardWrite_;
+    PlayerCardLockFn playerCardLock_;
+    PlayerCardLockedFn playerCardLocked_;
     RollFn      roller_;      // 掷骰引擎桥（pc:rollDice）
     ExtraFn     askExtra_;    // 平台扩展查询（askExtra）
 
