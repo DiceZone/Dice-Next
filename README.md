@@ -86,7 +86,7 @@ powershell -File package.ps1
 
 Dice!Next 是对 [Dice!](https://github.com/Dice-Developer-Team/Dice) 的致敬重构项目。它以现代 C++、本地 WebUI 与可维护的模块化结构重新实现骰娘的核心使用体验；并非 Dice! 的官方后续版本，也不与原项目团队存在从属关系。
 
-感谢 Dice! 的开发者与贡献者，尤其是 w4123 溯洄、String.Empty 和 Shiki，对中文 TRPG 骰娘生态所作的长期贡献。重构过程中，Dice! 的公开行为、文档和开源实现为兼容性设计提供了重要参考。
+感谢 Dice! 的开发者与贡献者，尤其是 w4123 溯洄、String.Empty (Shiki)，对中文 TRPG 骰娘生态所作的长期贡献。重构过程中，Dice! 的公开行为、文档和开源实现为兼容性设计提供了重要参考。
 
 同时感谢以下项目、协议与社区：
 
