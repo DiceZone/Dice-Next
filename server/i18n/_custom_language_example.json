@@ -1,0 +1,18 @@
+{
+  "_README": "自定义翻译文件示例（C#46）。把本文件复制为 <语言码>.json（如 ko.json、fr.json）放在本 i18n/ 目录即可被自动加载；下划线开头的文件不会被加载。_meta.name 是显示名，_meta.keywords 是 .lang 切换关键词（用户发 .lang ko / .lang 韩语 都能切换）。其余键参考 zh-Hans.json，缺失的键会自动回落到默认语言。",
+  "_meta": {
+    "name": "한국어",
+    "keywords": ["ko", "korean", "韩语", "韓語", "한국어"]
+  },
+  "lang": {
+    "name": "한국어",
+    "set": "그룹 언어를 {lang}(으)로 설정했습니다.",
+    "set_user": "당신의 언어를 {lang}(으)로 설정했습니다."
+  },
+  "dice": {
+    "roll": {
+      "result": "{nick}의 주사위: {res}",
+      "result_reason": "{nick}의 {reason} 주사위: {res}"
+    }
+  }
+}

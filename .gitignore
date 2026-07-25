@@ -1,0 +1,20 @@
+# Build output and local runtime state
+/release/
+/server/build/
+/server/build-arm64/
+/server/cmake-build-*/
+/server/data/*.db
+/server/data/*.db-shm
+/server/data/*.db-wal
+/server/logs/
+/server/uploads/
+/vcpkg/
+
+# Local configuration and editor files
+/config/default_config.json
+/.vs/
+/.vscode/
+*.user
+*.log
+*.err
+

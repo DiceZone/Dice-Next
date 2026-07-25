@@ -1,0 +1,847 @@
+﻿{
+  "_meta": {
+    "name": "日本語",
+    "keywords": [
+      "ja",
+      "japanese",
+      "日本語",
+      "日文",
+      "日语",
+      "日語"
+    ]
+  },
+  "dice": {
+    "error": {
+      "roll": "ロールエラー: {error}",
+      "coc": "COC判定エラー: {error}",
+      "dnd": "DND判定エラー: {error}",
+      "sc": "正気度判定エラー: {error}",
+      "st": "技能判定エラー: {error}"
+    },
+    "reason_prefix": "{reason}のため: ",
+    "proxy_note": "（{agent} が代理でロール）\n",
+    "crit": " [クリティカル]",
+    "fumble": " [ファンブル]",
+    "roll": {
+      "result": "{nick} のロール: {res}",
+      "result_reason": "{nick} の{reason}ロール: {res}",
+      "multi": "{nick} の {turn} 回ロール: {res}",
+      "multi_reason": "{nick} の{reason}を {turn} 回ロール: {res}",
+      "too_many": "ロールは最大 {max} 回までです（{n} 回が指定されました）。",
+      "hidden": "{nick} が暗ロールを行いました。結果は個別に送られました。"
+    },
+    "bp": {
+      "bonus": "ボーナス",
+      "penalty": "ペナルティ",
+      "bonus_label": "（ボーナス）",
+      "penalty_label": "（ペナルティ）"
+    },
+    "pool": {
+      "usage": "コマンド .ww の使い方: .ww <ダイス数> [成功値]、または .ww <ダイス数>a<振り足し値>c<成功値>+<追加成功>。例: .ww 10a8c7+2（a は既定10、c は既定8）",
+      "result": "{nick} のダイス: {expr}"
+    },
+    "dx": {
+      "usage": "コマンド .dx の使い方: .dx <ダイス数>c<クリティカル値>（ダブルクロス、例 .dx 3c8）または .dx <ダイス数>a<目標値>（成功プール/WoD、例 .dx 5a7）"
+    },
+    "rav": {
+      "usage": "コマンド .rav の使い方: .rav <A> <B>（数値または能力値）、例 .rav 60 50 または .rav 目星 隠密",
+      "result": "{nick} の対抗判定:\n{la}: 1D100={ra}/{va} {lva}\n{lb}: 1D100={rb}/{vb} {lvb}\n{outcome}",
+      "a_wins": "「{a}」の勝ち！",
+      "b_wins": "「{b}」の勝ち！",
+      "tie": "引き分け"
+    },
+    "check": {
+      "result": "{nick} の{attr}ロール: {roll}/{rate} {level}",
+      "result_reason": "{reason}のため、{nick} の{attr}ロール: {roll}/{rate} {level}",
+      "need_value": "目標値を指定してください。例 .ra 目星 60",
+      "no_card": "能力値「{attr}」が見つかりません。先に .st で登録するか、.ra {attr} 60 のように値を指定してください",
+      "hidden": "{nick} が暗判定を行いました。結果は個別に送られました。"
+    },
+    "level": {
+      "critical": "クリティカル！",
+      "extreme": "イクストリーム成功",
+      "hard": "ハード成功",
+      "regular": "成功",
+      "failure": "失敗",
+      "fumble": "ファンブル！"
+    },
+    "brp": {
+      "critical": "クリティカル！",
+      "special": "スペシャル成功",
+      "success": "成功",
+      "failure": "失敗",
+      "fumble": "ファンブル！",
+      "result": "{nick} の{attr}ロール: {roll}/{rate} {level}",
+      "result_reason": "{reason}のため、{nick} の{attr}ロール: {roll}/{rate} {level}",
+      "resist_usage": "使い方: .bav <能動値/能力値> <受動値/能力値> — BRP抵抗表。例 .bav STR SIZ",
+      "resist": "{nick} の抵抗: {la}({va}) vs {lb}({vb}) → 目標 {target}% {roll} {outcome}",
+      "resist_win": "{a} の勝ち！",
+      "resist_lose": "{a} の負け（{b} が抵抗成功）"
+    },
+    "rx": {
+      "no_group": "心理学の暗ロールは個別チャットでは行えません。",
+      "no_target": "心理学の暗ロールを行う探索者を @ で指定してください。",
+      "receipt": "{nick} が「{target}」に心理学の暗ロールを行いました — 探索者は霧の向こうを見抜けるか？",
+      "private": "「{target}」への心理学暗ロール（グループ {gid}）: D100={roll}/{rate} {level}\n{receipt}",
+      "msg": {
+        "critical": "クリティカル！ 誰かさんは大変なことになりそう、ふふ、はてさて誰でしょうね～",
+        "extreme": "イクストリーム成功 — キーパーは渡すべき手がかりをすべて差し出すのがよいでしょう。",
+        "hard": "ハード成功 — なかなか良い。探索者が知りたいことをキーパーが伝える価値あり。",
+        "regular": "成功 — キーパーは探索者の求めるものを見せてくれるでしょうか？",
+        "failure": "失敗 — キーパーは「探索者の力不足」と告げるか、それとも場面をごく普通に見せるか？",
+        "fumble": "フ・ァ・ン・ブ・ル！ この先、物語はどう転がる？ じっくり見届けましょう。"
+      }
+    },
+    "coc": {
+      "build": "{nick} の探索者:{res}",
+      "total": "合計",
+      "attr": {
+        "str": "STR",
+        "con": "CON",
+        "siz": "SIZ",
+        "dex": "DEX",
+        "app": "APP",
+        "int": "INT",
+        "pow": "POW",
+        "edu": "EDU",
+        "luck": "幸運"
+      }
+    },
+    "dnd": {
+      "build": "{nick} の冒険者の能力値（降順）:{res}",
+      "total": "合計 "
+    },
+    "sc": {
+      "result": "正気度判定 {output}"
+    },
+    "st": {
+      "result": "技能判定 {output}"
+    }
+  },
+  "card": {
+    "st": {
+      "usage": "コマンド .st の使い方: .st STR50 DEX60\n.st show\n.st clr\n.st del <能力値>",
+      "done": "{nick} のシートを更新しました: {detail}"
+    },
+    "show": "{nick} のキャラクターシート: {detail}",
+    "show_one": "{nick} の{attr}: {val}",
+    "empty": "{nick} はまだシートがありません — .st で能力値を設定してください",
+    "attr_missing": "能力値「{attr}」が見つかりません",
+    "cleared": "{nick} のキャラクターシートをクリアしました",
+    "attr_deleted": "{nick} の能力値「{attr}」を削除しました",
+    "sc": {
+      "usage": "コマンド .sc の使い方: .sc <成功時減少>/<失敗時減少> [現在SAN]、例 .sc 1/1d6 70；理智を設定済みならSANは省略可",
+      "no_san": "SAN値が未設定です — 先に .st 理智 [値] を使うか、コマンドの後に現在SANを指定してください",
+      "invalid_san": "SANは1〜99の整数で指定してください",
+      "result": "{nick} の正気度判定: 1D100={res}/{san} {grade}\nSAN -{loss} → 残り {final}",
+      "result_noloss": "{nick} の正気度判定: 1D100={res}/{san} {grade}\nSAN減少なし"
+    },
+    "en": {
+      "usage": "コマンド .en の使い方: .en <技能>（先に .st で設定が必要）",
+      "success": "{nick} の{attr}成長判定: {res}\n成功！ {attr} {change} → {final}",
+      "fail": "{nick} の{attr}成長判定: {res}\n成長なし。{attr} は変化しません",
+      "fail_grow": "{nick} の{attr}成長判定: {res}\n失敗、ただし失敗時成長 {change} → {final}"
+    },
+    "insane": {
+      "temp": "{nick} の発狂 — 一時的狂気:\n{res}",
+      "long": "{nick} の発狂 — 不定の狂気:\n{res}"
+    },
+    "export": "{nick} のシートエクスポート（.st で取り込み可）:\n{body}",
+    "fmt_done": "{nick} のシートを現在のルールに正規化しました。",
+    "locked_w": "現在のシートは書き込みロック中のため変更できません。",
+    "locked_r": "現在のシートは閲覧ロック中です。",
+    "weapon": {
+      "set": "{nick} の武器を登録しました: {detail}（.r <名前> でダメージをロール）"
+    },
+    "autocard": {
+      "recalc": "（自動シート）{causes} の変化により再計算しました: {detail}"
+    },
+    "db": {
+      "auto": "（ダメージボーナスを筋力+体格から自動計算：{db}）"
+    }
+  },
+  "fun": {
+    "jrrp": "{nick} の今日の運勢は: {res}",
+    "rulecmd": {
+      "fail": "コマンド「{cmd}」には未設定のシート能力値が必要です。"
+    },
+    "text": {
+      "usage": "コマンド .text の使い方: .text <テンプレート> — {波括弧}内の式と変数を評価します。例 .text 今日はツイてる {1d16}"
+    },
+    "name": {
+      "result": "{nick} のランダム名: {res}",
+      "too_many": "名前は最大10個までです"
+    },
+    "nn": {
+      "set": "「{old}」を「{new}」に改名しました",
+      "clear": "「{old}」のニックネームをクリアしました",
+      "too_long": "ニックネームが長すぎます（最大50バイト）"
+    },
+    "set": {
+      "done": "{nick} の既定ダイスを D{default} に設定しました",
+      "reset": "{nick} の既定ダイスを D{default} にリセットしました",
+      "usage": "コマンド .set の使い方: .set 20 で既定ダイスを設定；.set（引数なし）で100にリセット",
+      "invalid": "既定ダイスは1〜9999で指定してください",
+      "rule": "{nick} がこのグループのルールシステムを {name} に切り替えました（既定ダイス d{sides}）。",
+      "group_only": "ルールシステムの切り替えはグループチャットでのみ可能です。",
+      "no_perm": "グループ管理者のみがルールシステムを切り替えられます。",
+      "list": "利用可能なルールシステム（★ = このグループの現在: {active}）:\n{list}\n.set <名前> で切り替え。",
+      "list_empty": "（切り替え可能なルールシステムはありません）",
+      "none": "なし"
+    },
+    "sleep": "{nick}: ダイスボットは休憩に入ります。おやすみなさい zzz",
+    "mrrp": "{nick} の明日の運勢は {res}",
+    "zrrp": "{nick} の昨日の運勢は {res}",
+    "summon_empty": "{self} を呼びましたね、{nick} — ご用件は何でしょう？"
+  },
+  "help": {
+    "main": "Dice!Next ヘルプ\n- ロール: .r .rh .rb/.rp .ww .dx\n- 判定: .ra .rc .rav .sc(SAN) .en(成長)\n- シート: .st .pc（複数枚）\n- 生成: .coc .dnd .name\n- デッキ: .deck .draw .gacha\n- 娯楽: .jrrp .nn .set\n- 管理: .bot .group .log .ob .dismiss .send\n詳細は .help <コマンド>（例 .help ra）；.helpdoc で全項目一覧。",
+    "entry_missing": "ヘルプ項目「{entry}」はまだ利用できません。ドキュメントをご確認ください。",
+    "unknown": "「{topic}」のヘルプが見つかりません。.helpdoc で項目一覧をご確認ください。",
+    "ambiguous": "「{topic}」は複数の項目に一致します: {list}。もう少し具体的に指定してください。",
+    "topic": {
+      "r": "ロール .r [式] [理由]: ダイスを振る。例 .r3d6+2 攻撃；.rh で暗ロール；N#式 で繰り返し。",
+      "rh": "暗ロール .rh [式] [理由]: 暗ロール／暗判定。結果は個別送信され、グループには「<名前> が暗ロール」とだけ表示。暗判定は .rah / .rch（例 .rah 目星 60）。ハウスルール(.setcoc)とボーナス/ペナルティダイスも有効。",
+      "ra": "判定 .ra <技能|能力値> [成功率] [理由]: COC判定。成功率省略時はシートを参照。例 .ra 目星 / .ra str60",
+      "rx": "心理学 .rx @探索者 [成功率]: 心理学の暗ロール（キーパー向け）。@で指定した探索者に心理学判定を行い、成功段階を含む詳細結果は個別送信、グループにはネタバレ無しの通知のみ。省略時は対象シートの心理学を参照、既定10。",
+      "rb": "ボーナス/ペナルティ .rb/.rp [N] [判定]: ボーナス/ペナルティダイス（十の位を低い/高い方で採用）。例 .rb 目星",
+      "sc": "正気度 .sc 成功/失敗 [san]: 正気度判定。SANを自動減算してシートに保存。例 .sc 1/1d6",
+      "st": "能力値 .st str50 dex60: 能力値の設定/変更（+/- やダイス可、例 hp-2、san+1d3）。DND貨幣は pp/gp/ep/sp/cp に対応し、支払い時は自動で両替します。 .st show\n.st clr\n.st del <能力値>。",
+      "pc": "複数シート .pc: .pc new <名前>\n.pc tag <名前>\n.pc list\n.pc del <名前>\n.pc @誰か で相手のシートを表示。",
+      "npc": "NPC .npc：グループ共有キャラクターカード。\n.npc new <名前>\n.npc list\n.npc <名前> st str50 で能力値登録\n.npc <名前> ra spot でNPCとして判定\n.npc show/del/clr <名前>。",
+      "coc": "キャラ作成 .coc [回数]: COC7探索者の能力値を生成。",
+      "dnd": "キャラ作成 .dnd [回数]: DND能力値を生成（4d6で上位3つ）。",
+      "deck": "デッキ一覧 .deck\n.draw <デッキ> 抽選\n.gacha ガチャ。",
+      "jrrp": "運勢 .jrrp: 今日の運勢（人ごと・日ごとに固定）。",
+      "bot": "ボット .bot: バージョン/状態\n.bot on/off でこのグループの有効/無効（無効時は .bot のみ動作）。",
+      "group": "グループ設定 .group: このグループの設定を表示。編集はWeb管理画面で。",
+      "ob": "観戦 .ob: このグループのセッションを観戦\n.ob list\n.ob exit\n.ob clr。",
+      "send": "伝言 .send <メッセージ>: マスターへ転送。マスターは .send group/user <id> <msg> が可能。",
+      "log": "ログ .log new [名前] 記録開始\n.log on/off 再開/一時停止\n.log end 終了してアップロード（リンク+グループファイル）\n.log halt アップロードせず終了\n.log list 一覧\n.log get [名前] 再アップロードしてリンク取得\n.log del <名前> 削除\n.log stat [名前] 統計\n.log export [名前] ファイルのみ送信\n.log type txt/html ファイル形式（管理者）\n.log time/timer 計時\n.log masterget <グループ> [名前]（マスター）。",
+      "nn": "ニックネーム .nn <名前>: ボット内での表示名を設定；.nn でクリア。",
+      "set": "既定ダイス .set <面数>: 既定ダイスを設定（素の .r で使用）\n.set で100にリセット。",
+      "ww": "ダイスプール .ww N [成功値]: WoDの振り足しプール。従来の .ww 5 / .ww 5 7 は10で振り足し；拡張形 .ww 10a8c7+2 は a=振り足し値（既定10）、c=成功値（既定8）、+2=追加成功。成功ダイスは丸数字で示し、各ラウンドを表示する。",
+      "dx": "ダブルクロス .dx <個数>c<クリティカル>（例 .dx 3c8）または .dx <個数> <クリティカル>: ダブルクロスのダイス — クリティカル値に達したd10が爆発し、DXルールで集計。素のロールではなくDX専用の爆発判定。",
+      "rav": "対抗 .rav A B [@対象]: 対抗判定 — 双方がd100を振り、まず成功段階で比較、引き分けは出目で比較。例 .rav 戦闘 60 / .rav 目星 @誰か。",
+      "ba": "BRP判定 .ba <技能|能力値> [成功率] [理由]: BRP判定（ロールアンダーd100）。段階: クリティカル ≤ 技能/20、スペシャル ≤ 技能/5、成功 ≤ 技能、失敗 > 技能、ファンブル（100、または失敗時の99）。省略時はシート参照；@代理、N#連続に対応。例 .ba 目星 / .ba 戦闘60。",
+      "bav": "抵抗表 .bav <能動> <受動>: BRP抵抗表。目標% = 50 + (能動 − 受動)×5；1d100 ≤ 目標 で能動側の勝ち。能動/受動は能力値名（シートから読込）または数値。例 .bav STR SIZ。",
+      "en": "成長 .en <技能> [値] [([失敗時成長]/)成功時成長]: COC技能成長 — d100を振り、現在値より大（または>95）なら成長してシートに保存。成長は+/-で始める（既定+1d10）；.en a b や a|b で一括。",
+      "ti": "狂気 .ti 一時的狂気 / .li 不定の狂気: 探索者が正気度を失った際のCOC7発狂症状（恐怖症/マニアの副表付き）を引く。",
+      "setcoc": "ハウスルール .setcoc <0-7>: このグループのCOC判定ハウスルールを設定（クリティカル/ファンブルの裁定が異なる）。.setcoc show で表示\n.setcoc clr でクリア。",
+      "name": "名前生成 .name [cn/en/jp] [回数]: ランダム名（中国語/英語/日本語）、回数指定可；別名 .gn。",
+      "sleep": "休憩 .sleep: 休憩する — 休憩メッセージを返す。",
+      "mrrp": "運勢 .mrrp: 明日の運勢 — 人ごと・日ごとに固定、明日をのぞき見。",
+      "zrrp": "運勢 .zrrp: 昨日の運勢 — 人ごと・日ごとに固定、昨日を振り返る。",
+      "lang": "言語 .lang: ボットの返答言語を表示/切替。.lang 简体/繁體/en/日本語 で切替\n.lang clr で上書き解除。",
+      "favor": "好感度システム: 「好感」で好感度+称号を表示；「好感排行」/「群内好感排行」でランキング。オーナー/信頼(trust>=4)は .favor add[n]/grow/set<n>/clr（@誰か 可）が使える。好感度が高いほど成長は遅い。",
+      "hiy": "統計 .hiy [技能]: 判定統計。引数なし=全体；技能指定=その技能のロール数/成功数/成功率/段階内訳。",
+      "setsn": "名札設定 .setsn <能力値...>: オーナー/管理者がグループの .sn 名札に表示する能力値を設定（最大5、既定 hp san dex）。",
+      "sn": "名札 .sn [テンプレート]: テンプレートで自分のグループ名札を設定\n.sn off でクリア。.setsn の影響を受ける。",
+      "ri": "先攻 .ri [±補正] [名前]: イニシアチブ d20+補正\n.init list\n.init clr\n.init del。",
+      "welcome": "歓迎文 .welcome <文章>: 入室時の歓迎文を設定（{at} 対応）\n.welcome show / off。",
+      "dismiss": "退出 .dismiss: ボットをこのグループから退出させる（管理者/マスター）。",
+      "rules": "ルール検索 .rules <用語> / .rules <ルールブック>:<用語> — ルール検索（例 .rules coc:fumble）；.ruleset <ルールブック> でグループ既定を設定。",
+      "plugin": "プラグイン .plugin list でプラグインとグループ別状態を表示\n.plugin on|off <名前> で個別切替\n.plugin all on|off で一括。グループ管理者のみ。",
+      "game": "チーム管理 .game：\n.game new <名前> 開始(作成者がGM)\n.game open <16文字の団号> で別グループに接続(GM)\n.game join / exit 参加/退出\n.game master GMになる/GM一覧\n.game state 状態\n.game set 変数 値 (GM)\n.game call 全プレイヤーを呼ぶ(GM)\n.game kick <QQ> (GM)\n.game close このグループの領域を閉鎖\n.game over 終了\n.game rou 面数[*枚数] ルーレット(GM)、rou hist/reset/clr"
+    }
+  },
+  "ai": {
+    "group_only": "このコマンドはグループ内でのみ使えます。",
+    "status_on": "このグループの AI 機能（会話/NPC）：オン。",
+    "status_off": "このグループの AI 機能（会話/NPC）：オフ。",
+    "on": "このグループの AI 機能（会話/NPC）を有効にしました。",
+    "off": "このグループの AI 機能（会話/NPC）を無効にしました。",
+    "already_on": "このグループの AI 機能はすでに有効です。",
+    "already_off": "このグループの AI 機能はすでに無効です。",
+    "not_whitelisted": "このグループは AI ホワイトリストに含まれていないため、AI 機能を利用できません（マスターに許可を依頼してください）。"
+  },
+  "trust": {
+    "usage": "用法：.trust <@ユーザー/QQ> [レベル0-255]。レベル省略で照会。管理者(≥4)のみ、自分未満のレベルのみ設定可。",
+    "query": "{user} の信頼レベル：{level}",
+    "set": "{user} の信頼レベルを {level} に設定しました √",
+    "range": "信頼レベルは 0-255 の範囲です。",
+    "too_high": "自分と同等以上の信頼レベルは付与できません。",
+    "target_higher": "相手の信頼レベルが自分未満ではないため変更できません。"
+  },
+  "admin": {
+    "usage": "用法：.admin add/del <@ユーザー/QQ> で管理者を付与/剥奪；.admin list で一覧。マスターのみ。",
+    "added": "{user} に管理権限を付与しました √",
+    "removed": "{user} の管理権限を剥奪しました √",
+    "not_admin": "そのユーザーに管理権限はありません。",
+    "list": "管理者一覧：\n{list}",
+    "none": "（なし）"
+  },
+  "notice": {
+    "usage": "用法：.notice on/off でこのウィンドウの通知を切替；.notice level <1-15> で購読レベル設定(1定例/2重要/4重大/8エラー、加算可、15全部)。マスターのみ。",
+    "status": "このウィンドウはマスター通知を購読中、レベルマスク：{level}",
+    "off_status": "このウィンドウはマスター通知を購読していません。.notice on で有効化。",
+    "set": "このウィンドウを通知ウィンドウに設定、購読レベル：{level} √",
+    "removed": "このウィンドウのマスター通知を無効化しました √"
+  },
+  "alias": {
+    "usage": "用法：\n.alias add <別名ID> <主ID> でアカウント別名を紐付け\n.alias del <別名ID> で解除\n.alias list で一覧。別名アカウントの信頼/マスター身分は主アカウントに従います。マスターのみ。",
+    "added": "別名を紐付けました：{alias} -> {main} √",
+    "removed": "別名 {alias} を解除しました √",
+    "not_found": "その別名は見つかりません。",
+    "list": "アカウント別名：\n{list}"
+  },
+  "bot": {
+    "on": "{self} を有効にしました √",
+    "off": "{self} を無効にしました √",
+    "usage": "使い方: .bot on/off [ボットのQQ]",
+    "already_on": "{self} はこのグループで既に有効です。",
+    "already_off": "{self} はこのグループで既に無効です。"
+  },
+  "send": {
+    "empty": "マスターへ何を伝えますか？ 使い方: .send <メッセージ>",
+    "done": "マスターへ転送しました — フィードバックありがとうございます！",
+    "no_master": "このボットにはマスターが設定されていないため転送できません。",
+    "from_private": "{user}({uid}) からの個別メッセージ:",
+    "from_group": "グループ {group} の {user}({uid}) からのメッセージ:",
+    "master_usage": "使い方: .send group <グループID> <msg>  または  .send user <QQ> <msg>",
+    "master_done": "{target} へ送信しました"
+  },
+  "dismiss": {
+    "leaving": "ダイスボットはこのグループから退出します...",
+    "private": "個別チャットで {self} に何処から退出してほしいのですか？"
+  },
+  "game": {
+    "created": "ゲームを作成しました: {name}",
+    "untitled": "無題",
+    "usage": "使い方: .game new [名前]",
+    "group_only": "チーム管理コマンドはグループ専用です×",
+    "new": "{self}が新しいゲーム「{game_id}」を作成しました√",
+    "join_code": "団号：{code}",
+    "area_open": "{self}がここに「{game_id}」のゲーム領域を展開しました√",
+    "area_closed": "ゲーム領域を閉じました。{nick}は .game open {game_id} で再開できます√",
+    "master_denied": "申し訳ありませんが、GM権限を{nick}に渡せません×",
+    "mastered": "{self}は{nick}をこのテーブルのGMとして承認しました√",
+    "master_list": "このテーブルのGM:\n{items}",
+    "not_exist": "{self}は{game_id}というゲームを覚えていません×",
+    "void_here": "まだテーブルクロスも敷いていませんよ、{nick}。(.game new で新規作成)",
+    "not_master": "この操作はこのテーブルのGMにお願いしてください、{nick}×",
+    "state_head": "「{game_id}」ゲーム領域",
+    "state_closed": "（一時クローズ中）",
+    "state_vars": "テーブル変数:",
+    "item_set": "{self}はこのテーブルの{set_item}を{set_val}に設定しました√",
+    "item_show": "このテーブルの{set_item}は{set_val}です√",
+    "item_empty": "設定する項目を入力してください、{nick}×",
+    "joined": "{self}は{nick}のプレイヤー参加を受け付けました√",
+    "player_already": "{nick}はもう着席していますよ！",
+    "exited": "プレイヤー{nick}がゲームを退出しました√",
+    "not_joined": "あれ？{nick}は着席していましたか？",
+    "player_empty": "{self}にはまだプレイヤーが見えません~",
+    "kicked": "{self}は{tid}を退席させました√",
+    "kick_not_player": "{nick}が退席させたい{tid}は着席していません×",
+    "over": "ゲーム「{game_id}」は終了しました√",
+    "over_log_hint": "（グループログは記録中です。終了するには .log end）",
+    "roulette_set": "{self}は{face}面ダイスのルーレットを有効にしました√",
+    "roulette_hist": "今回のルーレット記録:\n{hist}",
+    "roulette_empty": "{self}はこのテーブルでルーレットを使っていません×",
+    "roulette_reset": "{self}はルーレットをリセットしました√",
+    "roulette_clear": "{self}はルーレットをクリアしました√",
+    "roulette_too_big": "そんなに大きいと……{nick}は振り切れますか？"
+  },
+  "log": {
+    "usage": "コマンド .log の使い方: new [名前]\non/off\nend（アップロード）\nhalt（アップロードなし）\nlist\nget/del/stat/export [名前]\ntype txt/html\ntime/timer\n引数なし=状態",
+    "unofficial_site": "⚠️ 設定中のログサイトは公式ではありません。リンクの安全性はご自身でご確認ください。",
+    "halted": "記録を強制終了しました（アップロードなし）。",
+    "not_found": "ログ「{name}」が見つかりません。.log list で確認してください。",
+    "getting": "ログを再アップロード中です。少々お待ちください…",
+    "del_usage": "使い方: .log del <ログ名>",
+    "deleted": "ログ「{name}」を削除しました。",
+    "stat": "「{name}」統計: {count} 件のメッセージ、参加者 {players} 名\n期間 {from} ~ {to}\n発言数上位:{tops}",
+    "stat_empty": "このログにはまだ内容がありません。",
+    "exported": "ログ「{name}」をグループファイルに送信しました。",
+    "masterget_usage": "使い方: .log masterget <グループID> [ログ名]（マスター専用）",
+    "new": "セッションログ「{name}」の記録を開始しました。グループのメッセージを記録します（.log off で一時停止、.log end で終了）",
+    "on": "セッションログ「{name}」の記録を再開しました。",
+    "resumed": "ログ「{name}」はここで一時停止されていました。記録を再開しました。",
+    "off": "セッションログを一時停止しました（{count} 行記録）。",
+    "ended": "セッションログを終了しました。{count} 行記録。",
+    "already_on": "既にログ #{id}-{name} を記録中、これまで {count} 行。",
+    "need_new": "まだログがありません — 先に .log new [名前] を使ってください。",
+    "not_recording": "このグループは記録していません。",
+    "idle": "記録していません。.log new [名前] で開始してください。",
+    "status": "ログ #{id}-{name} を記録中、これまで {count} 行。",
+    "paused_status": "このグループには一時停止中の記録があります。.log on [名前] で再開できます。\n#{id}-{name}（最終記録 {date}）【一時停止中】",
+    "no_paused": "再開できる一時停止中の記録はありません。.log new [名前] で開始してください。",
+    "list_empty": "このグループにはまだセッションログがありません。.log new [名前] で開始してください。",
+    "list": "このグループには {total} 件のログがあります。{from}-{to} を表示:\n{list}{more}",
+    "list_item": "#{id}-{name}（最終記録 {date}）【{state}】",
+    "state_running": "進行中",
+    "state_paused": "一時停止中",
+    "state_ended": "終了",
+    "list_more": "\n続きは .log list {page} を送信してください",
+    "group_only": "ログコマンドはグループでのみ利用できます。",
+    "bot_name": "ダイス",
+    "exists": "セッションログ「{name}」が既に進行中です。先に .log end で終了してください。",
+    "uploaded": "セッションログをアップロードしました — 再生: {url}",
+    "upload_failed": "ログのアップロードに失敗しました: {error}",
+    "type_show": "このグループのファイル形式: {type}。.log type txt/html で変更（グループ管理者以上）。",
+    "type_set": "ログのグループファイル形式を {type} に設定しました。",
+    "type_usage": "使い方: .log type txt（テキスト）または .log type html（画像入りウェブページ）。",
+    "timer": {
+      "unit_h": "時間 ",
+      "unit_m": "分 ",
+      "unit_s": "秒",
+      "started": "⏱ タイマー開始。",
+      "resumed": "⏱ タイマー再開、合計 {total}。",
+      "stopped": "⏱ 今回 {current}、合計 {total}。",
+      "show": "⏱ ログ「{name}」合計 {total}{running}",
+      "running": "（現セッション {current}）",
+      "show_none": "このグループにはまだ計測中のセッションログがありません。",
+      "is_off": "このグループはセッションタイマーが無効です（.log timer on で有効化）。",
+      "disabled_set": "このグループのセッションタイマーを無効にしました。",
+      "enabled_set": "このグループのセッションタイマーを有効にしました。",
+      "state_on": "セッションタイマー: ON（.log timer off で無効化）。",
+      "state_off": "セッションタイマー: OFF（.log timer on で有効化）。"
+    }
+  },
+  "reply": {
+    "on": "カスタム返信を有効にしました。",
+    "off": "カスタム返信を無効にしました。",
+    "usage": "使い方: .reply on/off"
+  },
+  "pc": {
+    "usage": "コマンド .pc の使い方:\n.pc new <名前> シートを作成\n.pc tag <名前> このグループに紐付け\n.pc rename <名前> 現在のシートを改名\n.pc untag 現在のシートの紐付け解除\n.pc list シート一覧\n.pc del <名前> シートを削除\n.pc @誰か 相手のシートを表示",
+    "list": "{nick} のシート（{count}）:\n{list}",
+    "list_empty": "{nick} はまだキャラクターシートがありません。.pc new <名前> で作成してください。",
+    "new": "{nick} がシートを作成して紐付けました: {name}",
+    "new_exists": "「{name}」という名前のシートは既に存在します。",
+    "new_usage": "名前を指定してください: .pc new <名前>",
+    "bound": "{nick} がシートを紐付けました: {name}",
+    "tag_usage": "使い方: .pc tag <名前>（既存シートを紐付け）",
+    "not_found": "「{name}」という名前のシートが見つかりません。",
+    "deleted": "{nick} がシートを削除しました: {name}",
+    "del_usage": "削除するシートを指定してください: .pc del <名前>",
+    "rename_usage": "使い方: .pc rename <新しい名前>（または .pc rename <旧> <新>）",
+    "renamed": "{nick} がシート「{old}」を「{new}」に改名しました",
+    "no_bound": "現在紐付けられたキャラクターシートはありません。",
+    "unbound": "{nick} がシートの紐付けを解除しました: {name}（シートは残ります。.pc tag で再紐付け）",
+    "show": "{owner} のシート [{name}]: {detail}",
+    "show_empty": "{owner} のシート [{name}] はまだ空です。",
+    "default_name": "既定",
+    "build_done": "{nick} のキャラシートを生成しました：\n{detail}",
+    "redo_done": "{nick} のキャラシートをリセットして再生成しました：\n{detail}",
+    "build_unknown": "不明な生成プリセット「{para}」。利用可能：pc（COC7 能力値）/ bg（背景）。コロンで連結可（例 pc:bg）。",
+    "build_empty": "（何も生成されませんでした）",
+    "lock_usage": "用法：.pc lock w/r で現在のシートをロック（w=書込 r=閲覧）；.pc unlock w/r で解除。",
+    "locked": "現在のシートをロックしました（{key}）√",
+    "unlocked": "現在のシートのロックを解除しました（{key}）√",
+    "lock_already": "現在のシートには既にそのロックがあります（{key}）。",
+    "unlock_missing": "現在のシートにそのロックはありません（{key}）。"
+  },
+  "deck": {
+    "usage": "コマンド .draw の使い方: .draw <デッキ>（複数は .draw3 <デッキ>）",
+    "no_deck": "「{name}」という名前のデッキはありません",
+    "ambiguous": "「{name}」は複数のデッキに一致します: {list}。もう少し具体的に指定してください。",
+    "result": "{nick} が引いた: {res}",
+    "list": "{count} 個のデッキ:\n{list}",
+    "empty": "デッキがありません — decks/ フォルダにデッキのJSONファイルを置いてください",
+    "default_set": "「{name}」をこのグループの既定デッキに設定しました。今後は .draw だけで引けます。",
+    "default_show": "このグループの既定デッキ: {name}",
+    "default_none": "このグループに既定デッキが未設定です。.deck set <名前> を使ってください。",
+    "default_cleared": "このグループの既定デッキをクリアしました。",
+    "default_group_only": "既定デッキはグループでのみ設定できます。",
+    "inline_name": "ランダム抽選",
+    "inline_usage": "使い方: .draw a/b/c — ランダムに1つ選びます。",
+    "temp_new": "このグループに一時デッキ「{name}」（{count} 項目）を作成しました。.draw {name} で引けます。",
+    "temp_del": "このグループの一時デッキ「{name}」を削除しました。",
+    "temp_usage": "使い方: .deck new <名前> a/b/c（誰でも作成可；卓のランダム演出に便利）。",
+    "temp_tag": "（一時）"
+  },
+  "mod": {
+    "wip": "モジュール機能は開発中です..."
+  },
+  "authorize": {
+    "sent": "認可リクエストをマスターへ送信しました。"
+  },
+  "ob": {
+    "group_only": "観戦機能はグループでのみ利用できます。",
+    "empty": "現在、観戦者はいません。",
+    "list": "観戦者（{count}）:\n{list}",
+    "cleared": "{nick} が観戦リストをクリアしました。",
+    "exit": "{nick} が観戦モードを抜けました。",
+    "joined": "{nick} がこのグループのセッションの観戦を始めました。",
+    "already": "{nick} は既に観戦中です。",
+    "not_in": "{nick} は観戦者ではありません。",
+    "on": "このグループの観戦機能を有効にしました √",
+    "off": "このグループの観戦機能を無効にしました √",
+    "on_already": "このグループの観戦機能はすでに有効です。",
+    "off_already": "このグループの観戦機能はすでに無効です。",
+    "disabled": "このグループの観戦機能は無効のため参加できません。"
+  },
+  "link": {
+    "usage": "用法：\n.link with/to/from <グループ番号> でリンク作成（with=双方向、to=ここ→対象、from=対象→ここ）\n.link start/close で再開/一時停止\n.link list で全リンク\n.link state でこのウィンドウの状態。信頼≥3が必要。",
+    "group_only": "リンク操作はグループ内で行ってください。",
+    "self": "自分自身のグループにはリンクできません。",
+    "list": "メッセージリンク：\n{list}",
+    "none": "（リンクなし）",
+    "state": "このウィンドウのリンク：\n{list}",
+    "state_none": "このウィンドウにリンクはありません。",
+    "started": "このウィンドウのメッセージリンクを再開しました √",
+    "closed": "このウィンドウのメッセージリンクを一時停止しました √",
+    "built": "リンクを作成しました：{home} {mode} {target} √",
+    "suspended": "（一時停止中）",
+    "mode_with": "⇄",
+    "mode_to": "→",
+    "mode_from": "←"
+  },
+  "me": {
+    "private_usage": "用法：.me <グループ番号> <アクション>（プライベートチャットから指定グループへ三人称アクションを送信）。",
+    "empty": "アクション内容を空にはできません。",
+    "disabled": "そのグループでは .me が無効です。",
+    "sent": "送信しました √",
+    "on": "このグループの .me を有効にしました √",
+    "off": "このグループの .me を無効にしました √",
+    "on_already": "このグループの .me はすでに有効です。",
+    "off_already": "このグループの .me はすでに無効です。"
+  },
+  "ak": {
+    "usage": "用法：.ak#タイトル で分岐を新規作成；.ak+選択肢1|選択肢2 で追加；.ak-番号 で削除；.ak= でランダム抽選；.ak show で一覧；.ak clr でクリア。",
+    "default_title": "（無題の分岐）",
+    "created": "分岐【{title}】を作成しました。.ak+選択肢 で追加してください。",
+    "added": "【{title}】現在の分岐：\n{list}",
+    "add_empty": "追加する選択肢を空にはできません。",
+    "num_err": "番号が無効です。",
+    "deleted": "【{title}】削除しました。残り：\n{list}",
+    "got": "【{title}】\n{list}\n運命の選択：{get}",
+    "show": "【{title}】現在の分岐：\n{list}",
+    "cleared": "現在の分岐をクリアしました。",
+    "opt_empty": "抽選できる分岐がまだありません。.ak+選択肢 で追加してください。",
+    "empty_list": "（空）"
+  },
+  "group": {
+    "private": "グループ設定はグループ内でのみ表示できます。",
+    "info": "------ グループ情報 ------\n名称: {name}\nグループ: {group}\nボット権限: {role}\n状態: {status}\n進行中ログ: {log}\nプレイヤー: {players}\nGM: {gm}\n観戦者: {observers}\nブラックリスト: {blacklist}\nブラックリスト退出レベル: {quitLevel}",
+    "enabled": "有効",
+    "disabled": "無効",
+    "none": "（なし）",
+    "role_owner": "オーナー",
+    "role_admin": "管理者",
+    "role_member": "メンバー",
+    "role_unknown": "不明",
+    "quit_member": "全メンバー",
+    "quit_admin": "管理者以上",
+    "cleared": "このグループの全設定（トグル/歓迎文/観戦者/停用項目など）をクリアしました。",
+    "term_set": "このグループで「{term}」を有効にしました。",
+    "term_cleared": "このグループで「{term}」を無効にしました。",
+    "term_unknown": "不明なグループ用語: {term}\n利用可能: 停用指令/禁用回复/禁用jrrp/禁用draw/禁用me/禁用help/禁用deck/禁用send",
+    "auto": {
+      "show": "グループ自動化設定：\n· 参加審査 pass = {pass}\n· 自動キック kick = {kick}\n· 自動ミュート mute = {mute}（{min}分）\n使い方：.group auto pass/kick/mute キーワード（pass は all で全通過；キーワード空=無効）",
+      "off": "無効",
+      "all": "すべて許可",
+      "usage": "使い方：\n.group auto pass キーワード\n.group auto kick キーワード\n.group auto mute キーワード [分]\n（pass は all で全通過；キーワード空=その項目を無効化）",
+      "need_bot_admin": "グループ自動化を有効にするには、まずボットにこのグループの管理者以上の権限が必要です。",
+      "pass_off": "参加自動審査をオフにしました。",
+      "pass_all": "参加自動審査オン：すべての参加申請を自動承認します。",
+      "pass_on": "参加自動審査オン：認証メッセージに「{kw}」が含まれる場合のみ承認します。",
+      "kick_off": "自動キックをオフにしました。",
+      "kick_on": "自動キックオン：発言に「{kw}」が含まれる人をグループから退出させます。",
+      "mute_off": "自動ミュートをオフにしました。",
+      "mute_on": "自動ミュートオン：発言に「{kw}」が含まれる人を {min} 分間ミュートします。"
+    }
+  },
+  "plugin": {
+    "group_only": "プラグインの切替はグループチャットでのみ設定できます。",
+    "unavailable": "プラグイン一覧を利用できません。",
+    "empty": "現在、読み込まれているプラグインはありません。",
+    "list": "プラグイン（{count}）:\n{list}\n.plugin on/off <名前> で切替、.plugin all on/off で一括。",
+    "state": {
+      "on": "有効",
+      "off": "ここで無効",
+      "global_off": "全体で無効"
+    },
+    "all_on": "このグループで全 {count} 個のプラグインを有効にしました。",
+    "all_off": "このグループで全 {count} 個のプラグインを無効にしました。",
+    "enabled": "プラグイン「{name}」をこのグループで有効にしました。",
+    "disabled": "プラグイン「{name}」をこのグループで無効にしました。",
+    "not_found": "「{name}」という名前のプラグインはありません — .plugin list で確認してください。",
+    "usage": "使い方: .plugin list / .plugin on|off <名前> / .plugin all on|off"
+  },
+  "gate": {
+    "no_perm": "グループ管理者以上の権限が必要です。",
+    "global_silent": "{self} は休憩中です。サービスを一時停止しています。",
+    "jrrp_global": "申し訳ありません、jrrp は全体で無効化されています。",
+    "me_global": "申し訳ありません、このコマンドは全体で無効化されています。",
+    "cmd_global": "申し訳ありません、{cmd} は全体で無効化されています。",
+    "in_group": "申し訳ありません、{cmd} はこのグループで無効化されています。",
+    "external_on": "外部モードON: 組み込みコマンドは無効、カスタム返信のみ有効（外置关 で復帰）。",
+    "external_off": "外部モードOFF: 組み込みコマンドを復帰しました。",
+    "not_master": "申し訳ありません、このコマンドはボットのマスター専用です。",
+    "not_admin": "申し訳ありません、あなたはまだこのボットの信頼/管理ユーザーではありません。",
+    "perm_denied": "申し訳ありません、このコマンドを実行する権限がありません。",
+    "self_perm": "権限が足りず実行できません（管理者権限を付与してください）。"
+  },
+  "rule": {
+    "usage": "コマンド .rules の使い方: .rules <用語>\n.rules <ルールブック>:<用語>（例 .rules coc:fumble）；.ruleset <ルールブック> でグループ既定を設定。",
+    "no_books": "ルールブックがありません — rules/ フォルダにルールのJSONファイルを置いてください。",
+    "result": "[{book} · {item}]\n{desc}",
+    "not_found": "「{item}」のルール項目が見つかりません。",
+    "book_set": "このグループの既定ルールブックを「{book}」に設定しました。",
+    "book_show": "このグループの既定ルールブック: {book}",
+    "book_none": "既定ルールブックが未設定です。.ruleset <ルールブック> を使ってください。",
+    "book_cleared": "このグループの既定ルールブックをクリアしました。",
+    "book_unknown": "「{book}」という名前のルールブックはありません。"
+  },
+  "helpdoc": {
+    "list": "ヘルプは .help <項目> で表示します。例 .help ra。\n項目が多いため、Web管理画面の「ヘルプドキュメント」ページで閲覧/検索できます。",
+    "default": {
+      "show": "現在の既定ヘルプソース: {cur}\n（同名項目はこのソースを優先、例 dnd3r より dnd5r）\n利用可能なソース: {list}\n.helpdoc default <ソース> で設定、.helpdoc default clear で解除。",
+      "none": "未設定（読込順）",
+      "set": "このグループの既定ヘルプソースを「{src}」に設定。同名項目はこれを優先します。",
+      "cleared": "このグループの既定ヘルプソースをクリアしました。"
+    },
+    "scope": {
+      "show": "このグループの現在の検索範囲: {cur}\n（ロック時、.help はこのソースのみ検索し、他は除外。組み込みコマンドのヘルプは保持）\n利用可能なソース: {list}\n.helpdoc scope <ソース> でロック、.helpdoc scope clear で解除。",
+      "none": "ロックなし（全ソース）",
+      "set": "このグループの検索範囲を「{src}」に切替。解除または変更まで .help はこのソースのみ表示します。",
+      "cleared": "検索範囲を解除しました。再び全ソースを検索します。",
+      "group_only": "検索範囲はグループでのみ設定できます。",
+      "empty": "このグループの検索範囲は「{scope}」にロックされており、「{topic}」がありません。.helpdoc scope clear で解除してください。"
+    }
+  },
+  "master": {
+    "boton": "グループ {group} でコマンドを有効にしました。",
+    "botoff": "グループ {group} でコマンドを無効にしました。",
+    "need_group": "グループIDを指定するか、対象グループ内で使用してください。",
+    "black_added_n": "{count} 件をブラックリストに追加: {list}",
+    "white_added_n": "{count} 件をホワイトリストに追加: {list}",
+    "removed_n": "{count} 件を削除: {list}",
+    "list_blackqq": "ブラックリストのユーザー: {list}",
+    "list_blackgroup": "ブラックリストのグループ: {list}",
+    "list_whitegroup": "ホワイトリストのグループ: {list}",
+    "list_whiteqq": "信頼ユーザー: {list}",
+    "list_empty": "（なし）"
+  },
+  "tplvar": {
+    "nick": "ニックネーム",
+    "res": "ロール/結果",
+    "reason": "理由",
+    "turn": "回数",
+    "attr": "能力値",
+    "roll": "ロール詳細",
+    "rate": "成功率",
+    "level": "成功段階",
+    "san": "正気度",
+    "grade": "結果",
+    "loss": "減少",
+    "final": "最終値",
+    "detail": "詳細",
+    "change": "変化",
+    "old": "旧名",
+    "new": "新名",
+    "default": "既定値",
+    "name": "名前",
+    "count": "個数"
+  },
+  "hiy": {
+    "result": "{nick} の判定統計（{total} 回）:\nクリティカル {crit} · イクストリーム {extreme} · ハード {hard} · 成功 {regular} · 失敗 {fail} · ファンブル {fumble}\n成功 {success}/{total}、成功率 {rate}%",
+    "empty": "{nick} はまだ判定記録がありません — 先に .ra で何回か振ってください。",
+    "skill_result": "{nick} 「{skill}」の統計: {total} 回、{success} 成功（{rate}%）\nクリティカル {crit} イクストリーム {extreme} ハード {hard} 通常 {regular} 失敗 {fail} ファンブル {fumble}",
+    "skill_empty": "{nick} はまだ「{skill}」の判定記録がありません。"
+  },
+  "setcoc": {
+    "set": "COC7判定のハウスルールを ルール{rule} に設定しました。",
+    "show": "現在のCOC7ハウスルール: ルール{rule}（.setcoc 0-7 / .setcoc show / .setcoc clr）。",
+    "cleared": "ハウスルールをクリアし、既定（ルール0）に戻しました。",
+    "invalid": "ルールは0〜7です。使い方: .setcoc <0-7> / .setcoc show / .setcoc clr"
+  },
+  "dnd": {
+    "ss": {
+      "usage": "コマンド .ss の使い方: .ss init 4 3 2（1/2/3環の最大）\n.ss set 3環 5\n.ss 3環 ±1\n.ss rest\n.ss clr\n.ss で表示。",
+      "show": "{nick} の呪文スロット: {detail}",
+      "empty": "{nick} は呪文スロットが未設定です（.ss init を使用）。",
+      "set": "{nick} の呪文スロットを設定: {detail}",
+      "cleared": "{nick} の呪文スロットをクリアしました。",
+      "rested": "{nick} の呪文スロットを完全に回復しました。",
+      "changed": "{nick} の {ring}環スロットは現在 {cur}、最大 {max}。",
+      "no_ring": "{ring}環スロットが未設定です（.ss init / .ss set を使用）。"
+    },
+    "cast": {
+      "usage": "コマンド .cast の使い方: .cast <環> [回数]、回数の既定は1。",
+      "empty": "{nick} は {ring}環スロットが残っていません。"
+    },
+    "longrest": {
+      "done": "{nick} の大休憩: HPを {hp} まで回復、呪文スロットも回復。",
+      "no_hpmax": "{nick} はhpmaxが未設定のためHPを回復できません（.st hpmax:<n> を使用）。"
+    },
+    "ds": {
+      "need_zero": "{nick} は死亡判定を行うには瀕死（HP = 0）である必要があります。",
+      "result": "{nick} の死亡判定: [1d20={roll}]={total} {outcome}",
+      "success": "成功！ 死亡判定の成功 +1",
+      "fail": "まずい！ 死亡判定の失敗 +1",
+      "critfail": "致命的失敗！ 死亡判定の失敗 +2",
+      "miracle": "医学的奇跡！ HPを1回復！",
+      "stabilized": "{nick} は安定しました！",
+      "dead": "{nick} は死亡判定の失敗が3回に達し、死亡しました...",
+      "stat": "{nick} の死亡判定: 成功 {s}/3、失敗 {f}/3"
+    },
+    "rc": {
+      "usage": "コマンド .rc の使い方（DNDモード）: .rc <能力>[+補正] [理由]、有利/不利も可、例 .rc 优势 力量+2",
+      "result": "{nick} の「{attr}」判定: {roll} {mod} = {total}"
+    },
+    "rdc": {
+      "usage": "DND 調整値判定: .rdc [回数#] [B/P] [能力値または技能] [±補正] [理由] [成功閾値]。能力値は floor((能力値-10)/2)、技能は独立した判定補正を使用します。Bは高い方、Pは低い方、最大9回。例: .rdc 3# B 力量+2 扉を破る 15",
+      "mode_off": ".rdc はこのグループで DND5e モードを有効にした場合のみ使えます（.setdnd on）。",
+      "turns": "回数は 1 から 9 の間で指定してください。",
+      "no_value": "DND 能力値または技能「{attr}」が見つかりません。",
+      "result": "{nick} の「{attr}」調整値判定{reason}:\n{detail}"
+    }
+  },
+  "setdnd": {
+    "on": "このグループでDND5eモードを有効にしました（.rc は d20 判定になります）。",
+    "off": "このグループのDND5eモードを無効にしました（.rc は COC の d100 に戻ります）。",
+    "usage": "コマンド .setdnd の使い方: .setdnd on/off；引数なしでトグル。"
+  },
+  "self": {
+    "show": "現在の {key}: {val}",
+    "set": "{key} を「{val}」に設定 √",
+    "reset": "{key} のカスタマイズをリセット √",
+    "unset": "（未設定）"
+  },
+  "buff": {
+    "show": "{nick} の現在のバフ: {detail}",
+    "empty": "{nick} には有効なバフがありません。",
+    "set": "{nick} のバフを設定: {detail}",
+    "cleared": "{nick} のバフをすべてクリアしました。",
+    "deleted": "{nick} の指定したバフを削除しました。",
+    "usage": "コマンド .buff の使い方: .buff <能力値>:<値> で設定；.buff <能力値>±<式> で調整；.buff del <能力値>；.buff clr；.buff で表示。"
+  },
+  "init": {
+    "group_only": "イニシアチブはグループでのみ利用できます。",
+    "rolled": "{name} のイニシアチブ: {roll}={total}",
+    "list": "イニシアチブ順:\n{list}",
+    "empty": "まだイニシアチブがありません。.ri で参加してください。",
+    "cleared": "イニシアチブリストをクリアしました。",
+    "removed": "{name} をイニシアチブから削除しました。"
+  },
+  "sn": {
+    "group_only": "名札の設定はグループでのみ利用できます。",
+    "cleared": "グループ名札のテンプレートをクリアしました。",
+    "done": "あなたのグループ名札を次に設定しました: {card}",
+    "auto_on": "名札の自動同期ON: 能力値の変化に合わせてグループ名札が即時更新されます。現在: {card}",
+    "auto_off": "名札の自動同期OFF。",
+    "default_template": "{nick} STR{力量} DEX{敏捷} POW{意志} HP{生命值} SAN{理智}"
+  },
+  "welcome": {
+    "group_only": "入群歓迎メッセージはグループ内でのみ設定できます。",
+    "private": "DMで{self}に誰を歓迎させたいですか？",
+    "none": "このグループには入群歓迎メッセージが設定されていません。",
+    "show": "現在の歓迎文: {text}",
+    "off": "歓迎メッセージを無効にしました。",
+    "set": "歓迎メッセージを設定しました: {text}",
+    "below_min": "現在のグローバル最低値に設定されました: {min}",
+    "bad_value": "有効な数値を入力してください",
+    "bad_range": "数値範囲外です",
+    "delay_off": "入群歓迎遅延を無効にしました",
+    "delay_set": "入群歓迎遅延を{sec}秒に設定",
+    "cd_off": "入群歓迎クールダウンを無効にしました",
+    "cd_set": "入群歓迎クールダウンを{sec}秒に設定",
+    "delay_info": "(遅延{sec}秒)",
+    "cd_info": "(クール{sec}秒)"
+  },
+  "lang": {
+    "name": "日本語",
+    "current": "返答言語: {lang}（上書き済み）。\n切替: .lang 简体 / .lang 繁體 / .lang en / .lang 日本語\n解除: .lang clr",
+    "current_default": "返答言語: {lang}（プラットフォーム/全体の既定）。\n切替: .lang 简体 / .lang 繁體 / .lang en / .lang 日本語",
+    "cleared": "言語の上書きを解除し、次に戻しました: {lang}。",
+    "usage": "使い方: .lang 简体（簡体字）/ .lang 繁體（繁体字）/ .lang en（英語）/ .lang 日本語 / .lang clr（上書き解除）",
+    "set": "グループの返答言語を次に設定しました: {lang}。",
+    "set_user": "あなたの返答言語を次に設定しました: {lang}。",
+    "ai_set": "このグループの返答言語を設定しました: {lang}（AI 翻訳、返信に少し遅延があります）。",
+    "ai_set_user": "あなたの返答言語を設定しました: {lang}（AI 翻訳、返信に少し遅延があります）。",
+    "current_ai": "現在の返答言語: {lang}（AI 翻訳）。.lang clr で既定に戻せます。"
+  },
+  "event": {
+    "group_joined": "皆さんこんにちは！ 私は Dice!Next です。.help でコマンド一覧；.bot on/off でこのグループでの有効/無効を切り替えます。",
+    "friend_welcome": "こんにちは！ 私は Dice!Next です。よろしくお願いします — .help でコマンドを確認できます。",
+    "blacklist_quit": "ブラックリストのユーザーがいるため、ポリシーに従いこのグループから退出します。",
+    "blacklist_group": "{self}: このグループはブラックリストのため、自動的に退出します。誤りの場合はボット管理者にご連絡ください。",
+    "nonfriend_group_leave": "{self}: 招待者がフレンドではないため、設定に従い自動的に退出します。ご利用の際はまずフレンド追加をお願いします。",
+    "leave_unused": "{self} はここで {day} 日間使われなかったため、設定に従い自動退出します。またどこかで！",
+    "poke": "つつくのはやめて、さもないとロールを全部1にしちゃうよ！",
+    "usergroup_invite": "{self} をご利用いただきありがとうございます！ ユーザーグループ {group} に参加して、ヘルプや更新情報を受け取ってください。",
+    "usergroup_leave": "このグループにはユーザーグループ {group} に参加しているメンバーがいないため、設定に従い {self} は退出します。継続利用にはユーザーグループへ参加してください。",
+    "keyword_group_leave": "このグループ名に禁止キーワードが含まれているため、{self} は退出します。"
+  },
+  "setsn": {
+    "show": "グループ名札の能力値: {attrs}（最大5、.setsn a b c で設定）",
+    "set": "グループ名札の能力値を設定: {attrs}",
+    "cleared": "グループ名札の能力値を既定（hp san dex）にリセットしました。",
+    "no_perm": "グループのオーナー/管理者のみ設定できます。",
+    "usage": "使い方: .setsn hp san dex（最大5、.setsn show / .setsn clr）"
+  },
+  "favor": {
+    "show": "{nick} に対する {self} の好感度: {favor}（{title}）",
+    "show_other": "{target} に対する {self} の好感度: {favor}（{title}）",
+    "rank": "{self} の好感度ランキング:\n{list}",
+    "rank_empty": "まだ好感度の記録がありません。",
+    "group_only": "グループ好感度ランキングはグループでのみ利用できます。",
+    "members_pending": "メンバー一覧を読込中です。しばらくしてから再試行してください。",
+    "no_perm": "ボットのオーナー/信頼ユーザーのみ好感度を調整できます。",
+    "no_grow": "{target} の好感度は今回成長しませんでした…",
+    "value_empty": "設定する好感度の値を指定してください。",
+    "grew": "{target} の好感度が成長: +{add} → {favor}",
+    "added": "{target} の好感度 {add} → 現在 {favor}",
+    "set": "{target} の好感度を {favor} に設定",
+    "erased": "{target} の好感度をすべて消去しました。",
+    "title": {
+      "hostile": "嫌悪",
+      "stranger": "他人",
+      "friendly": "友好",
+      "close": "親密",
+      "intimate": "親友",
+      "lover": "恋人"
+    }
+  },
+  "persona": {
+    "default_name": "既定",
+    "current": "現在のペルソナ: {name}",
+    "list": "利用可能なペルソナ:\n{list}.rpmode set <名前> で切替。",
+    "set": "ペルソナ「{name}」に切り替えました。",
+    "off": "既定のペルソナに戻しました。",
+    "not_found": "「{name}」という名前のペルソナはありません。",
+    "created": "現在の設定からペルソナ「{name}」を作成しました。\nWebUIで項目を編集してください。",
+    "copied": "「{src}」を「{dst}」にコピーしました。",
+    "deleted": "ペルソナ「{name}」を削除しました。",
+    "builtin_no_del": "組み込みペルソナは削除できません。",
+    "name_exists": "「{name}」という名前のペルソナは既に存在します。",
+    "name_empty": "ペルソナ名を指定してください。",
+    "no_perm_admin": "ペルソナの切替にはグループ管理者権限が必要です。",
+    "no_perm_master": "ペルソナの管理はマスターのみ可能です。",
+    "no_entries": "このペルソナにはまだ項目がありません。",
+    "entry_count": "項目数: {count}",
+    "info_name": "ペルソナ「{name}」",
+    "create_fail": "ペルソナの作成に失敗しました。",
+    "copy_fail": "ペルソナのコピーに失敗しました。",
+    "del_fail": "ペルソナの削除に失敗しました。",
+    "copy_usage": "使い方: .rpmode copy <コピー元> <コピー先>",
+    "no_personas": "まだペルソナのテンプレートがありません。WebUIで作成してください。"
+  },
+  "npc": {
+    "group_only": "NPCキャラクターカードはグループ内でのみ使用できます。",
+    "usage": "コマンド .npc の使い方: .npc new <名前> / .npc list / .npc <名前> st str50 / .npc <名前> ra spot / .npc show <名前> / .npc del <名前>。",
+    "empty": "このグループにはまだNPCカードがありません。.npc new <名前>、または .npc <名前> st <能力値> を使ってください。",
+    "list": "このグループのNPC（{count}）：{items}",
+    "new_usage": "使い方: .npc new <名前>。",
+    "exists": "NPC「{name}」は既に存在します。",
+    "new": "{nick} がNPC「{name}」を作成しました。",
+    "del_usage": "使い方: .npc del <名前>。",
+    "not_found": "NPC「{name}」が見つかりません。",
+    "deleted": "{nick} がNPC「{name}」とそのカードを削除しました。",
+    "clr_usage": "使い方: .npc clr <名前>。",
+    "cleared": "{nick} がNPC「{name}」のカードをクリアしました。",
+    "show_usage": "使い方: .npc show <名前>。",
+    "no_nest": "NPCプロキシから .npc を再び呼び出すことはできません。",
+    "sub_empty": "NPC「{name}」はサブコマンドに応答しませんでした: {sub}。",
+    "proxy_note": "【NPC：{name}】\n"
+  },
+  "system": {
+    "usage": "使い方：.system info（システム情報）/ .system stats（稼働統計）",
+    "unknown": "不明",
+    "info": "システム情報\nOS: {os}\nCPU: {cores} コア · 使用率 {cpu}%\nメモリ: {memused}/{memtotal} MB（{memload}%）\nプロセスメモリ: {proc} MB",
+    "stats": "稼働統計\n稼働時間: {uptime}\n起動後のコマンド数: {cmds}\n友達: {friends} · グループ: {groups}\nプレイヤー: {players} · セッション記録: {logs}"
+  }
+}

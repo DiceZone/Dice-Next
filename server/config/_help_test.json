@@ -1,0 +1,38 @@
+{
+  "adapters": [],
+  "dice": {
+    "auto_card": true,
+    "command_prefix": ".",
+    "command_prefixes": [
+      ".",
+      "。",
+      "!",
+      "！"
+    ],
+    "self_name": "希希"
+  },
+  "events": {
+    "auto_approve_friend": false,
+    "auto_approve_group": false,
+    "friend_keyword": "",
+    "friend_welcome": "",
+    "group_keyword": ""
+  },
+  "hot_reload": {
+    "enabled": false
+  },
+  "i18n": {
+    "default_locale": "zh-Hans",
+    "platform_defaults": {
+      "onebot_v11": "zh-Hans"
+    },
+    "resource_dir": "i18n"
+  },
+  "server": {
+    "api_key": "test",
+    "db_path": "./data/_helptest/dice.db",
+    "host": "127.0.0.1",
+    "log_level": "info",
+    "port": 8099
+  }
+}

@@ -1,0 +1,846 @@
+﻿{
+  "_meta": {
+    "name": "English",
+    "keywords": [
+      "en",
+      "english",
+      "英文",
+      "英语",
+      "英語"
+    ]
+  },
+  "dice": {
+    "error": {
+      "roll": "Roll error: {error}",
+      "coc": "COC check error: {error}",
+      "dnd": "DND check error: {error}",
+      "sc": "Sanity check error: {error}",
+      "st": "Skill check error: {error}"
+    },
+    "reason_prefix": "For {reason}: ",
+    "proxy_note": "(rolled by {agent} on their behalf)\n",
+    "crit": " [Critical Success]",
+    "fumble": " [Fumble]",
+    "roll": {
+      "result": "{nick} rolled: {res}",
+      "result_reason": "{nick} rolled for {reason}: {res}",
+      "multi": "{nick} rolled {turn} times: {res}",
+      "multi_reason": "{nick} rolled {turn} times for {reason}: {res}",
+      "too_many": "You can roll at most {max} times (you asked for {n}).",
+      "hidden": "{nick} made a hidden roll; the result was sent privately."
+    },
+    "bp": {
+      "bonus": "bonus",
+      "penalty": "penalty",
+      "bonus_label": " (bonus)",
+      "penalty_label": " (penalty)"
+    },
+    "pool": {
+      "usage": "Command .ww usage: .ww <dice> [success-line], or .ww <dice>a<add-line>c<success-line>+<bonus>, e.g. .ww 10a8c7+2 (a defaults to 10; c defaults to 8)",
+      "result": "{nick} rolls: {expr}"
+    },
+    "dx": {
+      "usage": "Command .dx usage: .dx <dice>c<add-line> (double-cross, e.g. .dx 3c8) or .dx <dice>a<add-line> (success pool/WoD, e.g. .dx 5a7)"
+    },
+    "rav": {
+      "usage": "Command .rav usage: .rav <A> <B> (values or attributes), e.g. .rav 60 50 or .rav Spot Sneak",
+      "result": "{nick}'s opposed check:\n{la}: 1D100={ra}/{va} {lva}\n{lb}: 1D100={rb}/{vb} {lvb}\n{outcome}",
+      "a_wins": "\"{a}\" wins!",
+      "b_wins": "\"{b}\" wins!",
+      "tie": "Tie"
+    },
+    "check": {
+      "result": "{nick} rolls {attr}: {roll}/{rate} {level}",
+      "result_reason": "For {reason}, {nick} rolls {attr}: {roll}/{rate} {level}",
+      "need_value": "Please provide a target value, e.g. .ra Spot 60",
+      "no_card": "Attribute \"{attr}\" not found; set it with .st first, or give a value like .ra {attr} 60",
+      "hidden": "{nick} made a hidden check; the result was sent privately."
+    },
+    "level": {
+      "critical": "Critical Success!",
+      "extreme": "Extreme Success",
+      "hard": "Hard Success",
+      "regular": "Success",
+      "failure": "Failure",
+      "fumble": "Fumble!"
+    },
+    "brp": {
+      "critical": "Critical Success!",
+      "special": "Special Success",
+      "success": "Success",
+      "failure": "Failure",
+      "fumble": "Fumble!",
+      "result": "{nick} rolls {attr}: {roll}/{rate} {level}",
+      "result_reason": "For {reason}, {nick} rolls {attr}: {roll}/{rate} {level}",
+      "resist_usage": "Usage: .bav <active value/attr> <passive value/attr> — BRP resistance table. e.g. .bav STR SIZ",
+      "resist": "{nick} resistance: {la}({va}) vs {lb}({vb}) → target {target}% {roll} {outcome}",
+      "resist_win": "{a} wins!",
+      "resist_lose": "{a} loses ({b} resists)"
+    },
+    "rx": {
+      "no_group": "Hidden psychology rolls can't be done in private chat.",
+      "no_target": "Please @ the investigator to make a hidden Psychology roll on.",
+      "receipt": "{nick} made a hidden Psychology roll for \"{target}\" — can the investigator see through the fog?",
+      "private": "Hidden Psychology roll for \"{target}\" (group {gid}): D100={roll}/{rate} {level}\n{receipt}",
+      "msg": {
+        "critical": "Critical! Looks like someone's in for a rough time, hmm, who could it be~",
+        "extreme": "Extreme success — the Keeper had better hand over every clue they should.",
+        "hard": "Hard success — not bad at all, worth the Keeper sharing what the investigator wants to know.",
+        "regular": "Success — will the Keeper let the investigator see what they're after?",
+        "failure": "Failure — does the Keeper just say the investigator isn't capable enough, or make the scene look perfectly normal?",
+        "fumble": "F-U-M-B-L-E! How will the story unfold from here? I'll be watching closely."
+      }
+    },
+    "coc": {
+      "build": "{nick}'s investigator:{res}",
+      "total": "Total",
+      "attr": {
+        "str": "STR",
+        "con": "CON",
+        "siz": "SIZ",
+        "dex": "DEX",
+        "app": "APP",
+        "int": "INT",
+        "pow": "POW",
+        "edu": "EDU",
+        "luck": "LUCK"
+      }
+    },
+    "dnd": {
+      "build": "{nick}'s adventurer ability scores (descending):{res}",
+      "total": "Total "
+    },
+    "sc": {
+      "result": "Sanity check {output}"
+    },
+    "st": {
+      "result": "Skill check {output}"
+    }
+  },
+  "card": {
+    "st": {
+      "usage": "Command .st usage: .st STR50 DEX60\n.st show\n.st clr\n.st del <attr>",
+      "done": "{nick}'s sheet updated: {detail}"
+    },
+    "show": "{nick}'s character sheet: {detail}",
+    "show_one": "{nick}'s {attr}: {val}",
+    "empty": "{nick} has no character sheet yet — set attributes with .st",
+    "attr_missing": "Attribute \"{attr}\" not found",
+    "cleared": "Cleared {nick}'s character sheet",
+    "attr_deleted": "Deleted {nick}'s attribute \"{attr}\"",
+    "sc": {
+      "usage": "Command .sc usage: .sc <successLoss>/<failLoss> [currentSan], e.g. .sc 1/1d6 70; omit San if 理智 is set",
+      "no_san": "No San value set — use .st 理智 [value] first, or pass current San after the command",
+      "invalid_san": "San must be an integer between 1 and 99",
+      "result": "{nick}'s Sanity Check: 1D100={res}/{san} {grade}\nSan -{loss} → {final} left",
+      "result_noloss": "{nick}'s Sanity Check: 1D100={res}/{san} {grade}\nNo San loss"
+    },
+    "en": {
+      "usage": "Command .en usage: .en <skill> (must be set via .st first)",
+      "success": "{nick}'s {attr} growth check: {res}\nSuccess! {attr} {change} → {final}",
+      "fail": "{nick}'s {attr} growth check: {res}\nNo growth; {attr} unchanged",
+      "fail_grow": "{nick}'s {attr} growth check: {res}\nFailed, but fail-growth {change} → {final}"
+    },
+    "insane": {
+      "temp": "{nick}'s madness — temporary symptom:\n{res}",
+      "long": "{nick}'s madness — indefinite symptom:\n{res}"
+    },
+    "export": "{nick}'s card export (import with .st):\n{body}",
+    "fmt_done": "{nick}'s card was normalized to the current rules.",
+    "locked_w": "The current card is write-locked; it cannot be modified.",
+    "locked_r": "The current card is read-locked.",
+    "weapon": {
+      "set": "Bound weapon(s) for {nick}: {detail} (roll damage with .r <name>)"
+    },
+    "autocard": {
+      "recalc": "(Auto sheet) {causes} changed, recalculated: {detail}"
+    },
+    "db": {
+      "auto": "(Damage bonus auto-computed from STR+SIZ: {db})"
+    }
+  },
+  "fun": {
+    "jrrp": "{nick}'s luck today is: {res}",
+    "rulecmd": {
+      "fail": "Command \"{cmd}\" needs a character-sheet attribute that isn't set yet."
+    },
+    "text": {
+      "usage": "Command .text usage: .text <template> — evaluates {braced} expressions and variables, e.g. .text feeling lucky {1d16}"
+    },
+    "name": {
+      "result": "{nick}'s random name(s): {res}",
+      "too_many": "At most 10 names"
+    },
+    "nn": {
+      "set": "Renamed \"{old}\" to \"{new}\"",
+      "clear": "Cleared the nickname for \"{old}\"",
+      "too_long": "Nickname too long (max 50 bytes)"
+    },
+    "set": {
+      "done": "Set {nick}'s default die to D{default}",
+      "reset": "Reset {nick}'s default die to D{default}",
+      "usage": "Command .set usage: .set 20 to set default die; .set (no arg) resets to 100",
+      "invalid": "Default die must be 1-9999",
+      "rule": "{nick} switched this group's rule system to {name} (default die d{sides}).",
+      "group_only": "Switching rule systems only works in a group chat.",
+      "no_perm": "Only group admins can switch this group's rule system.",
+      "list": "Available rule systems (★ = current in this group: {active}):\n{list}\nUse .set <name> to switch.",
+      "list_empty": "(no switchable rule systems)",
+      "none": "none"
+    },
+    "sleep": "{nick}: the dice bot is off to rest, good night zzz",
+    "mrrp": "{nick}'s luck tomorrow is {res}",
+    "zrrp": "{nick}'s luck yesterday was {res}",
+    "summon_empty": "You summoned {self}, {nick} — what can I do for you?"
+  },
+  "help": {
+    "main": "Dice!Next Help\n- Roll: .r .rh .rb/.rp .ww .dx\n- Checks: .ra .rc .rav .sc(san) .en(grow)\n- Cards: .st .pc (multi-card)\n- Generate: .coc .dnd .name\n- Decks: .deck .draw .gacha\n- Fun: .jrrp .nn .set\n- Admin: .bot .group .log .ob .dismiss .send\nType .help <cmd> for details (e.g. .help ra); .helpdoc lists all topics.",
+    "entry_missing": "Help entry \"{entry}\" is not available yet; please check the docs.",
+    "unknown": "No help found for \"{topic}\". Try .helpdoc for available topics.",
+    "ambiguous": "\"{topic}\" matches several help topics: {list}. Please be more specific.",
+    "topic": {
+      "r": "Roll .r [expr] [reason]: roll dice. e.g. .r3d6+2 attack; .rh hidden; N#expr repeat.",
+      "rh": "Hidden .rh [expr] [reason]: hidden roll / hidden check. The result is DM'd to you; the group only sees \"<name> made a hidden roll\". Hidden checks use .rah / .rch (e.g. .rah Spot 60). House rules (.setcoc) and bonus/penalty dice still apply.",
+      "ra": "Check .ra <skill|attr> [rate] [reason]: COC check. Reads the card if rate omitted. e.g. .ra spot / .ra str60",
+      "rx": "Psychology .rx @investigator [rate]: hidden Psychology roll (for Keepers). Rolls a Psychology check against the @'d investigator; the detailed result with success level is DM'd to you, while the group only sees a non-spoiler receipt. Reads the target card's Psychology if rate omitted, default 10.",
+      "rb": "Bonus/penalty .rb/.rp [N] [check]: bonus/penalty dice (keep low/high tens). e.g. .rb spot",
+      "sc": "Sanity .sc success/fail [san]: sanity check, auto-deducts SAN and saves to card. e.g. .sc 1/1d6",
+      "st": "Attributes .st str50 dex60: set/modify attributes (+/- and dice ok, e.g. hp-2, san+1d3). DND coins support pp/gp/ep/sp/cp and automatically make change when spending. .st show\n.st clr\n.st del <attr>.",
+      "pc": "Multi-card .pc: .pc new <name>\n.pc tag <name>\n.pc list\n.pc del <name>\n.pc @someone to view their card.",
+      "npc": "NPC .npc: group-shared character cards.\n.npc new <name>\n.npc list\n.npc <name> st str50 to set attributes\n.npc <name> ra spot to roll as that NPC\n.npc show/del/clr <name>.",
+      "coc": "Chargen .coc [count]: generate COC7 investigator stats.",
+      "dnd": "Chargen .dnd [count]: generate DND stats (4d6 keep highest 3).",
+      "deck": "Deck list .deck\n.draw <deck> draw\n.gacha pull.",
+      "jrrp": "Luck .jrrp: luck of the day (fixed per person per day).",
+      "bot": "Bot .bot: version/status\n.bot on/off enable/disable this group (only .bot works when off).",
+      "group": "Group .group: view this group's settings. Edit in the web admin.",
+      "ob": "Observe .ob: observe this group's session\n.ob list\n.ob exit\n.ob clr.",
+      "send": "Message .send <message>: forward a message to the Master. Master can .send group/user <id> <msg>.",
+      "log": "Log .log new [name] start recording\n.log on/off resume/pause\n.log end finish & upload (link + group file)\n.log halt finish without uploading\n.log list\n.log get [name] re-upload for link\n.log del <name>\n.log stat [name]\n.log export [name] group file only\n.log type txt/html file format (group admin)\n.log time/timer\n.log masterget <group> [name] (master).",
+      "nn": "Nickname .nn <name>: set your display name in the bot; .nn to clear.",
+      "set": "Default die .set <sides>: set the default die (used by bare .r)\n.set resets to 100.",
+      "ww": "Dice pool .ww N [success-line]: WOD adding dice pool. Legacy .ww 5 or .ww 5 7 uses 10 as the add line; extended .ww 10a8c7+2 uses a=add line (default 10), c=success line (default 8), and +2=extra successes. Successful dice use circled numerals and every round is shown.",
+      "dx": "Double-Cross .dx <count>c<crit> (e.g. .dx 3c8) or .dx <count> <crit>: Double-Cross dice — d10 reaching the crit value explodes; tallies per the DX rules. A DX-specific exploding check, not a plain roll.",
+      "rav": "Opposed .rav A B [@target]: opposed check — both roll d100, compare success level first, then the roll on a tie. e.g. .rav fighting 60 / .rav spot @someone.",
+      "ba": "BRP check .ba <skill|attr> [rate] [reason]: BRP check (roll-under d100). Levels: critical ≤ skill/20, special ≤ skill/5, success ≤ skill, failure > skill, fumble (100, or 99 on a failure). Reads the card if rate omitted; supports @someone proxy and N# multi. e.g. .ba spot / .ba fighting60.",
+      "bav": "Resistance .bav <active> <passive>: BRP resistance table. target% = 50 + (active − passive)×5; roll 1d100 ≤ target → active wins. Active/passive may be attribute names (read from card) or numbers. e.g. .bav STR SIZ.",
+      "en": "Growth .en <skill> [value] [([fail-growth]/)success-growth]: COC skill growth — roll d100; if > current value (or >95) it grows and saves to the card. Growth starts with +/- (default +1d10); batch with .en a b or a|b.",
+      "ti": "Madness .ti temporary / .li indefinite: draw a COC7 madness symptom (with fear/mania subtables) for when a character loses sanity.",
+      "setcoc": "House rule .setcoc <0-7>: set this group's COC check house rule (different critical/fumble rulings). .setcoc show to view\n.setcoc clr to clear.",
+      "name": "Names .name [cn/en/jp] [count]: random names (Chinese/English/Japanese), optional count; alias .gn.",
+      "sleep": "Rest .sleep: take a rest — returns a rest message.",
+      "mrrp": "Luck .mrrp: tomorrow's luck — deterministic per user per day, peek at tomorrow.",
+      "zrrp": "Luck .zrrp: yesterday's luck — deterministic per user per day, look back at yesterday.",
+      "lang": "Language .lang: view or switch the bot's reply language. .lang 简体/繁體/en/日本語 to switch\n.lang clr to clear override.",
+      "favor": "Favor system: \"好感\" shows favor + title; \"好感排行\"/\"群内好感排行\" show rankings. Owner/trusted (trust>=4) can use .favor add[n]/grow/set<n>/clr (optionally @someone). Higher favor grows slower.",
+      "hiy": "Stats .hiy [skill]: check stats. No arg = overall; with a skill = that skill's rolls/successes/rate/level breakdown.",
+      "setsn": "Group card .setsn <attrs...>: owner/admin sets which attributes the group .sn card shows (up to 5; default hp san dex).",
+      "sn": "Group card .sn [template]: set your own group card by template\n.sn off clears. Affected by .setsn.",
+      "ri": "Initiative .ri [±mod] [name]: initiative d20+mod\n.init list\n.init clr\n.init del.",
+      "welcome": "Welcome .welcome <text>: set the join welcome ({at} supported)\n.welcome show / off.",
+      "dismiss": "Leave .dismiss: make the bot leave this group (admin/master).",
+      "rules": "Rules .rules <term> / .rules <book>:<term> — quick rule lookup (e.g. .rules coc:fumble); .ruleset <book> sets the group default book.",
+      "plugin": "Plugins .plugin list shows plugins and their per-group status\n.plugin on|off <name> toggles one\n.plugin all on|off toggles all. Group admins only.",
+      "game": "Game table .game:\n.game new <name> create (creator becomes GM)\n.game open <16-char code> attach this group to a game (GM)\n.game join / exit\n.game master claim GM or list GMs\n.game state\n.game set <var> <val> table variable (GM)\n.game call @all players (GM)\n.game kick <QQ> (GM)\n.game close close this group's area\n.game over end the game\n.game rou <faces>[*copies] roulette dice (GM); rou hist/reset/clr"
+    }
+  },
+  "ai": {
+    "group_only": "This command can only be used in a group.",
+    "status_on": "AI features (chat/NPC) in this group: ON.",
+    "status_off": "AI features (chat/NPC) in this group: OFF.",
+    "on": "AI features (chat/NPC) enabled for this group.",
+    "off": "AI features (chat/NPC) disabled for this group.",
+    "already_on": "AI features are already on in this group.",
+    "already_off": "AI features are already off in this group.",
+    "not_whitelisted": "This group is not on the AI whitelist; AI features are unavailable (ask the bot owner for access)."
+  },
+  "trust": {
+    "usage": "Usage: .trust <@user/QQ> [level 0-255]. Omit level to query. Admins (≥4) only; you can only set a level below your own.",
+    "query": "{user}'s trust level: {level}",
+    "set": "Set {user}'s trust level to {level} √",
+    "range": "Trust level must be 0-255.",
+    "too_high": "Cannot grant a trust level at or above your own.",
+    "target_higher": "That user's trust level is not below yours; cannot modify."
+  },
+  "admin": {
+    "usage": "Usage: .admin add/del <@user/QQ> to grant/revoke admin; .admin list to list admins. Master only.",
+    "added": "Granted admin to {user} √",
+    "removed": "Revoked admin from {user} √",
+    "not_admin": "That user has no admin permission.",
+    "list": "Admins:\n{list}",
+    "none": "(none)"
+  },
+  "notice": {
+    "usage": "Usage: .notice on/off to toggle notices here; .notice level <1-15> to set subscription (1 routine / 2 important / 4 critical / 8 errors, combinable, 15 all). Master only.",
+    "status": "This window is subscribed to owner notices, level mask: {level}",
+    "off_status": "This window is not subscribed to owner notices. Use .notice on to enable.",
+    "set": "This window is now a notice window, level: {level} √",
+    "removed": "Owner notices for this window disabled √"
+  },
+  "alias": {
+    "usage": "Usage: .alias add <alias ID> <main ID> to bind an account alias\n.alias del <alias ID> to unbind\n.alias list to list. An alias account's trust/Master status follows the main account. Master only.",
+    "added": "Alias bound: {alias} -> {main} √",
+    "removed": "Alias {alias} unbound √",
+    "not_found": "Alias not found.",
+    "list": "Account aliases:\n{list}"
+  },
+  "bot": {
+    "on": "{self} enabled √",
+    "off": "{self} disabled √",
+    "usage": "Usage: .bot on/off [bot QQ]",
+    "already_on": "{self} is already enabled here.",
+    "already_off": "{self} is already disabled here."
+  },
+  "send": {
+    "empty": "What should I pass to the Master? Usage: .send <message>",
+    "done": "Forwarded to the Master - thanks for your feedback!",
+    "no_master": "No Master is configured for this bot, can't forward.",
+    "from_private": "Private message from {user}({uid}):",
+    "from_group": "Message from {user}({uid}) in group {group}:",
+    "master_usage": "Usage: .send group <groupId> <msg>  or  .send user <QQ> <msg>",
+    "master_done": "Sent to {target}"
+  },
+  "dismiss": {
+    "leaving": "The dice bot is leaving this group...",
+    "private": "Who exactly do you want {self} to leave in a private chat?"
+  },
+  "game": {
+    "created": "Game created: {name}",
+    "untitled": "Untitled",
+    "usage": "Usage: .game new [name]",
+    "group_only": "Game-table commands are group-only ×",
+    "new": "{self} created game \"{game_id}\" √",
+    "join_code": "Game code: {code}",
+    "area_open": "{self} opened the game area \"{game_id}\" here √",
+    "area_closed": "Game area closed; {nick} can reopen with .game open {game_id} √",
+    "master_denied": "Sorry, GM rights can't be given to {nick} ×",
+    "mastered": "{self} accepted {nick} as a GM of this table √",
+    "master_list": "GMs of this table:\n{items}",
+    "not_exist": "{self} doesn't remember a game called {game_id} ×",
+    "void_here": "The tablecloth isn't even laid, {nick}. (.game new to create one)",
+    "not_master": "Please let a GM of this table do that, {nick} ×",
+    "state_head": "Game area \"{game_id}\"",
+    "state_closed": "(temporarily closed)",
+    "state_vars": "Table variables:",
+    "item_set": "{self} set {set_item} to {set_val} for this table √",
+    "item_show": "{set_item} of this table is {set_val} √",
+    "item_empty": "Please give an item to set, {nick} ×",
+    "joined": "{self} accepted {nick} as a player √",
+    "player_already": "{nick} is already at the table!",
+    "exited": "Player {nick} left the game √",
+    "not_joined": "Hmm? Was {nick} ever at the table?",
+    "player_empty": "{self} sees no players at the table yet~",
+    "kicked": "{self} kicked {tid} off the table √",
+    "kick_not_player": "{tid} that {nick} wants to kick isn't at the table ×",
+    "over": "Game \"{game_id}\" is over √",
+    "over_log_hint": "(the group log is still recording; use .log end to stop)",
+    "roulette_set": "{self} enabled roulette for d{face} √",
+    "roulette_hist": "Roulette history this round:\n{hist}",
+    "roulette_empty": "{self} hasn't used roulette at this table ×",
+    "roulette_reset": "{self} reset the roulette √",
+    "roulette_clear": "{self} cleared the roulette √",
+    "roulette_too_big": "That big… can {nick} even finish rolling it?"
+  },
+  "log": {
+    "usage": "Command .log usage: new [name]\non/off\nend (upload)\nhalt (no upload)\nlist\nget/del/stat/export [name]\ntype txt/html\ntime/timer\nno arg = status",
+    "unofficial_site": "⚠️ The configured log site is not the official one — verify link safety yourself.",
+    "halted": "Recording force-closed (not uploaded).",
+    "not_found": "Log \"{name}\" not found. Use .log list to see this group's logs.",
+    "getting": "Re-uploading the log, one moment…",
+    "del_usage": "Usage: .log del <log name>",
+    "deleted": "Log \"{name}\" deleted.",
+    "stat": "\"{name}\" stats: {count} messages from {players} participant(s)\nSpan {from} ~ {to}\nMost active:{tops}",
+    "stat_empty": "This log has no content yet.",
+    "exported": "Log \"{name}\" sent to group files.",
+    "masterget_usage": "Usage: .log masterget <groupId> [log name] (master only)",
+    "new": "Started recording session log \"{name}\"; group messages will be logged (.log off to pause, .log end to finish)",
+    "on": "Resumed session log \"{name}\".",
+    "resumed": "Log \"{name}\" was paused here; logging has now resumed.",
+    "off": "Paused session logging ({count} lines recorded).",
+    "ended": "Session log ended, {count} lines recorded.",
+    "already_on": "Already recording log #{id}-{name}, {count} lines so far.",
+    "need_new": "No log here yet — use .log new [name] first.",
+    "not_recording": "This group isn't recording.",
+    "idle": "Not recording. Use .log new [name] to start.",
+    "status": "Recording log #{id}-{name}, {count} lines so far.",
+    "paused_status": "This group has a paused recording. Use .log on [name] to resume.\n#{id}-{name} (last recorded {date}) [paused]",
+    "no_paused": "There is no paused recording to resume. Use .log new [name] to start one.",
+    "list_empty": "No session logs in this group yet. Use .log new [name] to start.",
+    "list": "This group has {total} log(s); showing {from}-{to}:\n{list}{more}",
+    "list_item": "#{id}-{name} (last recorded {date}) [{state}]",
+    "state_running": "running",
+    "state_paused": "paused",
+    "state_ended": "ended",
+    "list_more": "\nFor more, send .log list {page}",
+    "group_only": "The log command is only available in groups.",
+    "bot_name": "Dice",
+    "exists": "A session log \"{name}\" is already running. Use .log end to finish it first.",
+    "uploaded": "Session log uploaded — replay: {url}",
+    "upload_failed": "Log upload failed: {error}",
+    "type_show": "Group-file transcript format for this group: {type}. Change with .log type txt/html (group admin+).",
+    "type_set": "Transcript group-file format set to {type}.",
+    "type_usage": "Usage: .log type txt (plain text) or .log type html (web page with images).",
+    "timer": {
+      "unit_h": "h ",
+      "unit_m": "m ",
+      "unit_s": "s",
+      "started": "⏱ Timer started.",
+      "resumed": "⏱ Timer resumed, total {total}.",
+      "stopped": "⏱ This session {current}, total {total}.",
+      "show": "⏱ Log \"{name}\" total {total}{running}",
+      "running": " (current session {current})",
+      "show_none": "No timed session log in this group yet.",
+      "is_off": "Session timer is off in this group (.log timer on to enable).",
+      "disabled_set": "Session timer disabled for this group.",
+      "enabled_set": "Session timer enabled for this group.",
+      "state_on": "Session timer: ON (.log timer off to disable).",
+      "state_off": "Session timer: OFF (.log timer on to enable)."
+    }
+  },
+  "reply": {
+    "on": "Custom replies enabled.",
+    "off": "Custom replies disabled.",
+    "usage": "Usage: .reply on/off"
+  },
+  "pc": {
+    "usage": "Command .pc usage:\n.pc new <name> create a card\n.pc tag <name> bind to this group\n.pc rename <name> rename current card\n.pc untag unbind current card\n.pc list list cards\n.pc del <name> delete a card\n.pc @someone view their card",
+    "list": "{nick}'s cards ({count}):\n{list}",
+    "list_empty": "{nick} has no character cards yet. Use .pc new <name> to create one.",
+    "new": "{nick} created and bound card: {name}",
+    "new_exists": "A card named \"{name}\" already exists.",
+    "new_usage": "Please give a name: .pc new <name>",
+    "bound": "{nick} bound card: {name}",
+    "tag_usage": "Usage: .pc tag <name> (bind an existing card)",
+    "not_found": "No card named \"{name}\" found.",
+    "deleted": "{nick} deleted card: {name}",
+    "del_usage": "Please give the card to delete: .pc del <name>",
+    "rename_usage": "Usage: .pc rename <new name> (or .pc rename <old> <new>)",
+    "renamed": "{nick} renamed card \"{old}\" to \"{new}\"",
+    "no_bound": "No character card is currently bound.",
+    "unbound": "{nick} unbound card: {name} (the card is kept; .pc tag to rebind)",
+    "show": "{owner}'s card [{name}]: {detail}",
+    "show_empty": "{owner}'s card [{name}] is still empty.",
+    "default_name": "Default",
+    "build_done": "{nick}'s character card generated:\n{detail}",
+    "redo_done": "{nick}'s character card reset and regenerated:\n{detail}",
+    "build_unknown": "Unknown build preset '{para}'. Available: pc (COC7 stats) / bg (background); combine with colons (e.g. pc:bg).",
+    "build_empty": "(nothing generated)",
+    "lock_usage": "Usage: .pc lock w/r to lock the current card (w=write, r=read); .pc unlock w/r to unlock.",
+    "locked": "Current card locked ({key}) √",
+    "unlocked": "Current card unlocked ({key}) √",
+    "lock_already": "The current card already has that lock ({key}).",
+    "unlock_missing": "The current card doesn't have that lock ({key})."
+  },
+  "deck": {
+    "usage": "Command .draw usage: .draw <deck> (or .draw3 <deck> for multiple)",
+    "no_deck": "No deck named \"{name}\"",
+    "ambiguous": "\"{name}\" matches several decks: {list}. Please be more specific.",
+    "result": "{nick} drew: {res}",
+    "list": "{count} decks:\n{list}",
+    "empty": "No decks yet — drop deck JSON files into the decks/ folder",
+    "default_set": "Set \"{name}\" as this group's default deck; now just use .draw to draw from it.",
+    "default_show": "This group's default deck: {name}",
+    "default_none": "No default deck set for this group; use .deck set <name>.",
+    "default_cleared": "Cleared this group's default deck.",
+    "default_group_only": "Default deck can only be set in a group.",
+    "inline_name": "random pick",
+    "inline_usage": "Usage: .draw a/b/c — picks one at random.",
+    "temp_new": "Created temp deck \"{name}\" ({count} items) for this group; draw with .draw {name}.",
+    "temp_del": "Deleted this group's temp deck \"{name}\".",
+    "temp_usage": "Usage: .deck new <name> a/b/c (anyone can create; handy for game randomness).",
+    "temp_tag": "(temp)"
+  },
+  "mod": {
+    "wip": "Module feature is under development..."
+  },
+  "authorize": {
+    "sent": "Authorization request sent to the Master."
+  },
+  "ob": {
+    "group_only": "The observer feature only works in groups.",
+    "empty": "No observers right now.",
+    "list": "Observers ({count}):\n{list}",
+    "cleared": "{nick} cleared the observer list.",
+    "exit": "{nick} left observer mode.",
+    "joined": "{nick} is now observing this group's session.",
+    "already": "{nick} is already observing.",
+    "not_in": "{nick} isn't an observer.",
+    "on": "Observer mode enabled for this group √",
+    "off": "Observer mode disabled for this group √",
+    "on_already": "Observer mode is already on in this group.",
+    "off_already": "Observer mode is already off in this group.",
+    "disabled": "Observer mode is disabled in this group; cannot join."
+  },
+  "link": {
+    "usage": "Usage: .link with/to/from <group> to build a link (with = two-way, to = here→target, from = target→here)\n.link start/close to resume/pause\n.link list for all links\n.link state for this window. Trust ≥3 required.",
+    "group_only": "Link operations must be done in a group.",
+    "self": "Cannot link a group to itself.",
+    "list": "Message links:\n{list}",
+    "none": "(no links)",
+    "state": "Links for this window:\n{list}",
+    "state_none": "This window has no links.",
+    "started": "Message link resumed for this window √",
+    "closed": "Message link paused for this window √",
+    "built": "Link built: {home} {mode} {target} √",
+    "suspended": " (paused)",
+    "mode_with": "⇄",
+    "mode_to": "→",
+    "mode_from": "←"
+  },
+  "me": {
+    "private_usage": "Usage: .me <group> <action> (relay a third-person action to that group from private chat).",
+    "empty": "The action text cannot be empty.",
+    "disabled": "The .me command is disabled in that group.",
+    "sent": "Action relayed √",
+    "on": "Command .me enabled for this group √",
+    "off": "Command .me disabled for this group √",
+    "on_already": "The .me command is already on in this group.",
+    "off_already": "The .me command is already off in this group."
+  },
+  "ak": {
+    "usage": "Usage: .ak#title to start a fork; .ak+option1|option2 to add; .ak-N to delete; .ak= to pick randomly; .ak show to list; .ak clr to clear.",
+    "default_title": "(unnamed fork)",
+    "created": "Fork [{title}] created — add branches with .ak+option.",
+    "added": "[{title}] current branches:\n{list}",
+    "add_empty": "The options to add cannot be empty.",
+    "num_err": "Invalid index.",
+    "deleted": "[{title}] deleted, remaining:\n{list}",
+    "got": "[{title}]\n{list}\nFate chose: {get}",
+    "show": "[{title}] current branches:\n{list}",
+    "cleared": "Current fork cleared.",
+    "opt_empty": "No branches to pick from yet — add with .ak+option.",
+    "empty_list": "(empty)"
+  },
+  "group": {
+    "private": "Group settings can only be viewed in a group.",
+    "info": "------ Group Info ------\nName: {name}\nGroup: {group}\nBot role: {role}\nStatus: {status}\nActive log: {log}\nPlayers: {players}\nGM: {gm}\nObservers: {observers}\nBlacklisted: {blacklist}\nBlacklist-quit level: {quitLevel}",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "none": "(none)",
+    "role_owner": "Owner",
+    "role_admin": "Admin",
+    "role_member": "Member",
+    "role_unknown": "Unknown",
+    "quit_member": "any member",
+    "quit_admin": "admin+",
+    "cleared": "Cleared all settings for this group (toggles / welcome / observers / disabled items, etc.).",
+    "term_set": "Enabled \"{term}\" for this group.",
+    "term_cleared": "Disabled \"{term}\" for this group.",
+    "term_unknown": "Unknown group term: {term}\nAvailable: 停用指令/禁用回复/禁用jrrp/禁用draw/禁用me/禁用help/禁用deck/禁用send",
+    "auto": {
+      "show": "Group automation:\n· Join review (pass) = {pass}\n· Auto-kick = {kick}\n· Auto-mute = {mute} ({min} min)\nUsage: .group auto pass/kick/mute <keyword> (pass 'all' = approve everyone; empty keyword = off)",
+      "off": "off",
+      "all": "approve all",
+      "usage": "Usage: .group auto pass <keyword>\n.group auto kick <keyword>\n.group auto mute <keyword> [minutes]\n(pass 'all' = approve everyone; empty keyword = turn that off)",
+      "need_bot_admin": "The bot needs admin (or higher) in this group before group automation can take effect.",
+      "pass_off": "Join auto-review turned off.",
+      "pass_all": "Join auto-review on: all join requests are approved.",
+      "pass_on": "Join auto-review on: only approved when the request comment contains \"{kw}\".",
+      "kick_off": "Auto-kick turned off.",
+      "kick_on": "Auto-kick on: anyone whose message contains \"{kw}\" is removed from the group.",
+      "mute_off": "Auto-mute turned off.",
+      "mute_on": "Auto-mute on: anyone whose message contains \"{kw}\" is muted for {min} min."
+    }
+  },
+  "plugin": {
+    "group_only": "Plugin toggles can only be set in a group chat.",
+    "unavailable": "Plugin list is unavailable.",
+    "empty": "No plugins are currently loaded.",
+    "list": "Plugins ({count}):\n{list}\nUse .plugin on/off <name> to toggle, .plugin all on/off for batch.",
+    "state": {
+      "on": "on",
+      "off": "off here",
+      "global_off": "globally off"
+    },
+    "all_on": "Enabled all {count} plugins in this group.",
+    "all_off": "Disabled all {count} plugins in this group.",
+    "enabled": "Plugin \"{name}\" enabled in this group.",
+    "disabled": "Plugin \"{name}\" disabled in this group.",
+    "not_found": "No plugin named \"{name}\" — use .plugin list to see them.",
+    "usage": "Usage: .plugin list / .plugin on|off <name> / .plugin all on|off"
+  },
+  "gate": {
+    "no_perm": "Requires group admin or higher.",
+    "global_silent": "{self} is on a break; service paused.",
+    "jrrp_global": "Sorry, jrrp has been disabled globally.",
+    "me_global": "Sorry, this command has been disabled globally.",
+    "cmd_global": "Sorry, {cmd} has been disabled globally.",
+    "in_group": "Sorry, {cmd} is disabled in this group.",
+    "external_on": "External mode ON: built-in commands disabled, only custom replies remain (use 外置关 to restore).",
+    "external_off": "External mode OFF: built-in commands restored.",
+    "not_master": "Sorry, this command is for the bot's Master only.",
+    "not_admin": "Sorry, you are not a trusted/admin user of this bot yet.",
+    "perm_denied": "Sorry, you don't have permission to run this command.",
+    "self_perm": "I don't have enough permission to do that (please grant me admin)."
+  },
+  "rule": {
+    "usage": "Command .rules usage: .rules <term>\n.rules <book>:<term> (e.g. .rules coc:fumble); .ruleset <book> sets the group default.",
+    "no_books": "No rulebooks yet — drop rule JSON files into the rules/ folder.",
+    "result": "[{book} · {item}]\n{desc}",
+    "not_found": "No rule entry found for \"{item}\".",
+    "book_set": "Set this group's default rulebook to \"{book}\".",
+    "book_show": "This group's default rulebook: {book}",
+    "book_none": "No default rulebook set; use .ruleset <book>.",
+    "book_cleared": "Cleared this group's default rulebook.",
+    "book_unknown": "No rulebook named \"{book}\"."
+  },
+  "helpdoc": {
+    "list": "Use .help <topic> to view its help, e.g. .help ra.\nThere are many topics — browse/search them on the web admin's \"Help Docs\" page.",
+    "default": {
+      "show": "Current default help source: {cur}\n(Same-named topics prefer this source, e.g. dnd5r over dnd3r)\nAvailable sources: {list}\nSet with .helpdoc default <source>, clear with .helpdoc default clear.",
+      "none": "not set (load order)",
+      "set": "Default help source for this group set to \"{src}\"; same-named topics will prefer it.",
+      "cleared": "Cleared this group's default help source."
+    },
+    "scope": {
+      "show": "Current search scope for this group: {cur}\n(When locked, .help only searches this source; other content is filtered out. Built-in command help is kept.)\nAvailable sources: {list}\nLock with .helpdoc scope <source>, release with .helpdoc scope clear.",
+      "none": "not locked (all sources)",
+      "set": "Search scope for this group switched to \"{src}\"; .help now only shows this source until released or changed.",
+      "cleared": "Search scope released; querying all sources again.",
+      "group_only": "Search scope can only be set in a group.",
+      "empty": "This group's search scope is locked to \"{scope}\", which has no \"{topic}\". Use .helpdoc scope clear to release it."
+    }
+  },
+  "master": {
+    "boton": "Commands enabled in group {group}.",
+    "botoff": "Commands disabled in group {group}.",
+    "need_group": "Specify a group id, or use this in the target group.",
+    "black_added_n": "Blacklisted {count}: {list}",
+    "white_added_n": "Whitelisted {count}: {list}",
+    "removed_n": "Removed {count}: {list}",
+    "list_blackqq": "Blacklisted users: {list}",
+    "list_blackgroup": "Blacklisted groups: {list}",
+    "list_whitegroup": "Whitelisted groups: {list}",
+    "list_whiteqq": "Trusted users: {list}",
+    "list_empty": "(none)"
+  },
+  "tplvar": {
+    "nick": "nickname",
+    "res": "roll/result",
+    "reason": "reason",
+    "turn": "turns",
+    "attr": "attribute",
+    "roll": "roll detail",
+    "rate": "success rate",
+    "level": "success level",
+    "san": "sanity",
+    "grade": "outcome",
+    "loss": "loss",
+    "final": "final value",
+    "detail": "detail",
+    "change": "change",
+    "old": "old name",
+    "new": "new name",
+    "default": "default value",
+    "name": "name",
+    "count": "count"
+  },
+  "hiy": {
+    "result": "{nick}'s roll stats ({total} checks):\nCrit {crit} · Extreme {extreme} · Hard {hard} · Success {regular} · Fail {fail} · Fumble {fumble}\nSuccess {success}/{total}, rate {rate}%",
+    "empty": "{nick} has no check records yet — roll a few with .ra first.",
+    "skill_result": "{nick} «{skill}» stats: {total} rolls, {success} successes ({rate}%)\nCrit {crit} Extreme {extreme} Hard {hard} Regular {regular} Fail {fail} Fumble {fumble}",
+    "skill_empty": "{nick} has no «{skill}» check records yet."
+  },
+  "setcoc": {
+    "set": "COC7 check house rule set to rule {rule}.",
+    "show": "Current COC7 house rule: rule {rule} (.setcoc 0-7 / .setcoc show / .setcoc clr).",
+    "cleared": "House rule cleared, back to default (rule 0).",
+    "invalid": "Rule must be 0-7. Usage: .setcoc <0-7> / .setcoc show / .setcoc clr"
+  },
+  "dnd": {
+    "ss": {
+      "usage": "Command .ss usage: .ss init 4 3 2 (lv1/2/3 max)\n.ss set 3环 5\n.ss 3环 ±1\n.ss rest\n.ss clr\n.ss to view.",
+      "show": "{nick}'s spell slots: {detail}",
+      "empty": "{nick} has no spell slots set (use .ss init).",
+      "set": "Spell slots set for {nick}: {detail}",
+      "cleared": "{nick}'s spell slots cleared.",
+      "rested": "{nick}'s spell slots fully restored.",
+      "changed": "{nick}'s lv{ring} slots now {cur}, max {max}.",
+      "no_ring": "Lv{ring} slots not set yet (use .ss init / .ss set)."
+    },
+    "cast": {
+      "usage": "Command .cast usage: .cast <ring> [count], count defaults to 1.",
+      "empty": "{nick} has no lv{ring} slots left."
+    },
+    "longrest": {
+      "done": "{nick}'s long rest: HP restored to {hp}, spell slots restored.",
+      "no_hpmax": "{nick} has no hpmax set, cannot restore HP (use .st hpmax:<n>)."
+    },
+    "ds": {
+      "need_zero": "{nick} must be dying (HP = 0) to make a death save.",
+      "result": "{nick}'s death save: [1d20={roll}]={total} {outcome}",
+      "success": "Success! Death-save success +1",
+      "fail": "Not good! Death-save failure +1",
+      "critfail": "Critical fail! Death-save failure +2",
+      "miracle": "A medical miracle! Regain 1 HP!",
+      "stabilized": "{nick} has stabilized!",
+      "dead": "{nick} accrued 3 death-save failures and has died...",
+      "stat": "{nick}'s death saves: {s}/3 success, {f}/3 failure"
+    },
+    "rc": {
+      "usage": "Command .rc usage (DND mode): .rc <ability>[+mod] [reason], optional advantage/disadvantage, e.g. .rc 优势 力量+2",
+      "result": "{nick}'s \"{attr}\" check: {roll} {mod} = {total}"
+    },
+    "rdc": {
+      "usage": "DND ability-modifier check: .rdc [rounds#] [B/P] [ability or skill] [±bonus] [reason] [DC]. Ability modifiers use floor((score-10)/2); skills use their separate check modifier. B keeps high, P keeps low; maximum 9 rounds. Example: .rdc 3# B strength+2 force door 15",
+      "mode_off": ".rdc can only be used when DND5e mode is enabled for this group (.setdnd on).",
+      "turns": "Rounds must be between 1 and 9.",
+      "no_value": "No DND ability score or skill modifier found for \"{attr}\".",
+      "result": "{nick}'s \"{attr}\" ability-modifier check{reason}:\n{detail}"
+    }
+  },
+  "setdnd": {
+    "on": "DND5e mode enabled for this group (.rc is now a d20 check).",
+    "off": "DND5e mode disabled for this group (.rc back to COC d100).",
+    "usage": "Command .setdnd usage: .setdnd on/off; no argument toggles."
+  },
+  "self": {
+    "show": "Current {key}: {val}",
+    "set": "{key} set to \"{val}\" √",
+    "reset": "{key} customization reset √",
+    "unset": "(not set)"
+  },
+  "buff": {
+    "show": "{nick}'s current buffs: {detail}",
+    "empty": "{nick} has no active buffs.",
+    "set": "Buffs set for {nick}: {detail}",
+    "cleared": "{nick}'s buffs all cleared.",
+    "deleted": "Specified buff(s) removed for {nick}.",
+    "usage": "Command .buff usage: .buff <attr>:<val> to set; .buff <attr>±<expr> to adjust; .buff del <attr>; .buff clr; .buff to view."
+  },
+  "init": {
+    "group_only": "Initiative only works in groups.",
+    "rolled": "{name}'s initiative: {roll}={total}",
+    "list": "Initiative order:\n{list}",
+    "empty": "No initiative yet. Use .ri to join.",
+    "cleared": "Initiative list cleared.",
+    "removed": "Removed {name} from initiative."
+  },
+  "sn": {
+    "group_only": "Set-name only works in groups.",
+    "cleared": "Your group-card template was cleared.",
+    "done": "Your group card is now: {card}",
+    "auto_on": "Auto card-sync on: your group card updates live as attributes change. Now: {card}",
+    "auto_off": "Auto card-sync off.",
+    "default_template": "{nick} STR{力量} DEX{敏捷} POW{意志} HP{生命值} SAN{理智}"
+  },
+  "welcome": {
+    "group_only": "Welcome can only be set in a group.",
+    "private": "Who do you want {self} to welcome in DM?",
+    "none": "No welcome message set for this group.",
+    "show": "Current welcome: {text}",
+    "off": "Welcome message disabled.",
+    "set": "Welcome message set: {text}",
+    "below_min": "Set to current global minimum: {min}",
+    "bad_value": "Please enter a valid number",
+    "bad_range": "Value out of range",
+    "delay_off": "Welcome delay disabled",
+    "delay_set": "Welcome delay set to {sec}s",
+    "cd_off": "Welcome cooldown disabled",
+    "cd_set": "Welcome cooldown set to {sec}s",
+    "delay_info": "(delay {sec}s)",
+    "cd_info": "(cooldown {sec}s)"
+  },
+  "lang": {
+    "name": "English",
+    "current": "Reply language: {lang} (overridden).\nSwitch: .lang 简体 / .lang 繁體 / .lang en / .lang 日本語\nClear: .lang clr",
+    "current_default": "Reply language: {lang} (platform/global default).\nSwitch: .lang 简体 / .lang 繁體 / .lang en / .lang 日本語",
+    "cleared": "Language override cleared, reverted to: {lang}.",
+    "usage": "Usage: .lang 简体 (Simplified Chinese) / .lang 繁體 (Traditional Chinese) / .lang en (English) / .lang 日本語 (Japanese) / .lang clr (clear override)",
+    "set": "Group reply language set to: {lang}.",
+    "set_user": "Your reply language set to: {lang}.",
+    "ai_set": "Group reply language set to: {lang} (AI-translated; replies will be slightly delayed).",
+    "ai_set_user": "Your reply language set to: {lang} (AI-translated; replies will be slightly delayed).",
+    "current_ai": "Reply language: {lang} (AI-translated). Send .lang clr to reset."
+  },
+  "event": {
+    "group_joined": "Hello everyone! I am Dice!Next. Type .help for commands; .bot on/off toggles me in this group.",
+    "friend_welcome": "Hi! I am Dice!Next. Nice to meet you — type .help to see commands.",
+    "blacklist_quit": "A blacklisted user is present; the bot is leaving this group per policy.",
+    "blacklist_group": "{self}: this group is blacklisted, so I'm leaving automatically. Contact the bot owner if this is a mistake.",
+    "nonfriend_group_leave": "{self}: I was pulled in by someone who isn't my friend, so I'm leaving per settings. Please add me as a friend first.",
+    "leave_unused": "{self} has been idle here for {day} days, so I'm leaving automatically per settings. See you around!",
+    "poke": "Stop poking me, or I will make all your rolls land on 1!",
+    "usergroup_invite": "Welcome to {self}! Please join the user group {group} for help and update news.",
+    "usergroup_leave": "No member of this group has joined the user group {group}; {self} is leaving per policy. Join the user group to keep using the bot.",
+    "keyword_group_leave": "This group's name contains a disallowed keyword; {self} will now leave."
+  },
+  "setsn": {
+    "show": "Group card attributes: {attrs} (up to 5; set with .setsn a b c)",
+    "set": "Group card attributes set: {attrs}",
+    "cleared": "Group card attributes reset to default (hp san dex).",
+    "no_perm": "Only the group owner/admin can configure this.",
+    "usage": "Usage: .setsn hp san dex (up to 5; .setsn show / .setsn clr)"
+  },
+  "favor": {
+    "show": "{self}’s favor toward {nick}: {favor} ({title})",
+    "show_other": "{self}’s favor toward {target}: {favor} ({title})",
+    "rank": "{self}’s favor ranking:\n{list}",
+    "rank_empty": "No favor records yet.",
+    "group_only": "Group favor ranking only works in a group.",
+    "members_pending": "Member list is loading, please try again shortly.",
+    "no_perm": "Only the bot owner / trusted users can adjust favor.",
+    "no_grow": "{target}’s favor did not grow this time…",
+    "value_empty": "Please give the favor value to set.",
+    "grew": "{target} favor grew: +{add} → {favor}",
+    "added": "{target} favor {add} → now {favor}",
+    "set": "{target} favor set to {favor}",
+    "erased": "Erased all favor of {target}.",
+    "title": {
+      "hostile": "Hostile",
+      "stranger": "Stranger",
+      "friendly": "Friendly",
+      "close": "Close",
+      "intimate": "Confidant",
+      "lover": "Lover"
+    }
+  },
+  "persona": {
+    "default_name": "Default",
+    "current": "Current persona: {name}",
+    "list": "Available personas:\n{list}Use .rpmode set <name> to switch.",
+    "set": "Switched to persona \"{name}\".",
+    "off": "Switched back to the default persona.",
+    "not_found": "No persona named \"{name}\".",
+    "created": "Created persona \"{name}\" from the current setup.\nEdit its entries in the WebUI.",
+    "copied": "Copied \"{src}\" to \"{dst}\".",
+    "deleted": "Deleted persona \"{name}\".",
+    "builtin_no_del": "Built-in personas cannot be deleted.",
+    "name_exists": "A persona named \"{name}\" already exists.",
+    "name_empty": "Please provide a persona name.",
+    "no_perm_admin": "Group admin permission is required to switch personas.",
+    "no_perm_master": "Only the Master can manage personas.",
+    "no_entries": "This persona has no entries yet.",
+    "entry_count": "Entries: {count}",
+    "info_name": "Persona \"{name}\"",
+    "create_fail": "Failed to create persona.",
+    "copy_fail": "Failed to copy persona.",
+    "del_fail": "Failed to delete persona.",
+    "copy_usage": "Usage: .rpmode copy <source> <target>",
+    "no_personas": "No persona templates yet. Create one in the WebUI."
+  },
+  "npc": {
+    "group_only": "NPC cards can only be used in a group chat.",
+    "usage": "Command .npc usage: .npc new <name> / .npc list / .npc <name> st str50 / .npc <name> ra spot / .npc show <name> / .npc del <name>.",
+    "empty": "This group has no NPC cards yet. Use .npc new <name>, or directly use .npc <name> st <attributes>.",
+    "list": "NPCs in this group ({count}): {items}",
+    "new_usage": "Usage: .npc new <name>.",
+    "exists": "NPC \"{name}\" already exists.",
+    "new": "{nick} created NPC \"{name}\".",
+    "del_usage": "Usage: .npc del <name>.",
+    "not_found": "NPC \"{name}\" was not found.",
+    "deleted": "{nick} deleted NPC \"{name}\" and its card.",
+    "clr_usage": "Usage: .npc clr <name>.",
+    "cleared": "{nick} cleared NPC \"{name}\"'s card.",
+    "show_usage": "Usage: .npc show <name>.",
+    "no_nest": "An NPC proxy command cannot call .npc again.",
+    "sub_empty": "NPC \"{name}\" did not respond to subcommand: {sub}.",
+    "proxy_note": "[NPC: {name}]\n"
+  },
+  "system": {
+    "usage": "Usage: .system info (system info) / .system stats (runtime stats)",
+    "unknown": "unknown",
+    "info": "System info\nOS: {os}\nCPU: {cores} cores · {cpu}% used\nMemory: {memused}/{memtotal} MB ({memload}%)\nProcess memory: {proc} MB",
+    "stats": "Runtime stats\nUptime: {uptime}\nCommands since start: {cmds}\nFriends: {friends} · Groups: {groups}\nPlayers: {players} · Session logs: {logs}"
+  }
+}

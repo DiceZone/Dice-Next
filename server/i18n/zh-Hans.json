@@ -1,0 +1,854 @@
+﻿{
+  "_meta": {
+    "name": "简体中文",
+    "keywords": [
+      "zh-hans",
+      "zh-cn",
+      "cn",
+      "hans",
+      "简体",
+      "簡體",
+      "简中",
+      "簡中",
+      "简体中文",
+      "簡體中文",
+      "简",
+      "簡"
+    ]
+  },
+  "dice": {
+    "error": {
+      "roll": "掷骰错误：{error}",
+      "coc": "COC检定错误：{error}",
+      "dnd": "DND检定错误：{error}",
+      "sc": "理智检定错误：{error}",
+      "st": "技能检定错误：{error}"
+    },
+    "reason_prefix": "由于{reason}，",
+    "proxy_note": "（由 {agent} 代掷）\n",
+    "crit": " 【暴击】",
+    "fumble": " 【大失败】",
+    "roll": {
+      "result": "{nick}掷骰: {res}",
+      "result_reason": "{nick}掷骰 {reason}: {res}",
+      "multi": "{nick}掷骰{turn}次: {res}",
+      "multi_reason": "{nick}掷骰{turn}次 {reason}: {res}",
+      "too_many": "最多只能掷骰 {max} 次（你输入了 {n} 次）",
+      "hidden": "{nick} 投了一次暗骰，结果已私聊告知。"
+    },
+    "bp": {
+      "bonus": "奖励骰",
+      "penalty": "惩罚骰",
+      "bonus_label": "(奖)",
+      "penalty_label": "(惩)"
+    },
+    "pool": {
+      "usage": "指令 .ww 用法：.ww 骰数 [成功线]；或 .ww 骰数a加骰线c成功线+附加成功，如 .ww 10a8c7+2（a默认10，c默认8）",
+      "result": "{nick} 掷骰：{expr}"
+    },
+    "dx": {
+      "usage": "指令 .dx 用法：.dx 骰数c加骰线（双十字，如 .dx 3c8）或 .dx 骰数a加骰线（数成功骰池/WoD，如 .dx 5a7）"
+    },
+    "rav": {
+      "usage": "指令 .rav 用法：.rav 甲 乙（数值或属性），如 .rav 60 50 或 .rav 侦查 潜行",
+      "result": "{nick} 的对抗检定：\n{la}：1D100={ra}/{va} {lva}\n{lb}：1D100={rb}/{vb} {lvb}\n{outcome}",
+      "a_wins": "「{a}」胜出！",
+      "b_wins": "「{b}」胜出！",
+      "tie": "平局"
+    },
+    "check": {
+      "result": "{nick}进行{attr}检定：{roll}/{rate} {level}",
+      "result_reason": "由于{reason} {nick}进行{attr}检定：{roll}/{rate} {level}",
+      "need_value": "请给出属性值，例如 .ra 侦查 60",
+      "no_card": "未找到属性「{attr}」，请先用 .st 录入，或直接 .ra {attr} 数值",
+      "hidden": "{nick} 进行了一次暗检定，结果已私聊告知。"
+    },
+    "level": {
+      "critical": "大成功！",
+      "extreme": "极难成功",
+      "hard": "困难成功",
+      "regular": "成功",
+      "failure": "失败",
+      "fumble": "大失败！"
+    },
+    "brp": {
+      "critical": "大成功！",
+      "special": "特殊成功",
+      "success": "成功",
+      "failure": "失败",
+      "fumble": "大失败！",
+      "result": "{nick}进行{attr}检定：{roll}/{rate} {level}",
+      "result_reason": "由于{reason} {nick}进行{attr}检定：{roll}/{rate} {level}",
+      "resist_usage": "用法：.bav <主动值/属性> <被动值/属性> —— BRP 抵抗表对抗。例 .bav 力量 体型",
+      "resist": "{nick} 抵抗对抗：{la}({va}) vs {lb}({vb}) → 目标 {target}% {roll} {outcome}",
+      "resist_win": "{a} 胜！",
+      "resist_lose": "{a} 败（{b} 抵抗成功）"
+    },
+    "rx": {
+      "no_group": "私聊窗口不可以暗骰哦",
+      "no_target": "请 @ 要进行心理学暗骰的调查员",
+      "receipt": "{nick} 为「{target}」进行了一次心理学暗骰，调查员能不能看穿眼前的迷雾呢？",
+      "private": "你为「{target}」暗骰心理学（本群 {gid}）的结果为：D100={roll}/{rate} {level}\n{receipt}",
+      "msg": {
+        "critical": "大成功，看来有人要受罪了呢，是谁呢～",
+        "extreme": "极难成功，守秘人得把该给的线索都给了哦",
+        "hard": "困难成功，很不错啦，值得守秘人给出调查员想要知道的信息了，不是吗？",
+        "regular": "成功了，守秘人觉得调查员能不能看出来他想要的呢？",
+        "failure": "失败了，守秘人是打算直接告诉调查员自己能力不够呢，还是让他眼里的场景看起来一切正常呢？",
+        "fumble": "大·失·败！故事接下来会如何发展呢？我会好好看着的"
+      }
+    },
+    "coc": {
+      "build": "{nick}的调查员作成:{res}",
+      "total": "共计",
+      "attr": {
+        "str": "力量",
+        "con": "体质",
+        "siz": "体型",
+        "dex": "敏捷",
+        "app": "外貌",
+        "int": "智力",
+        "pow": "意志",
+        "edu": "教育",
+        "luck": "幸运"
+      }
+    },
+    "dnd": {
+      "build": "为{nick}的冒险者生成随机六维（降序）:{res}",
+      "total": "总计"
+    },
+    "sc": {
+      "result": "理智检定 {output}"
+    },
+    "st": {
+      "result": "技能检定 {output}"
+    }
+  },
+  "card": {
+    "st": {
+      "usage": "指令 .st 用法：\n.st 力量50 敏捷60\n.st show\n.st clr\n.st del 属性",
+      "done": "{nick} 的人物卡已更新：{detail}"
+    },
+    "show": "{nick} 的人物卡：{detail}",
+    "show_one": "{nick} 的 {attr}：{val}",
+    "empty": "{nick} 还没有人物卡，先用 .st 录入属性吧",
+    "attr_missing": "未找到属性「{attr}」",
+    "cleared": "已清空 {nick} 的人物卡",
+    "attr_deleted": "已删除 {nick} 的属性「{attr}」",
+    "sc": {
+      "usage": "指令 .sc 用法：.sc 成功损失/失败损失 [当前San]，如 .sc 1/1d6 70；已 .st 理智 可省略 San",
+      "no_san": "未设定 San 值，请先 .st 理智 [数值]，或在指令后给出当前 San",
+      "invalid_san": "San 值需为 1-99 的整数",
+      "result": "{nick} 的理智检定：1D100={res}/{san} {grade}\n理智减少 {loss} → 剩余 {final}",
+      "result_noloss": "{nick} 的理智检定：1D100={res}/{san} {grade}\n无理智损失"
+    },
+    "en": {
+      "usage": "指令 .en 用法：.en 技能名（需已 .st 录入该技能）",
+      "success": "{nick} 的 {attr} 成长检定：{res}\n成功！{attr} 成长 {change} 点 → {final}",
+      "fail": "{nick} 的 {attr} 成长检定：{res}\n未达成长，{attr} 无变化",
+      "fail_grow": "{nick} 的 {attr} 成长检定：{res}\n虽未成功，按失败成长 {change} → {final}"
+    },
+    "insane": {
+      "temp": "{nick} 的疯狂发作-临时症状:\n{res}",
+      "long": "{nick} 的疯狂发作-总结症状:\n{res}"
+    },
+    "export": "{nick} 的人物卡导出（可直接 .st 导入）：\n{body}",
+    "fmt_done": "{nick} 的人物卡已按当前规则转换（同义词归一）。",
+    "locked_w": "当前人物卡已锁定写入，无法修改。",
+    "locked_r": "当前人物卡已锁定查看。",
+    "weapon": {
+      "set": "已为 {nick} 绑定武器：{detail}（用 .r 武器名 掷伤害）"
+    },
+    "autocard": {
+      "recalc": "（自动卡面）因 {causes} 变化，已自动重新计算：{detail}"
+    },
+    "db": {
+      "auto": "（伤害加值按力量+体型自动计算：{db}）"
+    }
+  },
+  "fun": {
+    "jrrp": "{nick} 今天的人品值是：{res}",
+    "rulecmd": {
+      "fail": "指令「{cmd}」需要的人物卡属性尚未设置。"
+    },
+    "text": {
+      "usage": "指令 .text 用法：.text <文本模板>，会把 {大括号} 内的表达式与变量求值，例如 .text 看看手气 {1d16}"
+    },
+    "name": {
+      "result": "{nick} 的随机名：{res}",
+      "too_many": "最多生成 10 个名字"
+    },
+    "nn": {
+      "set": "已将「{old}」改称为「{new}」",
+      "clear": "已清除「{old}」的称呼",
+      "too_long": "称呼过长（最多 50 字节）"
+    },
+    "set": {
+      "done": "已将 {nick} 的默认骰设置为 D{default}",
+      "reset": "已将 {nick} 的默认骰重置为 D{default}",
+      "usage": "指令 .set 用法：.set 20 设置默认骰；.set（不带参数）重置为 100",
+      "invalid": "默认骰需为 1-9999 的整数",
+      "rule": "{nick} 已切换本群规则为 {name}，默认骰 d{sides}。",
+      "group_only": "切换规则只能在群聊中进行。",
+      "no_perm": "只有群管理员才能切换本群规则。",
+      "list": "可用规则系统（★=本群当前：{active}）：\n{list}\n用 .set <名称> 切换。",
+      "list_empty": "（暂无可切换的规则系统）",
+      "none": "无"
+    },
+    "sleep": "{nick}：骰子去休息啦，晚安 zzz",
+    "mrrp": "{nick} 的明日人品是 {res}",
+    "zrrp": "{nick} 的昨日人品是 {res}",
+    "summon_empty": "召唤{self}，{nick}有何事？"
+  },
+  "help": {
+    "main": "Dice!Next 指令帮助\n· 投骰：.r .rh .rb/.rp .ww .dx/.rdx\n· 检定：.ra .rc .rav对抗 .sc理智 .en成长\n· 人物卡：.st 录卡 .pc 多卡管理\n· 生成：.coc .dnd .name\n· 牌堆：.deck .draw .gacha\n· 娱乐：.jrrp .nn .set\n· 管理：.bot .group .log .ob .dismiss .send\n输入 .help <指令> 看详情（如 .help ra）；.helpdoc 看全部条目。",
+    "entry_missing": "帮助词条「{entry}」暂未收录，请查阅文档。",
+    "unknown": "没有找到「{topic}」的帮助。试试 .helpdoc 查看可用条目。",
+    "ambiguous": "「{topic}」匹配到多个帮助条目：{list}，请输入更精确的名称。",
+    "topic": {
+      "r": "掷骰 .r [表达式] [原因]：投骰。例 .r3d6+2 攻击；.rh 暗骰；N#expr 连投。",
+      "rh": "暗骰 .rh [表达式] [原因]：暗骰/暗检定。结果以私聊发给你，群里只提示「<名> 进行了暗骰」，他人看不到点数。暗检定用 .rah / .rch（如 .rah 侦查 60），结果同样私聊；房规(.setcoc)、奖惩骰等照常生效。",
+      "ra": "检定 .ra <技能|属性> [成功率] [原因]：COC 检定。省略成功率时读人物卡。例 .ra 侦查 / .ra 力量60",
+      "rx": "心理学 .rx @调查员 [成功率]：心理学暗骰（守秘人用）。对被 @ 的调查员掷一次心理学检定，含成功等级的详细结果私聊发给你，群里只出一句不剧透的回执。省略成功率时读对方人物卡的「心理学」，默认 10。",
+      "rb": "奖惩骰 .rb/.rp [N] [检定]：奖励骰/惩罚骰（取低/高十位）。例 .rb 侦查 / .rp2 60",
+      "sc": "理智 .sc 成功/失败 [理智]：理智检定，自动扣 San 并存回人物卡。例 .sc 1/1d6",
+      "st": "录卡 .st 力量50 敏捷60：\n录入/修改属性（支持 +/- 与骰子，如 hp-2、理智+1d3）。DND 钱币支持 pp/gp/ep/sp/cp，扣款自动换开。\n.st show 查看\n.st clr 清空\n.st del <属性> 删除。",
+      "pc": "多角色卡 .pc：\n.pc new <名> 新建\n.pc tag <名> 绑定\n.pc list 列表\n.pc del <名> 删除\n.pc @某人 看他人卡。",
+      "npc": "NPC .npc：群共享角色卡。\n.npc new <名> 新建\n.npc list 列表\n.npc <名> st 力量50 录属性\n.npc <名> ra 侦查 以 NPC 代骰\n.npc show/del/clr <名>。",
+      "coc": "制卡 .coc [数量]：生成 COC7 调查员属性。",
+      "dnd": "制卡 .dnd [数量]：生成 DND 属性（4d6 取高3）。",
+      "deck": "牌堆一览 .deck\n.draw <牌堆> 抽牌\n.gacha 抽卡。",
+      "jrrp": "人品 .jrrp：今日人品（每人每天固定）。",
+      "bot": "骰娘 .bot：\n查看版本/状态\n.bot on/off 启用/停用本群（停用后仅 .bot 可用）。",
+      "group": "群设定 .group：查看本群设定（状态/记录/群名片/备注/旁观）。编辑请到网页后台。",
+      "ob": "旁观 .ob：\n旁观本群跑团\n.ob list 名单\n.ob exit 退出\n.ob clr 清空。",
+      "send": "留言 .send <留言>：把留言转交给 Master。Master 可用 .send group/user <号> <消息> 主动发送。",
+      "log": "日志 .log new [名称] 新建并开始记录\n.log on/off 继续/暂停\n.log end 结束并上传（发链接+群文件）\n.log halt 强行结束不上传\n.log list 日志列表\n.log get [名称] 重新上传取链接\n.log del <名称> 删除\n.log stat [名称] 统计\n.log export [名称] 只发群文件\n.log type txt/html 群文件格式（群管）\n.log time/timer 计时\n.log masterget <群号> [名称] 骰主跨群取链接。",
+      "nn": "昵称 .nn <新名>：设定在骰子里显示的名字；.nn 清除。",
+      "set": "默认骰 .set <面数>：\n设定默认骰（.r 不带表达式时用）\n.set 重置为100。",
+      "ww": "骰池 .ww N [成功线]：WOD 加骰池。旧写法 .ww 5 或 .ww 5 7（10 加骰）；扩展写法 .ww 10a8c7+2，其中 a=加骰线（默认10）、c=成功线（默认8）、+2=附加成功。成功骰以⑦⑧⑨⑩标注，逐轮列出骰池和成功数。",
+      "dx": "双十字 .dx 抛出数c临界值（如 .dx 3c8）或 .dx 抛出数 临界值：双十字骰系，掷 d10 达到临界值即爆骰加骰，按规则统计结果。与普通掷骰不同，它是双十字专用的加骰判定。旧版兼容别名：.rdx。",
+      "rdx": "双十字 .rdx：旧版 Dice 兼容别名，与 .dx 完全相同。例 .rdx 3c8。",
+      "rav": "对抗 .rav 甲 乙 [@对方]：对抗检定——双方各掷 d100，先比成功等级，等级相同再比骰点，判定谁胜。例 .rav 斗殴 60 / .rav 侦查 @某人。",
+      "ba": "BRP检定 .ba <技能|属性> [成功率] [原因]：BRP 检定（d100 低骰）。等级：大成功 ≤ 技能/20、特殊成功 ≤ 技能/5、成功 ≤ 技能、失败 > 技能、大失败（100 或失败且 99）。省略成功率读人物卡；支持 @某人 代骰、N# 连掷。例 .ba 侦查 / .ba 斗殴60。",
+      "bav": "BRP对抗 .bav <主动> <被动>：BRP 抵抗表对抗。目标% = 50 +（主动 − 被动）×5，掷 1d100 ≤ 目标则主动方胜。主动/被动可填属性名（读卡）或数值。例 .bav 力量 体型。",
+      "en": "成长 .en <技能> [技能值] [([失败成长]/)成功成长]：COC 技能成长检定，掷 d100 大于当前值（或>95）则成长并写回卡。成长值以+/-开头，省略默认 +1d10；可批量 .en 侦查 聆听 或 .en 侦查|聆听。",
+      "ti": "疯狂症状 .ti 临时疯狂 / .li 总结疯狂：抽取 COC7 疯狂症状，包含恐惧/躁狂子表，用于角色失去理智后的表现。",
+      "setcoc": "房规 .setcoc <0-7>：\n设置本群 COC 检定房规（大成功/大失败的判定方式各不相同）。.setcoc show 查看当前房规\n.setcoc clr 清除。",
+      "name": "起名 .name [cn/en/jp] [数量]：随机生成姓名（中文/英文/日文），可带数量；别名 .gn。",
+      "sleep": "休息 .sleep：休息一下，返回一句休息提示语。",
+      "mrrp": "人品 .mrrp：明日人品——按用户与日期确定性生成，提前看看明天的运气。",
+      "zrrp": "人品 .zrrp：昨日人品——按用户与日期确定性生成，回顾昨天的运气。",
+      "lang": "语言 .lang：\n查看或切换机器人回复语言。.lang 简体/繁體/en/日本語 切语言\n.lang clr 清除覆盖回到默认。",
+      "favor": "好感度系统：「好感」查看{self}对你的好感度与称号；「好感排行」「群内好感排行」查看排行。骰主/高信任(信任≥4)可用 .好感增加[值] / .好感成长 / .好感覆写<值> / .好感擦除（可带 @某人）调控；好感越高成长越难。",
+      "hiy": "统计 .hiy [技能]：查看检定统计。不带技能=全部合计；带技能名=该技能的出目次数/成功次数/成功率/各等级分布。",
+      "setsn": "名片设置 .setsn <属性...>：群主/管理员设置本群 .sn 名片显示哪些属性(最多5条，默认 hp san dex)。",
+      "sn": "名片 .sn [模板]：\n按模板设置自己的群名片\n.sn off 清除。受 .setsn 配置影响。",
+      "ri": "先攻 .ri [±调整] [名字]：\n先攻投 d20+调整入列\n.init 查看排序\n.init clr 清空\n.init del 删除。",
+      "welcome": "欢迎词 .welcome <文本>：\n设置入群欢迎词(支持 {at})\n.welcome show 查看\n.welcome off 关闭。",
+      "dismiss": "退群 .dismiss：让骰子退出本群(需管理/主人)。",
+      "rules": "规则 .rules 词条 / .rules 规则书:词条 速查规则（如 .rules coc:大失败、.rules dnd:借机攻击）；.ruleset 规则书 设本群默认规则书。",
+      "plugin": "插件 .plugin list 列出插件与本群状态\n.plugin on|off <名称> 启停某插件\n.plugin all on|off 批量启停。仅群主／管理员可操作。",
+      "game": "团务 .game：\n.game new <团名> 开团(开团者为GM)\n.game open <16位团号> 在其他群接入同一团(GM)\n.game join / exit 上桌/退出\n.game master 自任GM或列出GM\n.game state 团状态\n.game set 变量 值 团变量(GM)\n.game call 点名全体玩家(GM)\n.game kick <QQ> 踢下桌(GM)\n.game close 关闭当前群的领域\n.game over 结团\n.game rou 面数[*份数] 轮盘骰(GM)，rou hist/reset/clr 记录/复原/清空"
+    }
+  },
+  "ai": {
+    "group_only": "该指令只能在群里使用。",
+    "status_on": "本群 AI 功能（对话/NPC）：开启。",
+    "status_off": "本群 AI 功能（对话/NPC）：关闭。",
+    "on": "已开启本群 AI 功能（对话/NPC）。",
+    "off": "已关闭本群 AI 功能（对话/NPC）。",
+    "already_on": "本群 AI 功能已经是开启状态。",
+    "already_off": "本群 AI 功能已经是关闭状态。",
+    "not_whitelisted": "本群不在 AI 白名单内，无法使用 AI 功能（请联系骰主授权）。"
+  },
+  "trust": {
+    "usage": "用法：.trust <@某人/QQ号> [等级0-255]。省略等级则查询。管理员(≥4)可用，只能设低于自己的等级。",
+    "query": "{user} 的信任等级：{level}",
+    "set": "已将 {user} 的信任等级设为 {level}√",
+    "range": "信任等级需在 0-255 之间。",
+    "too_high": "不能授予高于或等于你自己的信任等级。",
+    "target_higher": "对方的信任等级不低于你，无法修改。"
+  },
+  "admin": {
+    "usage": "用法：.admin add/del <@某人/QQ号> 授予/撤销管理员；.admin list 列出管理员。仅骰主可用。",
+    "added": "已添加 {user} 的管理权限√",
+    "removed": "已收回 {user} 的管理权限√",
+    "not_admin": "该用户没有管理权限。",
+    "list": "管理员列表：\n{list}",
+    "none": "（暂无）"
+  },
+  "notice": {
+    "usage": "用法：.notice on/off 开关本窗口通知；.notice level <1-15> 设订阅级别(1例行/2重要/4关键/8错误，可叠加，15全部)。仅骰主可用。",
+    "status": "本窗口已订阅骰主通知，级别掩码：{level}",
+    "off_status": "本窗口未订阅骰主通知。用 .notice on 开启。",
+    "set": "已将本窗口设为通知窗口，订阅级别：{level}√",
+    "removed": "已取消本窗口的骰主通知√"
+  },
+  "alias": {
+    "usage": "用法：\n.alias add <别名ID> <主ID> 绑定账号别名\n.alias del <别名ID> 解绑\n.alias list 列出。别名账号的信任/Master 身份按主号计算。仅骰主可用。",
+    "added": "已绑定别名 {alias} -> {main}√",
+    "removed": "已解绑别名 {alias}√",
+    "not_found": "未找到该别名。",
+    "list": "账号别名：\n{list}"
+  },
+  "bot": {
+    "on": "成功开启{self}√",
+    "off": "成功关闭{self}√",
+    "usage": "用法：.bot on/off [骰子QQ]",
+    "already_on": "{self}已经处于开启状态！",
+    "already_off": "{self}已经处于关闭状态！"
+  },
+  "send": {
+    "empty": "要转交什么给 Master 呢？用法：.send <留言>",
+    "done": "✅ 已转交给 Master，谢谢你的反馈！",
+    "no_master": "本骰娘还没有设置 Master，无法转交。",
+    "from_private": "📨 来自私聊 {user}({uid}) 的留言：",
+    "from_group": "📨 来自群 {group} 的 {user}({uid}) 的留言：",
+    "master_usage": "用法：.send group <群号> <消息>  或  .send user <QQ号> <消息>",
+    "master_done": "✅ 已发送到 {target}"
+  },
+  "dismiss": {
+    "leaving": "骰子正在退出本群……",
+    "private": "你在私聊窗口想让{self}走哪呢？"
+  },
+  "game": {
+    "created": "已创建游戏：{name}",
+    "untitled": "未命名",
+    "usage": "用法：.game new [桌名]",
+    "group_only": "请在群内使用团务指令×",
+    "new": "{self}创建新游戏「{game_id}」成功√",
+    "join_code": "团号：{code}",
+    "area_open": "{self}已在此展开「{game_id}」游戏领域√",
+    "area_closed": "游戏领域关闭，{nick}可用 .game open {game_id} 重新展开√",
+    "master_denied": "抱歉，GM权限不能交给{nick}×",
+    "mastered": "{self}已接受{nick}为本桌游戏管理员√",
+    "master_list": "本桌游戏管理员有:\n{items}",
+    "not_exist": "{self}不记得有一桌叫{game_id}的游戏了×",
+    "void_here": "{self}连桌布还没铺上，{nick}就要动桌子么？(请先 .game new 新建游戏)",
+    "not_master": "请{nick}让这桌的GM进行此操作×",
+    "state_head": "「{game_id}」游戏领域",
+    "state_closed": "（已暂时关闭）",
+    "state_vars": "团变量:",
+    "item_set": "{self}已将本桌游戏的{set_item}设置为{set_val}√",
+    "item_show": "本桌游戏的{set_item}为{set_val}√",
+    "item_empty": "请{nick}输入待设置的项目×",
+    "joined": "{self}已接受{nick}的玩家报名√",
+    "player_already": "{nick}已经上桌啦！",
+    "exited": "玩家{nick}已退出游戏√",
+    "not_joined": "嗯？{nick}原来有在桌上吗？",
+    "player_empty": "{self}还没看到有玩家上桌哦~",
+    "kicked": "{self}已将{tid}踢下桌√",
+    "kick_not_player": "{nick}要踢走的{tid}不在桌上×",
+    "over": "游戏「{game_id}」已终结√",
+    "over_log_hint": "（本群日志仍在记录，如需结束请 .log end）",
+    "roulette_set": "{self}已为{face}面骰启用轮盘骰√",
+    "roulette_hist": "{self}本轮轮盘骰记录如下:\n{hist}",
+    "roulette_empty": "{self}并未在本桌用过轮盘骰×",
+    "roulette_reset": "{self}已复原桌上轮盘骰√",
+    "roulette_clear": "{self}已清空桌上轮盘骰√",
+    "roulette_too_big": "这么大……{nick}丢得完吗？"
+  },
+  "log": {
+    "usage": "指令 .log 用法：\nnew [名称] 新建\non/off 继续/暂停\nend 结束并上传\nhalt 结束不上传\nlist 列表\nget/del/stat/export [名称]\ntype txt/html 群文件格式\ntime/timer 计时\n无参查看状态",
+    "unofficial_site": "⚠️ 当前配置的日志站并非官方站点，链接安全性请自行确认。",
+    "halted": "已强行结束本次记录（未上传）。",
+    "not_found": "没有找到日志「{name}」。用 .log list 查看本群日志。",
+    "getting": "正在重新上传日志，请稍候……",
+    "del_usage": "用法：.log del <日志名称>",
+    "deleted": "日志「{name}」已删除。",
+    "stat": "「{name}」统计：共 {count} 条消息，{players} 位参与者\n时段 {from} ~ {to}\n发言最多：{tops}",
+    "stat_empty": "该日志还没有任何内容。",
+    "exported": "日志「{name}」已发送到群文件。",
+    "masterget_usage": "用法：.log masterget <群号> [日志名称]（骰主专用）",
+    "new": "已开始记录跑团日志「{name}」，本群消息将被记录（.log off 暂停 / .log end 结束）",
+    "on": "已继续记录跑团日志「{name}」。",
+    "resumed": "日志「{name}」暂停于此处，已继续开始记录。",
+    "off": "已暂停记录跑团日志（已记录 {count} 条）。",
+    "ended": "已结束跑团日志，共记录 {count} 条。",
+    "already_on": "已经在记录日志 #{id}-{name}，已记录 {count} 条发言。",
+    "need_new": "本群还没有日志，请先 .log new [名称]。",
+    "not_recording": "本群当前没有在记录。",
+    "idle": "本群当前没有在记录。用 .log new [名称] 开始。",
+    "status": "正在记录日志 #{id}-{name}，已 {count} 条。",
+    "paused_status": "本群当前有以下记录正在暂停中。用 .log on [名称] 继续记录。\n#{id}-{name}（最后记录时间 {date}）【暂停中】",
+    "no_paused": "本群没有可继续的暂停记录。用 .log new [名称] 新建记录。",
+    "list_empty": "本群还没有任何跑团记录。用 .log new [名称] 开始记录。",
+    "list": "本群当前记录共 {total} 条，显示第 {from}-{to} 条：\n{list}{more}",
+    "list_item": "#{id}-{name}（最后记录时间 {date}）【{state}】",
+    "state_running": "进行中",
+    "state_paused": "暂停中",
+    "state_ended": "已结束",
+    "list_more": "\n加载更多请发送 .log list {page}",
+    "group_only": "记录指令仅在群聊中可用。",
+    "bot_name": "骰子",
+    "exists": "本群已有正在进行的跑团日志「{name}」，请先 .log end 结束后再新建。",
+    "uploaded": "跑团日志已上传，回放链接：{url}",
+    "upload_failed": "日志上传失败：{error}",
+    "type_show": "本群日志上传到群文件的格式：{type}。用 .log type txt/html 修改（群管以上）。",
+    "type_set": "已设置日志群文件格式为 {type}。",
+    "type_usage": "用法：.log type txt（纯文本）或 .log type html（网页含图）。",
+    "timer": {
+      "unit_h": "小时",
+      "unit_m": "分",
+      "unit_s": "秒",
+      "started": "⏱ 已开始计时。",
+      "resumed": "⏱ 继续计时，累计时长 {total}。",
+      "stopped": "⏱ 本次时长 {current}，累计 {total}。",
+      "show": "⏱ 记录「{name}」累计时长 {total}{running}",
+      "running": "（本次进行中 {current}）",
+      "show_none": "本群暂无可计时的跑团记录。",
+      "is_off": "本群跑团计时未开启（.log timer on 开启）。",
+      "disabled_set": "已关闭本群跑团计时。",
+      "enabled_set": "已开启本群跑团计时。",
+      "state_on": "本群跑团计时：已开启（.log timer off 关闭）。",
+      "state_off": "本群跑团计时：已关闭（.log timer on 开启）。"
+    }
+  },
+  "reply": {
+    "on": "自定义回复已开启。",
+    "off": "自定义回复已关闭。",
+    "usage": "用法：.reply on/off"
+  },
+  "pc": {
+    "usage": "指令 .pc 用法：\n.pc new <名字> 新建人物卡\n.pc tag <名字> 绑定到该群\n.pc rename <名字> 给当前卡更名\n.pc untag 解除当前绑定\n.pc list 人物卡列表\n.pc del <名字> 删除人物卡\n.pc @某人 查看他人卡",
+    "list": "{nick} 的人物卡（共 {count} 张）：\n{list}",
+    "list_empty": "{nick} 还没有人物卡，用 .pc new <名字> 新建一张吧。",
+    "new": "{nick} 已新建并绑定人物卡：{name}",
+    "new_exists": "已存在名为「{name}」的人物卡了。",
+    "new_usage": "请指定卡名：.pc new <名字>",
+    "bound": "{nick} 已绑定人物卡：{name}",
+    "tag_usage": "用法：.pc tag <名字>（绑定一张已有的人物卡）",
+    "not_found": "找不到名为「{name}」的人物卡。",
+    "deleted": "{nick} 已删除人物卡：{name}",
+    "del_usage": "请指定要删除的卡名：.pc del <名字>",
+    "rename_usage": "用法：.pc rename <新名字>（或 .pc rename <旧名字> <新名字>）",
+    "renamed": "{nick} 已将人物卡「{old}」更名为「{new}」",
+    "no_bound": "当前没有绑定人物卡。",
+    "unbound": "{nick} 已解除绑定人物卡：{name}（卡片仍保留，可 .pc tag 重新绑定）",
+    "show": "{owner} 的人物卡【{name}】：{detail}",
+    "show_empty": "{owner} 的人物卡【{name}】还是空白的。",
+    "default_name": "默认卡",
+    "build_done": "{nick} 的人物卡已生成：\n{detail}",
+    "redo_done": "{nick} 的人物卡已重置并生成：\n{detail}",
+    "build_unknown": "未知的生成参数「{para}」。可用：pc（COC7 属性）/ bg（背景），冒号分隔可连用（如 pc:bg）。",
+    "build_empty": "（没有生成任何内容）",
+    "lock_usage": "用法：.pc lock w/r 锁定当前卡（w=锁写 r=锁读）；.pc unlock w/r 解锁。",
+    "locked": "已锁定当前人物卡（{key}）√",
+    "unlocked": "已解锁当前人物卡（{key}）√",
+    "lock_already": "当前人物卡已有该锁（{key}）。",
+    "unlock_missing": "当前人物卡没有该锁（{key}）。"
+  },
+  "deck": {
+    "usage": "指令 .draw 用法：.draw 牌堆名（可 .draw3 牌堆名 抽多张）",
+    "no_deck": "没有名为「{name}」的牌堆",
+    "ambiguous": "「{name}」匹配到多个牌堆：{list}，请输入更精确的名称。",
+    "result": "{nick} 抽到：{res}",
+    "list": "共 {count} 个牌堆：\n{list}",
+    "empty": "还没有任何牌堆，把牌堆 JSON 放进 decks/ 目录即可",
+    "default_set": "已将「{name}」设置为本群默认牌堆，之后直接 .draw 即可抽取。",
+    "default_show": "本群默认牌堆：{name}",
+    "default_none": "本群尚未设置默认牌堆，用 .deck set 牌堆名 设置。",
+    "default_cleared": "已清除本群默认牌堆。",
+    "default_group_only": "默认牌堆只能在群里设置哦。",
+    "inline_name": "随机选择",
+    "inline_usage": "用法：.draw 选项1/选项2/选项3，会随机选一个。",
+    "temp_new": "已建立本群临时牌堆「{name}」（{count} 项），用 .draw {name} 抽取。",
+    "temp_del": "已删除本群临时牌堆「{name}」。",
+    "temp_usage": "用法：.deck new 牌堆名 选项1/选项2/选项3（任何人可建，跑团随机用）。",
+    "temp_tag": "(临时)"
+  },
+  "mod": {
+    "wip": "模块功能开发中……"
+  },
+  "authorize": {
+    "sent": "许可申请已发送给 Master。"
+  },
+  "ob": {
+    "group_only": "旁观功能只能在群里使用哦。",
+    "empty": "当前没有旁观者。",
+    "list": "👀 旁观者（{count}）：\n{list}",
+    "cleared": "{nick} 已清空旁观名单。",
+    "exit": "{nick} 已退出旁观。",
+    "joined": "{nick} 开始旁观本群跑团。",
+    "already": "{nick} 已经在旁观了。",
+    "not_in": "{nick} 还不是旁观者。",
+    "on": "已开启本群旁观功能√",
+    "off": "已关闭本群旁观功能√",
+    "on_already": "本群旁观功能已经是开启状态。",
+    "off_already": "本群旁观功能已经是关闭状态。",
+    "disabled": "本群旁观功能已关闭，无法加入旁观。"
+  },
+  "link": {
+    "usage": "用法：\n.link with/to/from <群号> 建立链接（with=双向，to=本群→目标，from=目标→本群）\n.link start/close 恢复/暂停\n.link list 全部链接\n.link state 本窗口状态。需信任≥3。",
+    "group_only": "链接操作需要在群里进行。",
+    "self": "不能链接到本群自己。",
+    "list": "消息链接：\n{list}",
+    "none": "（暂无链接）",
+    "state": "本窗口链接：\n{list}",
+    "state_none": "本窗口没有链接。",
+    "started": "已恢复本窗口的消息链接√",
+    "closed": "已暂停本窗口的消息链接√",
+    "built": "已建立链接：{home} {mode} {target}√",
+    "suspended": "（已暂停）",
+    "mode_with": "⇄",
+    "mode_to": "→",
+    "mode_from": "←"
+  },
+  "me": {
+    "private_usage": "用法：.me <群号> <动作>（私聊远程代述到指定群）。",
+    "empty": "动作内容不能为空。",
+    "disabled": "该群已禁用 .me。",
+    "sent": "已代述√",
+    "on": "已开启本群 .me√",
+    "off": "已关闭本群 .me√",
+    "on_already": "本群 .me 已经是开启状态。",
+    "off_already": "本群 .me 已经是关闭状态。"
+  },
+  "ak": {
+    "usage": "用法：.ak#标题 新建抉择；.ak+选项1|选项2 添加；.ak-序号 删除；.ak= 随机抽取；.ak show 查看；.ak clr 清空。",
+    "default_title": "（未命名抉择）",
+    "created": "已新建抉择【{title}】，用 .ak+选项 添加分支。",
+    "added": "【{title}】当前分支：\n{list}",
+    "add_empty": "要添加的选项不能为空。",
+    "num_err": "序号无效。",
+    "deleted": "【{title}】已删除，剩余：\n{list}",
+    "got": "【{title}】\n{list}\n命运选中了：{get}",
+    "show": "【{title}】当前分支：\n{list}",
+    "cleared": "已清空当前抉择。",
+    "opt_empty": "还没有可抽取的分支，用 .ak+选项 添加。",
+    "empty_list": "（空）"
+  },
+  "group": {
+    "private": "群设定只能在群里查看哦。",
+    "info": "------※群信息------\n群名称：{name}\n群号：{group}\n骰子权限：{role}\n状态：{status}\n已激活的记录：{log}\n玩家：{players}名\n主持人：{gm}\n旁观者：{observers}名\n黑名单：{blacklist}名\n黑名单豁免：{quitLevel}",
+    "enabled": "已启用",
+    "disabled": "已禁用",
+    "none": "（无）",
+    "role_owner": "群主",
+    "role_admin": "管理员",
+    "role_member": "成员",
+    "role_unknown": "未知",
+    "quit_member": "群成员",
+    "quit_admin": "群管理",
+    "cleared": "已清空本群的所有设定（开关/欢迎词/旁观/停用项等）。",
+    "term_set": "已为本群开启「{term}」。",
+    "term_cleared": "已为本群关闭「{term}」。",
+    "term_unknown": "未知的群管词条：{term}\n可用：停用指令/禁用回复/禁用jrrp/禁用draw/禁用me/禁用help/禁用deck/禁用send",
+    "auto": {
+      "show": "本群自动化设置：\n· 加群审核 pass = {pass}\n· 自动踢出 kick = {kick}\n· 自动禁言 mute = {mute}（{min}分钟）\n用法：.group auto pass/kick/mute 关键字（pass 用 all 全过；关键字留空=关闭）",
+      "off": "关闭",
+      "all": "全部通过",
+      "usage": "用法：\n.group auto pass 关键字\n.group auto kick 关键字\n.group auto mute 关键字 [分钟]\n（pass 用 all 表示全部通过；关键字留空=关闭该项）",
+      "need_bot_admin": "需要先让骰子在本群拥有管理员及以上权限，群自动化才能生效。",
+      "pass_off": "已关闭本群「加群自动审核」。",
+      "pass_all": "已开启「加群自动审核」：所有加群申请自动通过。",
+      "pass_on": "已开启「加群自动审核」：验证消息含「{kw}」才自动通过。",
+      "kick_off": "已关闭本群「自动踢出」。",
+      "kick_on": "已开启「自动踢出」：谁的发言含「{kw}」就移出本群。",
+      "mute_off": "已关闭本群「自动禁言」。",
+      "mute_on": "已开启「自动禁言」：谁的发言含「{kw}」就禁言 {min} 分钟。"
+    }
+  },
+  "plugin": {
+    "group_only": "插件开关只能在群聊中设定。",
+    "unavailable": "插件清单暂不可用。",
+    "empty": "目前没有已加载的插件。",
+    "list": "插件列表（共 {count} 个）：\n{list}\n用 .plugin on/off <名称> 启停，.plugin all on/off 批量。",
+    "state": {
+      "on": "启用",
+      "off": "本群停用",
+      "global_off": "全局停用"
+    },
+    "all_on": "已在本群启用全部 {count} 个插件。",
+    "all_off": "已在本群停用全部 {count} 个插件。",
+    "enabled": "已在本群启用插件「{name}」。",
+    "disabled": "已在本群停用插件「{name}」。",
+    "not_found": "找不到名为「{name}」的插件，用 .plugin list 查看。",
+    "usage": "用法：.plugin list / .plugin on|off <名称> / .plugin all on|off"
+  },
+  "gate": {
+    "no_perm": "需要群管理员或更高权限才能操作。",
+    "global_silent": "{self} 休假中，暂停服务。",
+    "jrrp_global": "抱歉，已在全局关闭了 jrrp。",
+    "me_global": "抱歉，已在全局关闭了该命令。",
+    "cmd_global": "抱歉，{cmd} 已被全局停用。",
+    "in_group": "抱歉，{cmd} 已在本群停用。",
+    "external_on": "已开启外置模式：停用内置指令，仅保留自定义回复（用「外置关」恢复）。",
+    "external_off": "已关闭外置模式：内置指令已恢复。",
+    "not_master": "抱歉，该指令仅限本骰 Master 使用。",
+    "not_admin": "抱歉，你暂时不是本骰的信任/管理人员哦。",
+    "perm_denied": "抱歉，你没有执行该指令的权限。",
+    "self_perm": "我的权限不够，做不到这件事呢（请给我管理员权限）。"
+  },
+  "rule": {
+    "usage": "指令 .rules 用法：\n.rules 词条\n.rules 规则书:词条（如 .rules coc:大失败、.rules dnd:借机攻击）；.ruleset 规则书 设本群默认。",
+    "no_books": "还没有任何规则书，把规则 JSON 放进 rules/ 目录即可。",
+    "result": "【{book}·{item}】\n{desc}",
+    "not_found": "未找到对应的规则词条「{item}」。",
+    "book_set": "已将本群默认规则书设为「{book}」。",
+    "book_show": "本群默认规则书：{book}",
+    "book_none": "本群尚未设置默认规则书，用 .ruleset 规则书 设置。",
+    "book_cleared": "已清除本群默认规则书。",
+    "book_unknown": "没有名为「{book}」的规则书。"
+  },
+  "helpdoc": {
+    "list": "用 .help <条目> 查看对应帮助，例如 .help ra。\n完整条目较多，请在网页后台「帮助文档」页浏览/搜索。",
+    "default": {
+      "show": "当前默认帮助来源：{cur}\n（同名词条会优先用此来源，例如 dnd5r 压过 dnd3r）\n可选来源：{list}\n用 .helpdoc default <来源名> 设置，.helpdoc default clear 取消。",
+      "none": "未设置（按加载顺序）",
+      "set": "已将本群默认帮助来源设为「{src}」，同名词条将优先此来源。",
+      "cleared": "已取消本群默认帮助来源。"
+    },
+    "scope": {
+      "show": "当前本群搜索域：{cur}\n（锁定后 .help 只在此来源内查，其余内容自动过滤；内置指令说明仍保留）\n可选来源：{list}\n用 .helpdoc scope <来源名> 锁定，.helpdoc scope clear 解除。",
+      "none": "未锁定（全部来源）",
+      "set": "本群搜索域已切换至「{src}」，之后 .help 只显示此来源内容，直到解除或改设。",
+      "cleared": "已解除本群搜索域，恢复查询全部来源。",
+      "group_only": "搜索域只能在群里设定。",
+      "empty": "本群搜索域已锁定在「{scope}」，其中找不到「{topic}」。用 .helpdoc scope clear 可解除锁定。"
+    }
+  },
+  "master": {
+    "boton": "已在群 {group} 启用指令（骰娘开启）。",
+    "botoff": "已在群 {group} 停用指令（骰娘关闭）。",
+    "need_group": "请指定群号，或在目标群里使用。",
+    "black_added_n": "已拉黑 {count} 个：{list}",
+    "white_added_n": "已加入白名单 {count} 个：{list}",
+    "removed_n": "已移除 {count} 个：{list}",
+    "list_blackqq": "黑名单用户：\n{list}",
+    "list_blackgroup": "黑名单群：\n{list}",
+    "list_whitegroup": "白名单群（许可使用）：\n{list}",
+    "list_whiteqq": "白名单用户（信任）：\n{list}",
+    "list_empty": "（空）"
+  },
+  "tplvar": {
+    "nick": "昵称",
+    "res": "出目/结果",
+    "reason": "原因",
+    "turn": "轮数",
+    "attr": "属性名",
+    "roll": "检定骰详情",
+    "rate": "成功率",
+    "level": "成功等级",
+    "san": "理智值",
+    "grade": "判定结果",
+    "loss": "损失值",
+    "final": "最终值",
+    "detail": "详细内容",
+    "change": "变化值",
+    "old": "旧名",
+    "new": "新名",
+    "default": "默认值",
+    "name": "名称",
+    "count": "数量"
+  },
+  "hiy": {
+    "result": "{nick} 的掷骰统计（共 {total} 次检定）：\n大成功 {crit} · 极难 {extreme} · 困难 {hard} · 成功 {regular} · 失败 {fail} · 大失败 {fumble}\n成功 {success}/{total}，成功率 {rate}%",
+    "empty": "{nick} 还没有检定记录，先用 .ra 掷几次吧。",
+    "skill_result": "{nick} 的「{skill}」检定统计：出目 {total} 次，成功 {success} 次（成功率 {rate}%）\n大成功{crit} 极难{extreme} 困难{hard} 成功{regular} 失败{fail} 大失败{fumble}",
+    "skill_empty": "{nick} 还没有「{skill}」的检定记录哦。"
+  },
+  "setcoc": {
+    "set": "已设置本群 COC7 检定房规为 规则{rule}。",
+    "show": "当前 COC7 检定房规：规则{rule}（.setcoc 0-7 设置、.setcoc clr 清除）。",
+    "cleared": "已清除房规，恢复默认（规则0）。",
+    "invalid": "房规参数应为 0-7。用法：.setcoc <0-7> / .setcoc show / .setcoc clr"
+  },
+  "dnd": {
+    "ss": {
+      "usage": "指令 .ss 用法：\n.ss init 4 3 2 设置 1/2/3 环上限\n.ss set 3环 5 单独设置\n.ss 3环 ±1 增减\n.ss rest 恢复\n.ss clr 清除\n.ss 查看。",
+      "show": "{nick} 的法术位状况：{detail}",
+      "empty": "{nick} 尚未设置法术位（用 .ss init 设置）。",
+      "set": "已为 {nick} 设置法术位：{detail}",
+      "cleared": "{nick} 的法术位设置已清除。",
+      "rested": "{nick} 的法术位已完全恢复。",
+      "changed": "{nick} 的 {ring} 环法术位现为 {cur} 个，上限 {max} 个。",
+      "no_ring": "尚未设置 {ring} 环法术位（先用 .ss init / .ss set）。"
+    },
+    "cast": {
+      "usage": "指令 .cast 用法：.cast <环数> [消耗数量]，省略数量默认消耗 1。",
+      "empty": "{nick} 的 {ring} 环已没有可用法术位了。"
+    },
+    "longrest": {
+      "done": "{nick} 的长休：HP 恢复为 {hp}，法术位已全部恢复。",
+      "no_hpmax": "{nick} 尚未设置 hpmax，无法长休回血（用 .st hpmax:<值>）。"
+    },
+    "ds": {
+      "need_zero": "{nick} 当前并非濒死（HP 需为 0）才能进行死亡豁免。",
+      "result": "{nick} 的死亡豁免检定：[1d20={roll}]={total} {outcome}",
+      "success": "成功！死亡豁免成功 +1",
+      "fail": "有些不妙！死亡豁免失败 +1",
+      "critfail": "大失败！死亡豁免失败 +2",
+      "miracle": "你觉得还能抢救一下！HP 回复 1 点！",
+      "stabilized": "{nick} 成功稳定了下来！",
+      "dead": "{nick} 获得了 3 次死亡豁免失败，不幸去世了……",
+      "stat": "{nick} 的死亡豁免：成功 {s}/3，失败 {f}/3"
+    },
+    "rc": {
+      "usage": "指令 .rc 用法（DND 模式）：.rc <属性>[+调整] [原因]，可加 优势/劣势,如 .rc 优势 力量+2",
+      "result": "{nick} 的「{attr}」检定：{roll} {mod} = {total}"
+    },
+    "rdc": {
+      "usage": "DND 调整值检定：.rdc [轮数#] [B/P] [属性或技能] [±加值] [理由] [成功阈值]。属性按(属性值-10)/2向下取整，技能读取独立检定加值；B取高、P取低，轮数最多9。例：.rdc 3# B 力量+2 破门 15",
+      "mode_off": ".rdc 仅能在已开启 DND5e 模式的群中使用（.setdnd on）。",
+      "turns": "轮数必须为 1 至 9。",
+      "no_value": "找不到 DND 属性或技能「{attr}」。",
+      "result": "{nick} 的「{attr}」调整值检定{reason}：\n{detail}"
+    }
+  },
+  "setdnd": {
+    "on": "已开启本群 DND5e 模式（.rc 改为 d20 检定）。",
+    "off": "已关闭本群 DND5e 模式（.rc 恢复 COC d100）。",
+    "usage": "指令 .setdnd 用法：.setdnd on/off 开关;不带参数则切换。"
+  },
+  "self": {
+    "show": "当前 {key}：{val}",
+    "set": "已将 {key} 设置为「{val}」√",
+    "reset": "已重置 {key} 的自定义√",
+    "unset": "（未设置）"
+  },
+  "buff": {
+    "show": "{nick} 当前的 Buff：{detail}",
+    "empty": "{nick} 当前没有任何 Buff。",
+    "set": "已设置 {nick} 的 Buff：{detail}",
+    "cleared": "{nick} 的 Buff 已全部清除。",
+    "deleted": "{nick} 指定的 Buff 已删除。",
+    "usage": "指令 .buff 用法：.buff <属性>:<值> 设置;.buff <属性>±<式> 增减;.buff del <属性>;.buff clr;.buff 查看。"
+  },
+  "init": {
+    "group_only": "先攻只能在群里使用哦。",
+    "rolled": "{name} 的先攻：{roll}={total}",
+    "list": "先攻顺序：\n{list}",
+    "empty": "当前没有先攻记录，用 .ri 加入。",
+    "cleared": "先攻列表已清空。",
+    "removed": "已移除 {name} 的先攻。"
+  },
+  "sn": {
+    "group_only": "设定名片只能在群里使用哦。",
+    "cleared": "已清除你的群名片模板。",
+    "done": "已将你的群名片设为：{card}",
+    "auto_on": "已开启名片自动同步：属性变化时会即时更新群名片。当前：{card}",
+    "auto_off": "已关闭名片自动同步。",
+    "default_template": "{nick} 力量{力量} 敏捷{敏捷} 意志{意志} HP{生命值} SAN{理智}"
+  },
+  "welcome": {
+    "group_only": "入群欢迎词只能在群里设置哦。",
+    "private": "你在私聊窗口想让{self}欢迎谁呢？",
+    "none": "本群尚未设置入群欢迎词。",
+    "show": "当前入群欢迎词：{text}",
+    "off": "已关闭本群入群欢迎词。",
+    "set": "已设置入群欢迎词：{text}",
+    "below_min": "已设置为当前全局允许的最低值{min}",
+    "bad_value": "请输入有效数字",
+    "bad_range": "数值超出范围",
+    "delay_off": "已关闭入群欢迎延迟",
+    "delay_set": "入群欢迎延迟设置为 {sec} 秒",
+    "cd_off": "已关闭入群欢迎冷却",
+    "cd_set": "入群欢迎冷却设置为 {sec} 秒",
+    "delay_info": "(延迟{sec}秒)",
+    "cd_info": "(冷却{sec}秒)"
+  },
+  "lang": {
+    "name": "简体中文",
+    "current": "当前回复语言：{lang}（已单独设置）。\n切换：.lang 简体 / .lang 繁體 / .lang en / .lang 日本語\n清除：.lang clr",
+    "current_default": "当前回复语言：{lang}（跟随平台/全局默认）。\n切换：.lang 简体 / .lang 繁體 / .lang en / .lang 日本語",
+    "cleared": "已清除语言覆盖，恢复为：{lang}。",
+    "usage": "用法：.lang 简体（切换为简体中文）/ .lang 繁體（切换为繁体中文）/ .lang en（English）/ .lang 日本語（日本語）/ .lang clr（清除覆盖）",
+    "set": "已将本群回复语言切换为：{lang}。",
+    "set_user": "已将你的回复语言切换为：{lang}。",
+    "ai_set": "已将本群回复语言设为：{lang}（AI 翻译，回复会稍有延迟）。",
+    "ai_set_user": "已将你的回复语言设为：{lang}（AI 翻译，回复会稍有延迟）。",
+    "current_ai": "当前回复语言：{lang}（AI 翻译）。发送 .lang clr 可恢复默认。"
+  },
+  "event": {
+    "group_joined": "大家好，我是骰娘 Dice!Next～发送 .help 查看指令，.bot on/off 可开关本群。",
+    "friend_welcome": "我是骰娘 Dice!Next，很高兴认识你！发送 .help 查看指令。",
+    "blacklist_quit": "本群存在黑名单用户，骰娘依规则退出本群。",
+    "blacklist_group": "{self}：该群在黑名单中，已自动退出。如有疑问请联系骰主。",
+    "nonfriend_group_leave": "{self}：邀请者并非骰娘的好友，依设置自动退出。如需使用请先加骰娘为好友～",
+    "leave_unused": "{self} 已经在这里闲置 {day} 天啦，按设置自动离开，有缘再见～",
+    "poke": "别戳啦，再戳我就把你的出目都改成1！",
+    "usergroup_invite": "欢迎使用{self}！请加入用户群 {group}，获取使用帮助与更新通知～",
+    "usergroup_leave": "本群没有任何成员加入用户群 {group}，{self}将按设置自动退群。如需继续使用请先加入用户群～",
+    "keyword_group_leave": "本群群名含有不受欢迎的关键词，{self} 将自动退出。"
+  },
+  "setsn": {
+    "show": "本群名片属性：{attrs}（最多5条；.setsn 属性1 属性2 … 设置）",
+    "set": "已设置本群名片属性：{attrs}",
+    "cleared": "已重置本群名片属性为默认（hp san dex）。",
+    "no_perm": "只有群主/管理员可以设置本群名片属性哦。",
+    "usage": "用法：.setsn hp san dex（最多5条；.setsn show 查看 / .setsn clr 重置）"
+  },
+  "favor": {
+    "show": "{self} 对 {nick} 的好感度：{favor}（{title}）",
+    "show_other": "{self} 对 {target} 的好感度：{favor}（{title}）",
+    "rank": "{self} 的好感排行榜：\n{list}",
+    "rank_empty": "还没有任何好感记录哦。",
+    "group_only": "群内好感排行只能在群里用。",
+    "members_pending": "群成员列表加载中，请稍后再试一次。",
+    "no_perm": "只有骰主/高信任用户可以操控好感度哦。",
+    "no_grow": "{target} 的好感这次没有成长……",
+    "value_empty": "请给出要设置的好感数值。",
+    "grew": "{target} 的好感成长：+{add} → {favor}",
+    "added": "已将 {target} 的好感 {add} → 当前 {favor}",
+    "set": "已将 {target} 的好感覆写为 {favor}",
+    "erased": "已擦除 {target} 的全部好感。",
+    "title": {
+      "hostile": "厌恶",
+      "stranger": "陌生",
+      "friendly": "友好",
+      "close": "亲密",
+      "intimate": "挚友",
+      "lover": "恋人"
+    }
+  },
+  "persona": {
+    "default_name": "默认",
+    "current": "当前人格：{name}",
+    "list": "可用的人格有：\n{list}用 .rpmode set <名称> 切换",
+    "set": "已切换到人格「{name}」√",
+    "off": "已切回默认人格√",
+    "not_found": "找不到名为「{name}」的人格×",
+    "created": "已从当前文案创建人格「{name}」√\n请到 WebUI 后台编辑具体条目",
+    "copied": "已将「{src}」复制为「{dst}」√",
+    "deleted": "已删除人格「{name}」√",
+    "builtin_no_del": "内置人格不可删除×",
+    "name_exists": "已存在同名人格「{name}」×",
+    "name_empty": "请输入人格名称×",
+    "no_perm_admin": "需要群管理员权限才能切换人格×",
+    "no_perm_master": "仅 Master 可管理人格×",
+    "no_entries": "该人格暂无覆盖条目",
+    "entry_count": "覆盖条目：{count} 条",
+    "info_name": "人格：{name}",
+    "create_fail": "创建人格失败×",
+    "copy_fail": "复制人格失败×",
+    "del_fail": "删除人格失败×",
+    "copy_usage": "用法：.rpmode copy <源名称> <目标名称>",
+    "no_personas": "暂无人格模板，请到 WebUI 后台创建"
+  },
+  "npc": {
+    "group_only": "NPC 角色卡只能在群聊中使用。",
+    "usage": "指令 .npc 用法：.npc new <名称> / .npc list / .npc <名称> st 力量50 / .npc <名称> ra 侦查 / .npc show <名称> / .npc del <名称>。",
+    "empty": "本群还没有 NPC 角色卡。用 .npc new <名称> 创建，或直接 .npc <名称> st 属性。",
+    "list": "本群 NPC（{count}）：{items}",
+    "new_usage": "用法：.npc new <名称>。",
+    "exists": "NPC「{name}」已存在。",
+    "new": "{nick} 创建了 NPC「{name}」。",
+    "del_usage": "用法：.npc del <名称>。",
+    "not_found": "找不到 NPC「{name}」。",
+    "deleted": "{nick} 删除了 NPC「{name}」及其角色卡。",
+    "clr_usage": "用法：.npc clr <名称>。",
+    "cleared": "{nick} 清空了 NPC「{name}」的角色卡。",
+    "show_usage": "用法：.npc show <名称>。",
+    "no_nest": "NPC 代骰不能再次调用 .npc。",
+    "sub_empty": "NPC「{name}」没有响应子指令：{sub}。",
+    "proxy_note": "【NPC：{name}】\n"
+  },
+  "system": {
+    "usage": "用法：.system info（系统信息）/ .system stats（运行统计）",
+    "unknown": "未知",
+    "info": "系统信息\nOS: {os}\nCPU: {cores} 核 · 占用 {cpu}%\n内存: {memused}/{memtotal} MB（{memload}%）\n本进程内存: {proc} MB",
+    "stats": "运行统计\n运行时长: {uptime}\n启动后指令数: {cmds}\n好友: {friends} · 群: {groups}\n玩家: {players} · 群记录: {logs}"
+  }
+}
