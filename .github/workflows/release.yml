@@ -1,14 +1,7 @@
 name: Release Dice!Next
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag to create, for example v3.0.0-beta.661'
-        required: true
-        type: string
 
 permissions:
   contents: write
@@ -17,6 +10,12 @@ env:
   NODE_VERSION: '20'
   # Keep the vcpkg executable aligned with server/vcpkg.json's builtin-baseline.
   VCPKG_BASELINE: '44819aa2a6c10e56065e2b0330e7d6c89d1d2574'
+
+# Builds are serialized so a successful run can persist its number before the
+# next run calculates its own number.
+concurrency:
+  group: dice-next-release
+  cancel-in-progress: false
 
 jobs:
   linux:
@@ -277,9 +276,27 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [linux, windows, macos-arm64]
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Calculate release build number
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -nE 's/project\(dice-next-server VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' server/CMakeLists.txt | head -n1)
+          [[ -n "$version" ]] || { echo 'Cannot read server version' >&2; exit 1; }
+          key=$(sed -nE 's/^([0-9]+\.[0-9]+)\..*/\1/p' <<< "$version")
+          counter=$(tr -d '[:space:]' < server/build_counter.txt)
+          build=1
+          if [[ "$counter" =~ ^${key}:([0-9]+)$ ]]; then
+            build=$((BASH_REMATCH[1] + 1))
+          fi
+          printf 'build=%s\n' "$build" >> "$GITHUB_OUTPUT"
+          printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
+          printf 'tag=v%s-beta.%s\n' "$version" "$build" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -301,10 +318,20 @@ jobs:
             fi
           done
           find artifacts -maxdepth 2 -type f -print
+      - name: Record successful build number
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s:%s\n' '${{ steps.build.outputs.key }}' '${{ steps.build.outputs.build }}' > server/build_counter.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add server/build_counter.txt
+          git commit -m 'chore: record successful build ${{ steps.build.outputs.build }}'
+          git push origin HEAD:main
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ steps.build.outputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |

@@ -38,8 +38,7 @@ if (-not (Test-Path $exe))     { Fail "未找到 $exe，请先编译后端 (cmak
 if (-not $webRoot -or -not (Test-Path $webDist)) { Fail "未找到前端 dist，请先在 Dice-Next-WebUI 构建，或设置 DICENEXT_WEB_ROOT" }
 if (-not $docsRoot) { Fail "未找到文档项目，请设置 DICENEXT_DOC_ROOT 或放在同级 Dice-Next-Doc" }
 
-# 防止构建计数器已递增、但 exe 未重新链接时仍被错误地打包。版本实现文件
-# 是每次构建生成的源文件，必须不晚于 exe，且其数字必须与计数器一致。
+# 版本实现文件必须不晚于 exe；成功链接后，构建号会回写到计数器。
 $versionSource = Join-Path $server "$buildDir\generated\version_build.cpp"
 if (-not (Test-Path $versionSource)) { Fail "未找到 $versionSource，请先重新编译后端" }
 $versionSourceText = Get-Content $versionSource -Raw
