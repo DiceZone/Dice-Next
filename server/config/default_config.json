@@ -1,0 +1,196 @@
+{
+  "adapters": [
+    {
+      "access_token": "a60da7f7575cf7f1a5f5052254b3efa64e92db134ba9e850ff976ecaa0b81878",
+      "connection_mode": "forward_ws",
+      "enabled": true,
+      "endpoint": "ws://192.168.6.245:3001/",
+      "id": "adapter-default-0000-0000-000000000001",
+      "name": "MyQQBot",
+      "type": "onebot_v11"
+    }
+  ],
+  "dice": {
+    "ai": {
+      "chat": {
+        "at_bot": true,
+        "context_rounds": 10,
+        "cooldown_sec": 5,
+        "enabled": false,
+        "filters": [],
+        "keywords": [],
+        "max_chars": 200,
+        "model_id": "",
+        "no_emoji": true,
+        "persona": "",
+        "prompt": "",
+        "reply_at": false,
+        "standby_prob": 0
+      },
+      "enabled": true,
+      "memory": {
+        "long": {
+          "embed_model": "",
+          "embed_model_id": "",
+          "enabled": false,
+          "extract_model_id": "",
+          "extract_prompt": "",
+          "max_facts": 300,
+          "min_similarity": 0.75,
+          "top_k": 4
+        },
+        "short": {
+          "enabled": false,
+          "max_chars": 400,
+          "rounds": 20,
+          "summary_model_id": "",
+          "summary_prompt": ""
+        }
+      },
+      "models": [],
+      "npc": {
+        "enabled": false,
+        "list": []
+      },
+      "params": {
+        "frequency_penalty": 0.0,
+        "max_tokens": 1024,
+        "presence_penalty": 0.0,
+        "temperature": 0.7,
+        "top_p": 1.0
+      },
+      "polish": {
+        "cov": {
+          "custom": false,
+          "deck": false,
+          "fun": false,
+          "plugin": false,
+          "roll": true
+        },
+        "enabled": false,
+        "mode": "text",
+        "model_id": "",
+        "persona": "",
+        "prompt": ""
+      },
+      "tools": {
+        "draw_deck": true,
+        "enabled": false,
+        "get_attr": true,
+        "max_rounds": 3,
+        "roll_dice": true,
+        "run_command": true,
+        "search_help": true,
+        "set_attr": false
+      },
+      "translate": {
+        "cov": {
+          "custom": true,
+          "deck": true,
+          "fun": true,
+          "plugin": true,
+          "roll": true
+        },
+        "enabled": false,
+        "langs": [],
+        "model_id": "",
+        "prompt": ""
+      },
+      "vision": {
+        "enabled": false,
+        "max_images": 2,
+        "model_id": "",
+        "prompt": ""
+      },
+      "whitelist": {
+        "enabled": false,
+        "list": []
+      }
+    },
+    "api_enabled": true,
+    "api_timeout": 10,
+    "bot_header": "",
+    "bot_msg": "",
+    "command_prefix": ".",
+    "command_prefixes": [
+      ".",
+      "。",
+      "!",
+      "！"
+    ],
+    "disabled_global": [],
+    "disabled_jrrp": false,
+    "image_send": {
+      "host": "",
+      "mode": "base64"
+    },
+    "masters": [
+      {
+        "id": "1707642",
+        "platform": "onebot_v11"
+      }
+    ],
+    "notice": {
+      "windows": []
+    },
+    "respond_self": false,
+    "rules": {
+      "coc_critical_range": 1,
+      "coc_enabled": true,
+      "coc_fumble_range": 95,
+      "custom_rules": {},
+      "default_dice_sides": 100,
+      "dnd_advantage": false,
+      "dnd_enabled": true,
+      "fate_enabled": false,
+      "l5r_enabled": false
+    },
+    "save_log_images": true,
+    "silent_global": false,
+    "summon_word": "",
+    "whitelist_only": false
+  },
+  "events": {
+    "auto_approve_friend": false,
+    "auto_approve_group": false,
+    "friend_keyword": "",
+    "friend_policy": "manual",
+    "friend_welcome": "",
+    "group_invite_policy": "manual",
+    "group_invite_reject_blacklist": true,
+    "group_invite_reject_nonfriend": false,
+    "group_keyword": "",
+    "poke": "",
+    "poke_command": "",
+    "poke_enabled": true
+  },
+  "hot_reload": {
+    "debounce_ms": 500,
+    "enabled": true,
+    "watch_paths": [
+      "./config",
+      "./data"
+    ]
+  },
+  "i18n": {
+    "default_locale": "zh-Hans",
+    "platform_defaults": {
+      "discord": "en",
+      "onebot_v11": "zh-Hans"
+    },
+    "resource_dir": "i18n"
+  },
+  "log": {
+    "raw_events": false
+  },
+  "persona": {
+    "global": 0
+  },
+  "server": {
+    "api_key": "auto-generated-uuid",
+    "db_path": "./data/dice.db",
+    "host": "0.0.0.0",
+    "log_level": "info",
+    "port": 18088
+  }
+}

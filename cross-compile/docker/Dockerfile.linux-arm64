@@ -1,0 +1,59 @@
+# Dockerfile for Linux ARM64 build (cross-compilation)
+# Build from the common parent of dice-next and onedice-cpp-lib:
+# docker build -t dice-next:linux-arm64 -f dice-next/cross-compile/docker/Dockerfile.linux-arm64 .
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install system dependencies and cross-compilation toolchain
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    wget \
+    curl \
+    zip \
+    unzip \
+    tar \
+    pkg-config \
+    libssl-dev \
+    libsqlite3-dev \
+    libreadline-dev \
+    libncurses-dev \
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install vcpkg
+RUN git clone https://github.com/microsoft/vcpkg.git /opt/vcpkg && \
+    cd /opt/vcpkg && \
+    ./bootstrap-vcpkg.sh
+
+ENV VCPKG_ROOT=/opt/vcpkg
+ENV PATH="${VCPKG_ROOT}:${PATH}"
+
+# Install vcpkg dependencies for ARM64
+COPY dice-next/cross-compile/vcpkg-triplets/arm64-linux-dynamic.cmake /opt/vcpkg/triplets/
+COPY dice-next/cross-compile/vcpkg-triplets/arm64-linux-toolchain.cmake /opt/vcpkg/triplets/
+
+RUN /opt/vcpkg/vcpkg install \
+    drogon[sqlite3] \
+    nlohmann-json \
+    sqlite-orm \
+    spdlog \
+    yaml-cpp \
+    zstd \
+    quickjs-ng \
+    lua \
+    --triplet=arm64-linux-dynamic
+
+WORKDIR /workspace/dice-next
+
+COPY dice-next /workspace/dice-next
+COPY onedice-cpp-lib /workspace/onedice-cpp-lib
+
+RUN chmod +x /workspace/dice-next/cross-compile/scripts/*.sh
+
+CMD ["/bin/bash"]

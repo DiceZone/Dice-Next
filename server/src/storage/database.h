@@ -1,0 +1,618 @@
+#pragma once
+
+#include <string>
+#include <memory>
+#include <sqlite_orm/sqlite_orm.h>
+
+namespace dice {
+
+namespace orm = sqlite_orm;
+
+// ═══════════════════════════════════════════════════════════════
+// Row structs — one per table (required by sqlite_orm)
+// ═══════════════════════════════════════════════════════════════
+
+/// Schema migration tracking table.
+struct MigrationRecord {
+    int version = 0;
+    std::string appliedAt;
+};
+
+/// Custom reply rules table.
+struct ReplyRuleRow {
+    int id = 0;
+    int matchType = 0;        // Cast from MatchType (legacy / first condition)
+    std::string matchContent; // legacy / first condition content
+    std::string replyContent; // legacy / first result
+    bool enabled = true;
+    int priority = 0;
+    std::string createdAt;
+    std::string updatedAt;
+    // Enhanced engine (back-compat: empty → use the legacy single fields above):
+    std::string conditions;   // JSON array of {"type":"keyword|prefix|regex|search","content":"…"}
+    std::string logic;        // "and" | "or" (how to combine conditions; default "or")
+    std::string results;      // JSON array of reply strings (random pick on hit)
+};
+
+/// Key-value dice configuration (extensible rule storage).
+struct DiceConfigRow {
+    int id = 0;
+    std::string key;
+    std::string value;         // JSON-encoded
+};
+
+/// Deck / card collection table.
+struct DeckRow {
+    int id = 0;
+    std::string name;
+    std::string cards;          // JSON-encoded card list
+    std::string createdAt;
+};
+
+/// Adapter configuration table.
+struct AdapterRow {
+    int id = 0;
+    std::string name;
+    int type = 0;               // Cast from AdapterType
+    int connectionMode = 0;     // Cast from ConnectionMode
+    std::string endpoint;
+    std::string accessToken;
+    bool enabled = true;
+    std::string config;         // JSON-encoded
+};
+
+/// Game recording log table.
+struct GameLogRow {
+    int id = 0;
+    std::string groupId;
+    std::string gmId;
+    std::string name;           // log name (.log new <name>); "" → "log<id>"
+    std::string players;        // JSON-encoded
+    std::string customRules;    // JSON-encoded
+    int status = 0;             // Cast from GameLogStatus
+    std::string createdAt;
+};
+
+/// Ban / block list table.
+struct BanlistRow {
+    int id = 0;
+    int targetType = 0;         // 0=user, 1=group, ...
+    std::string targetId;
+    int listType = 0;           // 0=blacklist, 1=whitelist
+    std::string reason;
+    std::string createdAt;
+};
+
+/// Log of previously imported legacy files (prevents re-import).
+struct LegacyImportLogRow {
+    int id = 0;
+    std::string filePath;
+    std::string importedAt;     // ISO 8601
+    int recordCount = 0;
+};
+
+/// Per-scope locale (i18n) override table.
+/// Resolution order is "platform default + overridable": a row here
+/// overrides the configured default for a specific scope.
+///   scope    — "global" | "platform" | "group" | "user"
+///   scopeKey — depends on scope:
+///                global   → "" (single row)
+///                platform → platform name, e.g. "onebot_v11" / "discord"
+///                group    → "<platform>:<groupOrChannelId>"
+///                user     → "<platform>:<userId>"
+///   locale   — BCP-47 code, e.g. "zh-Hant" / "zh-Hans" / "en"
+struct LocaleSettingRow {
+    int id = 0;
+    std::string scope;
+    std::string scopeKey;
+    std::string locale;
+};
+
+/// Character card. Cards are named and global to a user (identified by
+/// userId + name); the empty name "" is the default unnamed card. Which card
+/// is "active" in a given group/scope is a per-(user, scope) binding stored in
+/// user_settings (key "cardBind"). Attributes are a JSON object {name: number}.
+/// groupId is retained for legacy rows but no longer part of the card key.
+struct CharacterCardRow {
+    int id = 0;
+    std::string userId;
+    std::string groupId;     // legacy / informational (scope where last touched)
+    std::string name;        // card name; "" = default unnamed card
+    std::string attrs;       // JSON object, e.g. {"力量":50,"理智":65}
+    std::string updatedAt;
+};
+
+/// Per-(user, group) string settings: nickname (.nn), default dice (.set), ...
+struct UserSettingRow {
+    int id = 0;
+    std::string userId;
+    std::string groupId;
+    std::string key;         // "nick" | "defaultDice" | ...
+    std::string value;
+};
+
+/// A single recorded line in a game log transcript (.log recording).
+struct GameLogMessageRow {
+    int id = 0;
+    int logId = 0;           // → game_logs.id
+    std::string sender;      // display name of the speaker (or bot name)
+    std::string userId;      // speaker's platform id (bot's selfId for replies)
+    std::string content;
+    std::string createdAt;   // ISO 8601
+    std::string images;      // C#3: JSON 数组，本条消息的图片引用（URL 或本地落地文件名）
+};
+
+/// C#44: persisted group-chat message (chat.db). Mirrors the simulated-chat
+/// window: incoming group messages + bot replies + web sends. Retained N days
+/// (config chat/retention_days); `recalled` marks撤回 but content is kept.
+struct ChatMsgRow {
+    int64_t id = 0;
+    std::string platform;
+    std::string groupId;
+    std::string msgId;       // platform message id (empty for outgoing/web sends)
+    std::string userId;      // speaker id (bot selfId for replies)
+    std::string sender;      // display name
+    std::string content;     // display text (CQ 原文，前端渲染图片)
+    int self = 0;            // 1 = sent by the bot
+    int64_t time = 0;        // unix epoch seconds
+    int recalled = 0;        // 1 = 已撤回（仍保留内容展示）
+};
+
+/// AI 记忆（chat.db）。阶段 B：滚动对话摘要（kind="summary"，每群一行）；
+/// 阶段 C 复用同表存持久事实（kind="fact"，带 embedding 向量做检索）。
+struct AiMemoryRow {
+    int64_t id = 0;
+    std::string scope;       // "group" | "user" | ...
+    std::string scopeId;     // 例如 "onebot_v11:123456"
+    std::string kind;        // "summary" | "fact"
+    std::string content;     // 摘要/事实文本
+    int64_t refId = 0;       // summary：已折叠进摘要的最新 chat_messages.id（水位线）
+    int importance = 0;      // 阶段 C 排序用
+    std::string embedding;   // 阶段 C：JSON 浮点数组，阶段 B 留空
+    int64_t createdAt = 0;   // unix 秒
+    int64_t updatedAt = 0;   // unix 秒
+    int hits = 0;            // 被检索命中次数
+};
+
+/// User override for a localized template (editable reply text). The bundle
+/// default always remains in the JSON files; this just layers on top.
+struct I18nOverrideRow {
+    int id = 0;
+    std::string locale;   // BCP-47 code, e.g. "zh-Hant"
+    std::string key;      // dotted i18n key, e.g. "dice.roll.result"
+    std::string value;
+};
+
+/// Per-(platform, group) settings: bot enabled flag (.bot on/off), and future
+/// group-management fields (bot card name, group remark, ...). Managed from chat
+/// and, later, the web admin panel.
+struct GroupSettingRow {
+    int id = 0;
+    std::string platform;
+    std::string groupId;
+    std::string key;         // "enabled" | "card" | "remark" | ...
+    std::string value;
+};
+
+/// Player profile — auto-created the first time a user triggers the bot (even a
+/// single .r). Powers the web 玩家管理 page.
+struct PlayerProfileRow {
+    int id = 0;
+    std::string platform;
+    std::string userId;
+    std::string nickname;     // last-seen display name
+    int trustLevel = 0;       // 信任等级 (0=普通, higher=trusted; matches banlist whitelist idea)
+    int cmdCount = 0;         // 总指令数
+    int favor = 0;            // 好感度 (DiceFavor)
+    std::string lastCmdAt;    // 上次指令时间 (ISO 8601)
+    std::string createdAt;    // 首次建档时间 (ISO 8601)
+};
+
+/// Per-(platform, user) skill-check roll statistics (.hiy 骰点统计). One row per
+/// user; counters accumulate over every COC check (.ra/.rb/.rp).
+struct RollStatRow {
+    int id = 0;
+    std::string platform;
+    std::string userId;
+    std::string skill;   // canonical skill name; "" = legacy/overall row
+    int total = 0;       // total checks counted
+    int crit = 0;        // 大成功
+    int extreme = 0;     // 极难成功
+    int hard = 0;        // 困难成功
+    int regular = 0;     // 成功
+    int fail = 0;        // 失败
+    int fumble = 0;      // 大失败
+};
+
+/// 定时任务 (#48): a message pushed to a target group/user on a daily schedule.
+struct ScheduledTaskRow {
+    int id = 0;
+    std::string name;        // 任务名（展示用）
+    std::string platform;    // 目标平台 (onebot_v11/…)
+    std::string targetType;  // "group" | "private"
+    std::string targetId;    // 群号 / QQ
+    std::string cronTime;    // 触发时刻 "HH:MM"（每日）
+    std::string days;        // 星期过滤，逗号分隔 0-6(0=周日)；空=每天
+    std::string content;     // 发送内容（支持 {self}{group}{date}{roll:..}{draw:..} 等变量/函数）
+    int enabled = 1;
+    std::string lastRun;     // 上次触发日期 "YYYY-MM-DD"（防当天重复）
+    std::string createdAt;
+    std::string action;      // 因果动作："send"(默认,发内容) | "leave"(退群,内容作告别语)
+    std::string condition;   // 因果条件（空=无条件）。如 "inactive>=7"：本群 ≥7 天无指令才触发
+};
+
+/// C#29: Causal rule row — a rule with conditions, actions, cooldown, and scope.
+struct CausalRuleRow {
+    int id = 0;
+    std::string name;
+    std::string scope;           // 'global' | 'group' | 'user'
+    std::string scopeIds;        // JSON array of group/user IDs
+    bool enabled = true;
+    int priority = 100;
+    int cooldownMs = 0;
+    std::string cooldownKey;     // 'per-user' | 'per-group' | 'global'
+    std::string conditions;      // JSON array of CausalCondition
+    std::string logic;           // 'and' | 'or'
+    std::string actions;         // JSON array of CausalAction
+    std::string createdAt;
+    std::string updatedAt;
+};
+
+/// C#29: Rule counter row — persistent counter for causal rules.
+struct RuleCounterRow {
+    int id = 0;
+    std::string key;             // '{ruleId}:{counterName}:{scope}:{scopeId}'
+    int value = 0;
+    std::string updatedAt;
+};
+
+/// C#28-B: Persona template row — a named set of i18n overrides.
+struct PersonaTemplateRow {
+    int id = 0;
+    std::string name;            // unique persona name (e.g. "傲娇", "严肃")
+    std::string description;     // human-readable description
+    bool isBuiltin = false;      // true = built-in (cannot delete)
+    std::string createdAt;
+    std::string updatedAt;
+};
+
+/// C#28-B: Persona entry row — a single (locale, key, value) override.
+struct PersonaEntryRow {
+    int id = 0;
+    int personaId = 0;           // → persona_templates.id
+    std::string locale;          // BCP-47 code, e.g. "zh-Hans"
+    std::string key;             // dotted i18n key, e.g. "dice.roll.result"
+    std::string value;           // override text
+};
+
+// ═══════════════════════════════════════════════════════════════
+// Database — SQLite connection manager
+// ═══════════════════════════════════════════════════════════════
+
+class Database {
+public:
+    Database();
+    ~Database();
+
+    // ─── Lifecycle ───────────────────────────────────────────
+
+    /// Open (or create) the SQLite database at the given path. The transcript log
+    /// store (game_logs / game_log_messages) is opened as a SEPARATE file
+    /// "logs.db" in the same directory, so it can be deleted independently to
+    /// clear log data. Creates all tables via sync_schema. Returns true on success.
+    bool open(const std::string& path);
+
+    /// Close the database connection gracefully.
+    void close();
+
+    /// Whether the database is currently open.
+    bool isOpen() const noexcept { return storage_ != nullptr; }
+
+    /// Get the underlying sqlite_orm storage (main DB).
+    /// Returns nullptr if not open.
+    auto* getStorage() { return storage_.get(); }
+
+    /// Get the transcript-log storage (separate logs.db). Returns nullptr if not open.
+    auto* getLogStorage() { return logStorage_.get(); }
+
+    /// Get the character-card storage (separate cards.db). Returns nullptr if not open.
+    auto* getCardStorage() { return cardStorage_.get(); }
+
+    /// C#44: get the chat-history storage (separate chat.db). Returns nullptr if not open.
+    auto* getChatStorage() { return chatStorage_.get(); }
+
+    /// Path of the separate transcript-log database file.
+    const std::string& logPath() const noexcept { return logDbPath_; }
+    /// Path of the separate character-card database file.
+    const std::string& cardPath() const noexcept { return cardDbPath_; }
+
+    /// Execute a raw SQL statement. Returns true on success.
+    bool execute(const std::string& sql);
+
+    /// Get the database file path.
+    const std::string& path() const noexcept { return dbPath_; }
+
+private:
+    std::string dbPath_;
+
+    // ─── ORM Storage type (all tables registered here) ───────
+
+    using Storage = decltype(orm::make_storage(
+        "",
+        orm::make_table("migrations",
+            orm::make_column("version", &MigrationRecord::version),
+            orm::make_column("applied_at", &MigrationRecord::appliedAt)
+        ),
+        orm::make_table("reply_rules",
+            orm::make_column("id", &ReplyRuleRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("match_type", &ReplyRuleRow::matchType),
+            orm::make_column("match_content", &ReplyRuleRow::matchContent),
+            orm::make_column("reply_content", &ReplyRuleRow::replyContent),
+            orm::make_column("enabled", &ReplyRuleRow::enabled),
+            orm::make_column("priority", &ReplyRuleRow::priority),
+            orm::make_column("created_at", &ReplyRuleRow::createdAt),
+            orm::make_column("updated_at", &ReplyRuleRow::updatedAt),
+            orm::make_column("conditions", &ReplyRuleRow::conditions),
+            orm::make_column("logic", &ReplyRuleRow::logic),
+            orm::make_column("results", &ReplyRuleRow::results)
+        ),
+        orm::make_table("dice_config",
+            orm::make_column("id", &DiceConfigRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("key", &DiceConfigRow::key,
+                orm::unique()),
+            orm::make_column("value", &DiceConfigRow::value)
+        ),
+        orm::make_table("decks",
+            orm::make_column("id", &DeckRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("name", &DeckRow::name),
+            orm::make_column("cards", &DeckRow::cards),
+            orm::make_column("created_at", &DeckRow::createdAt)
+        ),
+        orm::make_table("adapters",
+            orm::make_column("id", &AdapterRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("name", &AdapterRow::name),
+            orm::make_column("type", &AdapterRow::type),
+            orm::make_column("connection_mode", &AdapterRow::connectionMode),
+            orm::make_column("endpoint", &AdapterRow::endpoint),
+            orm::make_column("access_token", &AdapterRow::accessToken),
+            orm::make_column("enabled", &AdapterRow::enabled),
+            orm::make_column("config", &AdapterRow::config)
+        ),
+        // NOTE: game_logs / game_log_messages live in a SEPARATE database
+        // (LogStorage / logs.db) so the (potentially huge) transcript store can be
+        // deleted on its own to clear log data. See LogStorage below.
+        orm::make_table("banlist",
+            orm::make_column("id", &BanlistRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("target_type", &BanlistRow::targetType),
+            orm::make_column("target_id", &BanlistRow::targetId),
+            orm::make_column("list_type", &BanlistRow::listType),
+            orm::make_column("reason", &BanlistRow::reason),
+            orm::make_column("created_at", &BanlistRow::createdAt)
+        ),
+        orm::make_table("legacy_import_log",
+            orm::make_column("id", &LegacyImportLogRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("file_path", &LegacyImportLogRow::filePath),
+            orm::make_column("imported_at", &LegacyImportLogRow::importedAt),
+            orm::make_column("record_count", &LegacyImportLogRow::recordCount)
+        ),
+        orm::make_table("locale_settings",
+            orm::make_column("id", &LocaleSettingRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("scope", &LocaleSettingRow::scope),
+            orm::make_column("scope_key", &LocaleSettingRow::scopeKey),
+            orm::make_column("locale", &LocaleSettingRow::locale)
+        ),
+        orm::make_table("character_cards",
+            orm::make_column("id", &CharacterCardRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("user_id", &CharacterCardRow::userId),
+            orm::make_column("group_id", &CharacterCardRow::groupId),
+            orm::make_column("name", &CharacterCardRow::name),
+            orm::make_column("attrs", &CharacterCardRow::attrs),
+            orm::make_column("updated_at", &CharacterCardRow::updatedAt)
+        ),
+        orm::make_table("user_settings",
+            orm::make_column("id", &UserSettingRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("user_id", &UserSettingRow::userId),
+            orm::make_column("group_id", &UserSettingRow::groupId),
+            orm::make_column("key", &UserSettingRow::key),
+            orm::make_column("value", &UserSettingRow::value)
+        ),
+        orm::make_table("group_settings",
+            orm::make_column("id", &GroupSettingRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("platform", &GroupSettingRow::platform),
+            orm::make_column("group_id", &GroupSettingRow::groupId),
+            orm::make_column("key", &GroupSettingRow::key),
+            orm::make_column("value", &GroupSettingRow::value)
+        ),
+        orm::make_table("i18n_overrides",
+            orm::make_column("id", &I18nOverrideRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("locale", &I18nOverrideRow::locale),
+            orm::make_column("key", &I18nOverrideRow::key),
+            orm::make_column("value", &I18nOverrideRow::value)
+        ),
+        orm::make_table("player_profiles",
+            orm::make_column("id", &PlayerProfileRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("platform", &PlayerProfileRow::platform),
+            orm::make_column("user_id", &PlayerProfileRow::userId),
+            orm::make_column("nickname", &PlayerProfileRow::nickname),
+            orm::make_column("trust_level", &PlayerProfileRow::trustLevel),
+            orm::make_column("cmd_count", &PlayerProfileRow::cmdCount),
+            orm::make_column("favor", &PlayerProfileRow::favor),
+            orm::make_column("last_cmd_at", &PlayerProfileRow::lastCmdAt),
+            orm::make_column("created_at", &PlayerProfileRow::createdAt)
+        ),
+        orm::make_table("roll_stats",
+            orm::make_column("id", &RollStatRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("platform", &RollStatRow::platform),
+            orm::make_column("user_id", &RollStatRow::userId),
+            orm::make_column("skill", &RollStatRow::skill),
+            orm::make_column("total", &RollStatRow::total),
+            orm::make_column("crit", &RollStatRow::crit),
+            orm::make_column("extreme", &RollStatRow::extreme),
+            orm::make_column("hard", &RollStatRow::hard),
+            orm::make_column("regular", &RollStatRow::regular),
+            orm::make_column("fail", &RollStatRow::fail),
+            orm::make_column("fumble", &RollStatRow::fumble)
+        ),
+        orm::make_table("scheduled_tasks",
+            orm::make_column("id", &ScheduledTaskRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("name", &ScheduledTaskRow::name),
+            orm::make_column("platform", &ScheduledTaskRow::platform),
+            orm::make_column("target_type", &ScheduledTaskRow::targetType),
+            orm::make_column("target_id", &ScheduledTaskRow::targetId),
+            orm::make_column("cron_time", &ScheduledTaskRow::cronTime),
+            orm::make_column("days", &ScheduledTaskRow::days),
+            orm::make_column("content", &ScheduledTaskRow::content),
+            orm::make_column("enabled", &ScheduledTaskRow::enabled),
+            orm::make_column("last_run", &ScheduledTaskRow::lastRun),
+            orm::make_column("created_at", &ScheduledTaskRow::createdAt),
+            orm::make_column("action", &ScheduledTaskRow::action),
+            orm::make_column("cond", &ScheduledTaskRow::condition)
+        ),
+        // C#29: Causal rule engine tables
+        orm::make_table("causal_rules",
+            orm::make_column("id", &CausalRuleRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("name", &CausalRuleRow::name),
+            orm::make_column("scope", &CausalRuleRow::scope),
+            orm::make_column("scope_ids", &CausalRuleRow::scopeIds),
+            orm::make_column("enabled", &CausalRuleRow::enabled),
+            orm::make_column("priority", &CausalRuleRow::priority),
+            orm::make_column("cooldown_ms", &CausalRuleRow::cooldownMs),
+            orm::make_column("cooldown_key", &CausalRuleRow::cooldownKey),
+            orm::make_column("conditions", &CausalRuleRow::conditions),
+            orm::make_column("logic", &CausalRuleRow::logic),
+            orm::make_column("actions", &CausalRuleRow::actions),
+            orm::make_column("created_at", &CausalRuleRow::createdAt),
+            orm::make_column("updated_at", &CausalRuleRow::updatedAt)
+        ),
+        orm::make_table("rule_counters",
+            orm::make_column("id", &RuleCounterRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("key", &RuleCounterRow::key,
+                orm::unique()),
+            orm::make_column("value", &RuleCounterRow::value),
+            orm::make_column("updated_at", &RuleCounterRow::updatedAt)
+        ),
+        // C#28-B: Persona switching system tables
+        orm::make_table("persona_templates",
+            orm::make_column("id", &PersonaTemplateRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("name", &PersonaTemplateRow::name,
+                orm::unique()),
+            orm::make_column("description", &PersonaTemplateRow::description),
+            orm::make_column("is_builtin", &PersonaTemplateRow::isBuiltin),
+            orm::make_column("created_at", &PersonaTemplateRow::createdAt),
+            orm::make_column("updated_at", &PersonaTemplateRow::updatedAt)
+        ),
+        orm::make_table("persona_entries",
+            orm::make_column("id", &PersonaEntryRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("persona_id", &PersonaEntryRow::personaId),
+            orm::make_column("locale", &PersonaEntryRow::locale),
+            orm::make_column("key", &PersonaEntryRow::key),
+            orm::make_column("value", &PersonaEntryRow::value)
+        )
+    ));
+
+    // ─── Separate transcript-log storage (logs.db) ───────────
+    // Kept in its own file so it can grow large and be deleted on its own to
+    // wipe log data without touching the main database.
+    using LogStorage = decltype(orm::make_storage(
+        "",
+        orm::make_table("game_logs",
+            orm::make_column("id", &GameLogRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("group_id", &GameLogRow::groupId),
+            orm::make_column("gm_id", &GameLogRow::gmId),
+            orm::make_column("name", &GameLogRow::name),
+            orm::make_column("players", &GameLogRow::players),
+            orm::make_column("custom_rules", &GameLogRow::customRules),
+            orm::make_column("status", &GameLogRow::status),
+            orm::make_column("created_at", &GameLogRow::createdAt)
+        ),
+        orm::make_table("game_log_messages",
+            orm::make_column("id", &GameLogMessageRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("log_id", &GameLogMessageRow::logId),
+            orm::make_column("sender", &GameLogMessageRow::sender),
+            orm::make_column("user_id", &GameLogMessageRow::userId),
+            orm::make_column("content", &GameLogMessageRow::content),
+            orm::make_column("created_at", &GameLogMessageRow::createdAt),
+            orm::make_column("images", &GameLogMessageRow::images)
+        )
+    ));
+
+    // ─── C#44: separate chat-history storage (chat.db) ────────
+    // Group-chat persistence for the simulated-chat window; retained N days.
+    using ChatStorage = decltype(orm::make_storage(
+        "",
+        orm::make_table("chat_messages",
+            orm::make_column("id", &ChatMsgRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("platform", &ChatMsgRow::platform),
+            orm::make_column("group_id", &ChatMsgRow::groupId),
+            orm::make_column("msg_id", &ChatMsgRow::msgId),
+            orm::make_column("user_id", &ChatMsgRow::userId),
+            orm::make_column("sender", &ChatMsgRow::sender),
+            orm::make_column("content", &ChatMsgRow::content),
+            orm::make_column("self", &ChatMsgRow::self),
+            orm::make_column("time", &ChatMsgRow::time),
+            orm::make_column("recalled", &ChatMsgRow::recalled)
+        ),
+        orm::make_table("ai_memory",
+            orm::make_column("id", &AiMemoryRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("scope", &AiMemoryRow::scope),
+            orm::make_column("scope_id", &AiMemoryRow::scopeId),
+            orm::make_column("kind", &AiMemoryRow::kind),
+            orm::make_column("content", &AiMemoryRow::content),
+            orm::make_column("ref_id", &AiMemoryRow::refId),
+            orm::make_column("importance", &AiMemoryRow::importance),
+            orm::make_column("embedding", &AiMemoryRow::embedding),
+            orm::make_column("created_at", &AiMemoryRow::createdAt),
+            orm::make_column("updated_at", &AiMemoryRow::updatedAt),
+            orm::make_column("hits", &AiMemoryRow::hits)
+        )
+    ));
+
+    // ─── Separate character-card storage (cards.db) ──────────
+    // Cards live in their own file so they can be backed up / wiped separately
+    // from the main DB. character_cards is ALSO mapped in the main Storage above
+    // only so a one-time migration can read legacy rows out of dice.db.
+    using CardStorage = decltype(orm::make_storage(
+        "",
+        orm::make_table("character_cards",
+            orm::make_column("id", &CharacterCardRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("user_id", &CharacterCardRow::userId),
+            orm::make_column("group_id", &CharacterCardRow::groupId),
+            orm::make_column("name", &CharacterCardRow::name),
+            orm::make_column("attrs", &CharacterCardRow::attrs),
+            orm::make_column("updated_at", &CharacterCardRow::updatedAt)
+        )
+    ));
+
+    std::unique_ptr<Storage> storage_;
+    std::unique_ptr<LogStorage> logStorage_;
+    std::string logDbPath_;
+    std::unique_ptr<CardStorage> cardStorage_;
+    std::string cardDbPath_;
+    std::unique_ptr<ChatStorage> chatStorage_;   // C#44
+    std::string chatDbPath_;
+};
+
+}  // namespace dice
