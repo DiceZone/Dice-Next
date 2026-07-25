@@ -11,10 +11,10 @@ $serverDir = Join-Path $projectRoot 'server'
 
 if (-not $env:VCPKG_ROOT) { throw 'VCPKG_ROOT is required.' }
 
-$triplet = 'x64-windows-dynamic'
+$triplet = 'x64-windows'
 $buildDir = 'build'
 if ($Architecture -eq 'arm64') {
-    $triplet = 'arm64-windows-dynamic'
+    $triplet = 'arm64-windows'
     $buildDir = 'build-arm64'
 }
 

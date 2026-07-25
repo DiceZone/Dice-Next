@@ -24,6 +24,7 @@
 #include "service/ai_vision.h"         // C#85：多模态图像识别
 #include "service/ai_worker.h"         // C#89：AI 后台线程（AI 调用不再阻塞消息管线）
 #include "platform/instance_guard.h"   // 必须在 tray_win.h(<windows.h>) 之前：先引 winsock2.h
+#include "platform/autostart_win.h"    // Windows 注册表开机自启；其他平台提供 no-op 接口。
 #include "platform/tray_win.h"
 #include "platform/crash_diag_win.h"
 #include "adapter/adapter_interface.h"
