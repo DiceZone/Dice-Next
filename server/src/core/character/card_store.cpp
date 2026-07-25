@@ -241,15 +241,22 @@ void CharacterCardStore::saveRawCardJson(const std::string& user, const std::str
 
 bool CharacterCardStore::cardLocked(const std::string& user, const std::string& scope,
                                     const std::string& key) const {
-    json j = rawCardJson(user, boundCard(user, scope));
+    return cardLockedByName(user, boundCard(user, scope), key);
+}
+bool CharacterCardStore::cardLockedByName(const std::string& user, const std::string& cardName,
+                                          const std::string& key) const {
+    json j = rawCardJson(user, cardName);
     if (!j.contains("__meta") || !j["__meta"].is_object()) return false;
     std::string locks = j["__meta"].value("locks", std::string());
     return ("," + locks + ",").find("," + key + ",") != std::string::npos;
 }
 bool CharacterCardStore::lockCard(const std::string& user, const std::string& scope,
                                   const std::string& key) {
+    return lockCardByName(user, boundCard(user, scope), key);
+}
+bool CharacterCardStore::lockCardByName(const std::string& user, const std::string& card,
+                                        const std::string& key) {
     if (key.empty()) return false;
-    std::string card = boundCard(user, scope);
     json j = rawCardJson(user, card);
     if (!j["__meta"].is_object()) j["__meta"] = json::object();
     std::string locks = j["__meta"].value("locks", std::string());
@@ -260,8 +267,11 @@ bool CharacterCardStore::lockCard(const std::string& user, const std::string& sc
 }
 bool CharacterCardStore::unlockCard(const std::string& user, const std::string& scope,
                                     const std::string& key) {
+    return unlockCardByName(user, boundCard(user, scope), key);
+}
+bool CharacterCardStore::unlockCardByName(const std::string& user, const std::string& card,
+                                          const std::string& key) {
     if (key.empty()) return false;
-    std::string card = boundCard(user, scope);
     json j = rawCardJson(user, card);
     if (!j.contains("__meta") || !j["__meta"].is_object()) return false;
     std::string locks = j["__meta"].value("locks", std::string());
@@ -276,9 +286,13 @@ bool CharacterCardStore::unlockCard(const std::string& user, const std::string& 
 }
 
 std::map<std::string, std::string> CharacterCardStore::getTexts(const std::string& user,
-                                                                const std::string& scope) const {
+                                                                 const std::string& scope) const {
+    return getTextsByName(user, boundCard(user, scope));
+}
+std::map<std::string, std::string> CharacterCardStore::getTextsByName(
+        const std::string& user, const std::string& cardName) const {
     std::map<std::string, std::string> out;
-    json j = rawCardJson(user, boundCard(user, scope));
+    json j = rawCardJson(user, cardName);
     if (j.contains("__meta") && j["__meta"].is_object()
         && j["__meta"].contains("texts") && j["__meta"]["texts"].is_object())
         for (auto it = j["__meta"]["texts"].begin(); it != j["__meta"]["texts"].end(); ++it)
@@ -287,7 +301,10 @@ std::map<std::string, std::string> CharacterCardStore::getTexts(const std::strin
 }
 void CharacterCardStore::setText(const std::string& user, const std::string& scope,
                                  const std::string& name, const std::string& value) {
-    std::string card = boundCard(user, scope);
+    setTextByName(user, boundCard(user, scope), name, value);
+}
+void CharacterCardStore::setTextByName(const std::string& user, const std::string& card,
+                                       const std::string& name, const std::string& value) {
     json j = rawCardJson(user, card);
     if (!j["__meta"].is_object()) j["__meta"] = json::object();
     if (!j["__meta"]["texts"].is_object()) j["__meta"]["texts"] = json::object();
@@ -344,7 +361,12 @@ std::map<std::string, int> CharacterCardStore::getAttrs(
 
 std::optional<int> CharacterCardStore::getAttr(
         const std::string& user, const std::string& scope, const std::string& name) const {
-    auto attrs = getAttrs(user, scope);
+    return getAttrByName(user, boundCard(user, scope), name);
+}
+std::optional<int> CharacterCardStore::getAttrByName(
+        const std::string& user, const std::string& cardName, const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto attrs = attrsOf(user, cardName);
     auto it = attrs.find(canonical(name));
     if (it != attrs.end()) return it->second;
     return std::nullopt;
@@ -352,8 +374,11 @@ std::optional<int> CharacterCardStore::getAttr(
 
 void CharacterCardStore::setAttr(const std::string& user, const std::string& scope,
                                  const std::string& name, int value) {
+    setAttrByName(user, boundCard(user, scope), name, value);
+}
+void CharacterCardStore::setAttrByName(const std::string& user, const std::string& card,
+                                       const std::string& name, int value) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string card = boundCard(user, scope);
     auto attrs = attrsOf(user, card);
     attrs[canonical(name)] = value;
     saveAttrsOf(user, card, attrs);
@@ -370,8 +395,11 @@ bool CharacterCardStore::clear(const std::string& user, const std::string& scope
 
 bool CharacterCardStore::eraseAttr(const std::string& user, const std::string& scope,
                                    const std::string& name) {
+    return eraseAttrByName(user, boundCard(user, scope), name);
+}
+bool CharacterCardStore::eraseAttrByName(const std::string& user, const std::string& card,
+                                         const std::string& name) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string card = boundCard(user, scope);
     auto attrs = attrsOf(user, card);
     auto it = attrs.find(canonical(name));
     if (it == attrs.end()) return false;

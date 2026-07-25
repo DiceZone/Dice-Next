@@ -2,6 +2,7 @@
 # Complete macOS ARM64 Beta package. Usage: ./package-macos.sh
 
 set -euo pipefail
+trap 'status=$?; echo "Packaging failed at line ${LINENO} (exit ${status})." >&2; exit "${status}"' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
@@ -44,7 +45,11 @@ mkdir -p "$DATA_STAGE"
 copy_content() {
     local name=$1 source="$SERVER_DIR/data/$1"
     [[ -d "$source" ]] || source="$SERVER_DIR/$name"
-    [[ -d "$source" ]] && cp -a "$source" "$DATA_STAGE/$name"
+    # Optional bundled resources are not present in every source checkout.
+    # Their absence must not make a complete package fail under `set -e`.
+    if [[ -d "$source" ]]; then
+        cp -a "$source" "$DATA_STAGE/$name"
+    fi
 }
 copy_content decks
 copy_content rules
