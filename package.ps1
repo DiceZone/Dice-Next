@@ -1,7 +1,7 @@
 ﻿# ─────────────────────────────────────────────────────────────
 #  DiceNext 一键打包脚本
 #  把运行所必须的 release 打包成 zip → dice-next\release\
-#  文件名：DiceNext-beta-3.0.0(NNN)-YYYY-MM-DD-HHMMSS.zip
+#  文件名：DiceNext-beta-3.0.0(NNN)-windows-amd64-YYYY-MM-DD-HHMMSS.zip
 #  用法：在 dice-next\ 目录右键「用 PowerShell 运行」，或：
 #        powershell -ExecutionPolicy Bypass -File package.ps1
 # ─────────────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ if (Test-Path $counter) {
     }
 }
 $ts   = Get-Date -Format 'yyyy-MM-dd-HHmmss'
-$name = if ($Architecture -eq 'amd64') { "DiceNext-beta-$ver($build)-$ts" } else { "DiceNext-beta-$ver($build)-windows-$Architecture-$ts" }
+$name = "DiceNext-beta-$ver($build)-windows-$Architecture-$ts"
 
 $out   = [Environment]::GetEnvironmentVariable('DICENEXT_RELEASE_ROOT')
 if ([string]::IsNullOrWhiteSpace($out)) { $out = Join-Path $root 'release' }
