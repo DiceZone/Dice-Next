@@ -70,10 +70,11 @@ jobs:
         env:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
         run: |
+          set -euo pipefail
           if [ ! -d "$VCPKG_ROOT/.git" ]; then git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"; fi
           "$VCPKG_ROOT/bootstrap-vcpkg.sh"
-          "$VCPKG_ROOT/vcpkg" install --x-manifest-root=server --triplet=${{ matrix.triplet }}
-          cmake -S server -B server/${{ matrix.build_dir }} -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+          "$VCPKG_ROOT/vcpkg" install --x-manifest-root=server --x-install-root="$VCPKG_ROOT/installed" --triplet=${{ matrix.triplet }}
+          cmake -S server -B server/${{ matrix.build_dir }} -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
           cmake --build server/${{ matrix.build_dir }} --parallel "$(nproc)"
       - name: Package
         working-directory: main
@@ -89,6 +90,15 @@ jobs:
           name: DiceNext-linux-${{ matrix.arch }}
           path: main/release/*.tar.gz
           if-no-files-found: error
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-linux-${{ matrix.arch }}
+          path: |
+            main/server/**/vcpkg-manifest-install.log
+            main/server/**/CMakeError.log
+          if-no-files-found: ignore
 
   windows:
     name: Windows (${{ matrix.arch }})
@@ -144,12 +154,17 @@ jobs:
         shell: pwsh
         working-directory: main
         run: |
+          $ErrorActionPreference = 'Stop'
           $vcpkg = Join-Path $env:GITHUB_WORKSPACE 'vcpkg'
           if (-not (Test-Path (Join-Path $vcpkg '.git'))) { git clone https://github.com/microsoft/vcpkg.git $vcpkg }
           & (Join-Path $vcpkg 'bootstrap-vcpkg.bat')
-          & (Join-Path $vcpkg 'vcpkg.exe') install --x-manifest-root=server --triplet=${{ matrix.triplet }}
-          cmake -S server -B server/${{ matrix.build_dir }} -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+          & (Join-Path $vcpkg 'vcpkg.exe') install --x-manifest-root=server --x-install-root="$vcpkg/installed" --triplet=${{ matrix.triplet }}
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg install failed' }
+          cmake -S server -B server/${{ matrix.build_dir }} -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$vcpkg/installed"
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
           cmake --build server/${{ matrix.build_dir }} --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'CMake build failed' }
       - name: Package
         shell: pwsh
         working-directory: main
@@ -162,6 +177,15 @@ jobs:
           name: DiceNext-windows-${{ matrix.arch }}
           path: main/release/*.zip
           if-no-files-found: error
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-windows-${{ matrix.arch }}
+          path: |
+            main/server/**/vcpkg-manifest-install.log
+            main/server/**/CMakeError.log
+          if-no-files-found: ignore
 
   macos-arm64:
     name: macOS (arm64)
@@ -205,10 +229,11 @@ jobs:
         env:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
         run: |
+          set -euo pipefail
           if [ ! -d "$VCPKG_ROOT/.git" ]; then git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"; fi
           "$VCPKG_ROOT/bootstrap-vcpkg.sh"
-          "$VCPKG_ROOT/vcpkg" install --x-manifest-root=server --triplet=arm64-osx-dynamic
-          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=arm64-osx-dynamic
+          "$VCPKG_ROOT/vcpkg" install --x-manifest-root=server --x-install-root="$VCPKG_ROOT/installed" --triplet=arm64-osx-dynamic
+          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=arm64-osx-dynamic -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
           cmake --build server/build --parallel "$(sysctl -n hw.ncpu)"
       - name: Package
         working-directory: main
@@ -224,6 +249,15 @@ jobs:
           name: DiceNext-macos-arm64
           path: main/release/*.tar.gz
           if-no-files-found: error
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-macos-arm64
+          path: |
+            main/server/**/vcpkg-manifest-install.log
+            main/server/**/CMakeError.log
+          if-no-files-found: ignore
 
   release:
     name: Publish GitHub Release

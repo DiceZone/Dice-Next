@@ -198,7 +198,7 @@ inline void storeFacts(ConfigManager& cfg, Store* cst, const std::string& scope,
                     and orm::c(&AiMemoryRow::kind) == std::string("fact")),
                 orm::multi_order_by(orm::order_by(&AiMemoryRow::hits).asc(), orm::order_by(&AiMemoryRow::id).asc()));
             int toDel = total - cap;
-            for (auto& e : all) { if (toDel-- <= 0) break; cst->remove<AiMemoryRow>(e.id); }
+            for (auto& e : all) { if (toDel-- <= 0) break; cst->template remove<AiMemoryRow>(e.id); }
         }
     } catch (...) {}
 }

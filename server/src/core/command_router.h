@@ -2514,7 +2514,6 @@ private:
             // alias list: rule packs are allowed to customize attribute canonicals.
             const std::string skillKey = "dndskill:" + canonical;
             const bool isAbility = isDndAbility(attr);
-            const bool hasSeparateSkill = !getUserSetting(msg, skillKey).empty();
             // Keep the original token here, matching `.rc` exactly; effectiveAttr
             // performs its own canonicalization during the card lookup.
             auto score = effectiveAttr(msg, attr);
