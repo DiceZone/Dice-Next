@@ -109,11 +109,11 @@ jobs:
         include:
           - arch: amd64
             runner: windows-2022
-            triplet: x64-windows-dynamic
+            triplet: x64-windows
             build_dir: build
           - arch: arm64
             runner: windows-11-arm
-            triplet: arm64-windows-dynamic
+            triplet: arm64-windows
             build_dir: build-arm64
     steps:
       - uses: actions/checkout@v4

@@ -15,7 +15,6 @@
 cross-compile/
 ├── vcpkg-triplets/          # vcpkg 交叉编译配置
 │   ├── arm64-linux-dynamic.cmake
-│   ├── arm64-windows-dynamic.cmake
 │   └── arm64-linux-toolchain.cmake
 ├── docker/                   # Docker 构建环境
 │   ├── Dockerfile.linux-amd64
