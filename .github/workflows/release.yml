@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create, for example v3.0.0-beta.661'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -272,7 +277,7 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [linux, windows, macos-arm64]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -282,5 +287,7 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: artifacts/*
