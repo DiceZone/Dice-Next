@@ -82,35 +82,40 @@ set(SOURCES
 )
 
 # ─── Version / build-number generation ───────────────────────
-# Generates build/generated/version_build.cpp with an auto-incrementing
-# build number (resets on minor/major bump — see docs/versioning.md).
+# Generates build/generated/version_build.cpp with the next build number.
+# The source counter is committed only after the executable links successfully.
 
 set(VERSION_BUILD_SOURCE ${CMAKE_BINARY_DIR}/generated/version_build.cpp)
+set(VERSION_BUILD_PENDING ${CMAKE_BINARY_DIR}/generated/version_build.pending)
 set(VERSION_COUNTER_FILE ${CMAKE_CURRENT_SOURCE_DIR}/build_counter.txt)
 set(BUMP_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bump_build.cmake)
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 set_source_files_properties(${VERSION_BUILD_SOURCE} PROPERTIES GENERATED TRUE)
 
-# Generate once at configure time so the first compile has the header.
-execute_process(COMMAND ${CMAKE_COMMAND}
-    -DVERSION=${PROJECT_VERSION} -DOUT=${VERSION_BUILD_SOURCE}
-    -DCOUNTER=${VERSION_COUNTER_FILE} -P ${BUMP_SCRIPT})
-
-# Bump on every build (target has no real output → always runs).
-add_custom_target(bump_version ALL
+# Generate the tentative next number before every build without changing the
+# persistent counter. A failed compile therefore does not consume a number.
+add_custom_target(prepare_version ALL
     COMMAND ${CMAKE_COMMAND}
-        -DVERSION=${PROJECT_VERSION} -DOUT=${VERSION_BUILD_SOURCE}
-        -DCOUNTER=${VERSION_COUNTER_FILE} -P ${BUMP_SCRIPT}
-    BYPRODUCTS ${VERSION_BUILD_SOURCE}
-    COMMENT "Bumping Dice!Next build number")
+    -DMODE=PREPARE -DVERSION=${PROJECT_VERSION} -DOUT=${VERSION_BUILD_SOURCE}
+    -DPENDING=${VERSION_BUILD_PENDING}
+    -DCOUNTER=${VERSION_COUNTER_FILE} -P ${BUMP_SCRIPT}
+    BYPRODUCTS ${VERSION_BUILD_SOURCE} ${VERSION_BUILD_PENDING}
+    COMMENT "Preparing Dice!Next build number")
 
 # ─── Executable Target ───────────────────────────────────────
 
 add_executable(dice-next-server ${SOURCES} ${VERSION_BUILD_SOURCE})
-add_dependencies(dice-next-server bump_version)
+add_dependencies(dice-next-server prepare_version)
 # Keep the build value in a generated .cpp rather than a generated header.
 # Visual Studio reliably recompiles a source file produced by a dependency
 # target, whereas its include scanner can miss generated headers.  This keeps
-# the exe's .bot banner in sync with build_counter.txt on every build.
+# the exe's .bot banner in sync with the build number committed after linking.
+add_custom_command(TARGET dice-next-server POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+        -DMODE=COMMIT -DVERSION=${PROJECT_VERSION}
+        -DCOUNTER=${VERSION_COUNTER_FILE} -DPENDING=${VERSION_BUILD_PENDING}
+        -P ${BUMP_SCRIPT}
+    COMMENT "Recording successful Dice!Next build number")
 
 target_include_directories(dice-next-server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
