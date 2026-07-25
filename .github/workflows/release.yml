@@ -283,11 +283,33 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A expected=(
+            [DiceNext-linux-amd64]='*.tar.gz'
+            [DiceNext-linux-arm64]='*.tar.gz'
+            [DiceNext-windows-amd64]='*.zip'
+            [DiceNext-windows-arm64]='*.zip'
+            [DiceNext-macos-arm64]='*.tar.gz'
+          )
+          for artifact in "${!expected[@]}"; do
+            pattern="artifacts/${artifact}/${expected[$artifact]}"
+            if ! compgen -G "$pattern" > /dev/null; then
+              echo "::warning::Missing release asset from ${artifact}: ${pattern}"
+            fi
+          done
+          find artifacts -maxdepth 2 -type f -print
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
-          files: artifacts/*
+          files: |
+            artifacts/DiceNext-linux-amd64/*.tar.gz
+            artifacts/DiceNext-linux-arm64/*.tar.gz
+            artifacts/DiceNext-windows-amd64/*.zip
+            artifacts/DiceNext-windows-arm64/*.zip
+            artifacts/DiceNext-macos-arm64/*.tar.gz
