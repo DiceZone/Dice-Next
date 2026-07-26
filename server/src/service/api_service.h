@@ -13,6 +13,7 @@
 #include "../adapter/adapter_interface.h"
 #include "../adapter/adapter_manager.h"
 #include "../adapter/onebot_v11_adapter.h"
+#include "../adapter/qq_official_adapter.h"
 #include "../core/deck/card_deck.h"
 #include "../core/reply/reply_manager.h"
 #include "../core/mod/js_plugin_manager.h"
@@ -114,18 +115,39 @@ static ReplyRule replyRuleFromJson(const J& j) {
 }
 
 static J adapterToJson(const AdapterRow& a) {
+    J cfg = J::parse(a.config, nullptr, false);
+    const bool official = a.type == static_cast<int>(AdapterType::kQQOfficial);
     return J{
         {"id", std::to_string(a.id)},
         {"name", a.name},
-        {"type", "onebot_v11"},
+        {"type", official ? "qq_official" : "onebot_v11"},
         {"connectionMode", a.connectionMode == 0 ? "forward_ws" : a.connectionMode == 1 ? "reverse_ws" : "http"},
         {"endpoint", a.endpoint},
-        {"accessToken", a.accessToken},
+        {"accessToken", official ? "" : a.accessToken},
+        {"appId", official && cfg.is_object() ? cfg.value("appId", std::string()) : std::string()},
+        {"qqNumber", official && cfg.is_object() ? cfg.value("qqNumber", std::string()) : std::string()},
         {"enabled", a.enabled},
         {"status", "disconnected"},
         {"lastActive", nullptr},
         {"createdAt", "2026-06-14T00:00:00.000Z"}
     };
+}
+
+static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
+    if (a.type == static_cast<int>(AdapterType::kQQOfficial)) {
+        J cfg = J::parse(a.config, nullptr, false);
+        if (!cfg.is_object()) cfg = J::object();
+        auto adapter = std::make_shared<QQOfficialAdapter>(std::to_string(a.id));
+        adapter->configure({{"name", a.name}, {"appId", cfg.value("appId", std::string())},
+                            {"appSecret", cfg.value("appSecret", std::string())},
+                            {"qqNumber", cfg.value("qqNumber", std::string())}});
+        return adapter;
+    }
+    auto adapter = std::make_shared<OneBotV11Adapter>(std::to_string(a.id));
+    std::string mode = (a.connectionMode == 1) ? "reverse_ws" : (a.connectionMode == 2) ? "http" : "forward_ws";
+    adapter->configure({{"name", a.name}, {"endpoint", a.endpoint},
+                        {"accessToken", a.accessToken}, {"connectionMode", mode}});
+    return adapter;
 }
 
 static J replyToJson(const ReplyRuleRow& r) {
@@ -1047,7 +1069,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 else if (m.is_object()) norm.push_back(J{{"platform", m.value("platform", "")}, {"id", m.value("id", "")}});
             }
             if (req->method() == drogon::Post) {
-                auto j = J::parse(req->body());
+                auto j = J::parse(req->body(), nullptr, false);
+                if (!j.is_object()) { jsonReply(fail("invalid JSON request"), std::move(cb)); return; }
                 std::string plat = j.value("platform", "onebot_v11");
                 std::string id = j.value("id", "");
                 if (id.empty()) { jsonReply(fail("id required"), std::move(cb)); return; }
@@ -1171,7 +1194,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             auto& bm = BroadcastManager::instance();
             if (req->method() == drogon::Post) {
-                auto j = J::parse(req->body());
+                auto j = J::parse(req->body(), nullptr, false);
+                if (!j.is_object()) { jsonReply(fail("invalid JSON request"), std::move(cb)); return; }
                 std::string c = j.value("content", "");
                 // Truncate to 200 Unicode code points (UTF-8 aware).
                 int cps = 0; size_t cut = c.size();
@@ -1581,6 +1605,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         }
     }, {drogon::Get});
 
+    // ── QQ 官方机器人 2.0：扫码绑定（二维码密钥仅保留在服务端） ──
+    app.registerHandler("/api/adapters/qq-official/qr/start", [](Req, CB&& cb) {
+        QQOfficialAdapter::beginQrLogin([cb=std::move(cb)](QQOfficialAdapter::QrResult r) mutable {
+            jsonReply(r.ok ? ok(r.data) : fail(r.error), std::move(cb));
+        });
+    }, {drogon::Post});
+    app.registerHandler("/api/adapters/qq-official/qr/{1}", [](Req, CB&& cb, const std::string& sessionId) {
+        QQOfficialAdapter::pollQrLogin(sessionId, [cb=std::move(cb)](QQOfficialAdapter::QrResult r) mutable {
+            jsonReply(r.ok ? ok(r.data) : fail(r.error), std::move(cb));
+        });
+    }, {drogon::Get});
+
     // ── Adapters (DB-backed, status from AdapterManager) ──────
     app.registerHandler("/api/adapters", [st, &adapterMgr](Req req, CB&& cb) {
         try {
@@ -1603,18 +1639,27 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 auto j = J::parse(req->body());
                 AdapterRow a;
                 a.name = j.value("name", "");
-                a.endpoint = j.value("endpoint", "");
-                a.accessToken = j.value("accessToken", "");
                 a.enabled = j.value("enabled", true);
-                std::string mode = j.value("connectionMode", "forward_ws");
-                a.connectionMode = (mode == "reverse_ws") ? 1 : (mode == "http") ? 2 : 0;
+                const std::string type = j.value("type", std::string("onebot_v11"));
+                a.type = static_cast<int>(adapterTypeFromString(type));
+                if (a.type == static_cast<int>(AdapterType::kUnknown)) throw std::runtime_error("不支持的适配器类型");
+                if (a.type == static_cast<int>(AdapterType::kQQOfficial)) {
+                    const std::string appId = j.value("appId", std::string());
+                    const std::string appSecret = j.value("appSecret", std::string());
+                    if (appId.empty() || appSecret.empty()) throw std::runtime_error("QQ 官方机器人需要 AppID 和 AppSecret");
+                    a.connectionMode = 0; a.endpoint.clear(); a.accessToken.clear();
+                    a.config = J{{"appId", appId}, {"appSecret", appSecret},
+                                 {"qqNumber", j.value("qqNumber", std::string())}}.dump();
+                } else {
+                    a.endpoint = j.value("endpoint", ""); a.accessToken = j.value("accessToken", "");
+                    std::string mode = j.value("connectionMode", "forward_ws");
+                    a.connectionMode = (mode == "reverse_ws") ? 1 : (mode == "http") ? 2 : 0; a.config = "{}";
+                }
                 a.id = st->insert(a);
 
                 // Create real adapter instance and auto-start if enabled
                 if (a.enabled) {
-                    auto adapter = std::make_shared<OneBotV11Adapter>(std::to_string(a.id));
-                    adapter->configure({{"name", a.name}, {"endpoint", a.endpoint},
-                        {"accessToken", a.accessToken}, {"connectionMode", mode}});
+                    auto adapter = makeRuntimeAdapter(a);
                     adapterMgr.registerAdapter(adapter);
                     adapterMgr.startAdapter(std::to_string(a.id));
                 }
@@ -1632,8 +1677,15 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 auto j = J::parse(req->body());
                 auto a = st->get<AdapterRow>(aid);
                 if (j.contains("name")) a.name = j["name"];
-                if (j.contains("endpoint")) a.endpoint = j["endpoint"];
-                if (j.contains("accessToken")) a.accessToken = j["accessToken"];
+                bool credentialsChanged = false;
+                if (a.type == static_cast<int>(AdapterType::kQQOfficial)) {
+                    J cfg = J::parse(a.config, nullptr, false); if (!cfg.is_object()) cfg = J::object();
+                    if (j.contains("appId")) { credentialsChanged = credentialsChanged || cfg.value("appId", std::string()) != j["appId"].get<std::string>(); cfg["appId"] = j["appId"]; }
+                    if (j.contains("appSecret") && j["appSecret"].is_string() && !j["appSecret"].get<std::string>().empty()) { credentialsChanged = credentialsChanged || cfg.value("appSecret", std::string()) != j["appSecret"].get<std::string>(); cfg["appSecret"] = j["appSecret"]; }
+                    if (j.contains("qqNumber") && j["qqNumber"].is_string()) cfg["qqNumber"] = j["qqNumber"];
+                    if (cfg.value("appId", std::string()).empty() || cfg.value("appSecret", std::string()).empty()) throw std::runtime_error("QQ 官方机器人需要 AppID 和 AppSecret");
+                    a.config = cfg.dump();
+                } else { if (j.contains("endpoint")) a.endpoint = j["endpoint"]; if (j.contains("accessToken")) a.accessToken = j["accessToken"]; }
                 bool wasEnabled = a.enabled;
                 if (j.contains("enabled")) a.enabled = j["enabled"];
                 if (j.contains("connectionMode")) {
@@ -1644,10 +1696,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
                 // Handle toggle in AdapterManager
                 if (a.enabled && !wasEnabled) {
-                    auto adapter = std::make_shared<OneBotV11Adapter>(std::to_string(a.id));
-                    std::string mode = (a.connectionMode == 1) ? "reverse_ws" : (a.connectionMode == 2) ? "http" : "forward_ws";
-                    adapter->configure({{"name", a.name}, {"endpoint", a.endpoint},
-                        {"accessToken", a.accessToken}, {"connectionMode", mode}});
+                    auto adapter = makeRuntimeAdapter(a);
+                    adapterMgr.registerAdapter(adapter);
+                    adapterMgr.startAdapter(std::to_string(a.id));
+                } else if (a.enabled && wasEnabled && credentialsChanged) {
+                    adapterMgr.stopAdapter(std::to_string(a.id));
+                    adapterMgr.unregisterAdapter(std::to_string(a.id));
+                    auto adapter = makeRuntimeAdapter(a);
                     adapterMgr.registerAdapter(adapter);
                     adapterMgr.startAdapter(std::to_string(a.id));
                 } else if (!a.enabled && wasEnabled) {
@@ -1678,10 +1733,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             int aid = std::stoi(id);
             auto a = st->get<AdapterRow>(aid);
-            std::string mode = (a.connectionMode == 1) ? "reverse_ws" : (a.connectionMode == 2) ? "http" : "forward_ws";
-            auto adapter = std::make_shared<OneBotV11Adapter>("test-" + std::to_string(aid));
-            adapter->configure({{"name", a.name}, {"endpoint", a.endpoint},
-                {"accessToken", a.accessToken}, {"connectionMode", mode}});
+            auto adapter = makeRuntimeAdapter(a);
             adapter->start();
             std::this_thread::sleep_for(std::chrono::seconds(2));
             bool connected = adapter->isConnected();
@@ -1701,10 +1753,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (!adapter) {
                 // Not registered (e.g. was disabled) → register + start fresh.
                 if (!a.enabled) { a.enabled = true; st->update(a); }
-                auto na = std::make_shared<OneBotV11Adapter>(std::to_string(a.id));
-                std::string mode = (a.connectionMode == 1) ? "reverse_ws" : (a.connectionMode == 2) ? "http" : "forward_ws";
-                na->configure({{"name", a.name}, {"endpoint", a.endpoint},
-                    {"accessToken", a.accessToken}, {"connectionMode", mode}});
+                auto na = makeRuntimeAdapter(a);
                 adapterMgr.registerAdapter(na);
                 adapterMgr.startAdapter(std::to_string(a.id));
             } else {
@@ -2929,14 +2978,33 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             // but lurkers with 0 commands are hidden from the management UI.
             auto rows = st->get_all<PlayerProfileRow>(
                 orm::order_by(&PlayerProfileRow::lastCmdAt).desc());
-            J arr = J::array();
+            std::map<std::string, PlayerProfileRow> merged;
             for (auto& r : rows) {
                 if (r.cmdCount == 0 && r.favor == 0 && r.trustLevel == 0 && r.nickname.empty()) continue;  // skip empty placeholders
+                auto it = merged.find(r.userId);
+                if (it == merged.end()) merged.emplace(r.userId, r);
+                else {
+                    it->second.cmdCount += r.cmdCount;
+                    it->second.favor += r.favor;
+                    it->second.trustLevel = (std::max)(it->second.trustLevel, r.trustLevel);
+                    if (it->second.nickname.empty() && !r.nickname.empty()) it->second.nickname = r.nickname;
+                }
+            }
+            J arr = J::array();
+            for (auto& [uid, r] : merged) {
+                J bindings = J::array(); bool virtualId = identity::BindingStore::isVirtual(uid);
+                try {
+                    auto ids = st->get_all<IdentityRow>(orm::where(
+                        orm::c(&IdentityRow::kind) == "user" and orm::c(&IdentityRow::publicId) == uid), orm::limit(1));
+                    if (!ids.empty()) for (const auto& ep : st->get_all<IdentityEndpointRow>(orm::where(
+                        orm::c(&IdentityEndpointRow::identityId) == ids.front().id)))
+                        bindings.push_back(J{{"adapterType", ep.adapterType}, {"adapterAccount", ep.adapterAccount}, {"endpointId", ep.endpointId}});
+                } catch (...) {}
                 arr.push_back(J{
                     {"platform", r.platform}, {"userId", r.userId},
                     {"nickname", r.nickname}, {"trustLevel", r.trustLevel},
                     {"cmdCount", r.cmdCount}, {"favor", r.favor}, {"lastCmdAt", r.lastCmdAt},
-                    {"createdAt", r.createdAt}
+                    {"createdAt", r.createdAt}, {"virtualId", virtualId}, {"bindings", bindings}
                 });
             }
             jsonReply(ok(arr), std::move(cb));
@@ -3146,15 +3214,24 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // Pick a connected adapter for a platform (fallback: any connected).
-    static auto pickAdapter = [](AdapterManager& mgr, const std::string& plat) -> AdapterPtr {
+    // Pick a connected adapter for a platform.  A binding carries its adapter
+    // account too, so a simulation can deliberately choose between multiple
+    // official bots instead of accidentally using the first one.
+    static auto pickAdapter = [](AdapterManager& mgr, const std::string& plat,
+                                 const std::string& account = {}) -> AdapterPtr {
         AdapterPtr any;
         for (auto& a : mgr.allAdapters()) {
             if (!a->isConnected()) continue;
-            if (a->platform() == plat) return a;
+            if (a->platform() == plat) {
+                if (account.empty() || a->id() == account) return a;
+                if (plat == "qq_official") {
+                    auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(a);
+                    if (official && official->appId() == account) return a;
+                }
+            }
             if (!any) any = a;
         }
-        return any;
+        return account.empty() ? any : nullptr;
     };
 
     // Read an id field that may be a number or string (OneBot inconsistency).
@@ -3167,7 +3244,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     };
 
     // GET /api/groups — live joined-group list merged with group_settings.
-    app.registerHandler("/api/groups", [st, &adapterMgr, &cfg](Req req, CB&& cb) {
+    app.registerHandler("/api/groups", [st, &adapterMgr, &cfg, &db](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Post) {
                 auto j = J::parse(req->body());
@@ -3222,11 +3299,41 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             for (auto& lr : st->get_all<LocaleSettingRow>(
                      orm::where(orm::c(&LocaleSettingRow::scope) == std::string("group"))))
                 groupLocales[lr.scopeKey] = lr.locale;
-            J arr = J::array();
+            // A real QQ group can be reached through more than one adapter.  The
+            // management view represents that group once, and keeps every actual
+            // adapter endpoint as metadata instead of rendering duplicate cards.
+            std::map<std::string, std::string> selectedByGroup;
             for (auto& [pg, kv] : groups) {
-                if (kv.count("__removed") && kv["__removed"] == "1") continue;   // 隐藏已移除的群
+                if (kv.count("__removed") && kv["__removed"] == "1") continue;
                 auto sep = pg.find('\x1f');
                 std::string plat = pg.substr(0, sep), gid = pg.substr(sep + 1);
+                auto it = selectedByGroup.find(gid);
+                if (it == selectedByGroup.end()
+                    || (it->second.rfind("qq_official\x1f", 0) == 0 && plat != "qq_official")) {
+                    selectedByGroup[gid] = pg;
+                }
+            }
+
+            std::map<int64_t, IdentityRow> identities;
+            std::map<std::string, J> groupBindings;
+            try {
+                for (const auto& row : st->get_all<IdentityRow>()) identities[row.id] = row;
+                for (const auto& ep : st->get_all<IdentityEndpointRow>()) {
+                    auto it = identities.find(ep.identityId);
+                    if (it == identities.end() || it->second.kind != "group") continue;
+                    auto& list = groupBindings[it->second.publicId];
+                    if (!list.is_array()) list = J::array();
+                    list.push_back(J{{"adapterType", ep.adapterType}, {"adapterAccount", ep.adapterAccount},
+                                     {"endpointId", ep.endpointId}});
+                }
+            } catch (...) {}
+
+            J arr = J::array();
+            for (auto& [gid, pg] : selectedByGroup) {
+                auto& kv = groups[pg];
+                if (kv.count("__removed") && kv["__removed"] == "1") continue;   // 隐藏已移除的群
+                auto sep = pg.find('\x1f');
+                std::string plat = pg.substr(0, sep);
                 std::string name = gid, botRole;
                 int memberCount = 0;
                 if (auto a = pickAdapter(adapterMgr, plat)) {
@@ -3255,7 +3362,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"welcome_delay", kv.count("welcome_delay") ? kv["welcome_delay"] : ""},
                     {"welcome_cooldown", kv.count("welcome_cooldown") ? kv["welcome_cooldown"] : ""},
                     {"welcome_min_delay", cfg.get<int>("events/welcome_min_delay", 0)},
-                    {"welcome_min_cooldown", cfg.get<int>("events/welcome_min_cooldown", 0)}
+                    {"welcome_min_cooldown", cfg.get<int>("events/welcome_min_cooldown", 0)},
+                    {"bindings", groupBindings.count(gid) ? groupBindings[gid] : J::array()}
                 });
             }
             jsonReply(ok(arr), std::move(cb));
@@ -3548,10 +3656,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             std::string key = plat + ":" + gid;
             if (req->method() == drogon::Post) {
-                auto j = J::parse(req->body());
+                DICE_LOG_INFO("Web simulated group chat: platform={}, group={}, bodySize={}", plat, gid, req->body().size());
+                auto j = J::parse(req->body(), nullptr, false);
+                if (!j.is_object()) { jsonReply(fail("invalid JSON request"), std::move(cb)); return; }
                 std::string text = j.value("text", "");
+                std::string adapterAccount = j.value("adapterAccount", std::string());
                 if (text.empty()) { jsonReply(fail("empty"), std::move(cb)); return; }
-                auto a = pickAdapter(adapterMgr, plat);
+                auto a = pickAdapter(adapterMgr, plat, adapterAccount);
                 if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
                 a->sendGroupMessage(gid, text);
                 std::string me = a->getLoginName().empty() ? std::string("\xe9\xaa\xb0\xe5\xa8\x98") : a->getLoginName();  // C#82: 骰娘
@@ -3594,10 +3705,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             const std::string scope = "private:" + uid;
             if (req->method() == drogon::Post) {
-                auto j = J::parse(req->body());
+                DICE_LOG_INFO("Web simulated private chat: platform={}, user={}, bodySize={}", plat, uid, req->body().size());
+                auto j = J::parse(req->body(), nullptr, false);
+                if (!j.is_object()) { jsonReply(fail("invalid JSON request"), std::move(cb)); return; }
                 std::string text = j.value("text", "");
+                std::string adapterAccount = j.value("adapterAccount", std::string());
                 if (text.empty()) { jsonReply(fail("empty"), std::move(cb)); return; }
-                auto a = pickAdapter(adapterMgr, plat);
+                auto a = pickAdapter(adapterMgr, plat, adapterAccount);
                 if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
                 a->sendPrivateMessage(uid, text);
                 if (auto* cst = db.getChatStorage()) {

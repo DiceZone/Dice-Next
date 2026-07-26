@@ -177,6 +177,13 @@ public:
         std::string cmd = trim(text.substr(matchedPrefix.size()));
         if (cmd.empty()) return "";
 
+        // .dismiss is an operational escape hatch: it must remain available
+        // while a group is .bot off or web-hard-locked.  Rule aliases are not
+        // applied before it.  A hard lock means leave without a group message.
+        auto [earlyCmd, earlyArgs] = splitCommand(cmd);
+        if (toLower(earlyCmd) == "dismiss")
+            return handleDismiss(loc, earlyArgs, msg, isGroupLocked(msg));
+
         // Hard lock (web admin "彻底禁用"): EVERYTHING is silent, including .bot —
         // only the web panel can lift it. Stronger than .bot off.
         if (isGroupLocked(msg)) return "";
@@ -311,7 +318,7 @@ public:
             static const char* kWordCmds[] = {   // 本段全部词指令，按长度降序排列
                 "helpdoc", "welcome", "dismiss", "ruleset",
                 "notice",
-                "alias", "trust", "admin", "rules", "group", "reply",
+                "alias", "trust", "admin", "rules", "group", "reply", "bind", "info",
                 // C#107：“game”不做免空格前缀回退——.game xx 由 tryHandleGame 直达（带空格），
                 // 否则 .gameXXX 类 Lua 插件触发词会被拆成 game+XXX 吞掉。
                 "buff", "send", "help", "text", "link", "init", "lang", "rule",
@@ -339,13 +346,15 @@ public:
         if (cmdLower == "admin")   return handleAdmin(loc, args, msg); // C：管理员授撤
         if (cmdLower == "notice")  return handleNotice(loc, args, msg); // B：通知窗口注册
         if (cmdLower == "alias")   return handleAlias(loc, args, msg);  // C：账号别名（TinyList）
+        if (cmdLower == "bind")    return handleIdentityBind(args, msg);
+        if (cmdLower == "info")    return handleIdentityInfo(args, msg);
         if (cmdLower == "help")    return handleHelp(loc, args, msg);
         if (cmdLower == "helpdoc") return handleHelpDoc(loc, args, msg);
         if (cmdLower == "text")    return handleText(loc, args, msg);
         if (cmdLower == "hiy")     return handleHiy(loc, args, msg);
         if (cmdLower == "buff")    return handleBuff(loc, args, msg);
         if (cmdLower == "send")    return handleSend(loc, args, msg);
-        if (cmdLower == "dismiss") return handleDismiss(loc, args, msg);
+        if (cmdLower == "dismiss") return handleDismiss(loc, args, msg, false);
         if (cmdLower == "game")    return handleGame(loc, args, msg);
         if (cmdLower == "log")     return handleLog(loc, args, msg);
         if (cmdLower == "group")   return handleGroup(loc, args, msg);
@@ -420,6 +429,95 @@ private:
     }
 
     // ─── Command Handlers ────────────────────────────────────
+
+    std::string handleIdentityBind(const std::string& rawArgs, const Message& msg) {
+        using identity::BindingStore;
+        using identity::Kind;
+        std::istringstream input(trim(rawArgs)); std::string first, arg; input >> first >> arg;
+        Kind kind = msg.type == MessageType::kPrivate ? Kind::User : Kind::Group;
+        if (toLower(first) == "qq") { kind = Kind::User; }
+        else if (toLower(first) == "qqgroup") { kind = Kind::Group; }
+        else { arg = first; }
+        const std::string transport = msg.extra.value("__identity_transport", std::string());
+        auto& bindings = BindingStore::instance();
+        if (arg.empty())
+            return "用法：\n.bind qq <真实QQ号>\n.bind qqgroup <真实群号>\n.bind [qq|qqgroup] <QQ-Official-机器人ID:OpenID>";
+
+        const bool sourceOfficial = transport == "qq_official";
+        const bool sourceOneBot = transport == "onebot_v11";
+        if (!sourceOfficial && !sourceOneBot)
+            return "当前适配器不支持 QQ 身份绑定。";
+
+        const bool chooseUser = kind == Kind::User;
+        const std::string local = msg.extra.value(chooseUser ? "__identity_local_sender" : "__identity_local_target", std::string());
+        const std::string current = chooseUser ? msg.senderId : msg.targetId;
+        if (local.empty() && sourceOfficial) return "未取得当前官方身份，无法绑定。";
+
+        if (BindingStore::isRealQQ(arg)) {
+            if (!sourceOfficial)
+                return "真实 QQ 号应在 QQ 官方机器人窗口中绑定。\n反向绑定请填写 QQ-Official-机器人ID:OpenID。";
+            std::string error;
+            if (!bindings.bindOfficialToQQ(db_, local, arg, kind, error)) return "绑定失败：\n" + error;
+            return std::string("绑定成功。\n当前官方") + (kind == Kind::Group ? "群" : "用户")
+                + "已关联到真实 QQ " + arg + "。\n未连接 OneBot 时也会保留该真实 QQ 身份。";
+        }
+
+        if (!BindingStore::isOfficialId(arg))
+            return "绑定目标格式不正确。\n真实 QQ 号只能是数字。\n官方标识应为 QQ-Official-机器人ID:OpenID。";
+        if (!bindings.isKnownOfficial(db_, arg, kind))
+            return "绑定失败：未发现这个官方" + std::string(kind == Kind::Group ? "群" : "用户")
+                + "标识。\n请先让对应官方机器人在该群/私聊收到一条消息。\n不能空绑定 QQ-Official-xxx。";
+
+        std::string error;
+        if (sourceOneBot) {
+            if (!BindingStore::isRealQQ(current)) return "当前 OneBot 会话没有有效的真实 QQ 号。";
+            if (!bindings.bindOfficialToCurrentQQ(db_, arg, current, kind, error)) return "绑定失败：\n" + error;
+            return "绑定成功。\n当前真实 QQ 会话已关联到：\n" + arg;
+        }
+        if (!BindingStore::isRealQQ(current)) return "当前窗口没有可绑定的真实/虚拟 QQ 号。";
+        if (!bindings.bindOfficialToCurrentQQ(db_, arg, current, kind, error)) return "绑定失败：\n" + error;
+        return "绑定成功。\n当前窗口已关联到：\n" + arg;
+    }
+
+    std::string handleIdentityInfo(const std::string& args, const Message& msg) {
+        using identity::BindingStore; using identity::Kind;
+        const std::string selector = toLower(trim(args));
+        const Kind scope = selector == "qq" ? Kind::User : selector == "qqgroup" ? Kind::Group
+            : (msg.type == MessageType::kPrivate ? Kind::User : Kind::Group);
+        const std::string id = scope == Kind::User ? msg.senderId : msg.targetId;
+        const std::string transport = msg.extra.value("__identity_transport", std::string());
+        std::ostringstream out;
+        out << "当前窗口信息\n";
+        out << "类型：" << (scope == Kind::Group ? "群聊" : "私聊用户") << "\n";
+        out << "规范标识：" << BindingStore::qualified(scope, id) << "\n";
+        out << "业务号码：" << id << (BindingStore::isVirtual(id) ? "（虚拟 QQ 号，尚未绑定真实 QQ）" : "") << "\n";
+        const auto endpoints = BindingStore::instance().endpoints(db_, id, scope);
+        if (!endpoints.empty()) {
+            out << "已绑定端点：\n";
+            for (const auto& endpoint : endpoints) {
+                if (endpoint.adapterType == "qq_official") {
+                    out << "- QQ 官方机器人 " << endpoint.adapterAccount << "："
+                        << BindingStore::officialId(endpoint.adapterAccount, endpoint.endpointId) << "\n";
+                } else {
+                    out << "- " << endpoint.adapterType << "（适配器 " << endpoint.adapterAccount
+                        << "）：" << endpoint.endpointId << "\n";
+                }
+            }
+        }
+        if (transport == "qq_official") {
+            const std::string bot = msg.extra.value("official_bot_id", std::string());
+            const std::string raw = msg.extra.value(scope == Kind::Group ? "__identity_native_target" : "__identity_native_sender", std::string());
+            const std::string official = BindingStore::officialId(bot, raw);
+            out << "官方来源：QQ 官方机器人 / " << bot << " / " << raw << "\n";
+            out << "官方标识：" << official << "\n";
+            out << "绑定指引：\n.bind " << (scope == Kind::Group ? "qqgroup " : "qq ") << "<真实QQ号>\n";
+            out << "提示：群内用 .info qq 查看当前发言者的官方 OpenID。";
+        } else {
+            out << "来源适配器：" << (transport.empty() ? msg.platform : transport) << "\n";
+            out << "反向绑定示例：\n.bind " << (scope == Kind::Group ? "qqgroup " : "qq ") << "QQ-Official-机器人ID:OpenID";
+        }
+        return out.str();
+    }
 
     /// Detect & handle a roll command (".r", ".rh", ".rs", ".r3d6", ".r3d6 攻击").
     /// Returns nullopt if `cmd` is not a roll command (so other handlers run).
@@ -5621,18 +5719,18 @@ private:
         return i18n_.tr(loc, "fun.nn.set", {{"old", oldName}, {"new", name}});
     }
 
-    std::string handleDismiss(Locale loc, const std::string&, const Message& msg) {
+    std::string handleDismiss(Locale loc, const std::string&, const Message& msg, bool silent = false) {
         if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "dismiss.private");
         // C#48：原版 .dismiss 仅 群管理/群主/邀请人/信任>2 可用（DiceEvent.cpp:955-964）。
         if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
-        // C#62：指令退群 —— 先回退群宣言（本函数返回值），从此刻起本群禁响应一切指令
-        //（isBlocked 检查 "leaving"），随机 10~60 秒后真正退群。不删除群记录，退群后
-        // 标记 "left"（群组管理显示「已退群」）。
+        // C#62：指令退群 —— 普通状态先回退群宣言，再随机延时退群。彻底禁用时
+        // 不应在群内产生任何可见回复，改为静默立即退群。
         setGroupSetting(msg, "leaving", "1");
         static thread_local std::mt19937 rng{std::random_device{}()};
-        int delay = std::uniform_int_distribution<int>(10, 60)(rng);
+        int delay = silent ? 0 : std::uniform_int_distribution<int>(10, 60)(rng);
         const std::string plat = msg.platform, gid = msg.targetId, aid = msg.adapterId;
-        DICE_LOG_INFO("C#62 .dismiss：群 {} 已发退群宣言，{} 秒后退群（期间静默）", gid, delay);
+        DICE_LOG_INFO("C#62 .dismiss：群 {} {}，{} 秒后退群", gid,
+                      silent ? "完全禁用状态下静默执行" : "已发退群宣言", delay);
         drogon::app().getLoop()->runAfter(static_cast<double>(delay), [this, plat, gid, aid]() {
             auto a = adapters_.getAdapter(aid);
             if (!a || !a->isConnected())
@@ -5647,7 +5745,7 @@ private:
                 "\xe6\x8c\x87\xe4\xbb\xa4\xe9\x80\x80\xe7\xbe\xa4\xef\xbc\x9a\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe7\xbe\xa4 " + gid,
                 plat, gid, "dismiss");
         });
-        return i18n_.tr(loc, "dismiss.leaving");
+        return silent ? "" : i18n_.tr(loc, "dismiss.leaving");
     }
 
     // ─── .ri / .init 先攻（DND/COC，三系都有）────────────────

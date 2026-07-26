@@ -41,6 +41,28 @@ struct DiceConfigRow {
     std::string value;         // JSON-encoded
 };
 
+/// A stable logical QQ identity. publicId is always a numeric QQ/群号: a real
+/// number when known, otherwise a reserved virtual number for QQ Official.
+struct IdentityRow {
+    int id = 0;
+    std::string kind;          // "user" | "group"
+    std::string publicId;      // real QQ number or reserved virtual number
+    bool isVirtual = true;
+    std::string createdAt;
+};
+
+/// A platform endpoint attached to an IdentityRow.  Official OpenIDs are kept
+/// in endpointId and never mixed into the public QQ/群号 field.
+struct IdentityEndpointRow {
+    int id = 0;
+    int identityId = 0;
+    std::string kind;          // "user" | "group"
+    std::string adapterType;   // e.g. onebot_v11 / qq_official
+    std::string adapterAccount;// QQ Official AppID; OneBot adapter id
+    std::string endpointId;    // raw QQ number or official OpenID
+    std::string createdAt;
+};
+
 /// Deck / card collection table.
 struct DeckRow {
     int id = 0;
@@ -363,6 +385,22 @@ private:
             orm::make_column("key", &DiceConfigRow::key,
                 orm::unique()),
             orm::make_column("value", &DiceConfigRow::value)
+        ),
+        orm::make_table("identities",
+            orm::make_column("id", &IdentityRow::id, orm::primary_key().autoincrement()),
+            orm::make_column("kind", &IdentityRow::kind),
+            orm::make_column("public_id", &IdentityRow::publicId),
+            orm::make_column("is_virtual", &IdentityRow::isVirtual),
+            orm::make_column("created_at", &IdentityRow::createdAt)
+        ),
+        orm::make_table("identity_endpoints",
+            orm::make_column("id", &IdentityEndpointRow::id, orm::primary_key().autoincrement()),
+            orm::make_column("identity_id", &IdentityEndpointRow::identityId),
+            orm::make_column("kind", &IdentityEndpointRow::kind),
+            orm::make_column("adapter_type", &IdentityEndpointRow::adapterType),
+            orm::make_column("adapter_account", &IdentityEndpointRow::adapterAccount),
+            orm::make_column("endpoint_id", &IdentityEndpointRow::endpointId),
+            orm::make_column("created_at", &IdentityEndpointRow::createdAt)
         ),
         orm::make_table("decks",
             orm::make_column("id", &DeckRow::id,

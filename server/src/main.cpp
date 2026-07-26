@@ -30,6 +30,7 @@
 #include "adapter/adapter_interface.h"
 #include "adapter/adapter_manager.h"
 #include "adapter/onebot_v11_adapter.h"
+#include "adapter/qq_official_adapter.h"
 #include "core/command_router.h"
 #include "core/causal/causal_rule_manager.h"
 #include "core/causal/cooldown_manager.h"
@@ -1855,7 +1856,10 @@ static int realMain(int argc, char* argv[]) {
                     row.endpoint       = a.value("endpoint", std::string(""));
                     row.accessToken    = a.value("access_token", std::string(""));
                     row.enabled        = a.value("enabled", false);
-                    row.config         = "{}";
+                    row.config         = (row.type == static_cast<int>(dice::AdapterType::kQQOfficial))
+                        ? nlohmann::json{{"appId", a.value("app_id", a.value("appId", std::string()))},
+                                         {"appSecret", a.value("app_secret", a.value("appSecret", std::string()))}}.dump()
+                        : "{}";
                     st->insert(row);
                 }
                 DICE_LOG_INFO("Seeded {} adapter(s) from config into database",
@@ -1866,10 +1870,20 @@ static int realMain(int argc, char* argv[]) {
         auto adapters = st->get_all<dice::AdapterRow>();
         for (auto& row : adapters) {
             if (row.enabled) {
-                std::string mode = (row.connectionMode == 1) ? "reverse_ws" : (row.connectionMode == 2) ? "http" : "forward_ws";
-                auto adapter = std::make_shared<dice::OneBotV11Adapter>(std::to_string(row.id));
-                adapter->configure({{"name", row.name}, {"endpoint", row.endpoint},
-                    {"accessToken", row.accessToken}, {"connectionMode", mode}});
+                dice::AdapterPtr adapter;
+                if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
+                    auto c = nlohmann::json::parse(row.config, nullptr, false);
+                    auto qq = std::make_shared<dice::QQOfficialAdapter>(std::to_string(row.id));
+                    qq->configure({{"name", row.name}, {"appId", c.value("appId", std::string())},
+                                   {"appSecret", c.value("appSecret", std::string())}});
+                    adapter = qq;
+                } else {
+                    std::string mode = (row.connectionMode == 1) ? "reverse_ws" : (row.connectionMode == 2) ? "http" : "forward_ws";
+                    auto onebot = std::make_shared<dice::OneBotV11Adapter>(std::to_string(row.id));
+                    onebot->configure({{"name", row.name}, {"endpoint", row.endpoint},
+                        {"accessToken", row.accessToken}, {"connectionMode", mode}});
+                    adapter = onebot;
+                }
                 adapterMgr.registerAdapter(adapter);
             }
         }

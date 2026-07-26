@@ -142,13 +142,19 @@ DiceNext $ver($build) — Windows $Architecture 盲测版使用说明
 2. 双击 dice-next-server.exe 启动服务器。首次启动会自动创建配置文件。
 3. 浏览器打开管理后台： http://localhost:$port
 
-【接入你的 QQ 机器人 (OneBot v11)】
+【接入 QQ 机器人】
+OneBot v11：
 方式 A（推荐，网页操作）：
   - 打开后台 → 左侧「适配器」→ 新建连接 →
     选 正向/反向 WS，填你的 OneBot 端点（如 NapCat/LLOneBot）与 Token → 保存并启用。
 方式 B（改配置文件）：
   - 编辑 config\default_config.json 里的 adapters，填好 endpoint / access_token，
     把 enabled 改为 true，重启即可。
+
+QQ 官方机器人 2.0：
+  - 打开后台 → 左侧「适配器」→ 新建连接 → 选「QQ 官方机器人 2.0」。
+  - 可填写 AppID 与 AppSecret，或点击「扫码绑定 QQ 官方机器人」并用手机 QQ 扫码。
+  - 该适配器使用官方 Gateway WebSocket，不需要配置 OneBot 或 Webhook。
 
 【试用】
   - 后台「测试台」可不连 QQ 直接发指令试回复。
