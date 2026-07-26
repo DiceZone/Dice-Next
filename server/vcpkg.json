@@ -4,6 +4,7 @@
   "builtin-baseline": "44819aa2a6c10e56065e2b0330e7d6c89d1d2574",
   "dependencies": [
     "drogon",
+    "openssl",
     "nlohmann-json",
     "sqlite-orm",
     "spdlog",

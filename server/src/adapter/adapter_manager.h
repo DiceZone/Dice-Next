@@ -6,6 +6,7 @@
 
 #include "adapter_interface.h"
 #include "../storage/database.h"
+#include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
 
 #include <map>
@@ -16,7 +17,7 @@ namespace dice {
 
 class AdapterManager {
 public:
-    explicit AdapterManager(Database& db) : db_(db) {}
+    explicit AdapterManager(Database& db) : db_(db) { identity::BindingStore::instance().attach(db_); }
 
     // ─── Lifecycle ───────────────────────────────────────────
 
@@ -103,8 +104,11 @@ public:
     /// Route an incoming message to all message handlers.
     /// Called by adapters when they receive a message.
     void routeMessage(const Message& msg) {
+        Message routed = msg;
+        normalizeIdentity(routed);
+        ensureInboundGroup(routed);
         for (auto& handler : messageHandlers_) {
-            handler(msg);
+            handler(routed);
         }
     }
 
@@ -134,6 +138,61 @@ public:
     }
 
 private:
+    void ensureInboundGroup(const Message& msg) {
+        if (msg.type != MessageType::kGroup || msg.targetId.empty()) return;
+        auto* st = db_.getStorage(); if (!st) return;
+        try {
+            auto rows = st->get_all<GroupSettingRow>(orm::where(
+                orm::c(&GroupSettingRow::platform) == msg.platform and
+                orm::c(&GroupSettingRow::groupId) == msg.targetId and
+                orm::c(&GroupSettingRow::key) == std::string("enabled")), orm::limit(1));
+            if (rows.empty()) { GroupSettingRow row; row.platform = msg.platform; row.groupId = msg.targetId; row.key = "enabled"; row.value = "1"; st->insert(row); }
+        } catch (...) {}
+    }
+    void normalizeIdentity(Message& msg) {
+        using identity::BindingStore;
+        using identity::Kind;
+        auto& bindings = BindingStore::instance();
+        if (msg.platform == "qq_official") {
+            const std::string botId = msg.extra.value("official_bot_id", std::string());
+            if (botId.empty()) return;
+            const Kind scope = msg.type == MessageType::kPrivate ? Kind::User : Kind::Group;
+            const std::string rawTarget = msg.targetId;
+            const std::string rawSender = msg.senderId;
+            const std::string localTarget = BindingStore::officialId(botId, rawTarget);
+            const std::string localSender = BindingStore::officialId(botId, rawSender);
+            const std::string publicTarget = bindings.observeOfficial(db_, botId, rawTarget, scope);
+            const std::string publicSender = bindings.observeOfficial(db_, botId, rawSender, Kind::User);
+            msg.extra["__identity_transport"] = "qq_official";
+            msg.extra["__identity_native_target"] = rawTarget;
+            msg.extra["__identity_native_sender"] = rawSender;
+            msg.extra["__identity_local_target"] = localTarget;
+            msg.extra["__identity_local_sender"] = localSender;
+            msg.extra["__identity_qualified_target"] = BindingStore::qualified(scope, publicTarget);
+            msg.extra["__identity_qualified_sender"] = BindingStore::qualified(Kind::User, publicSender);
+            msg.targetId = publicTarget;
+            msg.senderId = publicSender;
+            for (auto& at : msg.atList) {
+                if (at == msg.selfId) continue;
+                at = bindings.observeOfficial(db_, botId, at, Kind::User);
+            }
+            return;
+        }
+        if (msg.platform == "onebot_v11" && (msg.type == MessageType::kGroup || msg.type == MessageType::kPrivate)) {
+            const std::string rawTarget = msg.targetId;
+            const std::string rawSender = msg.senderId;
+            const Kind scope = msg.type == MessageType::kPrivate ? Kind::User : Kind::Group;
+            const std::string publicTarget = bindings.observeQQ(db_, "onebot_v11", msg.adapterId, rawTarget, scope);
+            const std::string publicSender = bindings.observeQQ(db_, "onebot_v11", msg.adapterId, rawSender, Kind::User);
+            msg.extra["__identity_transport"] = "onebot_v11";
+            msg.extra["__identity_native_target"] = rawTarget;
+            msg.extra["__identity_native_sender"] = rawSender;
+            msg.extra["__identity_qualified_target"] = BindingStore::qualified(scope, publicTarget);
+            msg.extra["__identity_qualified_sender"] = BindingStore::qualified(Kind::User, publicSender);
+            msg.targetId = publicTarget;
+            msg.senderId = publicSender;
+        }
+    }
     Database& db_;
     std::map<std::string, AdapterPtr> adapters_;
     std::vector<IAdapter::MessageCallback> messageHandlers_;

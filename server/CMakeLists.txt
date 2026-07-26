@@ -14,6 +14,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # drogon — HTTP framework with WebSocket
 find_package(Drogon REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # nlohmann/json — JSON parsing
 find_package(nlohmann_json REQUIRED)
@@ -128,6 +129,8 @@ target_compile_definitions(dice-next-server PRIVATE
 
 target_link_libraries(dice-next-server PRIVATE
     Drogon::Drogon
+    OpenSSL::Crypto
+    OpenSSL::SSL
     nlohmann_json::nlohmann_json
     sqlite_orm::sqlite_orm
     spdlog::spdlog
@@ -147,6 +150,7 @@ if(WIN32)
     # Windows: link additional system libraries for ReadDirectoryChangesW
     target_link_libraries(dice-next-server PRIVATE
         ws2_32
+        crypt32
     )
     # Application icon resource. Edition selects the logo: stable | dev.
     # Override with: cmake -DDICE_EDITION=dev ...  (default stable)

@@ -64,6 +64,22 @@ bool Database::open(const std::string& path) {
                         orm::unique()),
                     orm::make_column("value", &DiceConfigRow::value)
                 ),
+                orm::make_table("identities",
+                    orm::make_column("id", &IdentityRow::id, orm::primary_key().autoincrement()),
+                    orm::make_column("kind", &IdentityRow::kind),
+                    orm::make_column("public_id", &IdentityRow::publicId),
+                    orm::make_column("is_virtual", &IdentityRow::isVirtual),
+                    orm::make_column("created_at", &IdentityRow::createdAt)
+                ),
+                orm::make_table("identity_endpoints",
+                    orm::make_column("id", &IdentityEndpointRow::id, orm::primary_key().autoincrement()),
+                    orm::make_column("identity_id", &IdentityEndpointRow::identityId),
+                    orm::make_column("kind", &IdentityEndpointRow::kind),
+                    orm::make_column("adapter_type", &IdentityEndpointRow::adapterType),
+                    orm::make_column("adapter_account", &IdentityEndpointRow::adapterAccount),
+                    orm::make_column("endpoint_id", &IdentityEndpointRow::endpointId),
+                    orm::make_column("created_at", &IdentityEndpointRow::createdAt)
+                ),
                 // ── decks ──
                 orm::make_table("decks",
                     orm::make_column("id", &DeckRow::id,

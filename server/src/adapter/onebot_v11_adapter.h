@@ -1,4 +1,6 @@
 #pragma once
+
+#include "../core/identity/identity_binding.h"
 // ─── Dice!Next v3.0.0 — OneBot v11 Adapter ───────────────────
 // Implements the OneBot v11 protocol over WebSocket.
 //
@@ -1231,7 +1233,7 @@ private:
                 if (end != std::string::npos) {
                     json seg = parseCode(raw.substr(i + 1, end - i - 1));
                     if (seg.is_object() && seg.value("type", "") == "at") {
-                        std::string qq = seg["data"].value("qq", "");
+                        std::string qq = jsonField(seg["data"], "qq");
                         if (!qq.empty()) atList.push_back(qq);
                     }
                     i = end + 1;
@@ -1397,7 +1399,7 @@ private:
     }
 
     static int64_t parseId(const std::string& id) {
-        try { return std::stoll(id); } catch (...) { return 0; }
+        try { return std::stoll(identity::BindingStore::rawQQ(id)); } catch (...) { return 0; }
     }
 
     // ─── State ───────────────────────────────────────────────
