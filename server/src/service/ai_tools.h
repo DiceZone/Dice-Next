@@ -64,7 +64,7 @@ inline json toolDefs(ConfigManager& cfg) {
             {"value", {{"type", "string"}, {"description", "绝对值如 60，或相对增减如 +3 / -5"}}}
         }}, {"required", json::array({"name", "value"})}}}
     }}});
-    // C#83：执行任意骰子指令（含插件），把「所有指令」暴露给 AI 作为动作。
+    // 执行任意骰子指令（含插件），把「所有指令」暴露给 AI 作为动作。
     if (c.value("run_command", true)) arr.push_back({{"type", "function"}, {"function", {
         {"name", "run_command"},
         {"description", "执行一条骰子机器人指令并返回结果。当用户想用掷骰以外的功能（查询、检定、人物卡 .st、抽签/塔罗、jrrp、日程等任意指令/插件）时，把对应指令交给它执行，然后把结果自然转述给用户。指令可带或不带前缀。"},
@@ -72,7 +72,7 @@ inline json toolDefs(ConfigManager& cfg) {
             {"command", {{"type", "string"}, {"description", "完整指令，如 .st 力量60、.jrrp、.draw 塔罗、r 2d6+3"}}}
         }}, {"required", json::array({"command"})}}}
     }}});
-    // C#83：在帮助文档里搜索相关词条 —— 用户问「怎么用/有没有X功能」时。
+    // 在帮助文档里搜索相关词条 —— 用户问「怎么用/有没有X功能」时。
     if (c.value("search_help", true)) arr.push_back({{"type", "function"}, {"function", {
         {"name", "search_help"},
         {"description", "在帮助文档里搜索与关键词相关的指令/词条并返回。用户问某功能怎么用、有没有某个功能、某指令是什么时用它，再据结果解释。"},

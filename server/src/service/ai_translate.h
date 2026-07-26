@@ -1,5 +1,5 @@
 ﻿#pragma once
-// ─── Dice!Next — AI 回复翻译（C#68 阶段三）──────────────────────
+// ─── Dice!Next — AI 回复翻译（阶段三）──────────────────────
 // 骰主在 AI 页定义「自定义语言」（名称 + .lang 切换关键词，无需 i18n 文件）。某群/某
 // 用户 .lang 切到自定义语言后：回复先按正常语言链生成，发送前经大模型翻译成目标语言。
 // 范围可选（掷骰文本 / 自定义回复 / 插件结果）。同文本+同语言有内存缓存，避免重复计费。
@@ -30,7 +30,7 @@ inline json conf(ConfigManager& cfg) {
 inline bool enabled(ConfigManager& cfg) {
     return ai::enabled(cfg) && conf(cfg).value("enabled", false);
 }
-// C#78：某回复类别是否在翻译覆盖范围内（roll/deck/fun/custom/plugin）。默认全覆盖，
+// 某回复类别是否在翻译覆盖范围内（roll/deck/fun/custom/plugin）。默认全覆盖，
 // 兼容旧配置（旧的 scope_dice/reply/plugin → roll/custom/plugin）。
 inline bool covers(ConfigManager& cfg, const std::string& cat) {
     if (cat.empty()) return false;
@@ -84,7 +84,7 @@ inline bool pickModel(ConfigManager& cfg, ai::Model& out) {
 inline std::mutex& cacheMutex() { static std::mutex m; return m; }
 inline std::map<std::string, std::string>& cache() { static std::map<std::string, std::string> c; return c; }
 
-// C#81：内置翻译提示词（前端可查看/覆盖）。{lang} 会替换为目标语言名。
+// 内置翻译提示词（前端可查看/覆盖）。{lang} 会替换为目标语言名。
 inline std::string defaultPrompt() {
     return "你是 TRPG 跑团骰娘的翻译器。把用户给的骰娘回复翻译成「{lang}」。**原样保留所有数字、"
         "骰点表达式（如 D100=57）、成功/失败等级、@提及、[图片] 等方括号代码与占位符，不得改动"
@@ -108,7 +108,7 @@ inline std::string translate(ConfigManager& cfg, const std::string& targetLang, 
     if (!pickModel(cfg, m)) return text;
     DICE_LOG_INFO("[AI translate] start model={} lang={} text_len={}", m.id, targetLang, text.size());
 
-    // C#81：系统提示词优先用配置里的 prompt（前端可编辑，{lang} 占位）；留空则用内置默认。
+    // 系统提示词优先用配置里的 prompt（前端可编辑，{lang} 占位）；留空则用内置默认。
     std::string tpl = conf(cfg).value("prompt", std::string());
     if (tpl.empty()) tpl = defaultPrompt();
     std::string sys = fillLang(tpl, targetLang);
@@ -122,7 +122,7 @@ inline std::string translate(ConfigManager& cfg, const std::string& targetLang, 
     auto e = out.find_last_not_of(" \t\r\n");
     if (b == std::string::npos) return text;
     out = out.substr(b, e - b + 1);
-    // C#78：译文若丢失/改动了原文数字（骰点结果）→ 判为翻译不可靠，发原文。
+    // 译文若丢失/改动了原文数字（骰点结果）→ 判为翻译不可靠，发原文。
     if (!ai::preservesNumbers(text, out)) { DICE_LOG_WARN("[AI translate] numbers changed, falling back to original lang={}", targetLang); return text; }
     {
         std::lock_guard<std::mutex> lk(cacheMutex());

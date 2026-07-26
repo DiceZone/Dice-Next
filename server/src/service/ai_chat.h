@@ -49,7 +49,7 @@ inline std::string stripCodes(const std::string& s) {
                 else if (inner.rfind("CQ:record", 0) == 0) o += "[\xe8\xaf\xad\xe9\x9f\xb3]"; // [语音]
                 else if (inner.rfind("CQ:video", 0) == 0) o += "[\xe8\xa7\x86\xe9\xa2\x91]";  // [视频]
                 else if (inner.rfind("CQ:at", 0) == 0) o += "@";
-                // C#85：其它非标准码（reply/file/json/xml/forward 等）一律过滤丢弃
+                // 其它非标准码（reply/file/json/xml/forward 等）一律过滤丢弃
                 i = e + 1; continue;
             }
         }
@@ -58,7 +58,7 @@ inline std::string stripCodes(const std::string& s) {
     return o;
 }
 
-// C#85：用户自定义过滤词（dice/ai.chat.filters，字符串数组）。喂给 AI 前把这些内容
+// 用户自定义过滤词（dice/ai.chat.filters，字符串数组）。喂给 AI 前把这些内容
 // 从文本里删除（逐字面量出现全删）。用于滤掉水印、签名、特定占位符、刷屏词等。
 inline std::vector<std::string> filters(ConfigManager& cfg) {
     std::vector<std::string> v;
@@ -88,7 +88,7 @@ inline std::string defaultPrompt() {
         "之类的口癖或颜文字，也不要使用任何 emoji 或表情符号；不确定或不适合回应时，简短带过即可。";
 }
 
-// C#86：去除输出里的 emoji / 常见表情符号（默认骰娘对话不发 emoji，即使模型硬要发也过滤掉）。
+// 去除输出里的 emoji / 常见表情符号（默认骰娘对话不发 emoji，即使模型硬要发也过滤掉）。
 inline std::string stripEmoji(const std::string& s) {
     std::string o; o.reserve(s.size());
     size_t i = 0;
@@ -123,7 +123,7 @@ inline std::string stripEmoji(const std::string& s) {
 }
 inline bool noEmoji(ConfigManager& cfg) { return conf(cfg).value("no_emoji", true); }
 
-// C#87：触发种类 —— None(不回) / Strong(被@或命中关键词，必回、无视冷却) /
+// 触发种类 —— None(不回) / Strong(被@或命中关键词，必回、无视冷却) /
 // Standby(非@非关键词时，按 standby_prob 概率待机搭话，受冷却限制)。
 enum class Trigger { None, Strong, Standby };
 inline Trigger triggerKind(ConfigManager& cfg, const std::string& text, bool atMe) {
@@ -223,7 +223,7 @@ inline std::string generate(ConfigManager& cfg, const std::string& contextBlock,
         if (r.ok) reply = r.reply;
     }
     if (reply.empty()) return "";
-    if (noEmoji(cfg)) reply = stripEmoji(reply);   // C#86：默认不发 emoji
+    if (noEmoji(cfg)) reply = stripEmoji(reply);   // 默认不发 emoji
     if (reply.empty()) return "";
     return truncateChars(reply, maxChars);
 }

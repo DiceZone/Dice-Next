@@ -319,6 +319,13 @@ static JSValue jsNewCmdItemInfo(JSContext* ctx, JSValueConst, int, JSValueConst*
     JSValue cmd = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, cmd, "name", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, cmd, "help", JS_NewString(ctx, ""));
+    // 海豹 CmdItemInfo 默认字段（插件常读这些做条件判断，缺则 undefined）。
+    JS_SetPropertyStr(ctx, cmd, "allowDelegate",           JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, cmd, "disabledInPrivate",       JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, cmd, "enableExecuteTimesParse", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, cmd, "raw",                     JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, cmd, "checkCurrentBotOn",       JS_NewBool(ctx, 1));
+    JS_SetPropertyStr(ctx, cmd, "checkMentionOthers",      JS_NewBool(ctx, 0));
     return cmd;
 }
 static JSValue jsNewCmdExecuteResult(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -374,7 +381,7 @@ static JSValue jsRuleTemplate(JSContext* ctx, JSValueConst, int argc, JSValueCon
     }
     return JS_NewObject(ctx);
 }
-// C#7：coc.registerRule — 记当前插件为「规则类」，空操作返回 0。
+// coc.registerRule — 记当前插件为「规则类」，空操作返回 0。
 static JSValue jsRuleRegister(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     if (auto* m = mgrOf(ctx)) m->markCurrentRulePlugin();
     return JS_NewInt32(ctx, 0);
@@ -499,12 +506,21 @@ static JSValue jsBtoa(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
     return JS_NewString(ctx, b64encode(argc > 0 ? toStr(ctx, argv[0]) : "").c_str());
 }
 static JSValue jsAtob(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-    return JS_NewString(ctx, b64decode(argc > 0 ? toStr(ctx, argv[0]) : "").c_str());
+    std::string s = argc > 0 ? toStr(ctx, argv[0]) : "";
+    // 海豹语义：先剥离 data:*;base64, 前缀（dice_jsvm.go atob）。
+    if (auto p = s.find(";base64,"); p != std::string::npos && s.rfind("data:", 0) == 0) s = s.substr(p + 8);
+    return JS_NewString(ctx, b64decode(s).c_str());
 }
 static JSValue jsGetVersion(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     JSValue o = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, o, "version", JS_NewString(ctx, "Dice!Next-3.0"));
+    JS_SetPropertyStr(ctx, o, "versionSimple", JS_NewString(ctx, "3.0.0"));
     JS_SetPropertyStr(ctx, o, "versionCode", JS_NewInt32(ctx, 30000));
+    JSValue d = JS_NewObject(ctx);   // 海豹 versionDetail{major,minor,patch}
+    JS_SetPropertyStr(ctx, d, "major", JS_NewInt32(ctx, 3));
+    JS_SetPropertyStr(ctx, d, "minor", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, d, "patch", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, o, "versionDetail", d);
     return o;
 }
 
@@ -558,7 +574,7 @@ static JSValue jsVarStrGet(JSContext* ctx, JSValueConst, int argc, JSValueConst*
         std::string nick = getStrProp(ctx, player, "name"); JS_FreeValue(ctx, player);
         return pairVal(ctx, JS_NewString(ctx, nick.c_str()), !nick.empty());
     }
-    // C#37：无 $ 前缀名先看人物卡的「关联/表达式属性」(.st 物防='dex+1')，让海豹规则
+    // 无 $ 前缀名先看人物卡的「关联/表达式属性」(.st 物防='dex+1')，让海豹规则
     // 插件 strGet 读到原文表达式（如最终物语据此联动算物防）；没有再走 KV。
     if (isCardAttrName(name) && m->hasCardStrBridge()) {
         std::string plat, uid, gid; ctxIds(ctx, argv[0], plat, uid, gid);
@@ -704,18 +720,68 @@ static JSValue jsGetTmplCfg(JSContext* ctx, JSValueConst, int argc, JSValueConst
     return jsonToArr(ctx, m->kvGet(cfgKey(ctx, argv[0], toStr(ctx, argv[1])), "[]"));
 }
 static JSValue jsGetOptCfg(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) { return jsGetStrCfg(ctx, JS_UNDEFINED, argc, argv); }
-static JSValue jsNewConfigItem(JSContext* ctx, JSValueConst, int, JSValueConst*) { return JS_NewObject(ctx); }
-static JSValue jsRegisterConfig(JSContext*, JSValueConst, int, JSValueConst*) { return JS_UNDEFINED; }
+// newConfigItem(key, default[, desc]) / newConfigItem(ext, key, default[, desc])
+// → 海豹 ConfigItem 对象，供随后 registerConfig(ext, ...items) 批量注册。
+static JSValue jsNewConfigItem(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    int i = (argc > 0 && JS_IsObject(argv[0]) && !JS_IsArray(argv[0])) ? 1 : 0;   // 跳过可选的 ext 参数
+    JSValue item = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, item, "key", JS_NewString(ctx, (argc > i) ? toStr(ctx, argv[i]).c_str() : ""));
+    if (argc > i + 1) {
+        JSValueConst dv = argv[i + 1];
+        JS_SetPropertyStr(ctx, item, "defaultValue", JS_DupValue(ctx, dv));
+        JS_SetPropertyStr(ctx, item, "value",        JS_DupValue(ctx, dv));
+        const char* type = "string";
+        if (JS_IsBool(dv)) type = "bool";
+        else if (JS_IsNumber(dv)) { double d = 0; JS_ToFloat64(ctx, &d, dv); type = (d == (double)(long long)d) ? "int" : "float"; }
+        else if (JS_IsArray(dv)) type = "template";
+        JS_SetPropertyStr(ctx, item, "type", JS_NewString(ctx, type));
+    }
+    if (argc > i + 2 && JS_IsString(argv[i + 2])) JS_SetPropertyStr(ctx, item, "description", JS_DupValue(ctx, argv[i + 2]));
+    return item;
+}
+static JSValue jsRegisterConfig(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    auto* m = mgrOf(ctx); if (!m || argc < 2) return JS_UNDEFINED;
+    std::string ext = getStrProp(ctx, argv[0], "name");
+    for (int i = 1; i < argc; ++i) {
+        if (!JS_IsObject(argv[i])) continue;
+        std::string key = getStrProp(ctx, argv[i], "key");
+        if (key.empty()) continue;
+        std::string type = getStrProp(ctx, argv[i], "type"); if (type.empty()) type = "string";
+        JSValue dv = JS_GetPropertyStr(ctx, argv[i], "defaultValue");
+        if (JS_IsUndefined(dv)) { JS_FreeValue(ctx, dv); dv = JS_GetPropertyStr(ctx, argv[i], "value"); }
+        std::string def = (type == "template" && JS_IsArray(dv)) ? jsArrToJson(ctx, dv) : toStr(ctx, dv);
+        JS_FreeValue(ctx, dv);
+        std::string desc = getStrProp(ctx, argv[i], "description");
+        cfgDefault(m, "cfg:" + ext + ":" + key, def);
+        m->addConfig(ext, key, type, def, desc, "");
+    }
+    return JS_UNDEFINED;
+}
+// 海豹 getConfig 返回 ConfigItem 对象（插件常读 .value）；保留 value 为字符串兼容旧读法。
 static JSValue jsGetConfig(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-    auto* m = mgrOf(ctx); if (!m || argc < 2) return JS_NewString(ctx, "");
-    return JS_NewString(ctx, m->kvGet(cfgKey(ctx, argv[0], toStr(ctx, argv[1]))).c_str());
+    auto* m = mgrOf(ctx); if (!m || argc < 2) return JS_NewObject(ctx);
+    std::string key = toStr(ctx, argv[1]);
+    std::string val = m->kvGet(cfgKey(ctx, argv[0], key));
+    JSValue o = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, o, "key",   JS_NewString(ctx, key.c_str()));
+    JS_SetPropertyStr(ctx, o, "value", JS_NewString(ctx, val.c_str()));
+    return o;
 }
 
-// ─── seal.deck.draw ──────────────────────────────────────────
+// ─── seal.deck.draw → 海豹返回对象 {exists,err,result} ────────
 static JSValue jsDeckDraw(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
-    auto* m = mgrOf(ctx); if (!m || argc < 2) return JS_NewString(ctx, "");
-    bool shuffle = argc >= 3 ? JS_ToBool(ctx, argv[2]) : false;
-    return JS_NewString(ctx, m->drawDeck(toStr(ctx, argv[1]), shuffle).c_str());
+    JSValue o = JS_NewObject(ctx);
+    auto* m = mgrOf(ctx);
+    std::string result;
+    if (m && argc >= 2) result = m->drawDeck(toStr(ctx, argv[1]), argc >= 3 ? JS_ToBool(ctx, argv[2]) : false);
+    JS_SetPropertyStr(ctx, o, "exists", JS_NewBool(ctx, !result.empty()));
+    JS_SetPropertyStr(ctx, o, "err",    JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, o, "result", JS_NewString(ctx, result.c_str()));
+    return o;
+}
+// seal.getEndPoints() → 数组（插件常 .forEach/.map；至少返回空数组避免崩）。
+static JSValue jsGetEndPoints(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    return JS_NewArray(ctx);
 }
 
 // ─── JsPluginManager ─────────────────────────────────────────
@@ -899,6 +965,7 @@ void JsPluginManager::installGlobals() {
     JS_SetPropertyStr(ctx_, g, "btoa", JS_NewCFunction(ctx_, jsBtoa, "btoa", 1));
     JS_SetPropertyStr(ctx_, g, "atob", JS_NewCFunction(ctx_, jsAtob, "atob", 1));
     JS_SetPropertyStr(ctx_, g, "fetch", JS_NewCFunction(ctx_, jsFetch, "fetch", 2));
+    JS_SetPropertyStr(ctx_, g, "__dirname", JS_NewString(ctx_, ""));   // 海豹占位，防打包插件读 undefined
 
     JSValue ext = JS_NewObject(ctx_);
     JS_SetPropertyStr(ctx_, ext, "new",                 JS_NewCFunction(ctx_, jsExtNew, "new", 3));
@@ -923,6 +990,7 @@ void JsPluginManager::installGlobals() {
     JS_SetPropertyStr(ctx_, ext, "getBoolConfig",          JS_NewCFunction(ctx_, jsGetBoolCfg, "getBoolConfig", 2));
     JS_SetPropertyStr(ctx_, ext, "getTemplateConfig",      JS_NewCFunction(ctx_, jsGetTmplCfg, "getTemplateConfig", 2));
     JS_SetPropertyStr(ctx_, ext, "getOptionConfig",        JS_NewCFunction(ctx_, jsGetOptCfg, "getOptionConfig", 2));
+    JS_SetPropertyStr(ctx_, ext, "unregisterConfig",       JS_NewCFunction(ctx_, jsNoop, "unregisterConfig", 1));
 
     JSValue seal = JS_NewObject(ctx_);
     JS_SetPropertyStr(ctx_, seal, "ext", ext);
@@ -939,6 +1007,9 @@ void JsPluginManager::installGlobals() {
     JS_SetPropertyStr(ctx_, vars, "intSet", JS_NewCFunction(ctx_, jsVarIntSet, "intSet", 3));
     JS_SetPropertyStr(ctx_, vars, "strGet", JS_NewCFunction(ctx_, jsVarStrGet, "strGet", 2));
     JS_SetPropertyStr(ctx_, vars, "strSet", JS_NewCFunction(ctx_, jsVarStrSet, "strSet", 3));
+    // computedGet/Set：v1 近似为字符串变量存取（暂无完整 rollvm 求值），保证不崩。
+    JS_SetPropertyStr(ctx_, vars, "computedGet", JS_NewCFunction(ctx_, jsVarStrGet, "computedGet", 2));
+    JS_SetPropertyStr(ctx_, vars, "computedSet", JS_NewCFunction(ctx_, jsVarStrSet, "computedSet", 3));
     JS_SetPropertyStr(ctx_, seal, "vars", vars);
     JSValue deck = JS_NewObject(ctx_);
     JS_SetPropertyStr(ctx_, deck, "draw",   JS_NewCFunction(ctx_, jsDeckDraw, "draw", 3));
@@ -960,7 +1031,7 @@ void JsPluginManager::installGlobals() {
     JS_SetPropertyStr(ctx_, seal, "memberKick", JS_NewCFunction(ctx_, jsMemberKick, "memberKick", 3));
     JS_SetPropertyStr(ctx_, seal, "applyPlayerGroupCardByTemplate", JS_NewCFunction(ctx_, jsNoop, "applyPlayerGroupCardByTemplate", 2));
     JS_SetPropertyStr(ctx_, seal, "newMessage", JS_NewCFunction(ctx_, jsNewObj, "newMessage", 0));
-    JS_SetPropertyStr(ctx_, seal, "getEndPoints", JS_NewCFunction(ctx_, jsNewObj, "getEndPoints", 0));
+    JS_SetPropertyStr(ctx_, seal, "getEndPoints", JS_NewCFunction(ctx_, jsGetEndPoints, "getEndPoints", 0));
     JS_SetPropertyStr(ctx_, seal, "getCtxProxyFirst", JS_NewCFunction(ctx_, jsGetCtxProxy, "getCtxProxyFirst", 2));
     JS_SetPropertyStr(ctx_, seal, "getCtxProxyAtPos", JS_NewCFunction(ctx_, jsGetCtxProxy, "getCtxProxyAtPos", 3));
     JS_SetPropertyStr(ctx_, seal, "createTempCtx", JS_NewCFunction(ctx_, jsCreateTempCtx, "createTempCtx", 2));
@@ -1005,7 +1076,7 @@ int JsPluginManager::loadDir(const std::string& dir) {
 int JsPluginManager::loadDirLocked(const std::string& dir) {
     JS_UpdateStackTop(rt_);   // (re)load may run on a worker thread; re-baseline first
     dir_ = dir;   // remember for WebUI management (upload/toggle/delete + reload)
-    // C#7：规则类插件目录 data/mod（主目录的祖父目录 / mod），与主目录一并扫描。
+    // 规则类插件目录 data/mod（主目录的祖父目录 / mod），与主目录一并扫描。
     modDir_ = (fs::path(dir).parent_path().parent_path() / "mod").string();
     rulePluginFiles_.clear();
     gameSystemTemplates_.clear();
@@ -1032,7 +1103,7 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
     };
     scan(dir, false);
     if (!modDir_.empty() && modDir_ != dir) scan(modDir_, true);
-    for (auto& ed : extraDirs_) scan(ed, false);   // C#27：规则包附加 js 目录
+    for (auto& ed : extraDirs_) scan(ed, false);   // 规则包附加 js 目录
     if (entries.empty()) return 0;
 
     // Pass 2: de-dupe by @name (NOT filename) — only the highest @version of each
@@ -1076,7 +1147,7 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
         loadingFile_.clear();
     }
 
-    // C#7：eval 后 rulePluginFiles_ 已填好 → 标记规则类，并把仍在主目录的规则类插件
+    // eval 后 rulePluginFiles_ 已填好 → 标记规则类，并把仍在主目录的规则类插件
     // 迁移到 data/mod（已加载在内存，移动文件不影响本次运行；下次 reload 从 mod 加载）。
     for (auto& p : plugins_) if (rulePluginFiles_.count(p.file)) p.ruleCompat = true;
     if (!modDir_.empty() && modDir_ != dir) {
@@ -1306,7 +1377,7 @@ std::vector<JsPluginManager::PluginMeta> JsPluginManager::listAll() const {
     return out;
 }
 
-// C#7：定位某插件文件实际所在目录（主目录或 data/mod），找不到则回退主目录。
+// 定位某插件文件实际所在目录（主目录或 data/mod），找不到则回退主目录。
 std::string JsPluginManager::dirForFile(const std::string& file) const {
     std::lock_guard<std::mutex> lk(mutex_);
     std::error_code ec;
@@ -1430,7 +1501,7 @@ void JsPluginManager::buildCtxMsg(const std::string& platform, const std::string
                                   JSValue& outCtx, JSValue& outMsg) {
     JSValue jctx = JS_NewObject(ctx_);
     JSValue player = JS_NewObject(ctx_);
-    // D#01：群名片（沿用 SealDice 语义：player.name = 群名片/显示名，非群或无名片时回退 QQ 昵称）。
+    // 群名片（沿用 SealDice 语义：player.name = 群名片/显示名，非群或无名片时回退 QQ 昵称）。
     // OneBot 入站 sender.card 是当前消息的权威值；成员缓存只作为合成消息的兜底。
     std::string groupCard = incomingCard;
     if (groupCard.empty() && cardNameResolver_ && !groupId.empty())
@@ -1464,6 +1535,12 @@ void JsPluginManager::buildCtxMsg(const std::string& platform, const std::string
     JS_SetPropertyStr(ctx_, jctx, "delegateText", JS_NewString(ctx_, ""));
     JSValue endPoint = JS_NewObject(ctx_);
     JS_SetPropertyStr(ctx_, endPoint, "platform", JS_NewString(ctx_, platform.c_str()));
+    // 海豹 EndPointInfo 常用字段（插件读 endPoint.userId 判「是否 @ 骰子自己」等，缺则 undefined）。
+    JS_SetPropertyStr(ctx_, endPoint, "id",       JS_NewString(ctx_, platform.c_str()));
+    JS_SetPropertyStr(ctx_, endPoint, "userId",   JS_NewString(ctx_, selfId_.c_str()));
+    JS_SetPropertyStr(ctx_, endPoint, "nickname", JS_NewString(ctx_, selfNick_.c_str()));
+    JS_SetPropertyStr(ctx_, endPoint, "state",    JS_NewInt32(ctx_, 1));
+    JS_SetPropertyStr(ctx_, endPoint, "enable",   JS_NewBool(ctx_, 1));
     JS_SetPropertyStr(ctx_, jctx, "endPoint", endPoint);
 
     JSValue jmsg = JS_NewObject(ctx_);
@@ -1479,7 +1556,7 @@ void JsPluginManager::buildCtxMsg(const std::string& platform, const std::string
     JSValue sender = JS_NewObject(ctx_);
     JS_SetPropertyStr(ctx_, sender, "userId", JS_NewString(ctx_, userId.c_str()));
     JS_SetPropertyStr(ctx_, sender, "nickname", JS_NewString(ctx_, nickname.c_str()));
-    JS_SetPropertyStr(ctx_, sender, "card", JS_NewString(ctx_, groupCard.c_str()));   // D#01：群名片
+    JS_SetPropertyStr(ctx_, sender, "card", JS_NewString(ctx_, groupCard.c_str()));   // 群名片
     JS_SetPropertyStr(ctx_, jmsg, "sender", sender);
     outCtx = jctx; outMsg = jmsg;
 }
@@ -1540,7 +1617,7 @@ JsPluginManager::Result JsPluginManager::handle(const std::string& platform, con
     // 实时在所有已注册 ext 的 cmdMap 里找指令名。
     JSValue cmd = JS_UNDEFINED;
     for (auto& e : exts_) {
-        // 插件分群启停（C#27 地基）：该源文件在本群被禁用 → 跳过其全部指令。
+        // 插件分群启停（地基）：该源文件在本群被禁用 → 跳过其全部指令。
         if (groupGate_ && !groupId.empty() && !e.second.empty()
             && !groupGate_(platform, groupId, "js:" + e.second)) continue;
         JSValue cmdMap = JS_GetPropertyStr(ctx_, e.first, "cmdMap");
@@ -1563,6 +1640,15 @@ JsPluginManager::Result JsPluginManager::handle(const std::string& platform, con
     JS_SetPropertyStr(ctx_, jargs, "command", JS_NewString(ctx_, word.c_str()));
     JS_SetPropertyStr(ctx_, jargs, "rawArgs", JS_NewString(ctx_, rest.c_str()));
     JS_SetPropertyStr(ctx_, jargs, "cleanArgs", JS_NewString(ctx_, rest.c_str()));
+    JS_SetPropertyStr(ctx_, jargs, "rawText", JS_NewString(ctx_, cmdLine.c_str()));   // 海豹：原始整条命令
+    // specialExecuteTimes：连骰「N#」前缀（海豹 cmd_parse.go），如 ".r 3# 1d6"。
+    int execTimes = 1;
+    { size_t h = rest.find('#');
+      if (h != std::string::npos && h > 0 && h <= 3) {
+          bool allDigit = true; for (size_t j = 0; j < h; ++j) if (!isdigit((unsigned char)rest[j])) { allDigit = false; break; }
+          if (allDigit) { int n = atoi(rest.substr(0, h).c_str()); if (n >= 1 && n <= 99) execTimes = n; }
+      } }
+    JS_SetPropertyStr(ctx_, jargs, "specialExecuteTimes", JS_NewInt32(ctx_, execTimes));
     JSValue arr = JS_NewArray(ctx_);
     { std::istringstream iss(rest); std::string t; uint32_t i = 0;
       while (iss >> t) JS_SetPropertyUint32(ctx_, arr, i++, JS_NewString(ctx_, t.c_str())); }

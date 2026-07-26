@@ -1,5 +1,5 @@
 #pragma once
-// ─── Dice!Next — 模拟聊天图片本地化（C#65）────────────────────────
+// ─── Dice!Next — 模拟聊天图片本地化────────────────────────
 // 新版 NTQQ 图片资源 URL 需要 rkey 且很快失效，网页直接 <img src=QQ地址> 会 400/
 // 裂开。收到消息时趁 rkey 还新鲜，把远端图片下到 data/chat/images/，chat.db 里的
 // 图码改指向本站 /api/chat/images/<名>，网页永远从本骰子服务器取图。

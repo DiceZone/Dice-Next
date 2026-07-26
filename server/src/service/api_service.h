@@ -19,18 +19,19 @@
 #include "../core/mod/js_plugin_manager.h"
 #include "../core/mod/lua_plugin_manager.h"
 #include "../core/command_router.h"
+#include "../platform/system_info.h"
 #include "../i18n/i18n.h"
 #include "../common/types.h"
 #include "group_chat_buffer.h"
 #include "broadcast_manager.h"
 #include "log_service.h"
-#include "ai_gateway.h"     // C#67 AI 网关
-#include "ai_polish.h"      // C#68/C#81 润色（默认提示词）
-#include "ai_translate.h"   // C#68/C#81 翻译（默认提示词）
+#include "ai_gateway.h"     // AI 网关
+#include "ai_polish.h"      // 润色（默认提示词）
+#include "ai_translate.h"   // 翻译（默认提示词）
 #include "ai_chat.h"        // 智能化阶段A：对话（默认提示词）
 #include "ai_memory.h"      // 智能化阶段B：记忆（摘要默认提示词）
 #include "ai_npc.h"         // 智能化阶段E：NPC 扮演
-#include "ai_vision.h"      // C#85：多模态图像识别（默认提示词）
+#include "ai_vision.h"      // 多模态图像识别（默认提示词）
 #include "notice_manager.h" // B：通知系统（全局开关变更推送）
 #include "../storage/legacy_import_v2.h"
 #include "../core/causal/causal_rule_manager.h"
@@ -41,7 +42,7 @@
 #include <drogon/HttpAppFramework.h>
 #include <drogon/HttpRequest.h>
 #include <drogon/HttpResponse.h>
-#include <drogon/utils/Utilities.h>   // base64Encode（C#3 网页带图导出内嵌图片）
+#include <drogon/utils/Utilities.h>   // base64Encode（网页带图导出内嵌图片）
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <fstream>
@@ -180,6 +181,27 @@ static J replyToJson(const ReplyRuleRow& r) {
     };
 }
 
+// Host CPU / memory / disk snapshot for the dashboard server-info panel and the
+// live /api/system/sysinfo poll. Static hardware details are cached in gather().
+static J sysInfoJson() {
+    auto si = dice::sysinfo::gather();
+    J disks = J::array();
+    for (const auto& d : si.disks) {
+        disks.push_back(J{
+            {"mount", d.mount}, {"label", d.label}, {"fs", d.fs}, {"model", d.model},
+            {"total_gb", d.totalGB}, {"used_gb", d.usedGB}, {"load", d.loadPct},
+        });
+    }
+    return J{
+        {"os", si.os}, {"os_id", si.osId},
+        {"cpu_model", si.cpuModel}, {"cpu_cores", si.cpuCores}, {"cpu_physical", si.cpuPhysical},
+        {"cpu_mhz", si.cpuMhz}, {"cpu_load", si.cpuLoadPct},
+        {"mem_total_mb", si.memTotalMB}, {"mem_used_mb", si.memUsedMB}, {"mem_load", si.memLoadPct},
+        {"mem_speed_mhz", si.memSpeedMhz}, {"proc_mem_mb", si.procMemMB},
+        {"disks", disks},
+    };
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Public: register all API routes on the Drogon app
 // ═══════════════════════════════════════════════════════════════
@@ -247,7 +269,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         return p == std::string::npos ? f : f.substr(p + 1);
     };
     // 按 UTF-8 构造路径：Windows 上 narrow ifstream/ofstream 把路径当系统码页(中文=GBK)，
-    // 用它打开 UTF-8 的中文文件名会失败；改用 u8string 构造的 fs::path 即可正确开（C#35）。
+    // 用它打开 UTF-8 的中文文件名会失败；改用 u8string 构造的 fs::path 即可正确开。
     static auto u8p = [](const std::string& s) {
         return std::filesystem::path(std::u8string(s.begin(), s.end()));
     };
@@ -337,7 +359,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             std::string file = baseName(j.value("file", std::string()));
             bool enabled = j.value("enabled", true);
             if (file.empty()) { jsonReply(fail("file required"), std::move(cb)); return; }
-            std::string dir = jsMod.dirForFile(file);   // C#7：文件可能在 data/mod
+            std::string dir = jsMod.dirForFile(file);   // 文件可能在 data/mod
             namespace fs = std::filesystem;
             // Normalize to the base "*.js" name regardless of which form was sent.
             std::string base = file;
@@ -359,7 +381,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             auto j = J::parse(req->body());
             std::string file = baseName(j.value("file", std::string()));
             if (file.empty()) { jsonReply(fail("file required"), std::move(cb)); return; }
-            std::string dir = jsMod.dirForFile(file);   // C#7：文件可能在 data/mod
+            std::string dir = jsMod.dirForFile(file);   // 文件可能在 data/mod
             namespace fs = std::filesystem;
             std::error_code ec;
             fs::remove(fs::path(dir) / file, ec);  // remove exactly what was listed
@@ -412,7 +434,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // C#69：自响应消息（用骰娘账号自身发指令自控）。热更新到适配器静态开关。
+    // 自响应消息（用骰娘账号自身发指令自控）。热更新到适配器静态开关。
     app.registerHandler("/api/system/respond-self", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
@@ -426,7 +448,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // C#67：AI 模型管理（配置 dice/ai）。GET 取配置；PUT 规范化后保存。
+    // AI 模型管理（配置 dice/ai）。GET 取配置；PUT 规范化后保存。
     app.registerHandler("/api/system/ai", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
@@ -457,14 +479,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     }
                 }
                 out["models"] = ms;
-                // C#78：覆盖范围规范化（roll/deck/fun/custom/plugin）。
+                // 覆盖范围规范化（roll/deck/fun/custom/plugin）。
                 auto normCov = [](const J& src, bool defRoll, bool defOthers) {
                     const J& cv = (src.contains("cov") && src["cov"].is_object()) ? src["cov"] : J::object();
                     return J{{"roll", cv.value("roll", defRoll)}, {"deck", cv.value("deck", defOthers)},
                              {"fun", cv.value("fun", defOthers)}, {"custom", cv.value("custom", defOthers)},
                              {"plugin", cv.value("plugin", defOthers)}};
                 };
-                // C#78：全局请求参数。
+                // 全局请求参数。
                 J prm = (j.contains("params") && j["params"].is_object()) ? j["params"] : J::object();
                 out["params"] = J{
                     {"temperature", prm.value("temperature", 0.7)},
@@ -473,7 +495,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"frequency_penalty", prm.value("frequency_penalty", 0.0)},
                     {"presence_penalty", prm.value("presence_penalty", 0.0)}
                 };
-                // C#68/C#78：润色配置（enabled / model_id / mode text|rp / persona / cov）。
+                // 润色配置（enabled / model_id / mode text|rp / persona / cov）。
                 J pj = (j.contains("polish") && j["polish"].is_object()) ? j["polish"] : J::object();
                 std::string pmode = pj.value("mode", std::string("text"));
                 if (pmode != "text" && pmode != "rp") pmode = "text";
@@ -482,10 +504,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"model_id", pj.value("model_id", std::string())},
                     {"mode", pmode},
                     {"persona", pj.value("persona", std::string())},
-                    {"prompt", pj.value("prompt", std::string())},   // C#81：可编辑系统提示词（空=内置默认）
+                    {"prompt", pj.value("prompt", std::string())},   // 可编辑系统提示词（空=内置默认）
                     {"cov", normCov(pj, true, false)}
                 };
-                // C#68/C#78：翻译配置（enabled / model_id / cov / 自定义语言列表）。
+                // 翻译配置（enabled / model_id / cov / 自定义语言列表）。
                 J tj = (j.contains("translate") && j["translate"].is_object()) ? j["translate"] : J::object();
                 J langs = J::array();
                 if (tj.contains("langs") && tj["langs"].is_array()) {
@@ -503,7 +525,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 out["translate"] = J{
                     {"enabled", tj.value("enabled", false)},
                     {"model_id", tj.value("model_id", std::string())},
-                    {"prompt", tj.value("prompt", std::string())},   // C#81：可编辑翻译提示词（{lang} 占位，空=内置默认）
+                    {"prompt", tj.value("prompt", std::string())},   // 可编辑翻译提示词（{lang} 占位，空=内置默认）
                     {"cov", normCov(tj, true, true)},
                     {"langs", langs}
                 };
@@ -513,7 +535,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (chj.contains("keywords") && chj["keywords"].is_array())
                     for (auto& kw : chj["keywords"])
                         if (kw.is_string() && !kw.get<std::string>().empty()) ckws.push_back(kw);
-                J cfilters = J::array();   // C#85：用户自定义过滤词
+                J cfilters = J::array();   // 用户自定义过滤词
                 if (chj.contains("filters") && chj["filters"].is_array())
                     for (auto& fw : chj["filters"])
                         if (fw.is_string() && !fw.get<std::string>().empty()) cfilters.push_back(fw);
@@ -530,8 +552,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"max_chars", chj.value("max_chars", (long long)200)},
                     {"cooldown_sec", chj.value("cooldown_sec", (long long)5)},
                     {"reply_at", chj.value("reply_at", false)},
-                    {"no_emoji", chj.value("no_emoji", true)},   // C#86：默认不发 emoji
-                    {"filters", cfilters}                        // C#85：用户自定义过滤词
+                    {"no_emoji", chj.value("no_emoji", true)},   // 默认不发 emoji
+                    {"filters", cfilters}                        // 用户自定义过滤词
                 };
                 // 智能化阶段B/C：记忆配置（memory.short 滚动摘要 + memory.long 长期事实向量检索）。
                 J mmj = (j.contains("memory") && j["memory"].is_object()) ? j["memory"] : J::object();
@@ -570,8 +592,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"draw_deck", tlj.value("draw_deck", true)},
                     {"get_attr", tlj.value("get_attr", true)},
                     {"set_attr", tlj.value("set_attr", false)},        // AI深化：写卡（默认关，有风险）
-                    {"run_command", tlj.value("run_command", true)},   // C#83
-                    {"search_help", tlj.value("search_help", true)},   // C#83
+                    {"run_command", tlj.value("run_command", true)},   // 
+                    {"search_help", tlj.value("search_help", true)},   // 
                     {"max_rounds", (long long)tmr}
                 };
                 // 智能化阶段E：NPC 扮演配置（enabled + list[]）。
@@ -613,7 +635,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                                            {"is_group", e.value("is_group", true)}, {"name", e.value("name", std::string())}});
                     }
                 out["whitelist"] = J{{"enabled", wlj.value("enabled", false)}, {"list", wlList}};
-                // C#85：图像识别（多模态）配置。
+                // 图像识别（多模态）配置。
                 J vsj = (j.contains("vision") && j["vision"].is_object()) ? j["vision"] : J::object();
                 int vmi = vsj.value("max_images", 2); if (vmi < 1) vmi = 1; if (vmi > 4) vmi = 4;
                 out["vision"] = J{
@@ -668,7 +690,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 cur["vision"] = J{{"enabled", false}, {"model_id", std::string()}, {"prompt", std::string()}, {"max_images", 2}, {"pass_url", true}};
             else if (!cur["vision"].contains("pass_url"))
                 cur["vision"]["pass_url"] = true;
-            // C#81：内置默认提示词（只读参考，供前端「载入默认」按钮填入编辑框）。
+            // 内置默认提示词（只读参考，供前端「载入默认」按钮填入编辑框）。
             cur["defaults"] = J{
                 {"polish_text", dice::aipolish::defaultPromptText()},
                 {"polish_rp", dice::aipolish::defaultPromptRp()},
@@ -721,7 +743,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 return;
             }
             std::string kind = req->getParameter("kind"); if (kind.empty()) kind = "summary";
-            std::string fsid = req->getParameter("scope_id");   // C#84：可选，只看某群
+            std::string fsid = req->getParameter("scope_id");   // 可选，只看某群
             J arr = J::array();
             try {
                 auto rows = cst->get_all<AiMemoryRow>(
@@ -738,7 +760,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Post, drogon::Delete});
 
-    // C#67：连通性测试——用请求里给的模型配置（未保存也能测）或按 id 取已存模型，
+    // 连通性测试——用请求里给的模型配置（未保存也能测）或按 id 取已存模型，
     // 调一次 chat 返回样例回复 + 延迟 + token + 估算费用。不受总开关限制（便于配置时验证）。
     app.registerHandler("/api/system/ai/test", [&cfg](Req req, CB&& cb) {
         try {
@@ -761,7 +783,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // C#3：是否把日志内图片落地到本地（data/logs/images），供网页导出内嵌。
+    // 是否把日志内图片落地到本地（data/logs/images），供网页导出内嵌。
     app.registerHandler("/api/system/save-log-images", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
@@ -825,7 +847,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // ═══ C#28-B: Persona switching API ═══════════════════════════
+    // ═══ Persona switching API ═══════════════════════════
 
     // List all personas
     app.registerHandler("/api/personas", [&personaMgr](Req, CB&& cb) {
@@ -1022,7 +1044,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // C#3：图床配置（mode none/generic/local + url/file_field/headers/result_path/public_base）。
+    // 图床配置（mode none/generic/local + url/file_field/headers/result_path/public_base）。
     app.registerHandler("/api/system/image-host", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
@@ -1037,7 +1059,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // C#56：图片发送方式（base64 内嵌 / httpurl + 可配 host，默认 localhost:<端口>）。
+    // 图片发送方式（base64 内嵌 / httpurl + 可配 host，默认 localhost:<端口>）。
     app.registerHandler("/api/system/image-send", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
@@ -1358,7 +1380,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // C#46/C#49：已加载语言列表（内置 + i18n/ 目录的自定义翻译文件），供
+    // 已加载语言列表（内置 + i18n/ 目录的自定义翻译文件），供
     // 群语言下拉 / 指令列表语言切换等动态展示。[{code, name}]
     app.registerHandler("/api/i18n/locales", [&i18n](Req, CB&& cb) {
         J arr = J::array();
@@ -1406,7 +1428,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Get});
 
     // Import a legacy Dice! V2 [DiceData] folder.  POST {dir, overwrite?}.
-    // C#30: Enhanced — passes CardDeck/LuaPluginManager for reload, accepts overwrite option,
+    // Enhanced — passes CardDeck/LuaPluginManager for reload, accepts overwrite option,
     // returns structured ImportResult for decks and mods.
     app.registerHandler("/api/legacy/import", [&db, &cfg, &i18n, &replyMgr, &cardDeck, &luaMod](Req req, CB&& cb) {
         try {
@@ -1421,7 +1443,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // C#30: Upload a deck file (multipart or JSON body). Writes to data/decks/ and reloads.
+    // Upload a deck file (multipart or JSON body). Writes to data/decks/ and reloads.
     app.registerHandler("/api/decks/upload", [&cardDeck](Req req, CB&& cb) {
         try {
             auto j = J::parse(req->body());
@@ -1448,7 +1470,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // C#30: Upload a mod file (Lua or zip). Writes to data/mod/ and reloads.
+    // Upload a mod file (Lua or zip). Writes to data/mod/ and reloads.
     app.registerHandler("/api/mods/upload", [&luaMod](Req req, CB&& cb) {
         try {
             auto j = J::parse(req->body());
@@ -1503,6 +1525,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Get});
 
     // ── Dashboard ─────────────────────────────────────────────
+    // Live host metrics for the dashboard server-info curve (polled frequently).
+    app.registerHandler("/api/system/sysinfo", [](Req, CB&& cb) {
+        jsonReply(ok(sysInfoJson()), std::move(cb));
+    }, {drogon::Get});
+
     app.registerHandler("/api/dashboard/stats", [st, lst, &adapterMgr](Req, CB&& cb) {
         try {
             int adapters = (int)st->count<AdapterRow>();
@@ -1589,8 +1616,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             jsonReply(ok(J{
                 {"uptime_seconds", static_cast<int>(std::time(nullptr) - utils::getStartupEpoch())},
                 {"active_connections", connectedCount},
+                {"total_adapters", adapters},
+                {"total_commands", static_cast<int>(CommandRouter::commandCount())},
                 {"total_rules", rules},
                 {"active_sessions", sessions},
+                {"system", sysInfoJson()},
                 {"recent_logs", readRecentLogs()}
             }), std::move(cb));
         } catch (const std::exception& e) {
@@ -1598,8 +1628,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             jsonReply(ok(J{
                 {"uptime_seconds", static_cast<int>(std::time(nullptr) - utils::getStartupEpoch())},
                 {"active_connections", 0},
+                {"total_adapters", (int)st->count<AdapterRow>()},
+                {"total_commands", static_cast<int>(CommandRouter::commandCount())},
                 {"total_rules", (int)st->count<ReplyRuleRow>()},
                 {"active_sessions", (int)lst->count<GameLogRow>()},
+                {"system", sysInfoJson()},
                 {"recent_logs", J::array()}
             }), std::move(cb));
         }
@@ -1743,7 +1776,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // POST /api/adapters/{id}/reconnect — C#38: manually resume a timed-out adapter
+    // POST /api/adapters/{id}/reconnect — manually resume a timed-out adapter
     // (resets the reconnect backoff). The adapter stays enabled; this is NOT an un-disable.
     app.registerHandler("/api/adapters/{1}/reconnect", [st, &adapterMgr](Req, CB&& cb, const std::string& id) {
         try {
@@ -1804,6 +1837,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             {"listen_group_request", true}, {"listen_group_add", true},
             {"listen_friend_request", true}, {"listen_friend_add", true},
             {"listen_at_when_off", true},
+            {"allow_official_direct_bind", false},
             {"private_mode", false}, {"check_group_license", false}, {"leave_discuss", false},
             {"leave_black_qq", false},
             {"cloud_visible", true}, {"cloud_black_share", true},
@@ -1904,7 +1938,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     cfg.set<std::string>("dice/logsite_url", u);   // 空串=恢复官方默认
                 }
                 if (j.contains("format")) {
-                    std::string f = j["format"].is_string() ? j["format"].get<std::string>() : std::string("seal");
+                    std::string f = j["format"].is_string() ? j["format"].get<std::string>() : std::string("dicenext");
                     if (f != "seal" && f != "seal_v105" && f != "dicenext" && f != "legacy") { jsonReply(fail("invalid format"), std::move(cb)); return; }
                     cfg.set<std::string>("dice/logsite_format", f);
                 }
@@ -1935,7 +1969,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"group_name_keyword_leave", ev.value("group_name_keyword_leave", std::string())},
                     {"poke", ev.value("poke", std::string())},
                     {"poke_command", ev.value("poke_command", std::string())},
-                    {"poke_enabled", ev.value("poke_enabled", true)},   // C#70：戳一戳回复开关
+                    {"poke_enabled", ev.value("poke_enabled", true)},   // 戳一戳回复开关
                     {"welcome_min_delay", ev.value("welcome_min_delay", 0)},
                     {"welcome_min_cooldown", ev.value("welcome_min_cooldown", 0)},
                 }), std::move(cb));
@@ -1963,7 +1997,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     cfg.set<std::string>("events/group_name_keyword_leave", j["group_name_keyword_leave"].get<std::string>());
                 if (j.contains("poke"))         cfg.set<std::string>("events/poke", j["poke"].get<std::string>());
                 if (j.contains("poke_command")) cfg.set<std::string>("events/poke_command", j["poke_command"].get<std::string>());
-                if (j.contains("poke_enabled")) cfg.set<bool>("events/poke_enabled", j["poke_enabled"].get<bool>());   // C#70
+                if (j.contains("poke_enabled")) cfg.set<bool>("events/poke_enabled", j["poke_enabled"].get<bool>());   // 
                 if (j.contains("welcome_min_delay") && j["welcome_min_delay"].is_number()) {
                     int newMin = j["welcome_min_delay"].get<int>();
                     int oldMin = cfg.get<int>("events/welcome_min_delay", 0);
@@ -1997,7 +2031,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // ── 规则包管理（P2：导入/查看/删除，热重载）──────────────────
     auto rulePackToJson = [](const CommandRouter::RulePack& p) {
         J keys = J::array(); for (auto& k : p.setKeys) keys.push_back(k);
-        // C#10/卡片：自定义指令 / 别名 / 屏蔽 三类指令，供前端像插件一样展示。
+        // 卡片：自定义指令 / 别名 / 屏蔽 三类指令，供前端像插件一样展示。
         J custom = J::array(); for (auto& [k, v] : p.customCmds) custom.push_back(k);
         J alias = J::array(); for (auto& [k, v] : p.cmdAlias) alias.push_back(J{{"from", k}, {"to", v}});
         J disable = J::array(); for (auto& d : p.disableCmds) disable.push_back(d);
@@ -2018,12 +2052,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         jsonReply(ok(J{{"packs", arr}}), std::move(cb));
     }, {drogon::Get});
 
-    // ── C#10 帮助系统：聚合 内置 / 规则包 / 插件 三源帮助条目 ──────────
+    // ── 帮助系统：聚合 内置 / 规则包 / 插件 三源帮助条目 ──────────
     app.registerHandler("/api/help", [&i18n, &jsMod, &luaMod](Req req, CB&& cb) {
         std::string lang = req->getParameter("lang");
         if (lang.empty()) lang = "zh-Hans";
         Locale loc = localeFromString(lang);
-        // C#26#3：服务端分页 + 搜索（Lua helpdoc 可达 2 万+ 条，全量回传会几十 MB/数秒）。
+        // 服务端分页 + 搜索（Lua helpdoc 可达 2 万+ 条，全量回传会几十 MB/数秒）。
         // 仅小写 ASCII A-Z（CJK 等高位字节保持精确，避免 locale 相关的 std::tolower 误伤多字节）。
         auto aLow = [](unsigned char c) -> char { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c; };
         std::string q = req->getParameter("q");
@@ -2048,11 +2082,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             for (auto& [k, c] : p.helpEntries) add(k, c, "rule:" + p.name, false, ""); } }
         for (auto& ch : jsMod.commandHelps())
             add(ch.name, ch.help, "plugin:" + ch.plugin, false, "");
-        for (auto& h : luaMod.helpEntries())   // C#26#1：补 Lua mod descriptor.helpdoc
+        for (auto& h : luaMod.helpEntries())   // 补 Lua mod descriptor.helpdoc
             add(h.topic, h.text, "lua:" + h.mod, false, "");
         { std::shared_lock<std::shared_mutex> lk(CommandRouter::helpLock());
           for (auto& [k, c] : CommandRouter::helpFiles()) add(k, c, "file:" + k, true, ""); }
-        { std::shared_lock<std::shared_mutex> lk(CommandRouter::helpDocLock());   // C#26：结构化帮助文档（海豹兼容+随包速查）
+        { std::shared_lock<std::shared_mutex> lk(CommandRouter::helpDocLock());   // 结构化帮助文档（海豹兼容+随包速查）
           for (auto& h : CommandRouter::helpDocs()) add(h.topic, h.content, "helpdoc:" + h.pack, false, ""); }
 
         // 大小写无关「包含」（不分配小写副本）。q 已是小写。
@@ -2271,7 +2305,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 int type = j.value("targetType", 0), list = j.value("listType", 0);
                 std::string id = j.value("targetId", std::string()), reason = j.value("reason", std::string());
                 if (id.empty()) { jsonReply(fail("targetId required"), std::move(cb)); return; }
-                // listType: 0=黑名单 1=白名单 2=骰娘名单(C#45)
+                // listType: 0=黑名单 1=白名单 2=骰娘名单
                 if (type < 0 || type > 1 || list < 0 || list > 2) { jsonReply(fail("invalid type/list"), std::move(cb)); return; }
                 if (!st) { jsonReply(fail("db not open"), std::move(cb)); return; }
                 bool exists = st->count<BanlistRow>(orm::where(
@@ -2819,18 +2853,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 for (auto& m : msgs) body += esc(m.createdAt) + "," + esc(m.sender) + "," + esc(m.content) + "\r\n";
                 mime = "text/csv"; ext = "csv";
             } else if (fmt == "html") {
-                // C#3：自包含网页（带图）。渲染在 logsvc::renderHtml（与 .log type html
-                // 的群文件上传共用，C#98）。
+                // 自包含网页（带图）。渲染在 logsvc::renderHtml（与 .log type html
+                // 的群文件上传共用，）。
                 body = logsvc::renderHtml(db, id); mime = "text/html"; ext = "html";
             } else {
                 // TXT: identical to what we upload to the log site (renderSealdice),
                 // so the downloaded file matches the online transcript byte-for-byte.
-                body = logsvc::renderSealdice(db, id, &cfg);   // C#3：图片→稳定图床 URL
+                body = logsvc::renderSealdice(db, id, &cfg);   // 图片→稳定图床 URL
                 mime = "text/plain"; ext = "txt";
             }
             auto resp = drogon::HttpResponse::newHttpResponse();
             resp->setContentTypeString(mime + "; charset=utf-8");
-            // C#104：按新版命名规则 q_<群号>_<日志名>.<ext>（原来固定 log_<id>.<ext>）。
+            // 按新版命名规则 q_<群号>_<日志名>.<ext>（原来固定 log_<id>.<ext>）。
             // 中文名走 RFC 5987 filename*，ASCII 回退避免旧客户端乱码。
             auto safe = [](std::string s) {
                 for (char& c : s) if (c=='/'||c=='\\'||c==':'||c=='*'||c=='?'||c=='"'||c=='<'||c=='>'||c=='|'||(unsigned char)c<0x20) c='_';
@@ -2854,7 +2888,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 
-    // GET /api/logs/images/{file} — 服务落地的日志图片（C#3 local 图床模式 + 预览）。
+    // GET /api/logs/images/{file} — 服务落地的日志图片（local 图床模式 + 预览）。
     app.registerHandler("/api/logs/images/{1}",
         [](Req, CB&& cb, std::string file) {
             // 仅取 basename，防路径穿越。
@@ -2878,7 +2912,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             cb(resp);
         }, {drogon::Get});
 
-    // GET /api/chat/images/{file} — C#65：服务模拟聊天缓存的入站图片（NTQQ 图收到时
+    // GET /api/chat/images/{file} — 服务模拟聊天缓存的入站图片（NTQQ 图收到时
     // 已下到本地，避免网页直连 QQ 图床 rkey 失效 400）。与 logs/images、assets 分开目录。
     app.registerHandler("/api/chat/images/{1}",
         [](Req, CB&& cb, std::string file) {
@@ -2918,13 +2952,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (success) jsonReply(ok(J{{"url", res}}), std::move(*cbp));
                 else jsonReply(fail(res), std::move(*cbp));
             };
-            // C#104：与 .log 指令一致，按 logsite_format 选协议。原来群管理上传固定走旧
+            // 与 .log 指令一致，按 logsite_format 选协议。原来群管理上传固定走旧
             // POST 仅用于旧端点；默认端点使用 PUT。
             std::string fmt = logsvc::uploadFormat(cfg);
             std::string selfId;   // isDice 染色：取任一已连适配器
             for (auto& a : adapterMgr.allAdapters()) if (a && a->isConnected()) { selfId = a->getLoginId(); break; }
             if (fmt == "legacy") {
-                std::string txt = logsvc::renderSealdice(db, id, &cfg);   // C#3：图片→稳定图床 URL
+                std::string txt = logsvc::renderSealdice(db, id, &cfg);   // 图片→稳定图床 URL
                 if (txt.empty()) { jsonReply(fail("empty log"), std::move(*cbp)); return; }
                 logsvc::upload(url, name, logsvc::makeUniformId(log.groupId), txt, std::move(onDone));
             } else if (fmt == "seal_v105") {
@@ -3035,7 +3069,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Put, drogon::Delete});
 
-    // ── C#93：各平台好友 uid 列表（C#52 适配器好友缓存）。玩家管理页用它判断
+    // ── 各平台好友 uid 列表（适配器好友缓存）。玩家管理页用它判断
     // 「删除好友」按钮该红字可点还是灰字禁用（非好友的档案多来自群内指令）。──
     app.registerHandler("/api/friends", [&adapterMgr](Req, CB&& cb) {
         try {
@@ -3053,7 +3087,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 
-    // ── C#90 玩家详情：该用户的全部资料（所在群/人物卡/设置键值/Lua插件数据）──
+    // ── 玩家详情：该用户的全部资料（所在群/人物卡/设置键值/Lua插件数据）──
     app.registerHandler("/api/players/{1}/{2}/detail",
         [&db, &adapterMgr, &luaMod, st](Req, CB&& cb, const std::string& plat, const std::string& uid) {
         try {
@@ -3124,7 +3158,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 
-    // C#90 人物卡属性改/删：{card, attr, value?}（value 缺省/null → 删除该属性）。
+    // 人物卡属性改/删：{card, attr, value?}（value 缺省/null → 删除该属性）。
     app.registerHandler("/api/players/{1}/{2}/card-attr",
         [&db](Req req, CB&& cb, const std::string&, const std::string& uid) {
         try {
@@ -3149,7 +3183,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // C#90 删除整张人物卡（连带清掉指向它的各群绑定）：{card}。
+    // 删除整张人物卡（连带清掉指向它的各群绑定）：{card}。
     app.registerHandler("/api/players/{1}/{2}/card-del",
         [&db, st](Req req, CB&& cb, const std::string&, const std::string& uid) {
         try {
@@ -3168,7 +3202,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // C#90 设置键值改/删：{id, value?}（value 缺省/null → 删除该行）。
+    // 设置键值改/删：{id, value?}（value 缺省/null → 删除该行）。
     app.registerHandler("/api/players/{1}/{2}/setting",
         [st](Req req, CB&& cb, const std::string&, const std::string& uid) {
         try {
@@ -3184,7 +3218,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // C#90 Lua 插件变量改/删：{key, value?}（value 缺省/null/空串 → 删除）。
+    // Lua 插件变量改/删：{key, value?}（value 缺省/null/空串 → 删除）。
     app.registerHandler("/api/players/{1}/{2}/luavar",
         [&luaMod](Req req, CB&& cb, const std::string&, const std::string& uid) {
         try {
@@ -3199,7 +3233,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // C#90 Lua 卡片数据改/删：{scope, data?}（data 缺省/null → 删除；否则须为 JSON 对象串）。
+    // Lua 卡片数据改/删：{scope, data?}（data 缺省/null → 删除；否则须为 JSON 对象串）。
     app.registerHandler("/api/players/{1}/{2}/luacard",
         [&luaMod](Req req, CB&& cb, const std::string&, const std::string& uid) {
         try {
@@ -3252,7 +3286,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 std::string gid  = j.value("groupId", "");
                 if (gid.empty()) { jsonReply(fail("groupId required"), std::move(cb)); return; }
                 gsSet(st, plat, gid, "__removed", "0");   // 清除墓碑，重新纳入管理
-                gsSet(st, plat, gid, "left", "0");        // C#62：手动重加也清「已退群」状态
+                gsSet(st, plat, gid, "left", "0");        // 手动重加也清「已退群」状态
                 gsSet(st, plat, gid, "leaving", "0");
                 if (gsGet(st, plat, gid, "enabled").empty()) gsSet(st, plat, gid, "enabled", "1");
                 jsonReply(ok(J{{"platform",plat},{"groupId",gid}}), std::move(cb));
@@ -3265,18 +3299,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (!a->isConnected()) continue;
                 std::string plat = a->platform();
                 for (auto& [gid, gname] : a->getGroupList()) {
-                    // C#82：如果机器人仍在群内，自动清除墓碑标记重新入库
+                    // 如果机器人仍在群内，自动清除墓碑标记重新入库
                     if (gsGet(st, plat, gid, "__removed") == "1") {
                         gsSet(st, plat, gid, "__removed", "0");
                         gsSet(st, plat, gid, "left", "0");
                     }
                     if (gsGet(st, plat, gid, "enabled").empty()) gsSet(st, plat, gid, "enabled", "1");
-                    if (!gname.empty() && gname != gid) gsSet(st, plat, gid, "name", gname);  // C#82
+                    if (!gname.empty() && gname != gid) gsSet(st, plat, gid, "name", gname);  // 
                     if (a->getSelfRole(gid).empty()) a->refreshSelfRole(gid);  // cheap, only if unknown
                 }
                 a->refreshGroupList();
 
-                // C#82：检查已退群 — 不在适配器群列表中的群自动标记 left
+                // 检查已退群 — 不在适配器群列表中的群自动标记 left
                 auto currentGroups = a->getGroupList();
                 auto allRows = st->get_all<GroupSettingRow>(
                     orm::where(orm::c(&GroupSettingRow::platform) == plat and
@@ -3294,7 +3328,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             auto rows = st->get_all<GroupSettingRow>();
             std::map<std::string, std::map<std::string, std::string>> groups; // "plat\x1fgid" → kv
             for (auto& r : rows) groups[r.platform + "\x1f" + r.groupId][r.key] = r.value;
-            // C#49：预载各群语言覆盖（locale_settings scope=group，key "<plat>:<gid>"）。
+            // 预载各群语言覆盖（locale_settings scope=group，key "<plat>:<gid>"）。
             std::map<std::string, std::string> groupLocales;
             for (auto& lr : st->get_all<LocaleSettingRow>(
                      orm::where(orm::c(&LocaleSettingRow::scope) == std::string("group"))))
@@ -3338,26 +3372,26 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 int memberCount = 0;
                 if (auto a = pickAdapter(adapterMgr, plat)) {
                     std::string gn = a->getGroupName(gid);
-                    if (!gn.empty() && gn != gid) name = gn;          // C#82
+                    if (!gn.empty() && gn != gid) name = gn;          // 
                     botRole = a->getSelfRole(gid);
                     memberCount = a->getGroupMemberCount(gid);
                 }
-                if (name == gid && kv.count("name") && !kv["name"].empty()) name = kv["name"];  // C#82
+                if (name == gid && kv.count("name") && !kv["name"].empty()) name = kv["name"];  // 
                 int observers = 0;
                 if (kv.count("observers")) { try { auto o = J::parse(kv["observers"]); if (o.is_array()) observers = (int)o.size(); } catch (...) {} }
                 auto glIt = groupLocales.find(plat + ":" + gid);
                 arr.push_back(J{
                     {"platform", plat}, {"groupId", gid}, {"name", name},
                     {"enabled", kv.count("enabled") ? kv["enabled"] != "0" : true},
-                    {"ai_enabled", kv.count("aiEnabled") ? kv["aiEnabled"] != "0" : true},   // C#84：本群 AI 开关（缺省=开）
+                    {"ai_enabled", kv.count("aiEnabled") ? kv["aiEnabled"] != "0" : true},   // 本群 AI 开关（缺省=开）
                     {"locked", kv.count("locked") && kv["locked"] == "1"},
                     {"card", kv.count("card") ? kv["card"] : ""},
                     {"remark", kv.count("remark") ? kv["remark"] : ""},
                     {"activeLog", kv.count("activeLog") && !kv["activeLog"].empty()},
                     {"observers", observers}, {"botRole", botRole}, {"memberCount", memberCount},
-                    {"inviter", kv.count("inviter") ? kv["inviter"] : ""},                       // C#47
-                    {"locale", glIt != groupLocales.end() ? glIt->second : std::string()},       // C#49
-                    {"left", kv.count("left") && kv["left"] == "1"}                              ,// C#62 已退群
+                    {"inviter", kv.count("inviter") ? kv["inviter"] : ""},                       // 
+                    {"locale", glIt != groupLocales.end() ? glIt->second : std::string()},       // 
+                    {"left", kv.count("left") && kv["left"] == "1"}                              ,// 已退群
                     {"welcome", kv.count("welcome") ? kv["welcome"] : ""},
                     {"welcome_delay", kv.count("welcome_delay") ? kv["welcome_delay"] : ""},
                     {"welcome_cooldown", kv.count("welcome_cooldown") ? kv["welcome_cooldown"] : ""},
@@ -3377,11 +3411,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (req->method() == drogon::Delete) {
                 // 清空该群所有设定，并打墓碑标记，使其不再被自动发现重新入库
                 // （即使骰子仍在群内）。重新加入管理用 POST /api/groups；机器人
-                // 重新入群时事件层会自动清墓碑（C#60）。
+                // 重新入群时事件层会自动清墓碑。
                 st->remove_all<GroupSettingRow>(
                     orm::where(orm::c(&GroupSettingRow::platform) == plat
                         and orm::c(&GroupSettingRow::groupId) == gid));
-                // C#60：群语言覆盖也一并清除（此前残留导致退群重加后仍是旧语言）。
+                // 群语言覆盖也一并清除（此前残留导致退群重加后仍是旧语言）。
                 st->remove_all<LocaleSettingRow>(
                     orm::where(orm::c(&LocaleSettingRow::scope) == std::string("group")
                         and orm::c(&LocaleSettingRow::scopeKey) == plat + ":" + gid));
@@ -3392,7 +3426,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             auto j = J::parse(req->body());
             auto a = pickAdapter(adapterMgr, plat);
             if (j.contains("enabled")) gsSet(st, plat, gid, "enabled", j["enabled"].get<bool>() ? "1" : "0");
-            if (j.contains("ai_enabled")) gsSet(st, plat, gid, "aiEnabled", j["ai_enabled"].get<bool>() ? "1" : "0");  // C#84
+            if (j.contains("ai_enabled")) gsSet(st, plat, gid, "aiEnabled", j["ai_enabled"].get<bool>() ? "1" : "0");  // 
             if (j.contains("locked"))  gsSet(st, plat, gid, "locked",  j["locked"].get<bool>() ? "1" : "0");
             if (j.contains("remark"))  gsSet(st, plat, gid, "remark", j["remark"].get<std::string>());
             if (j.contains("card")) {
@@ -3412,7 +3446,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (sv.empty()) { gsSet(st, plat, gid, "welcome_cooldown", ""); }
                 else { int val = std::stoi(sv); int mn = cfg.get<int>("events/welcome_min_cooldown", 0); if (val > 0 && val < mn) val = mn; gsSet(st, plat, gid, "welcome_cooldown", std::to_string(val)); }
             }
-            // C#49：网页端设置本群回复语言（写 locale_settings，Resolver 直读 DB 即时生效；空串=清除覆盖）。
+            // 网页端设置本群回复语言（写 locale_settings，Resolver 直读 DB 即时生效；空串=清除覆盖）。
             if (j.contains("locale")) {
                 std::string lc = j["locale"].get<std::string>();
                 std::string key = plat + ":" + gid;
@@ -3438,7 +3472,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
             if (action == "leave") {
                 a->leaveGroup(gid);
-                gsSet(st, plat, gid, "left", "1");   // C#62：状态=已退群（保留记录时可见）
+                gsSet(st, plat, gid, "left", "1");   // 状态=已退群（保留记录时可见）
             }
             else if (action == "message") a->sendGroupMessage(gid, j.value("text", ""));
             else { jsonReply(fail("unknown action"), std::move(cb)); return; }
@@ -3469,7 +3503,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 
-    // ── C#99 群文件 ──────────────────────────────────────────
+    // ── 群文件 ──────────────────────────────────────────
     // GET /api/groups/{p}/{g}/files[?folder=<id>] — 根目录或某文件夹的文件/子文件夹。
     // 经适配器同步调用 get_group_root_files / get_group_files_by_folder（NapCat/go-cqhttp）。
     app.registerHandler("/api/groups/{1}/{2}/files",
@@ -3597,7 +3631,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 
-    // C#110：POST /api/groups/{p}/{g}/file-upload — 网页上传文件到群文件。
+    // POST /api/groups/{p}/{g}/file-upload — 网页上传文件到群文件。
     // Body: { name, content(dataURL 或裸 base64) }。经适配器 upload_group_file
     //（本地路径优先，失败自动回退 base64://，见 onebot_v11_adapter）。
     app.registerHandler("/api/groups/{1}/{2}/file-upload",
@@ -3665,9 +3699,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 auto a = pickAdapter(adapterMgr, plat, adapterAccount);
                 if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
                 a->sendGroupMessage(gid, text);
-                std::string me = a->getLoginName().empty() ? std::string("\xe9\xaa\xb0\xe5\xa8\x98") : a->getLoginName();  // C#82: 骰娘
+                std::string me = a->getLoginName().empty() ? std::string("\xe9\xaa\xb0\xe5\xa8\x98") : a->getLoginName();  // 骰娘
                 GroupChatLog::instance().add(key, me, a->getLoginId(), text, true);
-                // C#44：网页发送的消息也持久化。
+                // 网页发送的消息也持久化。
                 if (auto* cst = db.getChatStorage()) {
                     try {
                         ChatMsgRow r; r.platform = plat; r.groupId = gid;
@@ -3678,7 +3712,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
                 jsonReply(ok(nullptr), std::move(cb));
             } else {
-                // C#44：读持久化的 chat.db（重启不丢，含撤回标注），取最近 100 条按时间升序。
+                // 读持久化的 chat.db（重启不丢，含撤回标注），取最近 100 条按时间升序。
                 auto* cst = db.getChatStorage();
                 if (!cst) { jsonReply(ok(GroupChatLog::instance().recent(key, 60)), std::move(cb)); return; }
                 J arr = J::array();
@@ -3691,14 +3725,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         arr.push_back(J{{"id", it->id}, {"sender", it->sender}, {"userId", it->userId},
                                         {"content", it->content}, {"self", it->self != 0},
                                         {"time", it->time}, {"recalled", it->recalled != 0},
-                                        {"msgId", it->msgId}});   // C#59: 供引用消息(CQ:reply)就地解析
+                                        {"msgId", it->msgId}});   // 供引用消息(CQ:reply)就地解析
                 } catch (...) {}
                 jsonReply(ok(arr), std::move(cb));
             }
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Post});
 
-    // C#106：玩家详情里的私聊模拟聊天。复用群聊的 chat.db 行格式，但用
+    // 玩家详情里的私聊模拟聊天。复用群聊的 chat.db 行格式，但用
     // private:<用户号> 作用域区分每一位玩家；发送走适配器的私聊接口。
     app.registerHandler("/api/players/{1}/{2}/messages",
         [&adapterMgr, &db](Req req, CB&& cb, const std::string& plat, const std::string& uid) {
@@ -3744,7 +3778,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Post});
 
-    // C#42：模拟聊天发送戳一戳（NapCat group_poke）。
+    // 模拟聊天发送戳一戳（NapCat group_poke）。
     app.registerHandler("/api/groups/{1}/{2}/poke",
         [&adapterMgr](Req req, CB&& cb, const std::string& plat, const std::string& gid) {
         try {
@@ -3758,7 +3792,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // C#44：向平台（NapCat）拉取本群历史消息 → 异步经 kGroupHistory 事件去重入库。
+    // 向平台（NapCat）拉取本群历史消息 → 异步经 kGroupHistory 事件去重入库。
     app.registerHandler("/api/groups/{1}/{2}/fetch-history",
         [&adapterMgr](Req, CB&& cb, const std::string& plat, const std::string& gid) {
         auto a = pickAdapter(adapterMgr, plat);
@@ -3767,7 +3801,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         jsonReply(ok(J{{"requested", true}}), std::move(cb));
     }, {drogon::Post});
 
-    // C#51：用户群设置（group=群号，enforce=群内无人在用户群时自动退群，invite=新好友私聊邀请）。
+    // 用户群设置（group=群号，enforce=群内无人在用户群时自动退群，invite=新好友私聊邀请）。
     app.registerHandler("/api/system/user-group", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
@@ -3785,7 +3819,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // C#52：自动清理好友天数（0 = 关闭）。
+    // 自动清理好友天数（0 = 关闭）。
     app.registerHandler("/api/system/friend-clean", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
@@ -3801,7 +3835,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Put, drogon::Get});
 
-    // C#52：玩家管理页「删除好友」。
+    // 玩家管理页「删除好友」。
     app.registerHandler("/api/players/{1}/{2}/delete-friend",
         [&adapterMgr](Req, CB&& cb, const std::string& plat, const std::string& uid) {
         auto a = pickAdapter(adapterMgr, plat);
@@ -3810,7 +3844,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         jsonReply(ok(J{{"deleted", uid}}), std::move(cb));
     }, {drogon::Post});
 
-    // C#44：聊天记录保留天数（0 = 永久保留，不自动清理）。
+    // 聊天记录保留天数（0 = 永久保留，不自动清理）。
     app.registerHandler("/api/system/chat-config", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
@@ -3826,7 +3860,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // ═══ C#29: Causal Rule Engine API ═══════════════════════════
+    // ═══ Causal Rule Engine API ═══════════════════════════
 
     // List all causal rules
     app.registerHandler("/api/causal/rules", [&causalMgr](Req, CB&& cb) {

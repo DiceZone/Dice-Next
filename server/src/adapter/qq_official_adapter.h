@@ -214,8 +214,33 @@ private:
             // Its payload is allowed to omit mentions, so the event itself must be
             // treated as an explicit mention; this also lets @ wake a disabled bot.
             if(t=="GROUP_AT_MESSAGE_CREATE"&&!loginId_.empty())m.atList.push_back(loginId_);
-            if(d.contains("mentions")&&d["mentions"].is_array()){m.extra["mentions"]=d["mentions"];for(const auto& mention:d["mentions"]){const auto id=mention.value("member_openid",mention.value("user_openid",mention.value("id",std::string()))); const bool mine=mention.value("is_you",false)||id==loginId_||id==appId_||mention.value("bot_appid",std::string())==appId_; if(mine)m.atList.push_back(loginId_);else if(!id.empty())m.atList.push_back(id);}}
+            // 官方正文会保留 <@OpenID>；若不移除，Dice! 的命令前缀不在首位，
+            // 例如「@机器人 .r」会被当作普通文本。仅剥离明确指向本机器人的标记。
+            auto eraseMention = [&m](const std::string& who) {
+                if (who.empty()) return;
+                for (const std::string& token : {"<@" + who + ">", "<@!" + who + ">"}) {
+                    size_t pos = 0;
+                    while ((pos = m.content.find(token, pos)) != std::string::npos) m.content.erase(pos, token.size());
+                }
+            };
+            if(d.contains("mentions")&&d["mentions"].is_array()){m.extra["mentions"]=d["mentions"];for(const auto& mention:d["mentions"]){const auto id=mention.value("member_openid",mention.value("user_openid",mention.value("id",std::string()))); const bool mine=mention.value("is_you",false)||id==loginId_||id==appId_||mention.value("bot_appid",mention.value("bot_app_id",std::string()))==appId_; if(mine){m.atList.push_back(loginId_); eraseMention(id); eraseMention(loginId_); eraseMention(appId_);}else if(!id.empty())m.atList.push_back(id);}}
+            // 有些 GROUP_AT_MESSAGE_CREATE 载荷不会带 mentions，只能安全地移除正文最前
+            // 的一个 @ 标记；事件类型本身已证明它指向当前机器人。
+            if(t=="GROUP_AT_MESSAGE_CREATE"){
+                const auto begin=m.content.find_first_not_of(" \t\r\n");
+                if(begin!=std::string::npos && m.content.compare(begin,2,"<@") == 0){
+                    const auto end=m.content.find('>',begin+2);
+                    if(end!=std::string::npos) m.content.erase(begin,end-begin+1);
+                }
+            }
+            const auto first=m.content.find_first_not_of(" \t\r\n");
+            if(first==std::string::npos)m.content.clear();
+            else { const auto last=m.content.find_last_not_of(" \t\r\n"); m.content=m.content.substr(first,last-first+1); }
+            m.rawContent=m.content;m.displayContent=m.content;
             DICE_LOG_INFO("QQOfficial '{}': inbound {} group={} sender={} atSelf={} textBytes={}", name_, t, m.targetId, m.senderId, !m.atList.empty(), m.content.size());
+            DICE_LOG_INFO("收↩ [官方群 OpenID({})] {}({}): {}", m.targetId,
+                          m.senderName.empty() ? std::string("—") : m.senderName,
+                          m.senderId, m.content.empty() ? std::string("[富媒体或空消息]") : m.content);
         }
         else if(t=="AT_MESSAGE_CREATE"){m.type=MessageType::kChannel;m.senderId=author.value("id",std::string());m.senderName=author.value("username",m.senderId);m.targetId=d.value("channel_id",std::string());}
         else { dispatchEvent(t,d,eventId); return; }

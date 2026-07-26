@@ -39,7 +39,7 @@ struct Message {
     std::vector<std::string> atList;  // 被@的账号列表（"all" 表示@全体），用于账号定向
     MessageType type = MessageType::kGroup;
     int64_t timestamp = 0;
-    bool fromSelf = false;    // C#69: 本消息由骰娘账号自身发出（post_type=message_sent，自控开关开启时才进管线）
+    bool fromSelf = false;    // 本消息由骰娘账号自身发出（post_type=message_sent，自控开关开启时才进管线）
     json extra;               // 平台特定附加数据（CQ码、附件等）
 };
 
@@ -56,9 +56,9 @@ enum class EventType {
     kFriendRequest,   // 收到加好友请求（待处理）
     kGroupRequest,    // 收到加群/邀请请求（待处理）
     kPoke,            // 戳一戳
-    kGroupRecall,     // C#44: 群消息撤回（extra.message_id = 被撤回消息）
-    kGroupHistory,    // C#44: 历史消息拉取结果（extra.messages = OneBot 消息数组）
-    kGroupUpload,     // C#99: 群文件上传（extra.file = {id,name,size,busid}）
+    kGroupRecall,     // 群消息撤回（extra.message_id = 被撤回消息）
+    kGroupHistory,    // 历史消息拉取结果（extra.messages = OneBot 消息数组）
+    kGroupUpload,     // 群文件上传（extra.file = {id,name,size,busid}）
     kOther,
 };
 
@@ -114,12 +114,12 @@ public:
     /// Last error message
     virtual std::string lastError() const = 0;
 
-    /// C#38: fine-grained connection state for the web UI.
+    /// fine-grained connection state for the web UI.
     /// Default just maps isConnected()→"connected"/"disconnected"; adapters with a
     /// reconnect backoff (e.g. OneBot) also report "timeout" when retries are paused.
     virtual std::string connectionStatus() const { return isConnected() ? "connected" : "disconnected"; }
 
-    /// C#38: manually resume a paused/timed-out connection (resets backoff). Default = start().
+    /// manually resume a paused/timed-out connection (resets backoff). Default = start().
     virtual void resumeConnection() { start(); }
 
     // ─── Messaging ───────────────────────────────────────────
@@ -183,20 +183,20 @@ public:
     /// Joined-group list (id, name) cached from the platform. Default empty.
     virtual std::vector<std::pair<std::string, std::string>> getGroupList() const { return {}; }
 
-    /// C#53: number of QQ friends the bot has (-1 = unknown / not synced yet). Default -1.
+    /// number of QQ friends the bot has (-1 = unknown / not synced yet). Default -1.
     virtual int getFriendCount() const { return -1; }
 
-    /// C#44: ask the platform (e.g. NapCat get_group_msg_history) for recent group
+    /// ask the platform (e.g. NapCat get_group_msg_history) for recent group
     /// history. Result arrives asynchronously as a kGroupHistory event. Default no-op.
     virtual void requestGroupHistory(const std::string& /*groupId*/, int /*count*/) {}
 
-    /// C#42: poke a group member (NapCat group_poke / 戳一戳). Default no-op.
+    /// poke a group member (NapCat group_poke / 戳一戳). Default no-op.
     virtual void sendGroupPoke(const std::string& /*groupId*/, const std::string& /*userId*/) {}
 
-    /// C#52: friend uid list (synced with get_friend_list; empty = unknown). Default empty.
+    /// friend uid list (synced with get_friend_list; empty = unknown). Default empty.
     virtual std::vector<std::string> getFriendList() const { return {}; }
 
-    /// C#52: delete a friend (NapCat delete_friend). Default no-op.
+    /// delete a friend (NapCat delete_friend). Default no-op.
     virtual void deleteFriend(const std::string& /*userId*/) {}
     /// Ask the platform to refresh the joined-group list (async). Default no-op.
     virtual void refreshGroupList() {}
@@ -213,7 +213,7 @@ public:
     /// Cached member list of a group (platform-native objects). Default empty array.
     virtual json getMembers(const std::string& /*groupId*/) const { return json::array(); }
 
-    /// C#99：同步调用平台 API 并等待响应（群文件列表/下载链等请求-响应式接口）。
+    /// 同步调用平台 API 并等待响应（群文件列表/下载链等请求-响应式接口）。
     /// 阻塞至响应或超时（返回 null）。⚠️ 不得在适配器接收线程上调用（会死锁），
     /// 供 WebUI 的 drogon 处理线程使用。默认不支持。
     virtual json invokeAction(const std::string& /*action*/, const json& /*params*/,

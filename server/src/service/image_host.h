@@ -39,7 +39,7 @@ inline std::string publicUrlFor(ConfigManager& cfg, const std::string& filename)
 // images 列里的 ref（http 稳定 url 或 本地文件名）→ 对外可访问 URL（无法对外则空）。
 inline std::string resolveRef(ConfigManager& cfg, const std::string& ref) {
     if (ref.rfind("http", 0) == 0) return ref;
-    // C#57：骰娘回复里的本地资产（[img,file=data/assets/..]）→ /api/assets/ 路径。
+    // 骰娘回复里的本地资产（[img,file=data/assets/..]）→ /api/assets/ 路径。
     std::string norm = ref; for (auto& ch : norm) if (ch == '\\') ch = '/';
     if (norm.rfind("data/assets/", 0) == 0) {
         std::string base = publicBase(cfg);
@@ -124,7 +124,7 @@ inline std::string substituteImages(const std::string& content, const std::strin
     while (i < content.size()) {
         if (content.compare(i, IMG.size(), IMG) == 0) { emit(); i += IMG.size(); continue; }
         if (content.compare(i, 9, "[CQ:image") == 0 ||
-            content.compare(i, 5, "[img,") == 0) {   // C#57 平台中立图片码
+            content.compare(i, 5, "[img,") == 0) {   // 平台中立图片码
             size_t end = content.find(']', i);
             if (end != std::string::npos) { emit(); i = end + 1; continue; }
         }

@@ -199,6 +199,7 @@
     "unknown": "No help found for \"{topic}\". Try .helpdoc for available topics.",
     "ambiguous": "\"{topic}\" matches several help topics: {list}. Please be more specific.",
     "topic": {
+      "rdx": "Double-cross .rdx: legacy Dice compatibility alias, identical to .dx. e.g. .rdx 3c8.",
       "r": "Roll .r [expr] [reason]: roll dice. e.g. .r3d6+2 attack; .rh hidden; N#expr repeat.",
       "rh": "Hidden .rh [expr] [reason]: hidden roll / hidden check. The result is DM'd to you; the group only sees \"<name> made a hidden roll\". Hidden checks use .rah / .rch (e.g. .rah Spot 60). House rules (.setcoc) and bonus/penalty dice still apply.",
       "ra": "Check .ra <skill|attr> [rate] [reason]: COC check. Reads the card if rate omitted. e.g. .ra spot / .ra str60",

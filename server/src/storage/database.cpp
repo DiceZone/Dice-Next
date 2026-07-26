@@ -207,7 +207,7 @@ bool Database::open(const std::string& path) {
                     orm::make_column("action", &ScheduledTaskRow::action),
                     orm::make_column("cond", &ScheduledTaskRow::condition)
                 ),
-                // C#29: low-code causal rule engine
+                // low-code causal rule engine
                 orm::make_table("causal_rules",
                     orm::make_column("id", &CausalRuleRow::id,
                         orm::primary_key().autoincrement()),
@@ -232,7 +232,7 @@ bool Database::open(const std::string& path) {
                     orm::make_column("value", &RuleCounterRow::value),
                     orm::make_column("updated_at", &RuleCounterRow::updatedAt)
                 ),
-                // C#28-B: Persona switching system tables
+                // Persona switching system tables
                 orm::make_table("persona_templates",
                     orm::make_column("id", &PersonaTemplateRow::id,
                         orm::primary_key().autoincrement()),
@@ -296,7 +296,7 @@ bool Database::open(const std::string& path) {
         DICE_LOG_INFO("Database: opened log store '{}' ({} tables)", logDbPath_,
             logStorage_->table_names().size());
 
-        // ── C#44: separate chat-history database (chat.db, same directory) ──
+        // ── separate chat-history database (chat.db, same directory) ──
         chatDbPath_ = (std::filesystem::path(path).parent_path() / "chat.db").string();
         chatStorage_ = std::make_unique<ChatStorage>(
             orm::make_storage(

@@ -1,5 +1,5 @@
 #pragma once
-// ─── Dice!Next v3.0.0 — Causal Rule Manager (C#29) ───────────
+// ─── Dice!Next v3.0.0 — Causal Rule Manager ───────────
 // Low-code causal rule engine: condition matching + action execution.
 // Rules are stored in the causal_rules table and loaded into memory.
 // Matching is prioritized over regular ReplyManager (checked first).

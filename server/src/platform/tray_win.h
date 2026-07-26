@@ -80,7 +80,7 @@ namespace tray_detail {
 } // namespace tray_detail
 
 /// Start the tray icon on a background thread. @p onExit is invoked when the
-/// user picks "退出" (wire it to stop the server cleanly). @p startHidden (C#13):
+/// user picks "退出" (wire it to stop the server cleanly). @p startHidden:
 /// 启动后把控制台窗口隐藏到托盘并禁用其关闭按钮，弹气泡告知「未退出，已最小化到托盘」。
 inline void startSystemTray(uint16_t port, std::function<void()> onExit, bool startHidden = false) {
     tray_detail::g_onExit = std::move(onExit);
@@ -109,7 +109,7 @@ inline void startSystemTray(uint16_t port, std::function<void()> onExit, bool st
           wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE); }
         Shell_NotifyIconW(NIM_ADD, &nid);
 
-        // C#13：启动即最小化到托盘——隐藏控制台窗口 + 禁用其关闭按钮（避免误点 X 杀进程，
+        // 启动即最小化到托盘——隐藏控制台窗口 + 禁用其关闭按钮（避免误点 X 杀进程，
         // 退出统一走托盘「退出」），并弹一次气泡告知程序仍在后台运行。
         if (startHidden) {
             if (HWND con = GetConsoleWindow()) {

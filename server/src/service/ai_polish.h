@@ -1,5 +1,5 @@
 ﻿#pragma once
-// ─── Dice!Next — AI 回复润色（C#68 阶段二）──────────────────────
+// ─── Dice!Next — AI 回复润色（阶段二）──────────────────────
 // 掷骰/检定类回复在发送前，按「人设 + 掷骰上下文」用大模型润色。同步调用（会给这条回复
 // 加延迟，是文档里说明的取舍）；失败/超时/未配置→原样返回，绝不影响正常掷骰。
 //
@@ -23,7 +23,7 @@ inline json conf(ConfigManager& cfg) {
 inline bool enabled(ConfigManager& cfg) {
     return ai::enabled(cfg) && conf(cfg).value("enabled", false);
 }
-// C#78：某回复类别是否在润色覆盖范围内（roll/deck/fun/custom/plugin）。默认只覆盖 roll，
+// 某回复类别是否在润色覆盖范围内（roll/deck/fun/custom/plugin）。默认只覆盖 roll，
 // 兼容旧配置（无 cov 字段时 roll 覆盖、其余不覆盖）。
 inline bool covers(ConfigManager& cfg, const std::string& cat) {
     if (cat.empty()) return false;
@@ -45,7 +45,7 @@ inline bool pickModel(ConfigManager& cfg, ai::Model& out) {
     return false;
 }
 
-// C#78/C#81：内置提示词（前端可查看/覆盖）。数字/结构保留是硬约束——即使被改，
+// 内置提示词（前端可查看/覆盖）。数字/结构保留是硬约束——即使被改，
 // preservesNumbers 校验仍会兜底回退原文。
 inline std::string defaultPromptText() {
     return "你是 TRPG 跑团骰娘。请只调整原回复的语气/措辞让它更自然生动，**保持它的结构与全部信息**。"
@@ -73,7 +73,7 @@ inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const 
     std::string mode = c.value("mode", std::string("text"));
     std::string persona = c.value("persona", std::string());
 
-    // C#81：系统提示词优先用配置里的 prompt（前端可编辑）；留空则用内置默认。
+    // 系统提示词优先用配置里的 prompt（前端可编辑）；留空则用内置默认。
     std::string sys = c.value("prompt", std::string());
     if (sys.empty()) sys = (mode == "rp") ? defaultPromptRp() : defaultPromptText();
     if (!persona.empty()) sys += "\n人设/风格：" + persona;
@@ -93,7 +93,7 @@ inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const 
     if (out.size() >= 2 && ((out.front() == '"' && out.back() == '"') ||
                             (out.front() == '\'' && out.back() == '\''))) out = out.substr(1, out.size() - 2);
     if (out.empty()) return replyText;
-    // C#78 关键：润色后若丢失/改动了原文的任何数字 → 判为破坏了骰点结果，直接发原文。
+    // 关键：润色后若丢失/改动了原文的任何数字 → 判为破坏了骰点结果，直接发原文。
     if (!ai::preservesNumbers(replyText, out)) { DICE_LOG_WARN("[AI polish] numbers changed, falling back to original"); return replyText; }
     DICE_LOG_INFO("[AI polish] ok model={} tokens={} latency={}ms in_len={} out_len={}", m.id, r.totalTokens, r.latencyMs, replyText.size(), out.size());
     return out;

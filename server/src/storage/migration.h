@@ -70,12 +70,12 @@ private:
     bool migrateV1toV2();
 
     /// V2 → V3: Add causal_rules and rule_counters tables for the
-    /// causal rule engine (C#29). sync_schema creates the new tables
+    /// causal rule engine. sync_schema creates the new tables
     /// and adds any columns missing from older schemas.
     bool migrateV2toV3();
 
     /// V3 → V4: Add persona_templates and persona_entries tables for
-    /// the persona switching system (C#28-B). sync_schema creates the
+    /// the persona switching system. sync_schema creates the
     /// new tables.
     bool migrateV3toV4();
 

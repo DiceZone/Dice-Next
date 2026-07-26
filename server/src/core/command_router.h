@@ -32,7 +32,7 @@
 #include "../i18n/locale_resolver.h"
 #include "../service/log_service.h"
 #include "../service/image_host.h"
-#include "../service/ai_translate.h"   // C#68 阶段三：.lang AI 翻译语言
+#include "../service/ai_translate.h"   // 阶段三：.lang AI 翻译语言
 #include "persona/persona_manager.h"
 #include <onedice/onedice.h>
 
@@ -42,7 +42,7 @@
 #include <atomic>
 #include <mutex>
 #include <random>
-#include <drogon/HttpAppFramework.h>   // C#62：.dismiss 随机延时退群用事件循环定时器
+#include <drogon/HttpAppFramework.h>   // .dismiss 随机延时退群用事件循环定时器
 #include <variant>
 #include <sstream>
 #include <optional>
@@ -86,7 +86,7 @@ public:
     std::optional<int> aiGetAttr(const Message& msg, const std::string& name) {
         std::string attr = CharacterCardStore::canonical(name);
         auto v = cards_.getAttr(msg.senderId, cardScope(msg), attr);
-        if (!v) v = evalStrAttr(msg, attr);       // C#37 关联属性表达式
+        if (!v) v = evalStrAttr(msg, attr);       // 关联属性表达式
         if (!v) v = derivedAttr(msg, attr);       // model.xml 衍生值
         return v;
     }
@@ -100,7 +100,7 @@ public:
         return true;
     }
 
-    // C#68/C#78：本条消息回复的「类别」（供 AI 润色/翻译按覆盖范围过滤）。取值：
+    // 本条消息回复的「类别」（供 AI 润色/翻译按覆盖范围过滤）。取值：
     //   roll(掷骰/检定) / deck(牌堆抽取) / fun(娱乐:jrrp/ti/li/name/favor/sleep) / ""(其它)。
     // 自定义回复(custom)/插件(plugin) 由 main.cpp 按来源另行分类。thread_local：handleMessage
     // 与调用方（main.cpp 出站前）在同一线程，无竞态。
@@ -114,9 +114,9 @@ public:
                               std::optional<Locale> forcedLocale = std::nullopt) {
         quoteOverride_.clear();   // reset per-message reply-quote override (#10)
         forwardNodes_.clear();    // reset per-message 合并转发节点 (#6)
-        s_replyCat.clear();       // C#68/C#78：每条消息重置回复类别
-        detectDiceBot(msg);       // C#45/C#73：被动识别其他骰子的 .bot 横幅回执（须紧跟探测）
-        recordBotProbe(msg);      // C#73：记录本群 .bot 探测时间，作为识别的时间窗
+        s_replyCat.clear();       // 每条消息重置回复类别
+        detectDiceBot(msg);       // 被动识别其他骰子的 .bot 横幅回执（须紧跟探测）
+        recordBotProbe(msg);      // 记录本群 .bot 探测时间，作为识别的时间窗
         std::string text = trim(msg.content);
         if (text.empty()) return "";
 
@@ -195,7 +195,7 @@ public:
         }
 
         std::string cmdL0 = toLower(cmd);
-        // ── 规则包指令层（C#12）：本群激活规则的 别名重写 + 自定义指令 + 屏蔽 ──
+        // ── 规则包指令层：本群激活规则的 别名重写 + 自定义指令 + 屏蔽 ──
         if (auto rp = activeRulePack(msg);
             rp && (!rp->cmdAlias.empty() || !rp->disableCmds.empty() || !rp->customCmds.empty())) {
             if (!rp->cmdAlias.empty()) {
@@ -206,7 +206,7 @@ public:
                     if (!k.empty() && cmd.rfind(k, 0) == 0) { cmd = tgt + cmd.substr(k.size()); break; }
                 cmdL0 = toLower(cmd);
             }
-            // C#12-A②：自定义指令（commands.add）。先于屏蔽判定，确保规则新增的指令
+            // 自定义指令（commands.add）。先于屏蔽判定，确保规则新增的指令
             // 不会被某条 disable 前缀误伤；按指令首词匹配（精确，其次忽略大小写）。
             if (!rp->customCmds.empty()) {
                 auto [w, rest] = splitCommand(cmd);
@@ -246,7 +246,7 @@ public:
         Message pmsg = msg;
         std::string proxyNote;
         if (std::string tgt = atTarget(msg); !tgt.empty()) {
-            // C#45：@ 的对象是已识别的骰娘 → 用户是在叫那只骰子执行指令，本骰静默
+            // @ 的对象是已识别的骰娘 → 用户是在叫那只骰子执行指令，本骰静默
             //（不当代骰目标执行）。
             if (isDiceBot(tgt)) return "";
             pmsg.senderId = tgt;
@@ -262,7 +262,7 @@ public:
 
         // These commands let their argument attach directly (".r3d6", ".ra侦查60",
         // ".coc5"), so they're parsed before the space-splitting path.
-        // C#68/C#78：CAT()/RM() 给回复打「类别」标签（AI 润色/翻译按覆盖范围过滤，
+        // CAT()/RM() 给回复打「类别」标签（AI 润色/翻译按覆盖范围过滤，
         // 不动 help/错误/配置回复）。RM=掷骰/检定类；CAT 用于牌堆/娱乐。
         auto CAT = [](const char* c, std::optional<std::string> r) { if (r) s_replyCat = c; return r; };
         auto RM = [&CAT](std::optional<std::string> r) { return CAT("roll", std::move(r)); };
@@ -275,9 +275,9 @@ public:
         if (auto r = RM(PX(tryHandleBrp(loc, pmsg, cmd))))   return *r;  // .ba / .bav  BRP 检定/对抗
         if (auto r = RM(PX(tryHandleCheck(loc, pmsg, cmd)))) return *r;  // .ra / .rc 检定
         if (auto r = RM(PX(tryHandleBP(loc, pmsg, cmd))))    return *r;  // .rb / .rp 奖励/惩罚骰
-        if (auto r = tryHandlePersona(loc, msg, cmd))    return *r;  // .rpmode 人格切换 (C#28-B)
+        if (auto r = tryHandlePersona(loc, msg, cmd))    return *r;  // .rpmode 人格切换
         if (auto r = RM(tryHandleDnd(loc, pmsg, cmd)))  return *r;  // .ss/.cast/.longrest/.ds (DND，@可代操作)
-        if (auto r = tryHandleGame(loc, msg, cmd))  return *r;  // C#107 .game 团务（须在 .ga 类之前独立匹配）
+        if (auto r = tryHandleGame(loc, msg, cmd))  return *r;  // .game 团务（须在 .ga 类之前独立匹配）
         if (auto r = tryHandleGen(loc, msg, cmd))   return *r;  // .coc / .dnd 生成
         if (auto r = tryHandleMaster(loc, msg, cmd))return *r;  // boton/botoff/blackqq/whitegroup… (须在 .bot 前)
         if (auto r = tryHandleBot(loc, msg, cmd))   return *r;  // .bot / .bot on/off (+账号定向)
@@ -296,8 +296,8 @@ public:
         if (auto r = CAT("fun", tryHandleNNN(loc, msg, cmd))) return *r; // .nnn 随机改名 (须在 .nn 前)
         if (auto r = tryHandleNN(loc, msg, cmd))    return *r;  // .nn 改名
         if (auto r = tryHandleSetcoc(loc, msg, cmd))return *r;  // .setcoc 房规 (须在 .set 前)
-        if (auto r = tryHandlePlugin(loc, msg, cmd)) return *r;  // .plugin 分群插件启停 (C#33)
-        if (auto r = tryHandleSystem(loc, msg, cmd)) return *r;  // .system info/stats (C#53, 骰主)
+        if (auto r = tryHandlePlugin(loc, msg, cmd)) return *r;  // .plugin 分群插件启停
+        if (auto r = tryHandleSystem(loc, msg, cmd)) return *r;  // .system info/stats (骰主)
         if (auto r = tryHandleSetsn(loc, msg, cmd)) return *r;  // .setsn 群名片模板 (须在 .set 前)
         if (auto r = tryHandleSetdnd(loc, msg, cmd))return *r;  // .setdnd DND模式开关 (须在 .set 前)
         if (auto r = tryHandleSet(loc, msg, cmd))   return *r;  // .set 默认骰
@@ -319,7 +319,7 @@ public:
                 "helpdoc", "welcome", "dismiss", "ruleset",
                 "notice",
                 "alias", "trust", "admin", "rules", "group", "reply", "bind", "info",
-                // C#107：“game”不做免空格前缀回退——.game xx 由 tryHandleGame 直达（带空格），
+                // “game”不做免空格前缀回退——.game xx 由 tryHandleGame 直达（带空格），
                 // 否则 .gameXXX 类 Lua 插件触发词会被拆成 game+XXX 吞掉。
                 "buff", "send", "help", "text", "link", "init", "lang", "rule",
                 "npc", "log", "hiy", "mod",
@@ -341,7 +341,7 @@ public:
         }
 
         // ─── Core Commands ───────────────────────────────────
-        if (cmdLower == "ai")      return handleAi(loc, args, msg);   // C#84：本群 AI 开关
+        if (cmdLower == "ai")      return handleAi(loc, args, msg);   // 本群 AI 开关
         if (cmdLower == "trust")   return handleTrust(loc, args, msg); // C：用户信任等级
         if (cmdLower == "admin")   return handleAdmin(loc, args, msg); // C：管理员授撤
         if (cmdLower == "notice")  return handleNotice(loc, args, msg); // B：通知窗口注册
@@ -368,7 +368,7 @@ public:
         if (cmdLower == "welcome") return handleWelcome(loc, args, msg);
         if (cmdLower == "reply")   return handleReply(loc, args, msg);
         if (cmdLower == "pc")      return handlePC(loc, args, msg);
-        if (cmdLower == "npc")     return handleNpc(loc, args, msg);   // D#06 NPC 卡+代骰
+        if (cmdLower == "npc")     return handleNpc(loc, args, msg);   // NPC 卡+代骰
         if (cmdLower == "mod")     return handleMod(loc, args, msg);
         if (cmdLower == "lang")    return handleLang(loc, args, msg);
 
@@ -441,12 +441,34 @@ private:
         const std::string transport = msg.extra.value("__identity_transport", std::string());
         auto& bindings = BindingStore::instance();
         if (arg.empty())
-            return "用法：\n.bind qq <真实QQ号>\n.bind qqgroup <真实群号>\n.bind [qq|qqgroup] <QQ-Official-机器人ID:OpenID>";
+            return "安全绑定用法（在 OneBot 窗口执行）：\n"
+                ".bind qq QQ-Official-机器人ID:OpenID\n"
+                ".bind qqgroup QQ-Official-机器人ID:OpenID\n"
+                "QQ群绑定须由该群群主或管理在目标群内执行。\n"
+                "官方窗口直绑真实 QQ 默认关闭，可由骰主在网页系统设置中临时开启。";
 
         const bool sourceOfficial = transport == "qq_official";
         const bool sourceOneBot = transport == "onebot_v11";
         if (!sourceOfficial && !sourceOneBot)
             return "当前适配器不支持 QQ 身份绑定。";
+
+        // QQ 官方机器人只提供隔离的 OpenID，无法验证它背后的真实 QQ 与群管理身份。
+        // 默认仅接受 OneBot 会话发起的绑定：该会话的发送者/群号可由 OneBot 提供并校验。
+        const auto officialDirectBindHint = [] {
+            return std::string(
+                "安全模式已开启：QQ 官方机器人无法验证发言者的真实 QQ 身份。\n"
+                "请在 OneBot 窗口中使用：\n"
+                ".bind qq QQ-Official-机器人ID:OpenID\n"
+                ".bind qqgroup QQ-Official-机器人ID:OpenID\n"
+                "骰主可在网页「系统设置 → 身份绑定（高风险）」临时开启官方窗口直绑。\n"
+                "开启后，任何人都可能冒认 QQ，导致人物卡或其他用户数据被错误关联。");
+        };
+
+        // 群标识必须在待绑定的 OneBot 群内由群管理发起；私聊无法验证一个群的归属。
+        if (kind == Kind::Group && msg.type != MessageType::kGroup)
+            return "QQ群绑定必须在目标群内执行。";
+        if (kind == Kind::Group && sourceOneBot && !senderIsGroupAdmin(msg))
+            return "仅群主或群管理可以绑定本群的 QQ 官方标识。";
 
         const bool chooseUser = kind == Kind::User;
         const std::string local = msg.extra.value(chooseUser ? "__identity_local_sender" : "__identity_local_target", std::string());
@@ -455,7 +477,11 @@ private:
 
         if (BindingStore::isRealQQ(arg)) {
             if (!sourceOfficial)
-                return "真实 QQ 号应在 QQ 官方机器人窗口中绑定。\n反向绑定请填写 QQ-Official-机器人ID:OpenID。";
+                return "请在 OneBot 窗口填写官方标识进行反向绑定：\n.bind "
+                    + std::string(kind == Kind::Group ? "qqgroup " : "qq ")
+                    + "QQ-Official-机器人ID:OpenID";
+            if (!cfg_.get<bool>("dice/allow_official_direct_bind", false))
+                return officialDirectBindHint();
             std::string error;
             if (!bindings.bindOfficialToQQ(db_, local, arg, kind, error)) return "绑定失败：\n" + error;
             return std::string("绑定成功。\n当前官方") + (kind == Kind::Group ? "群" : "用户")
@@ -474,9 +500,8 @@ private:
             if (!bindings.bindOfficialToCurrentQQ(db_, arg, current, kind, error)) return "绑定失败：\n" + error;
             return "绑定成功。\n当前真实 QQ 会话已关联到：\n" + arg;
         }
-        if (!BindingStore::isRealQQ(current)) return "当前窗口没有可绑定的真实/虚拟 QQ 号。";
-        if (!bindings.bindOfficialToCurrentQQ(db_, arg, current, kind, error)) return "绑定失败：\n" + error;
-        return "绑定成功。\n当前窗口已关联到：\n" + arg;
+        // 官方窗口中将一个 OpenID 关联到另一 OpenID 同样无法验证归属，不能作为默认通道。
+        return officialDirectBindHint();
     }
 
     std::string handleIdentityInfo(const std::string& args, const Message& msg) {
@@ -562,7 +587,7 @@ private:
             expr.clear();
             reason = rest;
         }
-        // C#63: 裸 d/D（无面数，如 .rd / .r d）视同「掷默认骰」，与 .r 一致——落入下方
+        // 裸 d/D（无面数，如 .rd / .r d）视同「掷默认骰」，与 .r 一致——落入下方
         // 默认骰逻辑（.set 默认骰 / 本群默认骰生效），否则引擎会把裸 d 当死板 d100。
         if (expr == "d" || expr == "D") expr.clear();
 
@@ -593,7 +618,7 @@ private:
 
         const std::string nick = displayName(msg);
 
-        // C#107：轮盘骰——GM 用 .game rou N 启用后，本群纯 1dN/dN 掷骰改为袋中
+        // 轮盘骰——GM 用 .game rou N 启用后，本群纯 1dN/dN 掷骰改为袋中
         // 不放回抽取（防「重骰刷点」，原版 DiceRoulette）。仅拦单骰、单轮。
         if (turns == 1 && msg.type == MessageType::kGroup) {
             std::string le = toLower(expr);
@@ -1175,7 +1200,7 @@ private:
                 if (adjOk && nm.find_first_of("0123456789") == std::string::npos) {
                     auto v = cards_.getAttr(owner, group, nm);
                     if (!v && owner == msg.senderId && group == cardScope(msg)) v = derivedAttr(msg, nm);  // model.xml 衍生值
-                    if (!v) v = defaultAttr(nm);   // C#102：未录入 → 规则默认值（如 急救30）
+                    if (!v) v = defaultAttr(nm);   // 未录入 → 规则默认值（如 急救30）
                     if (!v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", nm}}); return false; }
                     rate = *v + parseIntOr(adj, 0);
                     if (rate < 1) rate = 1;
@@ -1215,9 +1240,9 @@ private:
 
         // No inline/next rate → read the value from the card; remainder is the reason.
         auto v = cards_.getAttr(owner, group, attr);
-        if (!v && owner == msg.senderId && group == cardScope(msg)) v = evalStrAttr(msg, CharacterCardStore::canonical(attr));  // C#37 关联属性
+        if (!v && owner == msg.senderId && group == cardScope(msg)) v = evalStrAttr(msg, CharacterCardStore::canonical(attr));  // 关联属性
         if (!v && owner == msg.senderId && group == cardScope(msg)) v = derivedAttr(msg, attr);  // model.xml 衍生值
-        if (!v) v = defaultAttr(attr);   // C#102：未录入 → 规则默认值（如 急救30、聆听20）
+        if (!v) v = defaultAttr(attr);   // 未录入 → 规则默认值（如 急救30、聆听20）
         if (!v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", attr}}); return false; }
         rate = *v;
         reason = remainder;
@@ -1332,6 +1357,8 @@ private:
     }
 
     int senderTrust(const Message& msg) const {
+        // 官方群消息没有可验证的发送者 QQ，不能沿用绑定后的信任等级做鉴权。
+        if (msg.platform == "qq_official" && msg.type == MessageType::kGroup) return 0;
         auto* st = db_.getStorage(); if (!st) return 0;
         try {
             namespace orm = sqlite_orm;
@@ -1625,7 +1652,7 @@ private:
             auto rr = engine_.roll("1d100");
             if (!rr.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", rr.error}});
             std::string after = trim(splitCommand(s).second);
-            // C#101：.rad <技能> = .r + .ra 的合并——第一行按 .r 展示掷骰过程，第二行
+            // .rad <技能> = .r + .ra 的合并——第一行按 .r 展示掷骰过程，第二行
             // 用**同一个骰值**对技能成功率判定。"d" 后解析不出技能时保留原行为（当 reason）。
             if (!after.empty()) {
                 std::string attr2, reason2, err2; int rate2 = 0;
@@ -1736,7 +1763,7 @@ private:
         char c0 = static_cast<char>(std::tolower(static_cast<unsigned char>(cmd[0])));
         char c1 = static_cast<char>(std::tolower(static_cast<unsigned char>(cmd[1])));
         if (c0 != 'r' || (c1 != 'b' && c1 != 'p')) return std::nullopt;
-        // C#39: don't let ".rp"/".rb" greedily swallow longer ASCII command words such
+        // don't let ".rp"/".rb" greedily swallow longer ASCII command words such
         // as ".rpmode" (persona). Valid chars right after r[bp] are: end / space / a
         // digit (dice count) / a non-ASCII attribute (.rp侦查). An ASCII letter here means
         // this is a different command — defer so e.g. .rpmode reaches tryHandlePersona.
@@ -1769,7 +1796,7 @@ private:
         return formatCheck(loc, msg, attr, rate, reason, detail, result);
     }
 
-    // ─── Persona switching: .rpmode (C#28-B) ─────────────────────
+    // ─── Persona switching: .rpmode ─────────────────────
     // .rpmode is an independent command — no conflict with .rp (COC7 penalty dice).
     // Permissions: show/list/info = everyone; set/off/default = group admin;
     //              create/copy/del = Master only.
@@ -1795,7 +1822,7 @@ private:
 
         if (!personaMgr_) return std::nullopt;
 
-        const bool isGroupAdmin = senderIsGroupAdmin(msg);   // C#48：统一群管权限（含群主/管理/邀请人/骰主）
+        const bool isGroupAdmin = senderIsGroupAdmin(msg);   // 统一群管权限（含群主/管理/邀请人/骰主）
         const bool isMasterUser = isMaster(msg);
 
         // .rpmode (no args) → show current persona
@@ -2301,7 +2328,7 @@ private:
     std::optional<std::string> tryHandleSetdnd(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("setdnd", 0) != 0) return std::nullopt;
         std::string a = toLower(trim(cmd.substr(6)));
-        // C#48：群模式切换需群管权限（与 .setcoc 同级，对齐原版 canRoomHost 门控）。
+        // 群模式切换需群管权限（与 .setcoc 同级，对齐原版 canRoomHost 门控）。
         if (a != "show" && !senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
         if (a == "off" || a == "0" || a == "clr") { setGroupSetting(msg, "dndMode", "0"); return i18n_.tr(loc, "setdnd.off"); }
         if (a == "on" || a == "1")               { setGroupSetting(msg, "dndMode", "1"); return i18n_.tr(loc, "setdnd.on"); }
@@ -2337,7 +2364,7 @@ private:
         std::string canon = CharacterCardStore::canonical(attr), formula;
         {
             std::shared_lock<std::shared_mutex> lk(rulesLock());
-            // C#102：规则包声明的派生关系优先（可覆盖内置/model.xml 同名公式）。
+            // 规则包声明的派生关系优先（可覆盖内置/model.xml 同名公式）。
             auto& rp = rulePackDerivedRegistry();
             if (auto itp = rp.find(canon); itp != rp.end()) formula = itp->second;
             else {
@@ -2355,9 +2382,9 @@ private:
     }
     std::optional<int> effectiveAttr(const Message& msg, const std::string& attr) const {
         auto base = cards_.getAttr(msg.senderId, cardScope(msg), attr);
-        if (!base) base = evalStrAttr(msg, CharacterCardStore::canonical(attr));  // C#37 关联属性求值
+        if (!base) base = evalStrAttr(msg, CharacterCardStore::canonical(attr));  // 关联属性求值
         if (!base) base = derivedAttr(msg, attr);   // 未设置 → model.xml 衍生值
-        if (!base) base = defaultAttr(attr);        // C#102：规则默认值（如 急救30）
+        if (!base) base = defaultAttr(attr);        // 规则默认值（如 急救30）
         int buff = getBuff(msg, attr);
         if (!base && buff == 0) return std::nullopt;
         return base.value_or(0) + buff;
@@ -2374,7 +2401,7 @@ private:
         setUserSetting(msg, "attrf:" + canon, f);
     }
 
-    // D#03：COC7 伤害加值(DB) —— 按 力量+体型 之和查表，返回投掷公式原文（-2/-1/0/1d4/1d6/2d6…）。
+    // COC7 伤害加值(DB) —— 按 力量+体型 之和查表，返回投掷公式原文（-2/-1/0/1d4/1d6/2d6…）。
     // 表：<65 -2，<85 -1，<125 0，<165 1d4，<205 1d6，之后每满 80 点多 1d6。
     static std::string coc7DamageBonus(int strPlusSiz) {
         if (strPlusSiz < 65)  return "-2";
@@ -2395,7 +2422,7 @@ private:
         return "";
     }
 
-    // 「关联/表达式属性」(C#37)：值是引用其它属性的算式（如 物防=敏捷+1 / pd='dex+1'），
+    // 「关联/表达式属性」：值是引用其它属性的算式（如 物防=敏捷+1 / pd='dex+1'），
     // 存原文字符串，读取时按当前属性值求值（联动）。存在 user_settings "sattr:<canon>"。
     std::string getStrAttr(const Message& msg, const std::string& canon) const {
         return getUserSetting(msg, "sattr:" + canon);
@@ -2427,7 +2454,7 @@ private:
     /// 把掷骰表达式里的「公式属性」引用（db/DB/伤害加值…）替换成其存储的公式（带括号）。
     /// 如 .r 1d4+db（db 存了 1d4）→ 1d4+(1d4)。未录入则原样。
     std::string substituteFormulaAttrs(const std::string& expr, const Message& msg) const {
-        // D#03：未单独录入 DB 时也按 力量+体型 现算，避免 +db 被当骰子(d100 奖励骰)。
+        // 未单独录入 DB 时也按 力量+体型 现算，避免 +db 被当骰子(d100 奖励骰)。
         std::string f = effectiveDamageBonus(msg);  // 伤害加值（手动优先，未存则现算）
         if (f.empty() || expr.empty()) return expr;
         std::string repl = "(" + f + ")", out = expr;
@@ -2554,7 +2581,7 @@ private:
              {"mod", modStr}, {"total", std::to_string(total)}});
     }
 
-    // D#07: DND ability-modifier check. Ability scores are converted with
+    // DND ability-modifier check. Ability scores are converted with
     // floor((score - 10) / 2); non-ability names use the separate dndskill: store.
     std::optional<std::string> tryHandleRdc(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("rdc", 0) != 0) return std::nullopt;
@@ -2649,7 +2676,7 @@ private:
 
     // ─── .st — character card set/show/clear/del ─────────────
 
-    // D#02：清空该用户在本卡作用域下所有「卡相关」user_settings（关联属性 sattr: /
+    // 清空该用户在本卡作用域下所有「卡相关」user_settings（关联属性 sattr: /
     // 公式属性 attrf: / 武器 wpn: / 上限 max:）。.st clr 原先只清 CharacterCard 整数属性，
     // 这些存在 user_settings 里的会残留（.st show 仍显示、.st clr 清不掉、回执报 card empty）。
     bool clearCardUserSettings(const Message& msg) {
@@ -2662,9 +2689,9 @@ private:
                 orm::c(&UserSettingRow::groupId) == cardScope(msg)));
             for (auto& r : rows) {
                 if (r.key.rfind("sattr:", 0) == 0 || r.key.rfind("attrf:", 0) == 0
-                    || r.key.rfind("attrfauto:", 0) == 0   // D#03：DB 自动/手动标记
+                    || r.key.rfind("attrfauto:", 0) == 0   // DB 自动/手动标记
                     || r.key.rfind("wpn:", 0) == 0 || r.key.rfind("max:", 0) == 0
-                    || r.key.rfind("dndskill:", 0) == 0) { // D#07：DND 独立技能检定加值
+                    || r.key.rfind("dndskill:", 0) == 0) { // DND 独立技能检定加值
                     st->remove<UserSettingRow>(r.id); removed = true;
                 }
             }
@@ -2689,7 +2716,7 @@ private:
         if (lrest == "clr") {
             if (lockedW) return i18n_.tr(loc, "card.locked_w");
             bool had = cards_.clear(user, group);
-            had = clearCardUserSettings(msg) || had;   // D#02：连带清关联属性/公式/武器/上限
+            had = clearCardUserSettings(msg) || had;   // 连带清关联属性/公式/武器/上限
             return i18n_.tr(loc, had ? "card.cleared" : "card.empty", {{"nick", nick}});
         }
         if (lrest == "show" || lrest.rfind("show ", 0) == 0) {
@@ -2698,7 +2725,7 @@ private:
             if (attr.empty()) {
                 auto attrs = cards_.getAttrs(user, group);
                 std::string detail = joinAttrsVital(attrs, attrMax("\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc", msg));
-                // 关联/表达式属性 (C#37)：附在后面，显示「属性=表达式（=当前值）」。
+                // 关联/表达式属性：附在后面，显示「属性=表达式（=当前值）」。
                 for (auto& [k, e] : listStrAttrs(msg)) {
                     if (!detail.empty()) detail += " ";
                     detail += k + "=" + e;
@@ -2811,9 +2838,9 @@ private:
         // Attribute entry: "力量50 敏捷60 hp-2 理智+1d3" ...
         std::map<std::string, int> changes;
         std::map<std::string, std::string> formulaChanges;   // 公式属性（伤害加值）：存原文
-        std::map<std::string, std::string> strChanges;       // 关联/表达式属性 (C#37)：存原文
+        std::map<std::string, std::string> strChanges;       // 关联/表达式属性：存原文
 
-        // D#07：DND 钱币按最小单位（cp）统一结算，写回时按 pp/gp/ep/sp/cp
+        // DND 钱币按最小单位（cp）统一结算，写回时按 pp/gp/ep/sp/cp
         // 标准面额分解。这样 `.st gp-1` 在金币不足时会自动从更高面额换开，
         // `.st cp+1` 也会把已有零钱规整为可读的面额组合，且总价值绝不为负。
         struct CoinUnit { const char* name; long long cp; };
@@ -2891,7 +2918,7 @@ private:
             if (i < p.size() && (p[i] == '+' || p[i] == '-')) {
                 modifier = true; if (p[i] == '-') sign = -1; ++i;
             }
-            // C#37 关联/表达式属性：值以引号开头（'dex+1'），或以字母/中文开头的属性引用
+            // 关联/表达式属性：值以引号开头（'dex+1'），或以字母/中文开头的属性引用
             // 算式（敏捷+1）——把整段当表达式存为字符串属性，读取时按引用的属性求值。
             // 'd'+数字 仍当骰子（交给下方数字路径），如 .st x=d4。
             {
@@ -2951,7 +2978,7 @@ private:
             if (std::string fcanon = CharacterCardStore::canonical(attr); isFormulaAttr(fcanon)) {
                 std::string formula = (modifier && sign < 0 ? "-" : "") + valTok;   // 去掉前导 +，保留 -
                 setFormulaAttr(msg, fcanon, formula);
-                setUserSetting(msg, "attrfauto:" + fcanon, "0");   // D#03：手动录入 → 关自动，优先保留
+                setUserSetting(msg, "attrfauto:" + fcanon, "0");   // 手动录入 → 关自动，优先保留
                 formulaChanges[fcanon] = formula;
                 continue;
             }
@@ -2982,7 +3009,7 @@ private:
                     setUserSetting(msg, "max:" + key, std::to_string(mx));
                 }
             }
-            // D#06：生命值上限夹取 + 临时生命值（护盾）——受击优先扣临时，溢出再扣真实，
+            // 生命值上限夹取 + 临时生命值（护盾）——受击优先扣临时，溢出再扣真实，
             // 且真实血量不小于 0、不超过上限；治疗/设值同样夹在 [0, 上限]。
             static const std::string HP_CANON = "\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc";       // 生命值
             static const std::string HPTEMP_CANON = "\xe4\xb8\xb4\xe6\x97\xb6\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc";  // 临时生命值
@@ -3015,7 +3042,7 @@ private:
                 applyDndCoinChange(key, value, modifier);
                 continue;
             }
-            // D#07：DND 的技能检定加值与六项属性值分区保存。技能曾被录在普通卡
+            // DND 的技能检定加值与六项属性值分区保存。技能曾被录在普通卡
             // 属性中的旧数据仍可由 dndSkillValue 读取；一旦修改即迁移到独立 dndskill: 键。
             if (dndModeOn(msg) && !isDndCardSpecialInput(attr)) {
                 int newVal = modifier ? dndSkillValue(msg, key).value_or(0) + value : value;
@@ -3033,7 +3060,7 @@ private:
         // 公式属性（伤害加值）单独拼进 detail（值是公式原文，不是数）。
         std::string fdetail = joinAttrs(changes);
         for (auto& [k, f] : formulaChanges) { if (!fdetail.empty()) fdetail += " "; fdetail += k + ":" + f; }
-        // 关联/表达式属性 (C#37)：显示「属性=表达式（=当前值）」。
+        // 关联/表达式属性：显示「属性=表达式（=当前值）」。
         for (auto& [k, e] : strChanges) {
             if (!fdetail.empty()) fdetail += " ";
             fdetail += k + "=" + e;
@@ -3068,7 +3095,7 @@ private:
                                   + " → " + std::to_string(*newCur) + "/" + std::to_string(*newMax);
             }
         }
-        // D#03：伤害加值(DB) 自动计算。力量/体型有变、且 DB 非手动、本次未显式录 DB 时，
+        // 伤害加值(DB) 自动计算。力量/体型有变、且 DB 非手动、本次未显式录 DB 时，
         // 按 STR+SIZ 查表算 DB 存为公式属性（手动录入的自定义 DB 优先，不覆盖）。
         std::string dbDetail;
         {
@@ -3098,9 +3125,9 @@ private:
             }
             reply += "\n" + i18n_.tr(loc, "card.autocard.recalc", {{"causes", causes}, {"detail", recalcDetail}});
         }
-        if (!dbDetail.empty())   // D#03：告知自动算出的 DB
+        if (!dbDetail.empty())   // 告知自动算出的 DB
             reply += "\n" + i18n_.tr(loc, "card.db.auto", {{"db", dbDetail}});
-        maybeAutoSn(msg);   // .sn auto：属性变化后实时刷新群名片 (C#34)
+        maybeAutoSn(msg);   // .sn auto：属性变化后实时刷新群名片
         return reply;
     }
 
@@ -3115,7 +3142,7 @@ private:
         return s.str();
     }
 
-    // D#06：像 joinAttrs，但把「临时生命值」折进「生命值」——显示为 有效值[/上限]（如 13/10），
+    // 像 joinAttrs，但把「临时生命值」折进「生命值」——显示为 有效值[/上限]（如 13/10），
     // 临时>0 时体现「护盾」。@p hpMax 为空则不显示 /上限（改注「(+临时N)」）。
     static std::string joinAttrsVital(const std::map<std::string, int>& attrs, std::optional<int> hpMax) {
         static const std::string HP = "\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc";              // 生命值
@@ -3238,6 +3265,10 @@ private:
 
     // ─── .help / .helpdoc 文档系统 ───────────────────────────
 public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_service 聚合
+    /// Commands handled since process start (non-empty reply = a command). Read
+    /// by the dashboard / .system stats. Same counter as s_cmdCount.
+    static long commandCount() { return s_cmdCount.load(std::memory_order_relaxed); }
+
     /// Known built-in help topics (used by .help <topic> and .helpdoc listing).
     static const std::vector<std::string>& helpTopics() {
         static const std::vector<std::string> t = {
@@ -3249,20 +3280,20 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         return t;
     }
 
-    // C#10：插件帮助提供器（由 main.cpp 从 JsPluginManager 注入，返回 {指令名, 帮助文本}）。
+    // 插件帮助提供器（由 main.cpp 从 JsPluginManager 注入，返回 {指令名, 帮助文本}）。
     // CommandRouter 不直接依赖 JS 引擎，故用回调解耦。
     using HelpProviderFn = std::function<std::vector<std::pair<std::string, std::string>>()>;
     void setHelpProvider(HelpProviderFn f) { helpProvider_ = std::move(f); }
 
-    // C#33：插件清单提供器（main.cpp 注入 lua/js 插件列表），供 .plugin 指令枚举/启停。
+    // 插件清单提供器（main.cpp 注入 lua/js 插件列表），供 .plugin 指令枚举/启停。
     struct PluginEntry { std::string id; std::string name; std::string kind; bool enabledGlobal = true; };
     using PluginListFn = std::function<std::vector<PluginEntry>()>;
     void setPluginProvider(PluginListFn f) { pluginProvider_ = std::move(f); }
 
-    // C#10：一条帮助条目（合并自内置 i18n / 规则包 / 插件 / 文件四源）。
+    // 一条帮助条目（合并自内置 i18n / 规则包 / 插件 / 文件四源）。
     struct HelpEntry { std::string key, content, source; };  // builtin | rule:<包> | plugin:<名> | file:<名>
 
-    // C#10：data/help/*.md 用户自管帮助文档（第四源）。专用读写锁；启动期与 CRUD 后 loadHelpFiles。
+    // data/help/*.md 用户自管帮助文档（第四源）。专用读写锁；启动期与 CRUD 后 loadHelpFiles。
     static std::shared_mutex& helpLock() { static std::shared_mutex m; return m; }
     static std::map<std::string, std::string>& helpFiles() { static std::map<std::string, std::string> m; return m; }
     static void loadHelpFiles() {
@@ -3280,7 +3311,7 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         }
     }
 
-    // C#26：data/helpdoc/**/*.json 结构化帮助文档（海豹 SealDice 兼容 + 随包分发的规则速查）。
+    // data/helpdoc/**/*.json 结构化帮助文档（海豹 SealDice 兼容 + 随包分发的规则速查）。
     // 格式 {mod, brief, helpdoc:{词条:内容}}（值以 & 开头=别名，一级解析）。xlsx 在打包时转 json。
     struct HelpDocItem { std::string topic, content, pack; };
     static std::shared_mutex& helpDocLock() { static std::shared_mutex m; return m; }
@@ -3319,7 +3350,7 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         std::unique_lock<std::shared_mutex> lk(helpDocLock());
         helpDocs().clear();
         scanHelpDocDir("data/helpdoc");
-        // C#27：各规则包自带的 helpdoc（data/rulepacks/<包>/helpdoc/）。
+        // 各规则包自带的 helpdoc（data/rulepacks/<包>/helpdoc/）。
         namespace fs = std::filesystem; std::error_code ec;
         if (fs::is_directory("data/rulepacks", ec))
             for (auto& e : fs::directory_iterator("data/rulepacks", ec)) {
@@ -3359,7 +3390,7 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
             for (const auto& [k, c] : helpFiles())
                 if (!c.empty()) add(k, c, "file:" + k);
         }
-        {   // C#26：结构化帮助文档（data/helpdoc，海豹兼容 + 随包速查）
+        {   // 结构化帮助文档（data/helpdoc，海豹兼容 + 随包速查）
             std::shared_lock<std::shared_mutex> lk(helpDocLock());
             for (const auto& h : helpDocs())
                 if (!h.content.empty()) add(h.topic, h.content, "helpdoc:" + h.pack);
@@ -3429,7 +3460,7 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         return expandBracesOnly(s, msg, depth);
     }
 
-    // C#12 可视化生成器「实时测试」结果：matched=是否命中规则指令层；reply=渲染输出；
+    // 可视化生成器「实时测试」结果：matched=是否命中规则指令层；reply=渲染输出；
     // status: ""=正常 / "render_fail"=表达式引用缺失属性或未知函数 / "disabled"=被该规则屏蔽。
     struct RuleTestResult { bool matched = false; std::string reply; std::string status; };
 
@@ -3508,10 +3539,10 @@ private:
         std::string topic = toLower(trim(args));
         if (topic.empty()) return i18n_.tr(loc, "help.main");
         topic = toLower(trim(stripPrefix(topic)));   // 容忍 ".help .r"
-        // C#27 深化：本群激活的规则包，其同名帮助词条优先于内置/其它来源。
+        // 深化：本群激活的规则包，其同名帮助词条优先于内置/其它来源。
         if (auto rp = activeRulePack(msg))
             for (auto& [k, c] : rp->helpEntries) if (toLower(k) == topic) return expandHelpRefs(c, msg);
-        // C#36：设了默认帮助来源 → 同名词条优先该来源（如 dnd5r 压过 dnd3r）。
+        // 设了默认帮助来源 → 同名词条优先该来源（如 dnd5r 压过 dnd3r）。
         if (std::string defSrc = helpdocDefaultSource(msg); !defSrc.empty()) {
             std::shared_lock<std::shared_mutex> lk(helpDocLock());
             for (const auto& h : helpDocs())
@@ -3541,7 +3572,7 @@ private:
         return i18n_.tr(loc, "help.unknown", {{"topic", topic}});
     }
 
-    // C#36：当前生效的默认帮助来源（本群优先，回退全局配置）。空=未设。
+    // 当前生效的默认帮助来源（本群优先，回退全局配置）。空=未设。
     std::string helpdocDefaultSource(const Message& msg) const {
         std::string g = getGroupSetting(msg, "helpDefault");
         if (!g.empty()) return g;
@@ -3603,7 +3634,7 @@ private:
     }
 
     std::string handleHelpDoc(Locale loc, const std::string& args, const Message& msg) {
-        // C#36：.helpdoc default [来源] —— 切换默认帮助来源优先级（dnd3r/dnd5r 同名词条择优）。
+        // .helpdoc default [来源] —— 切换默认帮助来源优先级（dnd3r/dnd5r 同名词条择优）。
         // 搜索域：.helpdoc scope [来源|clear] —— 把本群帮助搜索「锁定」到某来源，只查它（更强）。
         {
             auto [sub, rest] = splitCommand(trim(args));
@@ -3614,7 +3645,7 @@ private:
         }
         std::string topic = toLower(trim(args));
         if (!topic.empty()) return handleHelp(loc, args, msg);   // .helpdoc <topic> == .help <topic>
-        // C#25：默认文案只给「怎么用」提示，不再罗列全部条目（海量 mod helpdoc 会刷屏）。
+        // 默认文案只给「怎么用」提示，不再罗列全部条目（海量 mod helpdoc 会刷屏）。
         // 仅当骰主把模板改回含 {list} 时，才构建完整条目列表（保留 {list} 变量）。
         if (i18n_.tr(loc, "helpdoc.list", {}).find("{list}") == std::string::npos)
             return i18n_.tr(loc, "helpdoc.list", {});
@@ -3654,7 +3685,7 @@ private:
             return std::string();
         }
 
-        // C#48：.bot on/off 需群管权限（原版 DiceEvent.cpp:3216 canRoomHost 门控 on/off）。
+        // .bot on/off 需群管权限（原版 DiceEvent.cpp:3216 canRoomHost 门控 on/off）。
         if (!action.empty() && !senderIsGroupAdmin(msg))
             return i18n_.tr(loc, "gate.no_perm");
         // Repeated on/off: tell the user it's already in that state (customizable).
@@ -3718,18 +3749,18 @@ public:
         return true;
     }
 
-    // ─── C#45：骰娘探测 ───────────────────────────────────────
+    // ─── 骰娘探测 ───────────────────────────────────────
     /// 是否已识别为骰娘（banlist listType=2）。
     bool isDiceBot(const std::string& userId) const { return banlistHas(0, 2, userId); }
 
-    // C#73：每群最近一次 .bot 探测的时间戳（epoch 秒）。只有骰子横幅在探测后很短时间
+    // 每群最近一次 .bot 探测的时间戳（epoch 秒）。只有骰子横幅在探测后很短时间
     // 内出现，才判定发送者是骰娘——防止有人复制粘贴 .bot 回执被误识别为骰娘。
     mutable std::mutex botProbeMu_;
     std::map<std::string, long> lastBotProbe_;
     /// 骰娘识别时间窗（秒）：横幅须在最近一次 .bot 探测后这么多秒内出现。
     long diceBotProbeWindow() const { return cfg_.get<int>("dice/dicebot_probe_window_sec", 2); }
 
-    /// C#73：记录一次群内 .bot 探测（供 detectDiceBot 的时间窗判定）。
+    /// 记录一次群内 .bot 探测（供 detectDiceBot 的时间窗判定）。
     void recordBotProbe(const Message& msg) {
         if (msg.type != MessageType::kGroup || msg.targetId.empty()) return;
         std::string t = trim(msg.content);
@@ -3771,19 +3802,19 @@ public:
         if (kind.empty()) kind = classifyDiceBanner(msg.rawContent);
         if (kind.empty()) kind = classifyDiceBanner(msg.displayContent);
         if (kind.empty() || isDiceBot(msg.senderId)) return;
-        // C#73：横幅须紧跟在一次真实 .bot 探测之后（默认 2 秒内）才登记，否则有人把
+        // 横幅须紧跟在一次真实 .bot 探测之后（默认 2 秒内）才登记，否则有人把
         // 骰娘的 .bot 回执复制粘贴出来也会被误识别为骰娘。
         {
             std::lock_guard<std::mutex> lk(botProbeMu_);
             auto it = lastBotProbe_.find(msg.platform + ":" + msg.targetId);
             if (it == lastBotProbe_.end() || nowEpoch() - it->second > diceBotProbeWindow()) {
-                DICE_LOG_INFO("C#73 骰娘探测：账号 {} 的横幅未紧跟 .bot 探测（{}），忽略",
+                DICE_LOG_INFO("骰娘探测：账号 {} 的横幅未紧跟 .bot 探测（{}），忽略",
                               msg.senderId, kind);
                 return;
             }
         }
         banlistAdd(0, 2, msg.senderId, kind);
-        DICE_LOG_INFO("C#45 骰娘探测：账号 {} 识别为 {}（已登记骰娘名单）", msg.senderId, kind);
+        DICE_LOG_INFO("骰娘探测：账号 {} 识别为 {}（已登记骰娘名单）", msg.senderId, kind);
     }
 
     /// Read a group setting by explicit platform+group (for event handlers that
@@ -3865,7 +3896,7 @@ public:
         if (msg.type != MessageType::kPrivate && !msg.targetId.empty()) {
             if (banlistHas(1, 0, msg.targetId)) return true;            // blacklisted group
             if (whitelistOnly() && !banlistHas(1, 1, msg.targetId)) return true;
-            // C#62：退群宣言已发出（随机延时退群中）→ 本群禁止响应一切指令。
+            // 退群宣言已发出（随机延时退群中）→ 本群禁止响应一切指令。
             if (getGroupSetting(msg, "leaving") == "1") return true;
         }
         return false;
@@ -3903,7 +3934,7 @@ public:
     static int loadModelTemplates() {
         namespace fs = std::filesystem; std::error_code ec; int n = 0;
         derivedRegistry().clear();   // 重载时不累积（alias 由 resetAliases 另清）
-        // C#102：先播内置派生（闪避=敏捷/2 等），规则 mod/包可覆盖同名条目。
+        // 先播内置派生（闪避=敏捷/2 等），规则 mod/包可覆盖同名条目。
         for (auto& [k, v] : builtinDerived()) derivedRegistry()[CharacterCardStore::canonical(k)] = v;
         auto attrOf = [](const std::string& tag, const std::string& key) -> std::string {
             for (char q : { '\'', '"' }) {
@@ -4068,13 +4099,13 @@ public:
         std::string name, fullName, version, file, dir, author;
         std::vector<std::string> setKeys;
         int diceSides = 0, aliasGroups = 0, computedCount = 0, manualCount = 0;
-        bool enabled = true;     // 文件 .json=启用 / .json.disabled=停用（C#4）
-        // C#12 指令层（commands 块）：本规则启用时生效。
+        bool enabled = true;     // 文件 .json=启用 / .json.disabled=停用
+        // 指令层（commands 块）：本规则启用时生效。
         std::vector<std::string> disableCmds;            // 屏蔽的指令（小写）
         std::map<std::string, std::string> cmdAlias;     // 指令别名：输入词→目标指令（.检定→ra）
-        // C#12-A② 自定义指令：指令名→输出模板（含 {表达式} DSL 占位）。
+        // 自定义指令：指令名→输出模板（含 {表达式} DSL 占位）。
         std::map<std::string, std::string> customCmds;
-        // C#10 帮助：主题→帮助文本（随规则包分发）。来源 = 包级 help 块 + 各自定义指令的 help 字段。
+        // 帮助：主题→帮助文本（随规则包分发）。来源 = 包级 help 块 + 各自定义指令的 help 字段。
         std::map<std::string, std::string> helpEntries;
     };
     static std::vector<RulePack>& rulePacks() { static std::vector<RulePack> v; return v; }
@@ -4126,12 +4157,12 @@ public:
                         }
                 else if (j.contains("computed") && j["computed"].is_object())
                     cc = (int)j["computed"].size();
-                // C#102：技能默认值（"defaults":{"技能":数值}）→ 全局默认值表（可覆盖内置）。
+                // 技能默认值（"defaults":{"技能":数值}）→ 全局默认值表（可覆盖内置）。
                 if (enabled && j.contains("defaults") && j["defaults"].is_object())
                     for (auto& [nm, val] : j["defaults"].items())
                         if (val.is_number_integer())
                             defaultsRegistry()[CharacterCardStore::canonical(nm)] = val.get<int>();
-                // C#102：派生关系（"derived":{"闪避":"敏捷/2"}）→ 规则包派生表（独立于
+                // 派生关系（"derived":{"闪避":"敏捷/2"}）→ 规则包派生表（独立于
                 // derivedRegistry——后者会被 loadModelTemplates 重建，查询时规则包优先）。
                 if (enabled && j.contains("derived") && j["derived"].is_object())
                     for (auto& [nm, expr] : j["derived"].items())
@@ -4156,24 +4187,24 @@ public:
                         for (auto& k : j["set"]["keys"]) if (k.is_string()) p.setKeys.push_back(k.get<std::string>());
                 }
                 if (j.contains("entries") && j["entries"].is_object()) p.manualCount = (int)j["entries"].size();
-                // C#12 指令层：commands.disable[] / commands.alias{输入→目标}。
+                // 指令层：commands.disable[] / commands.alias{输入→目标}。
                 if (j.contains("commands") && j["commands"].is_object()) {
                     auto& c = j["commands"];
                     if (c.contains("disable") && c["disable"].is_array())
                         for (auto& d : c["disable"]) if (d.is_string()) p.disableCmds.push_back(toLower(d.get<std::string>()));
                     if (c.contains("alias") && c["alias"].is_object())
                         for (auto& [k, v] : c["alias"].items()) if (v.is_string()) p.cmdAlias[k] = v.get<std::string>();
-                    // C#12-A②：自定义指令。值可为字符串(=输出模板) 或 {output:"...",help:"..."} 对象。
+                    // 自定义指令。值可为字符串(=输出模板) 或 {output:"...",help:"..."} 对象。
                     if (c.contains("add") && c["add"].is_object())
                         for (auto& [k, v] : c["add"].items()) {
                             if (v.is_string()) p.customCmds[k] = v.get<std::string>();
                             else if (v.is_object()) {
                                 if (v.contains("output") && v["output"].is_string()) p.customCmds[k] = v["output"].get<std::string>();
-                                if (v.contains("help") && v["help"].is_string()) p.helpEntries[k] = v["help"].get<std::string>();  // C#10
+                                if (v.contains("help") && v["help"].is_string()) p.helpEntries[k] = v["help"].get<std::string>();  // 
                             }
                         }
                 }
-                // C#10：包级 help 块（任意主题→帮助文本，随包分发）。
+                // 包级 help 块（任意主题→帮助文本，随包分发）。
                 if (j.contains("help") && j["help"].is_object())
                     for (auto& [k, v] : j["help"].items()) if (v.is_string()) p.helpEntries[k] = v.get<std::string>();
                 rulePacks().push_back(std::move(p));
@@ -4189,10 +4220,10 @@ public:
         rulePacks().clear();
         CharacterCardStore::resetAliases();
         resetComputed();
-        resetDefaults();                    // C#102：默认值/派生随规则包重载重建
+        resetDefaults();                    // 默认值/派生随规则包重载重建
         rulePackDerivedRegistry().clear();
         int n = 0; for (const auto& d : dirs) n += loadRulePacks(d);
-        loadRulePackBundles();   // C#27：重新扫描 data/rulepacks/<包>/（并入各包 rules）
+        loadRulePackBundles();   // 重新扫描 data/rulepacks/<包>/（并入各包 rules）
         loadModelTemplates();    // 规则 mod 的 model/*.xml 属性别名（alias 已被 resetAliases 清空，须重注册）
         return n;
     }
@@ -4217,7 +4248,7 @@ public:
         return std::nullopt;
     }
 
-    // ── C#27：规则包 bundle = data/rulepacks/<名>/ ─────────────────────
+    // ── 规则包 bundle = data/rulepacks/<名>/ ─────────────────────
     //   pack.json: {name, version, author, description, setKeys:[..]}
     //   rules/*.json   → 规则文件（现有格式，并入全局 rulePacks()）
     //   helpdoc/*.json → 帮助速查（loadHelpDocs 扫描，标 "<包>/<mod>"）
@@ -4372,7 +4403,7 @@ private:
     }
 
 public:
-    // ── 插件分群启停（C#27 地基；JS/Lua 通用）──────────────────────────
+    // ── 插件分群启停（地基；JS/Lua 通用）──────────────────────────
     // 默认：全局启用的插件在所有群生效；某群可单独禁用之。插件 id 形如 "js:<名>"/"lua:<名>"。
     // 存 group_settings 的 "pluginsOff"（\n 分隔的 id 列表）。私聊不 gating。
     std::vector<std::string> disabledPluginsInGroup(const std::string& platform, const std::string& group) const {
@@ -4385,7 +4416,7 @@ public:
     }
     bool isPluginEnabledInGroup(const std::string& platform, const std::string& group, const std::string& pluginId) const {
         if (group.empty()) return true;   // 私聊不 gating
-        // C#27：pack-bound 插件（属于某规则包）→ 仅在本群激活了该包对应规则系统时生效。
+        // pack-bound 插件（属于某规则包）→ 仅在本群激活了该包对应规则系统时生效。
         // 群的 ruleSystem 存的是「激活规则的名字」；该规则的 setKeys 与本包 setKeys 有交集 = 包已激活。
         {
             std::shared_lock<std::shared_mutex> lk(rulesLock());
@@ -4420,7 +4451,7 @@ public:
         const std::string scope = groupId.empty() ? std::string() : groupId;
         cards_.setAttr(userId, scope, attr, static_cast<int>(val));
     }
-    // C#37：读关联/表达式属性原文（.st 物防='dex+1' 存的），供 seal.vars.strGet。
+    // 读关联/表达式属性原文（.st 物防='dex+1' 存的），供 seal.vars.strGet。
     bool jsCardGetStr(const std::string& /*platform*/, const std::string& userId,
                       const std::string& groupId, const std::string& attr, std::string& out) {
         const std::string scope = groupId.empty() ? std::string() : groupId;
@@ -4442,8 +4473,8 @@ public:
         setGroupSetting(m, "pluginsOff", joined);
     }
 
-    // C#33：.plugin —— 群主/管理员分群启停插件。
-    // ─── .system —— 系统信息 / 运行统计 (C#53, 仅骰主) ──────────
+    // .plugin —— 群主/管理员分群启停插件。
+    // ─── .system —— 系统信息 / 运行统计 (仅骰主) ──────────
     //   .system info    系统硬件信息 + 占用率
     //   .system stats   运行时长 / 指令数 / 好友 / 群 / 玩家 / 群记录数
     std::optional<std::string> tryHandleSystem(Locale loc, const Message& msg, const std::string& cmd) {
@@ -4506,7 +4537,7 @@ public:
         char b[32]; std::snprintf(b, sizeof(b), "%.1f", v); return b;
     }
 
-    // ─── .plugin —— 分群插件启停 (C#33) ────────────────────────
+    // ─── .plugin —— 分群插件启停 ────────────────────────
     //   .plugin list           列出所有插件 + 本群状态
     //   .plugin on/off <名>     启用/停用某插件（按名称或 id 匹配）
     //   .plugin all on/off      批量启停
@@ -4773,6 +4804,9 @@ private:
     }
     // 消息重载：先做别名归并（原版 TinyList 在 master 判断之前生效），别名号享主号身份。
     bool isMaster(const Message& msg) const {
+        // 同理，官方群中不能把 OpenID 映射后的号码视作骰主身份。
+        // 这保证所有依赖骰主/信任/群管的群内管理操作都会被拒绝。
+        if (msg.platform == "qq_official" && msg.type == MessageType::kGroup) return false;
         return isMaster(msg.platform, resolveAlias(msg.platform, msg.senderId));
     }
 
@@ -4817,7 +4851,7 @@ private:
 
 public:
     /// Write a group_settings value for an ARBITRARY group (boton/botoff <群号>)。
-    /// public：main.cpp 事件层也用它记录群邀请人（C#47）等。
+    /// public：main.cpp 事件层也用它记录群邀请人等。
     void setGroupSettingFor(const std::string& platform, const std::string& groupId,
                             const std::string& key, const std::string& value) {
         auto* st = db_.getStorage(); if (!st) return;
@@ -4846,7 +4880,7 @@ public:
         } catch (...) {}
         return "";
     }
-    /// C#84：本群 AI 功能开关（group_settings key "aiEnabled"，缺省=开）。
+    /// 本群 AI 功能开关（group_settings key "aiEnabled"，缺省=开）。
     bool aiEnabledForGroup(const std::string& platform, const std::string& groupId) const {
         return getGroupSettingFor(platform, groupId, "aiEnabled") != "0";
     }
@@ -4870,7 +4904,7 @@ public:
         } catch (...) { return true; }
     }
 
-    // C#84：.ai on/off/status —— 本群 AI（对话/NPC）开关。开关需群管权限（与 .bot 一致）；仅群聊。
+    // .ai on/off/status —— 本群 AI（对话/NPC）开关。开关需群管权限（与 .bot 一致）；仅群聊。
     std::string handleAi(Locale loc, const std::string& args, const Message& msg) {
         if (msg.type != MessageType::kGroup || msg.targetId.empty())
             return i18n_.tr(loc, "ai.group_only");
@@ -5109,7 +5143,7 @@ private:
             int r = getCocRule(msg);
             return i18n_.tr(loc, "setcoc.show", {{"rule", std::to_string(r)}});
         }
-        // C#48：改动房规需群管权限（原版 DiceEvent.cpp:1699 canRoomHost 门控 .setcoc）。
+        // 改动房规需群管权限（原版 DiceEvent.cpp:1699 canRoomHost 门控 .setcoc）。
         if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
         if (lr == "clr" || lr == "clear") {
             clearCocRule(msg);
@@ -5289,7 +5323,7 @@ private:
         if (!at.empty()) {
             if (groupTrustOf(msg) < 0) return i18n_.tr(loc, "gate.no_perm");
             std::string atl = toLower(at);
-            // C#58：群自动化 .group auto pass/kick/mute ……
+            // 群自动化 .group auto pass/kick/mute ……
             if (atl == "auto" || atl.rfind("auto ", 0) == 0)
                 return handleGroupAuto(loc, msg, trim(at.substr(4)));
             if (atl == "clr" || atl == "clear") {
@@ -5358,7 +5392,7 @@ private:
         });
     }
 
-    // ─── C#58 群自动化：.group auto pass/kick/mute ─────────────
+    // ─── 群自动化：.group auto pass/kick/mute ─────────────
     // pass=加群自动审核（验证消息含关键字/all 全过），kick/mute=按消息关键字踢人/禁言。
     // 需群管配置（handleGroup 已门控）+ 骰子在群内有管理权限才实际生效。
     std::string handleGroupAuto(Locale loc, const Message& msg, const std::string& rest) {
@@ -5420,7 +5454,7 @@ private:
     }
 
 public:
-    /// C#58：一条群消息命中「自动踢出/禁言」关键字时执行动作，返回 "kick"/"mute" 或空。
+    /// 一条群消息命中「自动踢出/禁言」关键字时执行动作，返回 "kick"/"mute" 或空。
     /// 豁免骰主/群管/信任/邀请人/骰娘自身；骰子须有管理权限。由 main.cpp 消息循环调用。
     std::string applyGroupAutoModeration(const Message& msg) {
         if (msg.type != MessageType::kGroup || msg.targetId.empty() || msg.senderId.empty()) return "";
@@ -5721,15 +5755,15 @@ private:
 
     std::string handleDismiss(Locale loc, const std::string&, const Message& msg, bool silent = false) {
         if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "dismiss.private");
-        // C#48：原版 .dismiss 仅 群管理/群主/邀请人/信任>2 可用（DiceEvent.cpp:955-964）。
+        // 原版 .dismiss 仅 群管理/群主/邀请人/信任>2 可用（DiceEvent.cpp:955-964）。
         if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
-        // C#62：指令退群 —— 普通状态先回退群宣言，再随机延时退群。彻底禁用时
+        // 指令退群 —— 普通状态先回退群宣言，再随机延时退群。彻底禁用时
         // 不应在群内产生任何可见回复，改为静默立即退群。
         setGroupSetting(msg, "leaving", "1");
         static thread_local std::mt19937 rng{std::random_device{}()};
         int delay = silent ? 0 : std::uniform_int_distribution<int>(10, 60)(rng);
         const std::string plat = msg.platform, gid = msg.targetId, aid = msg.adapterId;
-        DICE_LOG_INFO("C#62 .dismiss：群 {} {}，{} 秒后退群", gid,
+        DICE_LOG_INFO(".dismiss：群 {} {}，{} 秒后退群", gid,
                       silent ? "完全禁用状态下静默执行" : "已发退群宣言", delay);
         drogon::app().getLoop()->runAfter(static_cast<double>(delay), [this, plat, gid, aid]() {
             auto a = adapters_.getAdapter(aid);
@@ -5739,7 +5773,7 @@ private:
             if (a) a->leaveGroup(gid);
             setGroupSettingFor(plat, gid, "leaving", "0");
             setGroupSettingFor(plat, gid, "left", "1");
-            DICE_LOG_INFO("C#62 .dismiss：已退出群 {}（记录保留，状态=已退群）", gid);
+            DICE_LOG_INFO(".dismiss：已退出群 {}（记录保留，状态=已退群）", gid);
             // B：指令退群通知骰主。
             dice::notice::notify(cfg_, adapters_, dice::notice::kImportant,
                 "\xe6\x8c\x87\xe4\xbb\xa4\xe9\x80\x80\xe7\xbe\xa4\xef\xbc\x9a\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe7\xbe\xa4 " + gid,
@@ -5771,7 +5805,7 @@ private:
         }
         std::string name = trim(a);
 
-        // D#06：多轮先攻 `.ri [轮数]#怪物名`——为同种怪物自动编号（哥布林1/2/3），
+        // 多轮先攻 `.ri [轮数]#怪物名`——为同种怪物自动编号（哥布林1/2/3），
         // 每个各掷一次独立先攻（原版 DiceEvent.cpp:3810 table_add 循环，轮数≤10）。
         if (size_t hp = name.find('#'); hp != std::string::npos) {
             std::string cntTok = trim(name.substr(0, hp));
@@ -5836,11 +5870,16 @@ private:
     }
 
     // ─── .sn 跑团名片（按模板设自己的群名片，青果/海豹）──────
-    /// C#48：群设置变更权限，对齐原版 `DiceEvent::canRoomHost()`（DiceEvent.cpp:4686）：
-    ///   trusted>3 ‖ 私聊 ‖ 群管理/群主（OneBot sender.role）‖ 群邀请人（C#47 记录）‖ 骰主。
+    /// 群设置变更权限，对齐原版 `DiceEvent::canRoomHost()`（DiceEvent.cpp:4686）：
+    ///   trusted>3 ‖ 私聊 ‖ 群管理/群主（OneBot sender.role）‖ 群邀请人（记录）‖ 骰主。
     /// 原版用它门控 .bot on/off、.dismiss、.setcoc、.me on/off、.game new 等开关类指令。
     bool senderIsGroupAdmin(const Message& msg) const {
-        if (msg.fromSelf) return true;                               // C#69 自控：用骰娘账号自身发指令视同群管理（操控者可信）
+        // QQ 官方机器人当前未提供群成员角色字段。为保持基础群内管理指令可用，
+        // 暂时允许官方群内任意用户通过“群管级”门槛（如 .bot on/.bot off）。
+        // 待官方 API 提供可信的群角色/权限信息后，必须改为在此校验 owner/admin。
+        // 骰主与信任级校验仍在 isMaster/senderTrust 中单独拒绝官方群 OpenID 映射。
+        if (msg.platform == "qq_official" && msg.type == MessageType::kGroup) return true;
+        if (msg.fromSelf) return true;                               // 自控：用骰娘账号自身发指令视同群管理（操控者可信）
         if (isMaster(msg) || senderTrust(msg) >= 4) return true;
         if (msg.type == MessageType::kPrivate) return true;          // 原版：私聊恒真
         std::string role;
@@ -5852,7 +5891,7 @@ private:
         return false;
     }
 
-    // ─── C#107：.game 团务（复刻原版 DiceEvent.cpp:1396-1625 + DiceSession）────
+    // ─── .game 团务（复刻原版 DiceEvent.cpp:1396-1625 + DiceSession）────
     // 团数据与 Lua 的 msg.game/GameTable 同源，保存在 lua_mod.db conf。
     // 新会话采用 game:<群号> → __session → game:session:<id> 的两层映射，
     // 以复刻原版 DiceSessionManager「多个聊天窗口映射到同一 Session」的行为；
@@ -5912,7 +5951,7 @@ private:
         gameConf_.set(gameIndexScope(), "sessions", j.dump());
     }
     std::string newGameCode() const {
-        // C#111：16 位 base36（大写字母 + 数字）= 约 83 bit；团名只是显示名，
+        // 16 位 base36（大写字母 + 数字）= 约 83 bit；团名只是显示名，
         // 无法靠编号或名称推测接入凭证。避免混入小写，方便玩家抄写/核对团号。
         static constexpr char alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         std::random_device rd;
@@ -6042,9 +6081,7 @@ private:
             bool isGm = false; for (auto& g : gms) if (g == uid) { isGm = true; break; }
             if (!isGm) {
                 // 原版：首个 GM 需 canRoomHost；已有 GM 时需群管
-                bool allow = gms.empty() ? senderIsGroupAdmin(msg)
-                                         : (msg.extra.value("role", std::string()) == "owner"
-                                            || msg.extra.value("role", std::string()) == "admin" || isMaster(msg));
+                bool allow = senderIsGroupAdmin(msg);
                 if (!allow) return i18n_.tr(loc, "game.master_denied", {{"nick", nick}});
                 gms.push_back(uid);
                 gSet(msg, "__gms", gListDump(gms));
@@ -6248,7 +6285,7 @@ private:
     }
     static void resetComputed() { computedRegistry() = builtinComputed(); }
 
-    // ─── C#102：技能默认值 + 内置派生关系 ─────────────────────
+    // ─── 技能默认值 + 内置派生关系 ─────────────────────
     /// COC7 技能默认值（原版 RDConstant.h SkillDefaultVal 全表移植）：未录入该技能时
     /// 检定按默认值（如 .ra 急救 → 30）。规则包 rules/*.json 可用 "defaults":{"技能":值}
     /// 增改（不同规则的默认值不同）。
@@ -6299,7 +6336,7 @@ private:
         if (it != reg.end()) return it->second;
         return std::nullopt;
     }
-    /// C#102：内置派生关系（原版 mVariableCOC7）：未录入时按公式算。灵感=智力、
+    /// 内置派生关系（原版 mVariableCOC7）：未录入时按公式算。灵感=智力、
     /// 知识=教育、取悦=魅惑已由同义词归并覆盖；这里补 闪避=敏捷/2、母语=教育、
     /// 理智初始=意志（生命/魔法的公式在 builtinComputed）。
     static std::map<std::string, std::string> builtinDerived() {
@@ -6378,7 +6415,7 @@ private:
         return (int)v;
     }
 
-    /// C#12-A②: 渲染规则包自定义指令的输出模板。模板中的 `{表达式}` 占位会被
+    /// 渲染规则包自定义指令的输出模板。模板中的 `{表达式}` 占位会被
     /// 求值后替换；模板外文字原样输出，字面量 `\n` 转真换行。表达式 DSL 支持：
     ///   数字 / '字符串' 或 "字符串" / NdM 掷骰(dM=1dM) / 属性名(取本人卡值) /
     ///   arg(指令后跟随的参数文本) / 全局变量(nick/user/group/self/date/time) /
@@ -6616,7 +6653,7 @@ private:
         std::string out = displayNameRaw(msg);   // 设群名片：用原始名，不加 <>
         for (const auto& tok : toks) {
             auto v = cards_.getAttr(msg.senderId, cardScope(msg), tok);
-            if (!v) v = evalStrAttr(msg, CharacterCardStore::canonical(tok));  // C#37 关联属性求值
+            if (!v) v = evalStrAttr(msg, CharacterCardStore::canonical(tok));  // 关联属性求值
             if (!v) continue;                          // skip attributes the card lacks
             out += " " + tok + std::to_string(*v);
             if (auto mx = attrMax(CharacterCardStore::canonical(tok), msg)) out += "/" + std::to_string(*mx);
@@ -6729,9 +6766,9 @@ private:
             if (!wc.empty()) info += " " + i18n_.tr(loc, "welcome.cd_info", {{"sec", wc}});
             return info;
         }
-        // C#48：设置/关闭欢迎词需群管权限（原版 canRoomHost 门控开关类指令）。
+        // 设置/关闭欢迎词需群管权限（原版 canRoomHost 门控开关类指令）。
         if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
-        // C#76: .welcome delay <sec>
+        // .welcome delay <sec>
         if (la.rfind("delay ", 0) == 0) {
             std::string val = trim(args.substr(6));
             if (val.empty() || val == "0") { setGroupSetting(msg, "welcome_delay", ""); return i18n_.tr(loc, "welcome.delay_off"); }
@@ -6742,7 +6779,7 @@ private:
             setGroupSetting(msg, "welcome_delay", std::to_string(sec));
             return i18n_.tr(loc, "welcome.delay_set", {{"sec", std::to_string(sec)}});
         }
-        // C#76: .welcome cd <sec>
+        // .welcome cd <sec>
         if (la.rfind("cd ", 0) == 0) {
             std::string val = trim(args.substr(3));
             if (val.empty() || val == "0") { setGroupSetting(msg, "welcome_cooldown", ""); return i18n_.tr(loc, "welcome.cd_off"); }
@@ -6763,7 +6800,7 @@ private:
     // `.lang`           → 显示当前语言 + 用法
     // `.lang 简体|繁體|en` → 设置本群（私聊则本人）的回复语言
     // `.lang clr`       → 清除覆盖，回到平台/全局默认
-    // C#46：显示名走 _meta.name → 本包 lang.name → 语言码（自定义语言没配 lang.name
+    // 显示名走 _meta.name → 本包 lang.name → 语言码（自定义语言没配 lang.name
     // 时不会误落回默认语言的名字）。
     std::string langName(Locale l) const { return i18n_.localeDisplayName(l); }
 
@@ -6795,7 +6832,7 @@ private:
 
         std::string a = trim(args), la = toLower(a);
         if (a.empty() || la == "show") {
-            // C#68：设了 AI 翻译语言 → 显示它（基础语言链仍在，翻译发送前才发生）。
+            // 设了 AI 翻译语言 → 显示它（基础语言链仍在，翻译发送前才发生）。
             std::string ai = aiLangFor(msg);
             if (!ai.empty()) return i18n_.tr(loc, "lang.current_ai", {{"lang", ai}});
             // Current effective locale (`loc` is what the resolver already chose).
@@ -6803,18 +6840,18 @@ private:
             return i18n_.tr(loc, overridden ? "lang.current" : "lang.current_default",
                             {{"lang", langName(loc)}});
         }
-        // C#49：群回复语言的变更限 群管理/群主/邀请人/骰主（私聊改自己不受限）。
+        // 群回复语言的变更限 群管理/群主/邀请人/骰主（私聊改自己不受限）。
         if (!priv && !senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
         if (la == "clr" || la == "off" || la == "default" || la == "reset") {
             resolver_.clearOverride(scope, scopeKey);
-            setAiLang(msg, "");                    // C#68：一并清除 AI 翻译语言
+            setAiLang(msg, "");                    // 一并清除 AI 翻译语言
             Locale now = resolver_.resolve(msg);   // reverted default
             return i18n_.tr(now, "lang.cleared", {{"lang", langName(now)}});
         }
         auto target = parseLocaleInput(a);
-        // C#46：内置别名没匹配到 → 查自定义翻译文件声明的 _meta.keywords（如 ko/韩语/한국어）。
+        // 内置别名没匹配到 → 查自定义翻译文件声明的 _meta.keywords（如 ko/韩语/한국어）。
         if (!target) target = i18n_.localeForKeyword(a);
-        // C#68：仍没匹配到 → 查骰主定义的 AI 翻译语言（无 i18n 文件，发送前大模型翻译）。
+        // 仍没匹配到 → 查骰主定义的 AI 翻译语言（无 i18n 文件，发送前大模型翻译）。
         if (!target) {
             std::string ai = aitrans::matchLang(cfg_, a);
             if (!ai.empty()) {
@@ -6824,12 +6861,12 @@ private:
         }
         if (!target) return i18n_.tr(loc, "lang.usage", {{"lang", langName(loc)}});
         resolver_.setOverride(scope, scopeKey, *target);
-        setAiLang(msg, "");                        // C#68：切到真实语言时清除 AI 翻译语言
+        setAiLang(msg, "");                        // 切到真实语言时清除 AI 翻译语言
         // Reply in the NEW language so the confirmation is in what they picked.
         return i18n_.tr(*target, priv ? "lang.set_user" : "lang.set", {{"lang", langName(*target)}});
     }
 
-    // ─── C#68 阶段三：AI 翻译语言（.lang 切自定义语言，发送前大模型翻译）────
+    // ─── 阶段三：AI 翻译语言（.lang 切自定义语言，发送前大模型翻译）────
 public:
     /// 本会话（群/私聊用户）设置的 AI 翻译目标语言显示名；未设置返回空。
     std::string aiLangFor(const Message& msg) {
@@ -6846,7 +6883,7 @@ public:
     }
 private:
 
-    // C#107：词指令入口 → 完整团务实现（tryHandleGame）。旧的占位雏形已移除。
+    // 词指令入口 → 完整团务实现（tryHandleGame）。旧的占位雏形已移除。
     std::string handleGame(Locale loc, const std::string& args, const Message& msg) {
         auto r = tryHandleGame(loc, msg, args.empty() ? std::string("game") : "game " + args);
         return r ? *r : i18n_.tr(loc, "help.topic.game");
@@ -6854,7 +6891,7 @@ private:
 
     // ─── .log 跑团记录（消息转录） ───────────────────────────
 
-    /// 平台缩写（C#1 日志文件名前缀）：onebot_v11→q、discord→d、kook→k。
+    /// 平台缩写（日志文件名前缀）：onebot_v11→q、discord→d、kook→k。
     static std::string platformAbbrev(const std::string& platform) {
         if (platform == "onebot_v11" || platform == "qq" || platform == "onebot") return "q";
         if (platform == "discord") return "d";
@@ -6872,7 +6909,7 @@ private:
         }
         return r.empty() ? std::string("log") : r;
     }
-    /// 日志文件名：`<平台>_<群号>_<日志名>.txt`，如 q_114514_无尽食欲.txt（C#1）。
+    /// 日志文件名：`<平台>_<群号>_<日志名>.txt`，如 q_114514_无尽食欲.txt。
     std::string logFileName(const Message& msg, const std::string& logName,
                             const std::string& ext = "txt") const {
         return platformAbbrev(msg.platform) + "_" + msg.targetId + "_" + sanitizeFileName(logName) + "." + ext;
@@ -6880,13 +6917,13 @@ private:
 
     /// Render the just-ended log, upload it to the log site, and (on success)
     /// post the share URL (+ optionally the transcript file to the group's files).
-    /// C#98：群文件格式可由群管 .log type txt|html 设置（日志站收自己的协议格式）。
-    /// 上传协议默认 SealDice V1（config dice/logsite_format=legacy 走旧多段 txt POST）；
+    /// 群文件格式可由群管 .log type txt|html 设置（日志站收自己的协议格式）。
+    /// 上传协议默认 DiceNext 专属 zstd JSON（config dice/logsite_format=seal 走 SealDice V1、legacy 走旧多段 txt POST）；
     /// 目标非官方站时回覆附加提示。@p sendFile=false 仅取链接（.log get / masterget）。
     void shareLog(const Message& msg, int logId, bool sendFile = true) {
         auto* st = db_.getLogStorage();
         if (!st) return;
-        std::string txt = logsvc::renderSealdice(db_, logId, &cfg_);   // C#3：图片→稳定图床 URL
+        std::string txt = logsvc::renderSealdice(db_, logId, &cfg_);   // 图片→稳定图床 URL
         if (txt.empty()) return;
         std::string logName = "log" + std::to_string(logId);
         std::string logGroup = msg.targetId;
@@ -6895,7 +6932,7 @@ private:
             if (!r.name.empty()) logName = r.name;
             if (!r.groupId.empty()) logGroup = r.groupId;   // masterget：日志属于别的群
         } catch (...) {}
-        // C#98：群文件内容按本群设置的格式渲染（html=自包含网页含内嵌图）。
+        // 群文件内容按本群设置的格式渲染（html=自包含网页含内嵌图）。
         std::string fileBody, fileName, path;
         if (sendFile) {
             const bool asHtml = getGroupSetting(msg, "logUploadType") == "html";
@@ -6905,7 +6942,7 @@ private:
                 if (!h.empty()) fileBody = std::move(h);
             }
             fileName = logFileName(msg, logName,
-                (asHtml && fileBody != txt) ? "html" : "txt");   // q_<群号>_<日志名>.<ext> (C#1)
+                (asHtml && fileBody != txt) ? "html" : "txt");   // q_<群号>_<日志名>.<ext>
             // Write a local copy so the platform client can attach it as a group file.
             try {
                 std::filesystem::create_directories("data/logs");
@@ -6974,7 +7011,7 @@ private:
         return "-";
     }
 
-    // ── 跑团计时（C#9）：挂在 .log 生命周期上累计每个记录的跑团时长 ──────────
+    // ── 跑团计时：挂在 .log 生命周期上累计每个记录的跑团时长 ──────────
     // 数据存 group_settings：logTimerTotal:<id>(累计秒) / logTimerStart:<id>(本次开始
     // 的 epoch，空=未在跑) / logTimerLastEnd:<id>(上次停止 epoch)；开关 logTimerOff=1。
     static long parseLongOr(const std::string& s, long d) { try { return s.empty() ? d : std::stol(s); } catch (...) { return d; } }
@@ -7189,7 +7226,7 @@ private:
                 shareLog(msg, target);   // auto-upload to log site + send txt to group file
                 return i18n_.tr(loc, "log.ended", {{"count", std::to_string(cnt)}}) + timerSuf;
             }
-            // C#98：.log type [txt|html] —— 群管设置 .log end 上传到群文件的格式
+            // .log type [txt|html] —— 群管设置 .log end 上传到群文件的格式
             //（html=自包含网页含内嵌图片；日志站始终收 txt）。无参查看当前格式。
             if (sub == "type") {
                 std::string a2 = toLower(trim(name));
@@ -7386,7 +7423,7 @@ public:
             else
                 groups.push_back("");
         }
-        // C#28: Pre-process legacy variable aliases ({pc}→{nick}, {char}→{nick}, etc.)
+        // Pre-process legacy variable aliases ({pc}→{nick}, {char}→{nick}, etc.)
         // so that original-Dice! flavor texts work with DiceNext's variable system.
         std::string processed = applyLegacyVarAliases(tmpl);
         std::string out; out.reserve(processed.size() + 32);
@@ -7456,7 +7493,7 @@ private:
             return deck_.drawFromDeck(name).value_or("");
         }
         if (tok.rfind("api:", 0) == 0) return fetchApi(trim(tok.substr(4)));   // {api:URL} 外部请求
-        // C#29: {counter:name} — resolves to the current counter value (set by CausalRuleManager)
+        // {counter:name} — resolves to the current counter value (set by CausalRuleManager)
         if (tok.rfind("counter:", 0) == 0) {
             std::string cname = trim(tok.substr(8));
             auto it = counterContext_.find(cname);
@@ -7550,14 +7587,14 @@ public:
     /// handleMessage(). Empty = quote the triggering message as usual. See #10.
     std::string takeQuoteOverride() { auto q = quoteOverride_; quoteOverride_.clear(); return q; }
 
-    // C#29: Set/clear the counter context for {counter:name} resolution in renderReply.
+    // Set/clear the counter context for {counter:name} resolution in renderReply.
     // CausalRuleManager calls setCounterContext() before rendering a causal reply,
     // then clearCounterContext() after.
     void setCounterContext(const std::map<std::string, std::string>& ctx) { counterContext_ = ctx; }
     void clearCounterContext() { counterContext_.clear(); }
 
 private:
-    /// C#28: Replace legacy original-Dice! variable placeholders with DiceNext
+    /// Replace legacy original-Dice! variable placeholders with DiceNext
     /// equivalents so that flavor texts from GlobalVar.cpp render correctly.
     /// e.g. {pc}→{nick}, {char}→{nick}, {attr}→{$0}, {dice_exp}→{$0}
     static std::string applyLegacyVarAliases(const std::string& tmpl) {
@@ -7583,7 +7620,7 @@ private:
         return out;
     }
 
-    std::map<std::string, std::string> counterContext_;  // C#29: {counter:name} → value
+    std::map<std::string, std::string> counterContext_;  // {counter:name} → value
 
 public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 private: 把它们困住导致编译失败，恢复 public）
     /// Blacklist/trust ops for JS plugins' seal.ban.*  (op: ban/trust/remove).
@@ -7666,7 +7703,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
 
     /// Append a transcript line for every message while a group log is recording.
     /// Called from the message loop (records the user line and, if any, the reply).
-    // ── C#3 日志内图片：提取 / 可选落地下载 ─────────────────────────
+    // ── 日志内图片：提取 / 可选落地下载 ─────────────────────────
     bool saveLogImages() const { return cfg_.get<bool>("dice/save_log_images", false); }
     // 从原始消息提取图片引用（[CQ:image,url=/file=..] 与 海豹 [图片:..]/[图:..]）→ JSON 数组串。
     std::string extractImageRefs(const std::string& raw) const {
@@ -7683,7 +7720,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
             size_t e = inner.find(',', k); if (e == std::string::npos) e = inner.size();
             return unesc(inner.substr(k, e - k));
         };
-        // [CQ:image,..] 与 [img,..]（C#57 平台中立码，骰娘回复用）
+        // [CQ:image,..] 与 [img,..]（平台中立码，骰娘回复用）
         for (const std::string& tag : {std::string("[CQ:image"), std::string("[img,")}) {
             size_t p = 0;
             while ((p = raw.find(tag, p)) != std::string::npos) {
@@ -7764,7 +7801,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         if (!reply.empty()) recordBotReply(msg, reply);
     }
 
-    /// C#89：入站消息落游戏日志。与骰娘回复拆开——回复可能经 AI 后台线程润色/翻译
+    /// 入站消息落游戏日志。与骰娘回复拆开——回复可能经 AI 后台线程润色/翻译
     /// 后才定稿，入站部分必须在消息线程即时记录且只记一次。
     void recordIncoming(const Message& msg) {
         if (msg.type == MessageType::kPrivate) return;
@@ -7781,7 +7818,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                 GameLogMessageRow m;
                 m.logId = logId; m.sender = displayName(msg); m.userId = msg.senderId;
                 m.content = logContent; m.createdAt = nowIso();
-                // C#3：从原始消息提取图片引用；骰主开启「保存图片」则落地到本地。
+                // 从原始消息提取图片引用；骰主开启「保存图片」则落地到本地。
                 std::string imgs = extractImageRefs(msg.rawContent.empty() ? msg.content : msg.rawContent);
                 if (!imgs.empty()) m.images = saveLogImages() ? downloadLogImages(imgs, logId) : imgs;
                 st->insert(m);
@@ -7789,7 +7826,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         } catch (...) {}
     }
 
-    /// C#89：骰娘回复落游戏日志（最终发送文本，含润色/翻译后的版本）。
+    /// 骰娘回复落游戏日志（最终发送文本，含润色/翻译后的版本）。
     void recordBotReply(const Message& msg, const std::string& reply) {
         if (msg.type == MessageType::kPrivate || reply.empty()) return;
         int logId = activeLogId(msg);
@@ -7801,7 +7838,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
             m.logId = logId; m.sender = i18n_.tr(localeForGroup(msg), "log.bot_name");
             m.userId = msg.selfId.empty() ? std::string("0") : msg.selfId;
             m.content = reply; m.createdAt = nowIso();
-            // C#57：骰娘回复也可能带图（[img,file=..]/自定义回复的图码），一并提取，
+            // 骰娘回复也可能带图（[img,file=..]/自定义回复的图码），一并提取，
             // 供导出 HTML 内嵌 / 日志站替换稳定链接。本地资产引用无需下载。
             std::string rimgs = extractImageRefs(reply);
             if (!rimgs.empty()) { m.images = rimgs; m.content = imageCodesToLabel(reply); }
@@ -7811,7 +7848,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
 
     /// Auto-build / update a player's profile. Called for every processed
     /// message; @p didCommand bumps the command counter + last-command time.
-    // C#53: total commands handled since this process started (non-empty reply = a command).
+    // total commands handled since this process started (non-empty reply = a command).
     static inline std::atomic<long> s_cmdCount{0};
 
     void recordPlayerActivity(const Message& msg, bool didCommand) {
@@ -8031,7 +8068,7 @@ private:
         if (attrs.empty())
             return i18n_.tr(loc, "pc.show_empty",
                 {{"owner", owner}, {"name", cardLabel(loc, name)}});
-        // D#06：折叠临时生命值（renderCard 无 msg 上下文，上限尽力从卡上显式上限属性取）。
+        // 折叠临时生命值（renderCard 无 msg 上下文，上限尽力从卡上显式上限属性取）。
         std::optional<int> hpMax;
         for (const auto& mn : explicitMaxNamesFor("\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc")) {
             auto it = attrs.find(CharacterCardStore::canonical(mn));
@@ -8197,7 +8234,7 @@ private:
         return i18n_.tr(loc, "pc.usage");
     }
 
-    // ─── .npc — NPC 角色卡（D#06，DiceNext 原创）───────────────────────────
+    // ─── .npc — NPC 角色卡（DiceNext 原创）───────────────────────────
     // NPC 是「群共享」的非玩家角色卡：录入属性后可通过 `.npc <名> <掷骰指令>` 代骰调用
     // 其属性（如 .npc 哥布林 ra 侦查）。存储：每个 NPC 用一个伪用户 id
     // `npc:<群>:<名>` 的默认卡，名册存群设置 npcRoster（JSON 数组）。
@@ -9276,7 +9313,7 @@ private:
             return i18n_.tr(loc, "fun.set.list", {{"list", list},
                 {"active", active.empty() ? i18n_.tr(loc, "fun.set.none", {}) : active}});
         }
-        // .set <规则包key>（coc7/dnd/5e…）→ 切换本群规则系统 + 默认骰面数。仅群管可改（C#4）。
+        // .set <规则包key>（coc7/dnd/5e…）→ 切换本群规则系统 + 默认骰面数。仅群管可改。
         if (auto rp = rulePackByKey(rest)) {
             if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "fun.set.group_only");
             if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "fun.set.no_perm");
@@ -9326,7 +9363,7 @@ private:
     CharacterCardStore& cards_;
     CardDeck& deck_;
     AdapterManager& adapters_;
-    PersonaManager* personaMgr_ = nullptr;  // C#28-B: set via setPersonaManager()
+    PersonaManager* personaMgr_ = nullptr;  // set via setPersonaManager()
     // 卡片模板（原版 CardTemp）：JS 求值钩子（main.cpp 注入 jsMod.evalString）+ preset 注册表缓存。
     std::function<std::optional<std::string>(const std::string&)> jsEval_;
     mutable std::map<std::string, std::vector<CardPresetItem>> cardPresets_;
@@ -9341,9 +9378,9 @@ private:
     // 指令在 forwardEnabled() 时填充；main.cpp 取走后以 send_group_forward_msg 发出。
     std::vector<std::string> forwardNodes_;
 
-    // C#10：插件帮助提供器（main.cpp 注入），供 .help 合并插件 cmd.help。
+    // 插件帮助提供器（main.cpp 注入），供 .help 合并插件 cmd.help。
     HelpProviderFn helpProvider_;
-    PluginListFn pluginProvider_;   // C#33
+    PluginListFn pluginProvider_;   // 
 
     // .rules 规则速查的懒加载缓存（rules/*.json）。mutable：在 const 查询里填充。
     mutable bool rulesLoaded_ = false;

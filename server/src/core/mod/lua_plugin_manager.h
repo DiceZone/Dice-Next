@@ -37,7 +37,7 @@ public:
     int  loadDir(const std::string& dir);   // 扫描 data/mod/<mod>/descriptor.json
     int  reload();                          // freeRuntime + init + loadDir(dir_)
     std::string modDir() const { return dir_; }
-    // C#27：除主目录外，额外扫描的 mod 目录（规则包 data/rulepacks/<包>/lua/）。reload 时一并加载。
+    // 除主目录外，额外扫描的 mod 目录（规则包 data/rulepacks/<包>/lua/）。reload 时一并加载。
     void setExtraDirs(std::vector<std::string> dirs) { extraDirs_ = std::move(dirs); }
 
     // 直接求值一段 Lua（供测试/脚本调用）。返回是否成功；err 写错误信息。
@@ -54,7 +54,7 @@ public:
                             const std::string& groupCard, bool isPrivate,
                             int trust = 0, const std::string& platform = "");
 
-    // 插件分群启停（C#27 地基）：派发前问宿主「此 mod 在该群是否启用」。id="lua:<mod名>"。
+    // 插件分群启停（地基）：派发前问宿主「此 mod 在该群是否启用」。id="lua:<mod名>"。
     using GroupGateFn = std::function<bool(const std::string& platform, const std::string& group, const std::string& pluginId)>;
     void setGroupGate(GroupGateFn f) { groupGate_ = std::move(f); }
     // 原版 fmt->format：把 {key} 递归解析为 speech 别名/嵌套模板 / msg 变量 / 全局。
@@ -69,14 +69,14 @@ public:
         std::string dir;        // 完整路径（目录型）或文件路径（单文件型）
         bool enabled = true;
         bool singleFile = false;   // 单文件 Lua 插件（msg_order 派发），非目录型 mod
-        bool ruleCompat = false;   // 含 model/*.xml 属性模板 → 规则类（同 C#7 JS，在规则管理展示）
+        bool ruleCompat = false;   // 含 model/*.xml 属性模板 → 规则类（同 JS，在规则管理展示）
         int replies = 0;        // reply/*.lua 数（目录）或 msg_order 条目数（单文件）
         int scripts = 0;        // script/*.lua 数
         std::map<std::string, std::string> helpdoc;   // descriptor.json helpdoc{主题:文本}
     };
     std::vector<LuaMod> mods() const;
 
-    // C#10 帮助聚合：各 mod descriptor.helpdoc 的条目（{主题, 文本, mod}）。
+    // 帮助聚合：各 mod descriptor.helpdoc 的条目（{主题, 文本, mod}）。
     struct HelpItem { std::string topic, text, mod; };
     std::vector<HelpItem> helpEntries() const;
 
@@ -101,12 +101,12 @@ public:
     void        confSet(const std::string& scope, const std::string& key, const std::string& val);
     // 枚举某 key 在所有 u:<uid> 作用域的值（rank_user 用 getUserConf(nil,field)）。
     std::vector<std::pair<std::string, std::string>> confAllUsers(const std::string& key) const;
-    // C#90：枚举某作用域全部键值（玩家管理详情页查看/编辑该用户的插件变量）。
+    // 枚举某作用域全部键值（玩家管理详情页查看/编辑该用户的插件变量）。
     std::vector<std::pair<std::string, std::string>> confAllOf(const std::string& scope) const;
     // 人物卡（Lua mod 专用，JSON blob，可存嵌套结构如背包）。scope=gid。
     std::string cardLoad(const std::string& uid, const std::string& scope) const;   // JSON 对象串（无则"{}"）
     void        cardSave(const std::string& uid, const std::string& scope, const std::string& jsonObj);
-    // C#90：枚举/删除某用户的全部 Lua 卡片数据（scope→data JSON）。
+    // 枚举/删除某用户的全部 Lua 卡片数据（scope→data JSON）。
     std::vector<std::pair<std::string, std::string>> cardAllOf(const std::string& uid) const;
     void        cardDel(const std::string& uid, const std::string& scope);
 
@@ -174,7 +174,7 @@ public:
     SendFn      sender_;
     EventFn     eventMsg_;
     HttpFetchFn httpFetch_;
-    GroupGateFn groupGate_;   // 分群启停 gate（C#27 地基）
+    GroupGateFn groupGate_;   // 分群启停 gate（地基）
     CardLockFn  cardLockFn_;  // 卡片锁定桥接（真人物卡）
     PlayerCardReadFn playerCardRead_;
     PlayerCardWriteFn playerCardWrite_;
@@ -208,7 +208,7 @@ private:
     lua_State* state_ = nullptr;
     mutable std::recursive_mutex mutex_;
     std::string dir_;
-    std::vector<std::string> extraDirs_;   // C#27：规则包附加 mod 目录
+    std::vector<std::string> extraDirs_;   // 规则包附加 mod 目录
     std::vector<LuaMod> mods_;
     std::map<std::string, std::string> speech_;   // 全局 speech 词条（各 mod 合并）
     std::vector<ReplyRule> replyRules_;
