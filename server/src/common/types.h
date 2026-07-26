@@ -23,7 +23,7 @@ enum class Locale {
     kJa     = 3,
 };
 
-// ─── C#46: 自定义语言（动态 Locale 注册表）────────────────────
+// ─── 自定义语言（动态 Locale 注册表）────────────────────
 // i18n/ 目录下除内置四语外的任意 <code>.json 会被 I18n::load() 注册为一个
 // 动态 Locale 值（kCustomLocaleBase 起递增）。localeToString/localeFromString
 // 都先查注册表，因此所有以 Locale 传递语言的现有代码无需改动。
@@ -53,7 +53,7 @@ inline const char* localeToString(Locale loc) {
         case Locale::kJa:     return "ja";
         default: break;
     }
-    // C#46: dynamic custom locale
+    // dynamic custom locale
     {
         std::lock_guard<std::mutex> lk(customLocaleMutex());
         auto& byId = customLocaleById();
@@ -64,7 +64,7 @@ inline const char* localeToString(Locale loc) {
 }
 
 /// Parse a locale code. Accepts common aliases (zh-TW, zh-CN, en-US, ja-JP, ...)
-/// and any registered custom locale code (C#46).
+/// and any registered custom locale code.
 /// Falls back to Simplified Chinese for anything unrecognized.
 inline Locale localeFromString(const std::string& s) {
     // Traditional Chinese variants
@@ -77,7 +77,7 @@ inline Locale localeFromString(const std::string& s) {
     // Japanese variants
     if (s == "ja" || s.rfind("ja-", 0) == 0 || s.rfind("ja_", 0) == 0)
         return Locale::kJa;
-    // C#46: registered custom locales (exact code match, e.g. "ko"/"fr")
+    // registered custom locales (exact code match, e.g. "ko"/"fr")
     if (s != "zh-Hans" && !s.empty()) {
         std::lock_guard<std::mutex> lk(customLocaleMutex());
         auto& byCode = customLocaleByCode();

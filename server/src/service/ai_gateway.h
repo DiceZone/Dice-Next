@@ -1,5 +1,5 @@
 ﻿#pragma once
-// ─── Dice!Next — AI 网关（C#67 阶段一）──────────────────────────
+// ─── Dice!Next — AI 网关（阶段一）──────────────────────────
 // OpenAI 兼容协议（/v1/chat/completions）的统一调用层。复用 {api} 的「curl 配置文件
 // 传参、防注入、带超时」安全模式，但**独立门控** dice/ai.enabled，且**不阻止私网地址**
 // ——因为骰主常用本地 AI（Ollama / LM Studio 等，跑在 localhost/局域网）。仅骰主经网页
@@ -80,13 +80,13 @@ inline std::vector<Model> models(ConfigManager& cfg) {
     return v;
 }
 
-// C#78：全局请求参数（temperature/top_p/max_tokens/penalties），可在 AI 页调。
+// 全局请求参数（temperature/top_p/max_tokens/penalties），可在 AI 页调。
 inline json params(ConfigManager& cfg) {
     json c = conf(cfg);
     return (c.is_object() && c.contains("params") && c["params"].is_object()) ? c["params"] : json::object();
 }
 
-// C#78：数字保留校验 —— AI 润色/翻译绝不能改动或丢失骰点/结果数字。
+// 数字保留校验 —— AI 润色/翻译绝不能改动或丢失骰点/结果数字。
 inline std::vector<std::string> extractNumbers(const std::string& s) {
     std::vector<std::string> v; std::string cur;
     for (char c : s) { if (c >= '0' && c <= '9') cur += c; else if (!cur.empty()) { v.push_back(cur); cur.clear(); } }
@@ -219,7 +219,7 @@ inline Result chat(ConfigManager& cfg, const Model& m,
     json msgs = json::array();
     if (!systemPrompt.empty()) msgs.push_back({{"role", "system"}, {"content", systemPrompt}});
     msgs.push_back({{"role", "user"}, {"content", userPrompt}});
-    // C#78：请求参数从 dice/ai.params 读取；调用方可覆盖 max_tokens / temperature。
+    // 请求参数从 dice/ai.params 读取；调用方可覆盖 max_tokens / temperature。
     json p = params(cfg);
     double temp = (tempOverride >= 0) ? tempOverride : p.value("temperature", 1.0);
     int mt = (maxTokens > 0) ? maxTokens : p.value("max_tokens", 1024);
@@ -255,7 +255,7 @@ inline Result chat(ConfigManager& cfg, const Model& m,
         if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
             auto& c0 = j["choices"][0];
             if (c0.contains("message") && c0["message"].contains("content") && c0["message"]["content"].is_string())
-                r.reply = sanitize(c0["message"]["content"].get<std::string>());   // C#79：清洗 \f 等控制符
+                r.reply = sanitize(c0["message"]["content"].get<std::string>());   // 清洗 \f 等控制符
         }
         if (j.contains("usage") && j["usage"].is_object()) {
             r.promptTokens = j["usage"].value("prompt_tokens", (long long)0);

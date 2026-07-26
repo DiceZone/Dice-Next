@@ -1,4 +1,4 @@
-// ─── Dice!Next v3.0.0 — Persona Manager (C#28-B) ──────────────
+// ─── Dice!Next v3.0.0 — Persona Manager ──────────────
 #include "persona_manager.h"
 #include "../../common/logger.h"
 #include "../../common/utils.h"

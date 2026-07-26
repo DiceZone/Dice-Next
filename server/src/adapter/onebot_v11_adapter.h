@@ -13,8 +13,8 @@
 
 #include "adapter_interface.h"
 #include "../common/logger.h"
-#include "../service/image_send.h"   // C#56/57 发送期图片码解析
-#include "self_echo_filter.h"        // C#69 自回声去重 + 跨骰防环护栏
+#include "../service/image_send.h"   // 发送期图片码解析
+#include "self_echo_filter.h"        // 自回声去重 + 跨骰防环护栏
 
 #include <drogon/WebSocketClient.h>
 #include <drogon/HttpAppFramework.h>  // for drogon::app()
@@ -91,7 +91,7 @@ public:
     bool isConnected() const override { return connected_; }
     std::string lastError() const override { return lastError_; }
 
-    /// C#38: fine-grained link state. "connected" / "timeout"（重连20次失败已暂停）/ "disconnected".
+    /// fine-grained link state. "connected" / "timeout"（重连20次失败已暂停）/ "disconnected".
     /// "timeout" 用来和「已禁用」区分开：适配器仍是 enabled，只是暂停自动重连，可手动重连。
     std::string connectionStatus() const override {
         if (connected_) return "connected";
@@ -99,7 +99,7 @@ public:
         return "disconnected";
     }
 
-    /// C#38: 手动重连——清零退避计数与超时标记，重新开始连接。
+    /// 手动重连——清零退避计数与超时标记，重新开始连接。
     /// （自动重连走 scheduleReconnect 不清零，否则退避失效；只有手动 resume 才清零。）
     void resumeConnection() override {
         reconnectAttempts_ = 0;
@@ -110,7 +110,7 @@ public:
 
     // ─── Send Messages ───────────────────────────────────────
 
-    // C#69/跨骰：出站预处理——跨骰护栏（开头是指令→插零宽空格）+ 登记自回声去重。
+    // 跨骰：出站预处理——跨骰护栏（开头是指令→插零宽空格）+ 登记自回声去重。
     std::string prepOutgoing(const std::string& target, const std::string& text) {
         std::string out = guardCrossBot(text);
         SelfEchoFilter::instance().mark(platform() + ":" + target, normalizeEcho(out));
@@ -229,9 +229,9 @@ public:
     // ─── Joined-group / member caches (web group-management) ──
     void refreshGroupList() override {
         sendOneBotAction("get_group_list", json::object(), "glist");
-        sendOneBotAction("get_friend_list", json::object(), "flist");   // C#53: 好友数量
+        sendOneBotAction("get_friend_list", json::object(), "flist");   // 好友数量
     }
-    // C#100：主动反查群名。snowluma 等协议端 get_group_list 不带 group_name 时，
+    // 主动反查群名。snowluma 等协议端 get_group_list 不带 group_name 时，
     // 逐群 get_group_info 补齐。**非阻塞**——结果经 "ginfo:<gid>" echo 回流缓存；
     // 不能在 WS 接收线程同步等 invokeAction（事件回调就跑在该线程，会自锁 8s）。
     // ginfoInflight_ 去重，避免重复请求。
@@ -254,13 +254,13 @@ public:
         std::lock_guard<std::mutex> lk(dataMutex_); return friendList_;
     }
 
-    /// C#52: 删除好友（NapCat delete_friend）。
+    /// 删除好友（NapCat delete_friend）。
     void deleteFriend(const std::string& userId) override {
         sendOneBotAction("delete_friend", {{"user_id", parseId(userId)}});
         DICE_LOG_INFO("OneBotV11 '{}': delete_friend {}", name_, userId);
     }
 
-    /// C#99：同步调用 OneBot API，等待 echo 响应（群文件列表/下载链等）。
+    /// 同步调用 OneBot API，等待 echo 响应（群文件列表/下载链等）。
     /// ⚠️ 不得在适配器接收线程调用（等待的响应正是该线程投递的 → 死锁）；
     /// WebUI 的 drogon 处理线程使用没问题。超时/未连接返回 null。
     json invokeAction(const std::string& action, const json& params, int timeoutMs = 8000) override {
@@ -287,12 +287,12 @@ public:
         return out;
     }
 
-    /// C#42: 戳一戳。优先 NapCat 扩展 API group_poke；老实现(go-cqhttp)走 [CQ:poke] 消息段。
+    /// 戳一戳。优先 NapCat 扩展 API group_poke；老实现(go-cqhttp)走 [CQ:poke] 消息段。
     void sendGroupPoke(const std::string& groupId, const std::string& userId) override {
         sendOneBotAction("group_poke", {{"group_id", parseId(groupId)}, {"user_id", parseId(userId)}});
     }
 
-    /// C#44: NapCat/go-cqhttp get_group_msg_history —— 结果经 kGroupHistory 事件回流。
+    /// NapCat/go-cqhttp get_group_msg_history —— 结果经 kGroupHistory 事件回流。
     void requestGroupHistory(const std::string& groupId, int count) override {
         json p{{"group_id", parseId(groupId)}};
         if (count > 0) p["count"] = count;   // NapCat 支持 count；不支持的实现忽略该参数
@@ -433,7 +433,7 @@ private:
         wsClient_->connectToServer(req, [self](drogon::ReqResult r, const drogon::HttpResponsePtr&, const drogon::WebSocketClientPtr&) {
             if (r != drogon::ReqResult::Ok) { self->connected_=false; self->lastError_="WS connect failed"; self->scheduleReconnect(); }
             else { self->connected_=true; self->lastError_.clear();  self->timedOut_=false; DICE_LOG_INFO("OneBotV11 '{}': connected", self->name_); self->sendOneBotAction("get_login_info", json::object()); self->refreshGroupList(); self->startGroupRefreshTimer(); }
-                    // C#75: after stable connection, reset reconnect counter
+                    // after stable connection, reset reconnect counter
                     if (self->stabilityTimer_) self->stabilityTimer_.reset();
                     self->stabilityTimer_ = std::make_shared<trantor::TimerId>();
                     auto weak = std::weak_ptr<OneBotV11Adapter>(self);
@@ -666,7 +666,7 @@ private:
         });
     }
 
-    /// Schedule a reconnect attempt (forward WS only). C#38 退避策略：
+    /// Schedule a reconnect attempt (forward WS only). 退避策略：
     ///   前 10 次每 5 秒重连；第 11~20 次每 60 秒；超过 20 次暂停自动重连，状态置「连接超时」。
     void scheduleReconnect() {
         if (stopping_ || mode_ != "forward_ws") return;
@@ -706,7 +706,7 @@ public:
     // Settable from config (log.raw_events) and the web admin (/api/system/log-mode).
     inline static std::atomic<bool> s_rawEventLog{false};
 
-    // C#69 自响应：true = 也处理骰娘账号自身发出的消息（post_type=message_sent），
+    // 自响应：true = 也处理骰娘账号自身发出的消息（post_type=message_sent），
     // 允许用骰娘账号发指令自控。默认关。config dice/respond_self + /api/system/respond-self。
     inline static std::atomic<bool> s_respondSelf{false};
 
@@ -715,16 +715,16 @@ private:
         const bool rawMode = s_rawEventLog.load();
         try {
             auto j = json::parse(raw);
-            // 详细模式：每个事件输出一条「完整可读解释」（C#35：取代原来截断到 200 字节
+            // 详细模式：每个事件输出一条「完整可读解释」（取代原来截断到 200 字节
             // 的原始 JSON 转储——那个既不完整又不知所谓，尤其图片/复杂消息）。简洁模式下
             // 仍由后面的 收↩/事件 行处理（且静音心跳与接口成功响应）。
             if (rawMode)
                 DICE_LOG_INFO("\xe8\xaf\xa6\xe7\xbb\x86 {}", interpretEvent(j));   // 详细
 
-            // Handle post_type: message events. C#69：自响应开启时，也把骰娘账号自身
+            // Handle post_type: message events. 自响应开启时，也把骰娘账号自身
             // 发出的消息（post_type=message_sent）当作消息处理，用于自控。
             std::string postType = j.contains("post_type") ? j.value("post_type", std::string()) : "";
-            // C#69：自身消息可能来自 post_type=message_sent（NapCat 扩展），也可能是
+            // 自身消息可能来自 post_type=message_sent（NapCat 扩展），也可能是
             // post_type=message 且 user_id==self_id（部分实现/配置）。两种都算「自身」。
             std::string mSelfId = jsonField(j, "self_id");
             std::string mUserId = jsonField(j, "user_id");
@@ -786,7 +786,7 @@ private:
                             std::string id = jsonField(data, "id");
                             if (!id.empty()) cqContent += "[CQ:face,id=" + id + "]";
                         } else if (segType == "file") {
-                            // C#99：NTQQ 群文件可作为消息段到达（NapCat）。带出可下载引用，
+                            // NTQQ 群文件可作为消息段到达（NapCat）。带出可下载引用，
                             // 模拟聊天/记录里渲染成文件条目（file_id 供 get_group_file_url）。
                             std::string fname = data.value("file", data.value("name", std::string()));
                             std::string fid = jsonField(data, "file_id");
@@ -806,7 +806,7 @@ private:
                 if (msgType == "private") {
                     msg.type = MessageType::kPrivate;
                     msg.senderId = std::to_string(j.value("user_id", 0LL));
-                    // C#69：自身私聊消息(message_sent)里 user_id=自己，对话对象在 target_id；
+                    // 自身私聊消息(message_sent)里 user_id=自己，对话对象在 target_id；
                     // 回复要发到对方私聊窗口，而不是发给自己。普通私聊 target_id 缺省=user_id。
                     if (isSelf) {
                         std::string tgt = jsonField(j, "target_id");
@@ -858,7 +858,7 @@ private:
                     DICE_LOG_INFO("收\xe2\x86\xa9 [{}] {}({}): {}", where, nick, msg.senderId, flat);
                 }
 
-                // C#69 自回声去重：若这是骰娘账号自身发出的消息（message_sent），且能在
+                // 自回声去重：若这是骰娘账号自身发出的消息（message_sent），且能在
                 // 近期「本程序主动发送」登记里匹配到 → 判为骰娘自己的回复的回声，直接丢弃，
                 // 不进管线（否则会无限自触发）；匹配不到才是操作者手打的自控指令，正常处理。
                 if (isSelf && SelfEchoFilter::instance().consume(
@@ -898,7 +898,7 @@ private:
                     }
                     return;  // handled (success → nothing more to do)
                 }
-                // C#99：同步调用（invokeAction）的响应 → 兑现等待中的 promise。
+                // 同步调用（invokeAction）的响应 → 兑现等待中的 promise。
                 if (echo.rfind("invoke:", 0) == 0) {
                     std::shared_ptr<std::promise<json>> pr;
                     {
@@ -909,7 +909,7 @@ private:
                     if (pr) { try { pr->set_value(j); } catch (...) {} }
                     return;
                 }
-                // C#100：群名反查（get_group_info）响应 → 缓存 group_name。
+                // 群名反查（get_group_info）响应 → 缓存 group_name。
                 if (echo.rfind("ginfo:", 0) == 0) {
                     std::string gid = echo.substr(6);
                     std::lock_guard<std::mutex> lk(dataMutex_);
@@ -936,7 +936,7 @@ private:
                         DICE_LOG_ERROR("OneBotV11 '{}': get_group_list failed: {}", name_,
                                        j.value("status", std::string("?")));
                     } else {
-                        std::vector<std::string> needName;   // C#100: 协议端没给名字、待 get_group_info 反查
+                        std::vector<std::string> needName;   // 协议端没给名字、待 get_group_info 反查
                         {
                         std::lock_guard<std::mutex> lk(dataMutex_);
                         groupList_.clear();
@@ -958,7 +958,7 @@ private:
                         for (auto& gid : needName) requestGroupInfo(gid);
                     }
                 } else if (echo == "flist") {
-                    // C#53/C#52: friend-list pull — cache count + uid list (silent on success).
+                    // friend-list pull — cache count + uid list (silent on success).
                     if (d.is_array()) {
                         std::lock_guard<std::mutex> lk(dataMutex_);
                         friendCount_ = (int)d.size();
@@ -969,7 +969,7 @@ private:
                         }
                     }
                 } else if (echo.rfind("history:", 0) == 0) {
-                    // C#44: 历史消息 → 打包成 kGroupHistory 事件回流给引擎入库。
+                    // 历史消息 → 打包成 kGroupHistory 事件回流给引擎入库。
                     const json* msgs = nullptr;
                     if (d.is_object() && d.contains("messages") && d["messages"].is_array()) msgs = &d["messages"];
                     else if (d.is_array()) msgs = &d;
@@ -1043,12 +1043,12 @@ private:
                 ev.operatorId = jsonField(j, "user_id");   // who poked
                 label = "戳一戳";
             }
-            else if (nt == "group_recall") {               // C#44: 群消息撤回
+            else if (nt == "group_recall") {               // 群消息撤回
                 ev.type = EventType::kGroupRecall;
                 ev.extra["message_id"] = jsonField(j, "message_id");
                 label = "撤回";
             }
-            else if (nt == "group_upload") {               // C#99: 群文件上传
+            else if (nt == "group_upload") {               // 群文件上传
                 ev.type = EventType::kGroupUpload;
                 json f = j.contains("file") && j["file"].is_object() ? j["file"] : json::object();
                 ev.extra["file"] = json{{"id", jsonField(f, "id")}, {"name", f.value("name", std::string())},
@@ -1063,7 +1063,7 @@ private:
         }
         if (ev.type == EventType::kOther) return;   // nothing we act on
 
-        // C#100：群名未知 → 异步反查补齐缓存，供本群后续通知显示「名(号)」。
+        // 群名未知 → 异步反查补齐缓存，供本群后续通知显示「名(号)」。
         if (!ev.groupId.empty()) {
             bool known;
             {
@@ -1104,11 +1104,11 @@ private:
     }
 
     /// Parse one bracket body into a OneBot segment, or null if not a known code.
-    /// Supports the platform-neutral image code ([img,file=..], C#57), CQ codes
+    /// Supports the platform-neutral image code ([img,file=..],), CQ codes
     /// ([CQ:image,file=..]/[CQ:at,qq=..]/[CQ:face,id=..]) and compatible image
     /// codes ([图片:..]/[图:..]).
     static json parseCode(const std::string& inner) {
-        // C#57 平台中立图片码：[img,file=<本地路径或URL>]
+        // 平台中立图片码：[img,file=<本地路径或URL>]
         if (inner.rfind("img,", 0) == 0) {
             std::string rest = inner.substr(4);
             size_t pos = 0;
@@ -1175,7 +1175,7 @@ private:
                 if (end != std::string::npos) {
                     json seg = parseCode(text.substr(i + 1, end - i - 1));
                     if (!seg.is_null()) {
-                        // C#56：图片按「图片发送方式」配置转换（本地路径/本站资产
+                        // 图片按「图片发送方式」配置转换（本地路径/本站资产
                         // 链接 → base64:// 或 http://<host>/api/assets/..）。
                         if (seg.value("type", "") == "image")
                             seg["data"]["file"] = imgsend::resolve(seg["data"].value("file", ""));
@@ -1190,7 +1190,7 @@ private:
         return arr;
     }
 
-    /// C#56/57：字符串格式发送前的归一化——平台中立 [img,file=..] 转成 CQ 图片码，
+    /// 字符串格式发送前的归一化——平台中立 [img,file=..] 转成 CQ 图片码，
     /// [CQ:image,..] 的本地资产引用按「图片发送方式」重解析；其余码原样保留
     /// （[CQ:poke] 等仍由平台解析）。
     static std::string normalizeCQText(const std::string& text) {
@@ -1314,7 +1314,7 @@ private:
         return out;
     }
 
-    // ── 详细日志：把任意 OneBot 事件解释成一行可读文本（C#35：替换原来截断的
+    // ── 详细日志：把任意 OneBot 事件解释成一行可读文本（替换原来截断的
     // 原始 JSON 转储）。覆盖 消息 / 通知 / 请求 / 元事件(心跳/生命周期) / 接口响应。──
     std::string interpretEvent(const json& j) const {
         const std::string post = j.value("post_type", "");
@@ -1416,10 +1416,10 @@ private:
     std::atomic<bool> stopping_{false};
     std::string lastError_;
 
-    // C#38: reconnect backoff state
+    // reconnect backoff state
     std::atomic<int>  reconnectAttempts_{0};   // consecutive failed reconnects since last success
     std::atomic<bool> timedOut_{false};        // true once auto-reconnect is paused (status "timeout")
-    // C#75: stability timer — only reset reconnectAttempts_ after stable connection
+    // stability timer — only reset reconnectAttempts_ after stable connection
     static constexpr double kStableAfterSec = 30.0;   // seconds before resetting reconnectAttempts_
     std::shared_ptr<trantor::TimerId> stabilityTimer_;
 
@@ -1445,10 +1445,10 @@ private:
     // Caches for web group-management (filled from get_group_list / member APIs).
     mutable std::mutex dataMutex_;
     std::map<std::string, std::string> groupList_;   // joined groups: gid -> name
-    std::set<std::string> ginfoInflight_;            // C#100: get_group_info 反查去重（gid 在查中）
+    std::set<std::string> ginfoInflight_;            // get_group_info 反查去重（gid 在查中）
     std::map<std::string, int> groupCount_;          // gid -> member count
-    int friendCount_ = -1;                            // C#53: 好友数量（-1=未知/未同步）
-    std::vector<std::string> friendList_;             // C#52: 好友 uid 列表（flist 同步）
+    int friendCount_ = -1;                            // 好友数量（-1=未知/未同步）
+    std::vector<std::string> friendList_;             // 好友 uid 列表（flist 同步）
     std::map<std::string, std::string> selfRole_;    // gid -> owner|admin|member
     std::map<std::string, json> memberLists_;        // gid -> members array
 
@@ -1458,7 +1458,7 @@ private:
     struct PendingUpload { std::string groupId, name, content; };
     std::map<std::string, PendingUpload> pendingUploads_;  // guarded by dataMutex_
 
-    // C#99：同步调用（invokeAction）等待中的 promise（echo → promise）。
+    // 同步调用（invokeAction）等待中的 promise（echo → promise）。
     mutable std::mutex invokeMutex_;
     std::map<std::string, std::shared_ptr<std::promise<json>>> pendingInvokes_;
 };

@@ -85,7 +85,7 @@ int CardDeck::loadDirLocked(const std::string& dir) {   // caller holds mutex_
         return 0;
     }
     // 文件名转 UTF-8：Windows 上 path::string() 返回系统 ANSI 码页(中文系统=GBK)，
-    // 直接进 JSON/日志会变方块问号；u8string() 才是 UTF-8（C#35 测试机 Win2016 复现）。
+    // 直接进 JSON/日志会变方块问号；u8string() 才是 UTF-8（测试机 Win2016 复现）。
     auto u8name = [](const fs::path& p) { auto u = p.u8string(); return std::string(u.begin(), u.end()); };
     int count = 0;
     for (const auto& entry : fs::directory_iterator(d)) {

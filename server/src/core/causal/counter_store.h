@@ -1,5 +1,5 @@
 #pragma once
-// ─── Dice!Next v3.0.0 — Counter Store (C#29) ─────────────────
+// ─── Dice!Next v3.0.0 — Counter Store ─────────────────
 // Persistent counter storage for the causal rule engine.
 // Counters are identified by a composite key:
 //   "{ruleId}:{counterName}:{scope}:{scopeId}"

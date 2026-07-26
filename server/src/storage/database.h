@@ -161,10 +161,10 @@ struct GameLogMessageRow {
     std::string userId;      // speaker's platform id (bot's selfId for replies)
     std::string content;
     std::string createdAt;   // ISO 8601
-    std::string images;      // C#3: JSON 数组，本条消息的图片引用（URL 或本地落地文件名）
+    std::string images;      // JSON 数组，本条消息的图片引用（URL 或本地落地文件名）
 };
 
-/// C#44: persisted group-chat message (chat.db). Mirrors the simulated-chat
+/// persisted group-chat message (chat.db). Mirrors the simulated-chat
 /// window: incoming group messages + bot replies + web sends. Retained N days
 /// (config chat/retention_days); `recalled` marks撤回 but content is kept.
 struct ChatMsgRow {
@@ -263,7 +263,7 @@ struct ScheduledTaskRow {
     std::string condition;   // 因果条件（空=无条件）。如 "inactive>=7"：本群 ≥7 天无指令才触发
 };
 
-/// C#29: Causal rule row — a rule with conditions, actions, cooldown, and scope.
+/// Causal rule row — a rule with conditions, actions, cooldown, and scope.
 struct CausalRuleRow {
     int id = 0;
     std::string name;
@@ -280,7 +280,7 @@ struct CausalRuleRow {
     std::string updatedAt;
 };
 
-/// C#29: Rule counter row — persistent counter for causal rules.
+/// Rule counter row — persistent counter for causal rules.
 struct RuleCounterRow {
     int id = 0;
     std::string key;             // '{ruleId}:{counterName}:{scope}:{scopeId}'
@@ -288,7 +288,7 @@ struct RuleCounterRow {
     std::string updatedAt;
 };
 
-/// C#28-B: Persona template row — a named set of i18n overrides.
+/// Persona template row — a named set of i18n overrides.
 struct PersonaTemplateRow {
     int id = 0;
     std::string name;            // unique persona name (e.g. "傲娇", "严肃")
@@ -298,7 +298,7 @@ struct PersonaTemplateRow {
     std::string updatedAt;
 };
 
-/// C#28-B: Persona entry row — a single (locale, key, value) override.
+/// Persona entry row — a single (locale, key, value) override.
 struct PersonaEntryRow {
     int id = 0;
     int personaId = 0;           // → persona_templates.id
@@ -340,7 +340,7 @@ public:
     /// Get the character-card storage (separate cards.db). Returns nullptr if not open.
     auto* getCardStorage() { return cardStorage_.get(); }
 
-    /// C#44: get the chat-history storage (separate chat.db). Returns nullptr if not open.
+    /// get the chat-history storage (separate chat.db). Returns nullptr if not open.
     auto* getChatStorage() { return chatStorage_.get(); }
 
     /// Path of the separate transcript-log database file.
@@ -520,7 +520,7 @@ private:
             orm::make_column("action", &ScheduledTaskRow::action),
             orm::make_column("cond", &ScheduledTaskRow::condition)
         ),
-        // C#29: Causal rule engine tables
+        // Causal rule engine tables
         orm::make_table("causal_rules",
             orm::make_column("id", &CausalRuleRow::id,
                 orm::primary_key().autoincrement()),
@@ -545,7 +545,7 @@ private:
             orm::make_column("value", &RuleCounterRow::value),
             orm::make_column("updated_at", &RuleCounterRow::updatedAt)
         ),
-        // C#28-B: Persona switching system tables
+        // Persona switching system tables
         orm::make_table("persona_templates",
             orm::make_column("id", &PersonaTemplateRow::id,
                 orm::primary_key().autoincrement()),
@@ -594,7 +594,7 @@ private:
         )
     ));
 
-    // ─── C#44: separate chat-history storage (chat.db) ────────
+    // ─── separate chat-history storage (chat.db) ────────
     // Group-chat persistence for the simulated-chat window; retained N days.
     using ChatStorage = decltype(orm::make_storage(
         "",
@@ -649,7 +649,7 @@ private:
     std::string logDbPath_;
     std::unique_ptr<CardStorage> cardStorage_;
     std::string cardDbPath_;
-    std::unique_ptr<ChatStorage> chatStorage_;   // C#44
+    std::unique_ptr<ChatStorage> chatStorage_;   // 
     std::string chatDbPath_;
 };
 

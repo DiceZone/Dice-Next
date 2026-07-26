@@ -244,11 +244,13 @@ static int l_getPlayerCardAttr(lua_State* L) {
     if (m->hasPlayerCardBridge()) {
         json value;
         if (m->playerCardRead(uid, scope, byName, attr, value)) { jsonToLua(L, value); return 1; }
+        if (m->playerCardRead(uid, scope, byName, "&" + attr, value)) { jsonToLua(L, value); return 1; }  // &key 兜底（DiceLua.cpp 973）
         if (lua_gettop(L) >= 4 && !lua_isnoneornil(L, 4)) { lua_pushvalue(L, 4); return 1; }
         lua_pushnil(L); return 1;
     }
     json j = json::parse(m->cardLoad(uid, scope), nullptr, false);
     if (j.is_object() && j.contains(attr)) { jsonToLua(L, j[attr]); return 1; }
+    if (j.is_object() && j.contains("&" + attr)) { jsonToLua(L, j["&" + attr]); return 1; }   // &key 兜底
     if (lua_gettop(L) >= 4 && !lua_isnoneornil(L, 4)) { lua_pushvalue(L, 4); return 1; }   // 默认值
     lua_pushnil(L); return 1;
 }
@@ -359,7 +361,7 @@ static int l_getUserToday(lua_State* L) {
     std::string v = m->confGet(scope, key);
     if (v.empty() && !m->confHas(scope, key)) {
         if (lua_gettop(L) >= 3 && !lua_isnoneornil(L, 3)) { lua_pushvalue(L, 3); return 1; }
-        lua_pushnil(L); return 1;
+        lua_pushinteger(L, 0); return 1;   // 原版未命中返回 0（DiceLua.cpp 948，计数场景免 nil 算术崩）
     }
     pushConfValue(L, v); return 1;
 }
@@ -482,7 +484,11 @@ static int l_mkDirs(lua_State* L) {
 }
 static int l_sleepTime(lua_State*) { return 0; }   // 原版阻塞计时；这里空操作（避免卡住消息回合）
 static int l_drawDeck(lua_State* L) {
-    auto* m = mgrOf(L); std::string name = argStr(L, 1);
+    auto* m = mgrOf(L);
+    // 原版 drawDeck(fromGID, fromUID, deckName) 三参（DiceLua.cpp 1027）；牌名是最后一个参数。
+    // 也容忍 1 参 drawDeck(name)。gid/uid 用于原版的 session 牌堆优先，本实现只抽公共牌堆。
+    int n = lua_gettop(L);
+    std::string name = (n >= 3) ? argStr(L, 3) : argStr(L, 1);
     std::string r = (m && m->deckDraw_) ? m->deckDraw_(name) : std::string();
     lua_pushstring(L, r.c_str()); return 1;
 }
@@ -646,7 +652,9 @@ static int l_urlDecode(lua_State* L) {
 static int l_loadLua(lua_State* L) {
     auto* m = mgrOf(L); std::string name = argStr(L, 1);
     if (!m || name.empty()) return 0;
-    fs::path p = fs::path(m->loadingModDir_) / "script" / (name + ".lua");
+    // 原版点分命名空间：loadLua("BRP.overview") → script/BRP/overview.lua（DiceLua.cpp fmt->lua_path）。
+    std::string rel = name; for (auto& c : rel) if (c == '.') c = '/';
+    fs::path p = fs::path(m->loadingModDir_) / "script" / (rel + ".lua");
     std::error_code ec;
     if (!fs::exists(p, ec)) { DICE_LOG_ERROR("[lua] loadLua: not found {}", dnx_u8str(p)); return 0; }
     if (dnx_dofile(L, p) != LUA_OK) {
@@ -841,7 +849,7 @@ do
   }
   GameTable = function(gid)
     if gid == nil or gid == '' then return nil end
-    -- C#107：对齐原版语义——开团（.game new 写 __name）才存在，无团返回 nil。
+    -- 对齐原版语义——开团（.game new 写 __name）才存在，无团返回 nil。
     local nm = __dnx_conf(game_scope(gid), '__name')
     if nm == nil or nm == '' then return nil end
     local o = {}; rawset(o,'__g', tostring(gid))
@@ -907,6 +915,8 @@ do
         elseif k == 'grp' or k == 'group' then
           if gidS ~= '' then local o = {}; rawset(o,'__id',gidS); v = setmetatable(o, GrpM) end
         elseif k == 'game' then v = GameTable(gidS)
+        elseif k == 'gender' then v = getUserConf(uidS, 'gender')   -- 原版 getUserItem(uid,'gender')
+        elseif k == 'grpAuth' then v = trust or 0                    -- 原版 idx_gAuth（近似为本消息 trust 等级）
         end
         if v ~= nil then lazy[k] = v end
         return v
@@ -964,7 +974,7 @@ std::vector<std::pair<std::string, std::string>> LuaPluginManager::confAllUsers(
     return out;
 }
 
-// C#90：枚举某作用域（如 "u:<uid>"）全部键值，玩家管理详情页用。
+// 枚举某作用域（如 "u:<uid>"）全部键值，玩家管理详情页用。
 std::vector<std::pair<std::string, std::string>> LuaPluginManager::confAllOf(const std::string& scope) const {
     std::lock_guard<std::mutex> lk(confMutex_);
     std::vector<std::pair<std::string, std::string>> out;
@@ -983,7 +993,7 @@ std::vector<std::pair<std::string, std::string>> LuaPluginManager::confAllOf(con
     return out;
 }
 
-// C#90：枚举某用户全部 Lua 卡片数据（scope→data JSON）。
+// 枚举某用户全部 Lua 卡片数据（scope→data JSON）。
 std::vector<std::pair<std::string, std::string>> LuaPluginManager::cardAllOf(const std::string& uid) const {
     std::lock_guard<std::mutex> lk(confMutex_);
     std::vector<std::pair<std::string, std::string>> out;
@@ -1002,7 +1012,7 @@ std::vector<std::pair<std::string, std::string>> LuaPluginManager::cardAllOf(con
     return out;
 }
 
-// C#90：删除某用户某作用域的 Lua 卡片数据。
+// 删除某用户某作用域的 Lua 卡片数据。
 void LuaPluginManager::cardDel(const std::string& uid, const std::string& scope) {
     std::lock_guard<std::mutex> lk(confMutex_);
     if (!confDb_) return;
@@ -1184,7 +1194,7 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
         auto fwd = [](fs::path p) { std::string s = p.string(); for (auto& c : s) if (c == '\\') c = '/'; return s; };
         std::string paths = fwd(fs::path(dir) / "?.lua") + ";" + fwd(fs::path(dir) / "?" / "init.lua") + ";"
                           + fwd(base / "plugin" / "?.lua") + ";" + fwd(base / "plugin" / "?" / "init.lua") + ";";
-        for (auto& ed : extraDirs_)   // C#27：规则包附加 lua 目录也可 require
+        for (auto& ed : extraDirs_)   // 规则包附加 lua 目录也可 require
             paths += fwd(fs::path(ed) / "?.lua") + ";" + fwd(fs::path(ed) / "?" / "init.lua") + ";";
         lua_getglobal(state_, "package");
         lua_getfield(state_, -1, "path");
@@ -1289,7 +1299,7 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
         }
     };
     scanOne(dir);
-    for (auto& ed : extraDirs_) scanOne(ed);   // C#27：规则包附加 lua 目录
+    for (auto& ed : extraDirs_) scanOne(ed);   // 规则包附加 lua 目录
 
     // Pass 4：插件目录 data/plugin（单文件 .lua = msg_order 插件；子目录为资源，由插件引用）。
     fs::path pluginDir = fs::path(dir).parent_path() / "plugin";
@@ -1672,7 +1682,8 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         int sbase = lua_gettop(state_);
         bool callOk;
         if (!rule.echoScript.empty()) {
-            fs::path sp = fs::path(rule.modDir) / "script" / (rule.echoScript + ".lua");
+            std::string erel = rule.echoScript; for (auto& c : erel) if (c == '.') c = '/';   // 点分命名空间→子目录
+            fs::path sp = fs::path(rule.modDir) / "script" / (erel + ".lua");
             callOk = (dnx_dofile(state_, sp) == LUA_OK);
         } else {
             lua_rawgeti(state_, LUA_REGISTRYINDEX, rule.echoRef);

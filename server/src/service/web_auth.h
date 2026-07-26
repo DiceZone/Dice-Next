@@ -1,5 +1,5 @@
 #pragma once
-// ─── Dice!Next — WebUI 登录鉴权 (C#34) ───────────────────────
+// ─── Dice!Next — WebUI 登录鉴权 ───────────────────────
 // 极简的「共享口令 + 会话 token」鉴权：设了口令就要求登录，登录成功颁发随机
 // token，写进 Cookie(dice_session)。浏览器同源请求会自动带 Cookie，所以前端
 // 各处的 fetch 无需逐个改。token 存内存，重启即失效（可接受，局域网管理面板）。

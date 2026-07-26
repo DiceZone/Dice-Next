@@ -1,5 +1,5 @@
 #pragma once
-// ─── Dice!Next — 图片发送方式（C#56/C#57）────────────────────────
+// ─── Dice!Next — 图片发送方式────────────────────────
 // WebUI 上传的图片以前直接生成 http://<访问host>/api/assets/.. 链接写进回复，
 // NapCat 跑在别的设备时 localhost 链接取不到图。现在回复/模板里统一存平台中立
 // 图片码 [img,file=<本地路径>]，发送时由适配器按 config dice.image_send 转成

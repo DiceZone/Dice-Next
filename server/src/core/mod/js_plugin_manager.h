@@ -61,11 +61,11 @@ public:
         bool enabled = true;
         bool superseded = false;                 // 被同名更高版本顶替（不激活）
         std::string supersededBy;                // 顶替它的版本号
-        bool ruleCompat = false;                 // C#7：调用了 gameSystem/coc.registerRule → 「JS兼容规则」
-        bool inMod = false;                      // C#7：文件位于 data/mod（规则类插件目录）
+        bool ruleCompat = false;                 // 调用了 gameSystem/coc.registerRule → 「JS兼容规则」
+        bool inMod = false;                      // 文件位于 data/mod（规则类插件目录）
     };
     std::vector<PluginMeta> plugins() const;
-    // C#10：枚举所有已注册指令的 help 文本（{插件名, 指令名, 帮助}），供帮助系统聚合。
+    // 枚举所有已注册指令的 help 文本（{插件名, 指令名, 帮助}），供帮助系统聚合。
     struct CmdHelp { std::string plugin, name, help; };
     std::vector<CmdHelp> commandHelps() const;
     // 比较两个版本号（点分数字，非数字段按字典序）；a<b 返回 <0。
@@ -98,9 +98,9 @@ public:
     /// The directory passed to the last loadDir/reload (so the WebUI can write /
     /// remove / toggle plugin files there and then reload).
     std::string pluginDir() const { return dir_; }
-    /// C#7：规则类 JS 插件目录（data/mod，由主插件目录推导）。loadDir 会一并扫描它。
+    /// 规则类 JS 插件目录（data/mod，由主插件目录推导）。loadDir 会一并扫描它。
     std::string modDir() const { return modDir_; }
-    /// C#7：标记「当前正在加载的插件」为规则类（gameSystem/coc.registerRule 桥接调用）。
+    /// 标记「当前正在加载的插件」为规则类（gameSystem/coc.registerRule 桥接调用）。
     void markCurrentRulePlugin() { if (!loadingFile_.empty()) rulePluginFiles_.insert(loadingFile_); }
     /// seal.gameSystem.newTemplate(ByYaml) 的模板原文（JSON/YAML）收集，供宿主解析属性别名/衍生。
     void addGameSystemTemplate(std::string s) { if (!s.empty()) gameSystemTemplates_.push_back(std::move(s)); }
@@ -162,13 +162,14 @@ public:
     std::vector<std::string> extNamesForFile(const std::string& file) const;
 
     // 牌堆抽取注入（seal.deck.draw）。由 main.cpp 接到 CardDeck。
+    void setSelfInfo(const std::string& id, const std::string& nick) { selfId_ = id; selfNick_ = nick; }   // ctx.endPoint.userId/nickname
     void setDeckDraw(std::function<std::string(const std::string&, bool)> f) { deckDraw_ = std::move(f); }
     std::string drawDeck(const std::string& name, bool shuffle) const { return deckDraw_ ? deckDraw_(name, shuffle) : std::string(); }
     // 骰子表达式求值注入（seal.format 里的 {表达式}）。接到 DiceEngine。
     void setDiceEval(std::function<std::string(const std::string&)> f) { diceEval_ = std::move(f); }
     std::string evalDice(const std::string& expr) const { return diceEval_ ? diceEval_(expr) : expr; }
 
-    // 插件分群启停（C#27 地基）：派发前问宿主「此插件(按源文件)在该群是否启用」。id="js:<文件>"。
+    // 插件分群启停（地基）：派发前问宿主「此插件(按源文件)在该群是否启用」。id="js:<文件>"。
     using GroupGateFn = std::function<bool(const std::string& platform, const std::string& group, const std::string& pluginId)>;
     void setGroupGate(GroupGateFn f) { groupGate_ = std::move(f); }
 
@@ -180,15 +181,15 @@ public:
     using CardSetFn = std::function<void(const std::string& platform, const std::string& userId,
                                          const std::string& groupId, const std::string& attr, long long val)>;
     void setCardBridge(CardGetFn g, CardSetFn s) { cardGet_ = std::move(g); cardSet_ = std::move(s); }
-    // C#37：读取「关联/表达式属性」(.st 物防='dex+1' 存的原文)，供 seal.vars.strGet 读到。
+    // 读取「关联/表达式属性」(.st 物防='dex+1' 存的原文)，供 seal.vars.strGet 读到。
     using CardGetStrFn = std::function<bool(const std::string& platform, const std::string& userId,
                                             const std::string& groupId, const std::string& attr, std::string& out)>;
     void setCardStrBridge(CardGetStrFn g) { cardGetStr_ = std::move(g); }
-    // D#01：群名片解析器（platform, groupId, userId → 群名片）。规则包 JS 读
+    // 群名片解析器（platform, groupId, userId → 群名片）。规则包 JS 读
     // msg.sender.card / ctx.player.card / ctx.player.name(显示名) 靠它；未设则回退 QQ 昵称。
     using CardNameFn = std::function<std::string(const std::string&, const std::string&, const std::string&)>;
     void setCardNameResolver(CardNameFn f) { cardNameResolver_ = std::move(f); }
-    // D#09：当前群日志状态，供 ctx.group.logOn / ctx.group.logCurName 兼容海豹字段。
+    // 当前群日志状态，供 ctx.group.logOn / ctx.group.logCurName 兼容海豹字段。
     using LogStateFn = std::function<std::pair<bool, std::string>(const std::string&, const std::string&)>;
     void setLogStateResolver(LogStateFn f) { logStateResolver_ = std::move(f); }
     bool cardGetStr(const std::string& p, const std::string& u, const std::string& g, const std::string& a, std::string& out) const {
@@ -203,7 +204,7 @@ public:
     }
     bool hasCardBridge() const { return (bool)cardGet_; }
 
-    // C#27：除主目录外，额外扫描的 js 插件目录（规则包 data/rulepacks/<包>/js/）。reload 时一并加载。
+    // 除主目录外，额外扫描的 js 插件目录（规则包 data/rulepacks/<包>/js/）。reload 时一并加载。
     void setExtraDirs(std::vector<std::string> dirs) { extraDirs_ = std::move(dirs); }
 
     // HTTP 注入（全局 fetch）。接到 CommandRouter 的受控 curl（白名单 + 开关 + SSRF 防护）。
@@ -247,9 +248,10 @@ private:
     std::string pendingReply_;     // solve 期间 replyToSender 累积
     bool sideEffectReply_ = false; // replyPerson 等已直接投递的回复
     std::string loadingFile_;      // 当前加载文件名
+    std::string selfId_, selfNick_;   // 机器人自身账号/昵称（ctx.endPoint.userId/nickname）
     std::string dir_;              // 最近一次 loadDir/reload 的主目录（供 WebUI 管理）
-    std::string modDir_;           // C#7：规则类插件目录 data/mod（从 dir_ 推导）
-    std::set<std::string> rulePluginFiles_;  // C#7：本次加载中被标记为规则类的文件名
+    std::string modDir_;           // 规则类插件目录 data/mod（从 dir_ 推导）
+    std::set<std::string> rulePluginFiles_;  // 本次加载中被标记为规则类的文件名
     std::vector<std::string> gameSystemTemplates_;  // seal.gameSystem 模板原文
 
     std::unordered_map<std::string, std::string> kv_;   // 内存读缓存（启动时从 plugins.db 装载）
@@ -262,13 +264,13 @@ private:
 
     ScheduleFn scheduler_;
     SenderFn sender_;
-    GroupGateFn groupGate_;   // 分群启停 gate（C#27 地基）
+    GroupGateFn groupGate_;   // 分群启停 gate（地基）
     CardGetFn cardGet_;       // seal.vars ↔ 人物卡桥接
     CardSetFn cardSet_;
-    CardGetStrFn cardGetStr_; // C#37 关联/表达式属性读取
-    CardNameFn cardNameResolver_;   // D#01：群名片/显示名解析
-    LogStateFn logStateResolver_;   // D#09：群日志状态/当前名称
-    std::vector<std::string> extraDirs_;   // C#27：规则包附加 js 目录
+    CardGetStrFn cardGetStr_; // 关联/表达式属性读取
+    CardNameFn cardNameResolver_;   // 群名片/显示名解析
+    LogStateFn logStateResolver_;   // 群日志状态/当前名称
+    std::vector<std::string> extraDirs_;   // 规则包附加 js 目录
     GroupAdminFn groupAdmin_;
     BanFn banOp_;
     BanQueryFn banQuery_;

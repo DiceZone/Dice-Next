@@ -76,7 +76,7 @@ public:
     /// Locales that successfully loaded a bundle.
     std::vector<Locale> availableLocales() const;
 
-    // ─── C#46: 自定义翻译文件 ─────────────────────────────────
+    // ─── 自定义翻译文件 ─────────────────────────────────
     // i18n/ 目录下所有 <code>.json 都会被加载（内置四语之外的注册为动态
     // Locale）。文件可带 `_meta` 块自定义显示名与 .lang 切换关键词：
     //   { "_meta": { "name": "한국어", "keywords": ["ko","korean","韩语"] }, ... }
@@ -115,7 +115,7 @@ public:
     /// applied — the caller overlays them.
     std::map<std::string, std::string> flatten(Locale loc) const;
 
-    // ─── Persona layer (C#28-B: 骰娘人格切换) ─────────────────
+    // ─── Persona layer (骰娘人格切换) ─────────────────
     // A "persona" is an overlay bundle that sits between user overrides and the
     // default bundle in the lookup chain: override → persona(若启用) → bundle → key.
     // Persona data is injected by PersonaManager from the database (not files).
@@ -142,7 +142,7 @@ private:
     /// Caller must hold mutex_.
     const json* lookupNode(Locale loc, const std::string& key) const;
 
-    /// Look up a flat key in the persona bundle for @p loc (C#28-B).
+    /// Look up a flat key in the persona bundle for @p loc.
     /// Persona bundles are flat {dotted-key → string}, so no nested traversal.
     /// Caller must hold mutex_.
     const json* lookupPersonaNode(Locale loc, const std::string& key) const;
@@ -154,9 +154,9 @@ private:
     Locale defaultLocale_;
     std::map<Locale, json> bundles_;
     std::map<Locale, std::map<std::string, std::string>> overrides_;  // (loc,key) → user value
-    std::map<Locale, json> personaBundles_;   // C#28-B: persona overlay (flat key→string)
-    int activePersonaId_ = 0;                   // C#28-B: current persona (0=default/off)
-    std::map<std::string, Locale> keywordMap_;  // C#46: _meta.keywords → locale（键已转小写）
+    std::map<Locale, json> personaBundles_;   // persona overlay (flat key→string)
+    int activePersonaId_ = 0;                   // current persona (0=default/off)
+    std::map<std::string, Locale> keywordMap_;  // _meta.keywords → locale（键已转小写）
     mutable std::mutex mutex_;
 };
 

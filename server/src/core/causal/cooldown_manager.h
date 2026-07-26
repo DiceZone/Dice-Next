@@ -1,5 +1,5 @@
 #pragma once
-// ─── Dice!Next v3.0.0 — Cooldown Manager (C#29) ──────────────
+// ─── Dice!Next v3.0.0 — Cooldown Manager ──────────────
 // In-memory cooldown tracking for the causal rule engine.
 // Each cooldown is identified by a composite key:
 //   "{ruleId}:{cooldownKey}:{scopeId}"

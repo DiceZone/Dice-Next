@@ -60,7 +60,7 @@ bool I18n::load() {
         }
     }
 
-    // ── C#46: 自定义翻译文件 —— 加载目录里内置四语之外的所有 <code>.json。
+    // ── 自定义翻译文件 —— 加载目录里内置四语之外的所有 <code>.json。
     // 文件名(去扩展名)即语言码，注册为动态 Locale；用户可自加任意语言。
     std::error_code ec;
     for (const auto& e : fs::directory_iterator(dir, ec)) {
@@ -82,7 +82,7 @@ bool I18n::load() {
         }
     }
 
-    // ── C#46: 汇总 .lang 切换关键词 —— 每个包（含内置）可在 `_meta.keywords`
+    // ── 汇总 .lang 切换关键词 —— 每个包（含内置）可在 `_meta.keywords`
     // 声明触发词（如 ["ko","korean","韩语","한국어"]）；语言码本身恒可用。
     auto lower = [](std::string s) {
         for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -107,7 +107,7 @@ bool I18n::load() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// C#46: custom-locale helpers
+// custom-locale helpers
 // ═══════════════════════════════════════════════════════════════
 
 std::optional<Locale> I18n::localeForKeyword(const std::string& input) const {
@@ -171,7 +171,7 @@ std::map<std::string, std::string> I18n::flatten(Locale loc) const {
     std::map<std::string, std::string> out;
     auto it = bundles_.find(loc);
     if (it != bundles_.end()) flattenNode(it->second, "", out);
-    // C#46: `_meta`（显示名/切换关键词）不是文案，别混进「全部文本」编辑器。
+    // `_meta`（显示名/切换关键词）不是文案，别混进「全部文本」编辑器。
     for (auto e = out.begin(); e != out.end();)
         e = (e->first.rfind("_meta", 0) == 0) ? out.erase(e) : std::next(e);
     return out;
@@ -200,7 +200,7 @@ const json* I18n::lookupNode(Locale loc, const std::string& key) const {
 std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 查找顺序（C#28-B 更新）：
+    // 查找顺序（更新）：
     //   请求语言的覆盖 → 请求语言的人格层(若启用) → 请求语言的内置 →
     //   默认语言的覆盖 → 默认语言的人格层 → 默认语言的内置 → raw key。
     // 关键：请求语言的「内置文案」必须优先于「默认语言的覆盖」——否则用户把简中
@@ -210,7 +210,7 @@ std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const
         auto kIt = ovIt->second.find(key);
         if (kIt != ovIt->second.end()) return interpolate(kIt->second, args);
     }
-    // C#28-B: persona layer (between override and bundle)
+    // persona layer (between override and bundle)
     if (const json* personaNode = lookupPersonaNode(loc, key)) return interpolate(personaNode->get<std::string>(), args);
     if (const json* locNode = lookupNode(loc, key)) return interpolate(locNode->get<std::string>(), args);
 
@@ -221,7 +221,7 @@ std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const
             auto kIt = dIt->second.find(key);
             if (kIt != dIt->second.end()) return interpolate(kIt->second, args);
         }
-        // C#28-B: default locale persona layer
+        // default locale persona layer
         if (const json* dPersona = lookupPersonaNode(defaultLocale_, key)) return interpolate(dPersona->get<std::string>(), args);
         node = lookupNode(defaultLocale_, key);  // fall back to default locale bundle
     }
@@ -319,7 +319,7 @@ std::vector<Locale> I18n::availableLocales() const {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Persona layer (C#28-B: 骰娘人格切换)
+// Persona layer (骰娘人格切换)
 // ═══════════════════════════════════════════════════════════════
 
 const json* I18n::lookupPersonaNode(Locale loc, const std::string& key) const {

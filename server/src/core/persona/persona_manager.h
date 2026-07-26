@@ -1,5 +1,5 @@
 #pragma once
-// ─── Dice!Next v3.0.0 — Persona Manager (C#28-B) ──────────────
+// ─── Dice!Next v3.0.0 — Persona Manager ──────────────
 // Manages named persona templates and their i18n override entries.
 // Personas are DB-driven overlays that sit between user overrides and
 // the default i18n bundle in the lookup chain:

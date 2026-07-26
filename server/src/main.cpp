@@ -13,16 +13,16 @@
 #include <drogon/HttpResponse.h>
 
 #include "service/api_service.h"
-#include "service/web_auth.h"          // C#34 WebUI 登录鉴权
-#include "service/chat_image.h"        // C#65 模拟聊天图片本地化
-#include "service/ai_polish.h"         // C#68 AI 回复润色
-#include "service/ai_translate.h"      // C#68 AI 回复翻译（.lang 自定义语言）
+#include "service/web_auth.h"          // WebUI 登录鉴权
+#include "service/chat_image.h"        // 模拟聊天图片本地化
+#include "service/ai_polish.h"         // AI 回复润色
+#include "service/ai_translate.h"      // AI 回复翻译（.lang 自定义语言）
 #include "service/ai_chat.h"           // 智能化阶段A：AI 对话回复
 #include "service/ai_memory.h"         // 智能化阶段B/C：群聊滚动摘要 + 长期事实记忆
 #include "service/ai_tools.h"          // 智能化阶段D：AI 工具调用（掷骰/抽牌/查卡）
 #include "service/ai_npc.h"            // 智能化阶段E：NPC 扮演
-#include "service/ai_vision.h"         // C#85：多模态图像识别
-#include "service/ai_worker.h"         // C#89：AI 后台线程（AI 调用不再阻塞消息管线）
+#include "service/ai_vision.h"         // 多模态图像识别
+#include "service/ai_worker.h"         // AI 后台线程（AI 调用不再阻塞消息管线）
 #include "platform/instance_guard.h"   // 必须在 tray_win.h(<windows.h>) 之前：先引 winsock2.h
 #include "platform/autostart_win.h"    // Windows 注册表开机自启；其他平台提供 no-op 接口。
 #include "platform/tray_win.h"
@@ -67,7 +67,7 @@ namespace {
 
 /// 按 UTF-8 构造文件系统路径：Windows 的 narrow ifstream/ofstream 把路径当系统码页
 /// (中文系统=GBK)，用它打开 UTF-8 的中文文件名会失败；用 u8string 构造的 path 才正确
-/// (Windows 内部转 wide)。用于一切「按用户给的名字开文件」的场景（C#35 文件名编码）。
+/// (Windows 内部转 wide)。用于一切「按用户给的名字开文件」的场景（文件名编码）。
 inline std::filesystem::path u8path(const std::string& s) {
     return std::filesystem::path(std::u8string(s.begin(), s.end()));
 }
@@ -79,7 +79,7 @@ static inline std::string dnx_u8str(const std::filesystem::path& p) {
     return std::string(u.begin(), u.end());
 }
 
-/// 重启本程序（C#34 改 IP/端口后用）：派生一个分离的 cmd——等本进程退出(2秒，让单
+/// 重启本程序（改 IP/端口后用）：派生一个分离的 cmd——等本进程退出(2秒，让单
 /// 实例锁与端口释放)→ 重新拉起同一个 exe(继承当前工作目录)，随后本进程优雅退出。
 inline void relaunchSelf() {
 #if defined(_WIN32) || defined(_WIN64)
@@ -300,7 +300,7 @@ static int realMain(int argc, char* argv[]) {
         DICE_LOG_INFO("i18n: ready (default locale '{}', {} bundle(s) loaded)",
             defaultLocaleCode, i18n.availableLocales().size());
     }
-    // C#28-B: Persona system initialized later (after DB open + migration)
+    // Persona system initialized later (after DB open + migration)
 
     // ── 4. Open database ─────────────────────────────────────
     dice::crashdiag::setPhase("database");
@@ -380,12 +380,12 @@ static int realMain(int argc, char* argv[]) {
     {
         int packN = dice::CommandRouter::loadRulePacks("rules");
         packN += dice::CommandRouter::loadRulePacks("data/rules");
-        int bundleN = dice::CommandRouter::loadRulePackBundles();   // C#27：data/rulepacks/<包>/
+        int bundleN = dice::CommandRouter::loadRulePackBundles();   // data/rulepacks/<包>/
         int aliasN = dice::CommandRouter::loadModelTemplates();     // 规则 mod 的 model/*.xml 属性别名 → .st/.ra
         DICE_LOG_INFO("规则包：加载 {} 个规则 + {} 个规则包(bundle) + {} 个属性模板别名", packN, bundleN, aliasN);
     }
-    dice::CommandRouter::loadHelpFiles();   // C#10：加载 data/help/*.md 帮助文档
-    dice::CommandRouter::loadHelpDocs();    // C#26：加载 data/helpdoc/**/*.json 结构化帮助文档（海豹兼容+随包速查）
+    dice::CommandRouter::loadHelpFiles();   // 加载 data/help/*.md 帮助文档
+    dice::CommandRouter::loadHelpDocs();    // 加载 data/helpdoc/**/*.json 结构化帮助文档（海豹兼容+随包速查）
     dice::CardDeck cardDeck;
     cardDeck.setDiceEval([&engine](const std::string& e) {
         auto r = engine.roll(e);
@@ -403,14 +403,14 @@ static int realMain(int argc, char* argv[]) {
     dice::ReplyManager replyManager(db, configMgr);
     replyManager.loadRules();
 
-    // C#29: Causal rule engine — managers instantiated here, wired into the
+    // Causal rule engine — managers instantiated here, wired into the
     // message pipeline below (checked before regular ReplyManager).
     dice::CooldownManager cooldownMgr;
     dice::CounterStore counterStore(db);
     dice::CausalRuleManager causalMgr(db, configMgr, cooldownMgr, counterStore);
     causalMgr.loadRules();
 
-    // C#28-B: Persona switching system
+    // Persona switching system
     dice::PersonaManager personaMgr(db, i18n, configMgr);
     personaMgr.loadStartupPersona();
     cmdRouter.setPersonaManager(&personaMgr);
@@ -438,7 +438,7 @@ static int realMain(int argc, char* argv[]) {
     jsMod.setScheduler([](double sec, std::function<void()> cb) {
         drogon::app().getLoop()->runAfter(sec, std::move(cb));
     });
-    // 插件分群启停（C#27 地基）：JS 指令派发前问「该群是否启用此插件（按源文件）」。
+    // 插件分群启停（地基）：JS 指令派发前问「该群是否启用此插件（按源文件）」。
     jsMod.setGroupGate([&cmdRouter](const std::string& platform, const std::string& group, const std::string& pluginId) {
         return cmdRouter.isPluginEnabledInGroup(platform, group, pluginId);
     });
@@ -456,7 +456,7 @@ static int realMain(int argc, char* argv[]) {
         [&cmdRouter](const std::string& p, const std::string& u, const std::string& g, const std::string& a, std::string& out) {
             return cmdRouter.jsCardGetStr(p, u, g, a, out);
         });
-    // D#01：群名片解析器 —— JS 规则包读 msg.sender.card / ctx.player.name（显示名）。
+    // 群名片解析器 —— JS 规则包读 msg.sender.card / ctx.player.name（显示名）。
     jsMod.setCardNameResolver([&adapterMgr](const std::string& platform, const std::string& groupId,
                                             const std::string& userId) -> std::string {
         if (groupId.empty() || userId.empty()) return "";
@@ -526,9 +526,9 @@ static int realMain(int argc, char* argv[]) {
             if (r.targetId == id) return entryJson(r).dump();
         return "null";
     });
-    // C#27：规则包 data/rulepacks/<包>/js 附加加载（按群激活 gating）。
+    // 规则包 data/rulepacks/<包>/js 附加加载（按群激活 gating）。
     { std::vector<std::string> luaDirs, jsDirs; dice::CommandRouter::packPluginDirs(luaDirs, jsDirs); jsMod.setExtraDirs(jsDirs); }
-    // 插件目录优先 data/plugins/js（数据迁移 C#2），旧部署回退到根 plugins/js。
+    // 插件目录优先 data/plugins/js（数据迁移），旧部署回退到根 plugins/js。
     dice::crashdiag::setPhase("js-plugins");
     jsMod.loadDir(std::filesystem::exists("data/plugins/js") ? "data/plugins/js" : "plugins/js");
     // JS 规则插件(seal.gameSystem)的属性模板：把模板原文交给 CommandRouter 解析（别名/衍生 → .st/.ra）。
@@ -543,6 +543,8 @@ static int realMain(int argc, char* argv[]) {
     });
     luaMod.setSelfName(configMgr.get<std::string>("dice/self_name", std::string("\xe9\xaa\xb0\xe5\xa8\x98")));
     luaMod.setBotId(configMgr.get<std::string>("dice/self_qq", std::string()));   // getDiceQQ()
+    jsMod.setSelfInfo(configMgr.get<std::string>("dice/self_qq", std::string()),
+                      configMgr.get<std::string>("dice/self_name", std::string()));   // ctx.endPoint.userId/nickname
     // Lua 插件可锁定人物卡，.st 的读写会遵守锁定状态。
     luaMod.setCardLock([&cardStore](const std::string& uid, const std::string& scope,
                                     const std::string& key, bool on) {
@@ -613,7 +615,7 @@ static int realMain(int argc, char* argv[]) {
                                      const std::string& headers, const std::string& body, int& status) {
         return cmdRouter.jsHttpFetch(method, url, headers, body, status);
     });
-    // C#107：.game 团务与 Lua msg.game/GameTable 同源存储（lua_mod.db conf "game:<gid>"）。
+    // .game 团务与 Lua msg.game/GameTable 同源存储（lua_mod.db conf "game:<gid>"）。
     cmdRouter.setGameConf({
         [&luaMod](const std::string& scope, const std::string& key) { return luaMod.confGet(scope, key); },
         [&luaMod](const std::string& scope, const std::string& key, const std::string& val) { luaMod.confSet(scope, key, val); },
@@ -710,15 +712,15 @@ static int realMain(int argc, char* argv[]) {
             return;
         }
     });
-    // 插件分群启停（C#27 地基）：Lua mod 派发前问「该群是否启用此 mod」。
+    // 插件分群启停（地基）：Lua mod 派发前问「该群是否启用此 mod」。
     luaMod.setGroupGate([&cmdRouter](const std::string& platform, const std::string& group, const std::string& pluginId) {
         return cmdRouter.isPluginEnabledInGroup(platform, group, pluginId);
     });
-    { std::vector<std::string> luaDirs, jsDirs; dice::CommandRouter::packPluginDirs(luaDirs, jsDirs); luaMod.setExtraDirs(luaDirs); }   // C#27：规则包 lua 附加加载
+    { std::vector<std::string> luaDirs, jsDirs; dice::CommandRouter::packPluginDirs(luaDirs, jsDirs); luaMod.setExtraDirs(luaDirs); }   // 规则包 lua 附加加载
     dice::crashdiag::setPhase("lua-mods");
-    luaMod.loadDir("data/mod");   // 与 C#7 的 JS 规则插件共用 data/mod（Lua mod=目录，JS=文件）
+    luaMod.loadDir("data/mod");   // 与 JS 规则插件共用 data/mod（Lua mod=目录，JS=文件）
 
-    // C#10：把 JS 插件 cmd.help + Lua mod descriptor.helpdoc 喂给 .help 帮助系统
+    // 把 JS 插件 cmd.help + Lua mod descriptor.helpdoc 喂给 .help 帮助系统
     //（解耦：router 不直接依赖各引擎）。
     cmdRouter.setHelpProvider([&jsMod, &luaMod]() {
         std::vector<std::pair<std::string, std::string>> v;
@@ -727,7 +729,7 @@ static int realMain(int argc, char* argv[]) {
         return v;
     });
 
-    // C#33：.plugin 指令的插件清单（lua mods + js 插件），与 /api/groups/plugins 同源。
+    // .plugin 指令的插件清单（lua mods + js 插件），与 /api/groups/plugins 同源。
     cmdRouter.setPluginProvider([&jsMod, &luaMod]() {
         std::vector<dice::CommandRouter::PluginEntry> v;
         for (auto& m : luaMod.mods())
@@ -780,7 +782,7 @@ static int realMain(int argc, char* argv[]) {
                 if (rel) return an + "\xef\xbc\x9a" + std::to_string(oldv) + " \xe2\x86\x92 " + std::to_string(newv);  // 属性：old → new
                 return an + " \xe5\xb7\xb2\xe8\xae\xbe\xe4\xb8\xba " + std::to_string(newv);  // 已设为 N
             }
-            // C#83：执行任意指令 / 帮助搜索 —— 以发送者身份走 command_router，权限=该用户。
+            // 执行任意指令 / 帮助搜索 —— 以发送者身份走 command_router，权限=该用户。
             if (tn == "run_command" || tn == "search_help") {
                 std::string cmd = (tn == "search_help")
                     ? (".helpdoc " + ta.value("query", std::string()))
@@ -806,11 +808,11 @@ static int realMain(int argc, char* argv[]) {
         if (dice::CommandRouter::isForAnotherBot(msg) && !jsCommandMatches(jsMod, cmdRouter, msg)) return;
         // Black/white-list: ignore blacklisted users/groups (and non-whitelisted in whitelist mode).
         if (cmdRouter.isBlocked(msg)) return;
-        // C#58 群自动化：消息命中「自动踢出/禁言」关键字则执行并跳过后续处理。
+        // 群自动化：消息命中「自动踢出/禁言」关键字则执行并跳过后续处理。
         {
             std::string act = cmdRouter.applyGroupAutoModeration(msg);
             if (!act.empty()) {
-                DICE_LOG_INFO("event: C#58 群 {} 自动{} 用户 {}（命中关键字）", msg.targetId,
+                DICE_LOG_INFO("event: 群 {} 自动{} 用户 {}（命中关键字）", msg.targetId,
                               act == "kick" ? "踢出" : "禁言", msg.senderId);
                 return;
             }
@@ -821,13 +823,13 @@ static int realMain(int argc, char* argv[]) {
         // normal fallback path when no built-in command matched.
         bool forcedByAt = dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);
         auto reply = cmdRouter.handleMessage(msg);
-        // C#68 阶段3：回复来源分类（builtin/plugin/reply），供 AI 翻译按范围过滤。
+        // 阶段3：回复来源分类（builtin/plugin/reply），供 AI 翻译按范围过滤。
         std::string replySrc = "builtin";
         // No command matched → custom replies, unless the group is disabled or has
         // custom replies turned off (.group +禁用回复).
         bool replyOff = msg.type == dice::MessageType::kGroup && !msg.targetId.empty()
                         && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId);
-        // C#69 自控：操作者用骰娘账号手打的消息走**完整管线**（内置/插件/自定义回复）；
+        // 自控：操作者用骰娘账号手打的消息走**完整管线**（内置/插件/自定义回复）；
         // 骰娘自己的回复回声已在适配器层被自回声去重丢弃，不会到这里，故无需在此限制。
         if (reply.empty() && (!disabled || forcedByAt) && !replyOff) {
             // JS 插件指令（海豹兼容）优先于自定义回复。
@@ -848,7 +850,7 @@ static int realMain(int argc, char* argv[]) {
                     msg.senderName.empty() ? msg.senderId : msg.senderName, msg.extra.value("card", std::string()), priv, trust, msg.platform);
                 if (lr.matched && !lr.reply.empty()) { reply = lr.reply; replySrc = "plugin"; }
             }
-            // C#29: 因果规则匹配（优先于普通自定义回复）。
+            // 因果规则匹配（优先于普通自定义回复）。
             if (reply.empty()) {
                 std::string nick = msg.senderName.empty() ? msg.senderId : msg.senderName;
                 std::string groupId = msg.type == dice::MessageType::kPrivate ? "" : msg.targetId;
@@ -880,7 +882,7 @@ static int realMain(int argc, char* argv[]) {
                 if (nc.matched && !nc.reply.empty()) { reply = nc.reply; replySrc = "plugin"; }
             }
         }
-        // ── C#89：先在消息线程消费本条消息的一次性路由状态 ─────────────
+        // ── 先在消息线程消费本条消息的一次性路由状态 ─────────────
         // 回复投递可能转入 AI 后台线程，这些状态晚取会被下一条消息拿走/污染。
         std::string aiCat = (replySrc == "plugin") ? "plugin"
                           : (replySrc == "reply")  ? "custom"
@@ -915,7 +917,7 @@ static int realMain(int argc, char* argv[]) {
             }
         }
 
-        // ── C#89：统一的回复投递（润色→翻译→link转发→日志→发送）────────
+        // ── 统一的回复投递（润色→翻译→link转发→日志→发送）────────
         // AI 网关是同步 curl（最长 30s），此前润色/翻译/对话都直接跑在适配器消息线程
         // 上，一次超时全部指令失效 30 秒。需要 AI 后处理的回复把这一整段投给
         // aiwork::Worker 后台执行；不需要 AI 时原地执行，行为与旧版完全一致。
@@ -927,13 +929,13 @@ static int realMain(int argc, char* argv[]) {
             // text — works for both command replies and custom replies.
             if (!reply.empty())     reply = cmdRouter.applySelf(msg, reply);
             if (!broadcast.empty()) broadcast = cmdRouter.applySelf(msg, broadcast);
-            // C#68 阶段2：AI 润色 —— 类别在覆盖范围内 + 总开关+润色开关开启。失败/超时/
+            // 阶段2：AI 润色 —— 类别在覆盖范围内 + 总开关+润色开关开启。失败/超时/
             // 破坏数字一律回退原文，绝不影响掷骰结果。
             if (!reply.empty() && !msg.fromSelf
                 && dice::aipolish::enabled(configMgr) && dice::aipolish::covers(configMgr, aiCat)) {
                 reply = dice::aipolish::polish(configMgr, msg.content, reply);
             }
-            // C#68 阶段3：AI 翻译 —— 本群/本用户 .lang 切到骰主自定义语言时，回复先按正常
+            // 阶段3：AI 翻译 —— 本群/本用户 .lang 切到骰主自定义语言时，回复先按正常
             // 语言生成，发送前大模型翻译成目标语言（带缓存）。按覆盖范围过滤。
             if (!reply.empty() && !msg.fromSelf && dice::aitrans::enabled(configMgr)) {
                 std::string tgt = cmdRouter.aiLangFor(msg);
@@ -956,7 +958,7 @@ static int realMain(int argc, char* argv[]) {
                 std::string chatScope = msg.type == dice::MessageType::kPrivate
                     ? "private:" + msg.senderId : msg.targetId;
                 std::string key = msg.platform + ":" + chatScope;
-                // C#82：骰娘自己的消息也显示名字（QQ 昵称，缺失回退「骰娘」）。
+                // 骰娘自己的消息也显示名字（QQ 昵称，缺失回退「骰娘」）。
                 std::string botName;
                 if (auto ba = adapterMgr.getAdapter(msg.adapterId)) botName = ba->getLoginName();
                 if (botName.empty()) botName = "\xe9\xaa\xb0\xe5\xa8\x98";   // 骰娘
@@ -1016,7 +1018,7 @@ static int realMain(int argc, char* argv[]) {
                     if (wantForward && !fwdNodes.empty() && a->sendGroupForwardMsg(msg.targetId, fwdNodes)) return;
                     for (size_t k = 0; k < segs.size(); ++k) {
                         if (k == 0 && quoteFirst) a->sendReply(replyMsg, segs[0]);
-                        // C#69：私聊回复发到 targetId（普通私聊=对方=senderId；自身消息自控时
+                        // 私聊回复发到 targetId（普通私聊=对方=senderId；自身消息自控时
                         // =对话对方，避免回复发给骰娘自己）。sendReply 亦用 targetId，一致。
                         else if (priv) a->sendPrivateMessage(msg.targetId, segs[k]);
                         else a->sendGroupMessage(msg.targetId, segs[k]);
@@ -1042,12 +1044,12 @@ static int realMain(int argc, char* argv[]) {
         // 智能化阶段A：AI 对话回复 —— 前面都没回复时，被 @骰娘 / 命中关键词 / 概率待机
         // 触发 → 用「人设 + chat.db 近期上下文」生成一条对话回复。强限频防刷屏；仅群聊。
         // 阶段E：若命中某 NPC（名字/触发词），优先以该 NPC 身份回复（人设/模型覆盖）。
-        // C#89：触发判定留在消息线程（廉价），上下文/记忆检索/图像识别/生成/工具调用整段
+        // 触发判定留在消息线程（廉价），上下文/记忆检索/图像识别/生成/工具调用整段
         // 投给 AI 后台线程 —— 大模型再慢也不影响其他指令；完成后经 finishReply 发送。
         if (reply.empty() && !disabled && !replyOff && !msg.fromSelf
             && msg.type == dice::MessageType::kGroup && !msg.targetId.empty()
             && (dice::aichat::enabled(configMgr) || dice::ainpc::enabled(configMgr))
-            && cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId)      // C#84：本群 AI 开关
+            && cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId)      // 本群 AI 开关
             && cmdRouter.aiWhitelistOk(msg.platform, msg.targetId, true)) { // AI 白名单模式
             bool atMe = !msg.selfId.empty()
                 && std::find(msg.atList.begin(), msg.atList.end(), msg.selfId) != msg.atList.end();
@@ -1059,7 +1061,7 @@ static int realMain(int argc, char* argv[]) {
             dice::aichat::Trigger tkind = dice::aichat::enabled(configMgr)
                 ? dice::aichat::triggerKind(configMgr, trigText, atMe) : dice::aichat::Trigger::None;
             bool defaultHit = !npcHit && tkind != dice::aichat::Trigger::None;
-            // C#87：被@/命中关键词（Strong）或 NPC 命中 → 必回，无视冷却；待机搭话（Standby）受冷却。
+            // 被@/命中关键词（Strong）或 NPC 命中 → 必回，无视冷却；待机搭话（Standby）受冷却。
             bool bypassCd = npcHit || tkind == dice::aichat::Trigger::Strong;
             if ((npcHit || defaultHit) && (bypassCd || dice::aichat::cooldownOk(configMgr, gkey))) {
                 std::string senderNick = msg.senderName.empty() ? msg.senderId : msg.senderName;
@@ -1104,7 +1106,7 @@ static int realMain(int argc, char* argv[]) {
                         npcMood = dice::ainpc::getMood(db.getChatStorage(), gkey, npc.id, msgC.senderId);
                     std::string sysOv = npcHit ? dice::ainpc::systemPrompt(npc, npcMood, senderNick) : std::string();
                     std::string modelOv = npcHit ? npc.modelId : std::string();
-                    // C#85：多模态 —— 消息带图且开启图像识别时，识别图片内容并注入当前消息。
+                    // 多模态 —— 消息带图且开启图像识别时，识别图片内容并注入当前消息。
                     std::string curText = dice::aichat::cleanForAi(configMgr, trigText);
                     if (dice::aivision::enabled(configMgr) && !msgC.rawContent.empty()) {
                         std::string vdesc = dice::aivision::describe(configMgr, msgC.rawContent);
@@ -1125,7 +1127,7 @@ static int realMain(int argc, char* argv[]) {
                             msgC.senderId, senderNick, curText, aiReply);
                 };
                 if (!dice::aiwork::Worker::instance().post(std::move(job)))
-                    DICE_LOG_INFO("C#89: AI \xe9\x98\x9f\xe5\x88\x97\xe5\xb7\xb2\xe6\xbb\xa1\xef\xbc\x8c\xe4\xb8\xa2\xe5\xbc\x83\xe6\x9c\xac\xe6\xac\xa1 AI \xe5\xaf\xb9\xe8\xaf\x9d\xe8\xa7\xa6\xe5\x8f\x91 group {}", msg.targetId);  // 队列已满，丢弃本次 AI 对话触发
+                    DICE_LOG_INFO("AI \xe9\x98\x9f\xe5\x88\x97\xe5\xb7\xb2\xe6\xbb\xa1\xef\xbc\x8c\xe4\xb8\xa2\xe5\xbc\x83\xe6\x9c\xac\xe6\xac\xa1 AI \xe5\xaf\xb9\xe8\xaf\x9d\xe8\xa7\xa6\xe5\x8f\x91 group {}", msg.targetId);  // 队列已满，丢弃本次 AI 对话触发
             }
         }
 
@@ -1137,15 +1139,15 @@ static int realMain(int argc, char* argv[]) {
             broadcast = dice::BroadcastManager::instance().takeFor(msg.platform + ":" + msg.targetId);
 
         // Auto-build the player's profile (every processed message; a non-empty
-        // reply counts as a command for the activity counter). C#69：自身消息不建档。
+        // reply counts as a command for the activity counter). 自身消息不建档。
         if (!msg.fromSelf) cmdRouter.recordPlayerActivity(msg, !reply.empty());
         // “活跃” = 本群最近用过指令（非空回复即一次指令，与 recordPlayerActivity 同口径）。
         // 这样定时任务的 inactive>=N 条件表示“N 天无指令”，纯聊天不计入，符合“无指令退群”语义。
         if (msg.type == dice::MessageType::kGroup && !msg.targetId.empty() && !reply.empty())
             cmdRouter.markGroupActive(msg.platform, msg.targetId);   // #47 群活跃度（按指令）
-        // .log transcript recording (skipped for disabled groups). C#69：操作者手打的
+        // .log transcript recording (skipped for disabled groups). 操作者手打的
         // 自控消息（fromSelf 且已过自回声去重）视同正常消息记录；骰娘自己的回复回声不会到这里。
-        // C#89：只记入站；骰娘回复待润色/翻译定稿后在 finishReply 里记（recordBotReply）。
+        // 只记入站；骰娘回复待润色/翻译定稿后在 finishReply 里记（recordBotReply）。
         if (!disabled) cmdRouter.recordIncoming(msg);
         // Feed the web "模拟聊天" live window (incoming line + bot reply + broadcast).
         if ((msg.type == dice::MessageType::kGroup && !msg.targetId.empty())
@@ -1154,28 +1156,28 @@ static int realMain(int argc, char* argv[]) {
                 ? "private:" + msg.senderId : msg.targetId;
             std::string key = msg.platform + ":" + chatScope;
             // 喂 CQ 原文(msg.rawContent，含 [CQ:image,file=URL])给模拟聊天，前端据此渲染真图片；
-            // content 是去掉 CQ 的纯指令文本(无图)，rawContent 才保留图片链接。带 userId 作头像/标识 (C#32)。
+            // content 是去掉 CQ 的纯指令文本(无图)，rawContent 才保留图片链接。带 userId 作头像/标识。
             std::string chatContent = !msg.rawContent.empty() ? msg.rawContent
                 : (msg.displayContent.empty() ? msg.content : msg.displayContent);
             dice::GroupChatLog::instance().add(key,
                 msg.senderName.empty() ? msg.senderId : msg.senderName, msg.senderId,
                 chatContent, false);
-            // C#89：骰娘回复/广播的模拟聊天与 chat.db 写入移到 finishReply（定稿后）。
-            // C#44：同步持久化到 chat.db（带 msgId，供撤回标注与保留期管理）。
+            // 骰娘回复/广播的模拟聊天与 chat.db 写入移到 finishReply（定稿后）。
+            // 同步持久化到 chat.db（带 msgId，供撤回标注与保留期管理）。
             if (auto* cst = db.getChatStorage()) {
                 try {
                     int64_t now = static_cast<int64_t>(std::time(nullptr));
                     dice::ChatMsgRow rin;
                     rin.platform = msg.platform; rin.groupId = chatScope; rin.msgId = msg.id;
                     rin.userId = msg.senderId;
-                    // C#82：群员显示群名片(群昵称)优先，其次 QQ 昵称，最后 QQ 号。
+                    // 群员显示群名片(群昵称)优先，其次 QQ 昵称，最后 QQ 号。
                     std::string sndCard = (msg.extra.contains("card") && msg.extra["card"].is_string())
                                         ? msg.extra["card"].get<std::string>() : std::string();
                     rin.sender = !sndCard.empty() ? sndCard
                                : (msg.senderName.empty() ? msg.senderId : msg.senderName);
                     rin.content = chatContent; rin.self = 0; rin.time = now;
                     int64_t inId = cst->insert(rin);
-                    // C#65：入站消息若含远端(NTQQ)图片，趁 rkey 新鲜后台下载到本地并
+                    // 入站消息若含远端(NTQQ)图片，趁 rkey 新鲜后台下载到本地并
                     // 回写行内容为 /api/chat/images/<名>（避免网页直连 QQ 图床 400 裂开）。
                     if (inId > 0 && dice::chatimg::hasRemoteImage(chatContent)) {
                         std::string cap = chatContent;
@@ -1193,7 +1195,7 @@ static int realMain(int argc, char* argv[]) {
             // 阶段B/C：后台折叠 —— 存完消息后异步更新本群记忆（滚动摘要 + 抽取持久事实，
             // 攒够一批才真正调模型，天然限频）。放后台线程避免阻塞消息处理。默认全关。
             if ((dice::aimemory::shortEnabled(configMgr) || dice::aimemory::longEnabled(configMgr))
-                && cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId)      // C#84：本群关 AI 则不建记忆
+                && cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId)      // 本群关 AI 则不建记忆
                 && cmdRouter.aiWhitelistOk(msg.platform, msg.targetId, true)) { // AI 白名单模式
                 std::string plat = msg.platform, gid = msg.targetId;
                 std::thread([&configMgr, &db, plat, gid]() {
@@ -1201,7 +1203,7 @@ static int realMain(int argc, char* argv[]) {
                 }).detach();
             }
         }
-        // ── C#89：投递回复 ── 需要 AI 后处理（润色/翻译命中覆盖范围）时走后台线程，
+        // ── 投递回复 ── 需要 AI 后处理（润色/翻译命中覆盖范围）时走后台线程，
         // 消息线程立即空出来处理下一条；否则原地执行（无 AI 时零行为差异）。
         if (!reply.empty() || !broadcast.empty()) {
             bool needBg = !msg.fromSelf && !reply.empty()
@@ -1216,7 +1218,7 @@ static int realMain(int argc, char* argv[]) {
                 if (!dice::aiwork::Worker::instance().post(std::move(job))) {
                     // AI 队列堵死（持续超时）→ 跳过润色/翻译（类别传空即跳过）直接发，
                     // 保证指令回复永远送达。
-                    DICE_LOG_INFO("C#89: AI \xe9\x98\x9f\xe5\x88\x97\xe5\xb7\xb2\xe6\xbb\xa1\xef\xbc\x8c\xe8\xb7\xb3\xe8\xbf\x87\xe6\xb6\xa6\xe8\x89\xb2/\xe7\xbf\xbb\xe8\xaf\x91\xe7\x9b\xb4\xe6\x8e\xa5\xe5\x8f\x91\xe9\x80\x81");  // 队列已满，跳过润色/翻译直接发送
+                    DICE_LOG_INFO("AI \xe9\x98\x9f\xe5\x88\x97\xe5\xb7\xb2\xe6\xbb\xa1\xef\xbc\x8c\xe8\xb7\xb3\xe8\xbf\x87\xe6\xb6\xa6\xe8\x89\xb2/\xe7\xbf\xbb\xe8\xaf\x91\xe7\x9b\xb4\xe6\x8e\xa5\xe5\x8f\x91\xe9\x80\x81");  // 队列已满，跳过润色/翻译直接发送
                     finishReply(msg, reply, broadcast, "", quoteId, fwdNodes, !disabled, linkReplyOk);
                 }
             } else {
@@ -1267,7 +1269,7 @@ static int realMain(int argc, char* argv[]) {
             }
             return cmdRouter.lookupNick(e.platform, uid);   // 记录的昵称，最终回退 QQ号
         };
-        // C#100：通知里群/人显示「名字(号码)」；名字未知（未入群/无档案）回退纯号码。
+        // 通知里群/人显示「名字(号码)」；名字未知（未入群/无档案）回退纯号码。
         auto groupLabel = [&](const std::string& gid) -> std::string {
             if (gid.empty()) return gid;
             std::string n = a ? a->getGroupName(gid) : gid;
@@ -1287,9 +1289,9 @@ static int realMain(int argc, char* argv[]) {
         lm.senderId = e.userId;
         dice::Locale loc = localeResolver.resolve(lm);
 
-        // ── C#44：聊天记录持久化 —— 撤回标注 / 历史消息回流入库 ──
+        // ── 聊天记录持久化 —— 撤回标注 / 历史消息回流入库 ──
         if (e.type == ET::kGroupUpload) {
-            // C#99：群文件上传 → 记入模拟聊天 + chat.db（[CQ:file,...] 供前端渲染
+            // 群文件上传 → 记入模拟聊天 + chat.db（[CQ:file,...] 供前端渲染
             // 成文件条目，点击经 /api/groups/.../file-url 取下载链）。
             if (e.groupId.empty()) return;
             nlohmann::json f = e.extra.contains("file") && e.extra["file"].is_object()
@@ -1310,7 +1312,7 @@ static int realMain(int argc, char* argv[]) {
                     cst->insert(r);
                 } catch (...) {}
             }
-            DICE_LOG_INFO("event: C#99 群 {} 文件上传 {} by {}", e.groupId, f.value("name", std::string()), e.userId);
+            DICE_LOG_INFO("event: 群 {} 文件上传 {} by {}", e.groupId, f.value("name", std::string()), e.userId);
             return;
         }
         if (e.type == ET::kGroupRecall) {
@@ -1370,7 +1372,7 @@ static int realMain(int argc, char* argv[]) {
                     r.time = m.value("time", (int64_t)0);
                     if (r.time == 0) r.time = static_cast<int64_t>(std::time(nullptr));
                     int64_t hid = cst->insert(r);
-                    // C#65：历史消息里的远端图片也本地化（拉历史时 rkey 通常仍新鲜）。
+                    // 历史消息里的远端图片也本地化（拉历史时 rkey 通常仍新鲜）。
                     if (hid > 0 && dice::chatimg::hasRemoteImage(r.content)) {
                         std::string cap = r.content;
                         std::thread([&db, hid, cap]() {
@@ -1424,25 +1426,25 @@ static int realMain(int argc, char* argv[]) {
                         }
                     }
                 }
-                // C#60：曾「删除记录」过的群重新加回来 → 清墓碑标记，否则群组管理
+                // 曾「删除记录」过的群重新加回来 → 清墓碑标记，否则群组管理
                 // 的自动发现会一直跳过它，刷不出这个群。
                 if (cmdRouter.groupSettingValue(e.platform, e.groupId, "__removed") == "1") {
                     cmdRouter.setGroupSettingFor(e.platform, e.groupId, "__removed", "0");
                     cmdRouter.setGroupSettingFor(e.platform, e.groupId, "enabled", "1");
-                    DICE_LOG_INFO("event: C#60 群 {} 重新加入，已清除移除标记（记录可重建）", e.groupId);
+                    DICE_LOG_INFO("event: 群 {} 重新加入，已清除移除标记（记录可重建）", e.groupId);
                 }
-                // C#62：曾指令退群的群重新加回来 → 清「已退群/退群中」状态。
+                // 曾指令退群的群重新加回来 → 清「已退群/退群中」状态。
                 if (cmdRouter.groupSettingValue(e.platform, e.groupId, "left") == "1" ||
                     cmdRouter.groupSettingValue(e.platform, e.groupId, "leaving") == "1") {
                     cmdRouter.setGroupSettingFor(e.platform, e.groupId, "left", "0");
                     cmdRouter.setGroupSettingFor(e.platform, e.groupId, "leaving", "0");
                 }
-                // C#47：直接被拉进群（无邀请事件）时，operator 即邀请人
+                // 直接被拉进群（无邀请事件）时，operator 即邀请人
                 // 已有邀请人记录时不覆盖。
                 if (!e.operatorId.empty() &&
                     cmdRouter.groupSettingValue(e.platform, e.groupId, "inviter").empty())
                     cmdRouter.setGroupSettingFor(e.platform, e.groupId, "inviter", e.operatorId);
-                // 群名关键词自动退群：邀请/入群事件不含群名，入群后靠 C#100 反查暖缓存，
+                // 群名关键词自动退群：邀请/入群事件不含群名，入群后靠反查暖缓存，
                 // 延迟数秒按群名判关键词（空白分隔多词，任一命中）→ 提示 + 退群 + 通知骰主。
                 {
                     std::string kws = ev.value("group_name_keyword_leave", std::string());
@@ -1499,7 +1501,7 @@ static int realMain(int argc, char* argv[]) {
                     "\xe9\xbb\x91\xe5\x90\x8d\xe5\x8d\x95\xe7\x94\xa8\xe6\x88\xb7 " + userLabel(e.userId) + " \xe5\x8a\xa0\xe5\x85\xa5\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "blacklist_leave");
                 return;
             }
-            // ── C#51：必须加入用户群 —— 挂靠黑名单检查点（入群事件）。
+            // ── 必须加入用户群 —— 挂靠黑名单检查点（入群事件）。
             // 若本群所有成员中无一人在配置的「用户群」里 → 自动退群。
             // 成员缓存异步刷新，故先请求两边刷新、延时后再比对。
             {
@@ -1530,14 +1532,14 @@ static int realMain(int argc, char* argv[]) {
                         for (const auto& id : gm) if (um.count(id)) return;   // 有交集 → 合规
                         if (!leaveText.empty()) ad->sendGroupMessage(gid2, leaveText);
                         ad->leaveGroup(gid2);
-                        DICE_LOG_INFO("event: C#51 群 {} 无成员在用户群 {} → 自动退群", gid2, ug2);
+                        DICE_LOG_INFO("event: 群 {} 无成员在用户群 {} → 自动退群", gid2, ug2);
                     });
                 }
             }
             // 入群反馈开关。
             if (!diceFlag("listen_group_add", true)) return;
             // A member joined → send the group's .welcome text if configured.
-            // C#76: welcome with delay + cooldown
+            // welcome with delay + cooldown
             std::string welcome = cmdRouter.groupSettingValue(e.platform, e.groupId, "welcome");
             if (welcome.empty()) return;
             int welcomeDelay = 0;
@@ -1555,7 +1557,7 @@ static int realMain(int argc, char* argv[]) {
                 a->sendGroupMessageCQ(e.groupId, w);
             };
 {
-                // C#76 v2: welcome with debounce + cooldown + proper timer cancellation
+                // v2: welcome with debounce + cooldown + proper timer cancellation
                 static std::mutex wcMtx;
                 static std::map<std::string, std::chrono::steady_clock::time_point> lastW;
                 static std::map<std::string, std::vector<std::string>> pendU;
@@ -1635,7 +1637,7 @@ static int realMain(int argc, char* argv[]) {
                     "\xe9\xaa\xb0\xe5\xa8\x98\xe5\xb7\xb2\xe7\xa6\xbb\xe5\xbc\x80\xe7\xbe\xa4 " + groupLabel(e.groupId) + who, "group_left");
             }
         } else if (e.type == ET::kPoke) {
-            if (!ev.value("poke_enabled", true)) return;   // C#70：戳一戳回复总开关（默认开）
+            if (!ev.value("poke_enabled", true)) return;   // 戳一戳回复总开关（默认开）
             // 戳一戳: only react when WE were the one poked (target == self).
             if (e.selfId.empty() || e.userId != e.selfId) return;
             // 映射：events.poke_command 设了就把它当「被戳者发的消息」跑完整回复管线
@@ -1711,7 +1713,7 @@ static int realMain(int argc, char* argv[]) {
             std::string fw = ev.value("friend_welcome", std::string());
             if (fw.empty()) fw = i18n.tr(loc, "event.friend_welcome");
             if (!fw.empty()) a->sendPrivateMessage(e.userId, fw);
-            // ── C#51：新好友不在用户群 → 私聊发送用户群邀请（群号+引导文本）。
+            // ── 新好友不在用户群 → 私聊发送用户群邀请（群号+引导文本）。
             // 说明：OneBot v11 无标准「发送群邀请卡片」API，先以私聊文本邀请。
             {
                 std::string ug = diceStr("user_group");
@@ -1733,7 +1735,7 @@ static int realMain(int argc, char* argv[]) {
                             }
                         } catch (...) {}
                         if (!inviteText.empty()) ad->sendPrivateMessage(uid2, inviteText);
-                        DICE_LOG_INFO("event: C#51 新好友 {} 不在用户群 {} → 已私聊邀请", uid2, ug2);
+                        DICE_LOG_INFO("event: 新好友 {} 不在用户群 {} → 已私聊邀请", uid2, ug2);
                     });
                 }
             }
@@ -1812,12 +1814,12 @@ static int realMain(int argc, char* argv[]) {
                 }   // ignore / manual → 不处理（忽视所有邀请）
             } else {
                 // sub_type=add：有人申请加入机器人作为管理员的群。
-                // C#58：优先看本群 .group auto pass 设置（all=全过 / 关键字=验证消息含关键字才过）。
+                // 优先看本群 .group auto pass 设置（all=全过 / 关键字=验证消息含关键字才过）。
                 std::string ap = cmdRouter.groupSettingValue(e.platform, e.groupId, "autoPass");
                 if (!ap.empty()) {
                     if (ap == "all" || (!e.comment.empty() && e.comment.find(ap) != std::string::npos)) {
                         a->setGroupRequest(e.flag, e.subType, true);
-                        DICE_LOG_INFO("event: C#58 群 {} 加群申请自动通过(auto pass) from {}", e.groupId, e.userId);
+                        DICE_LOG_INFO("event: 群 {} 加群申请自动通过(auto pass) from {}", e.groupId, e.userId);
                     }   // 不含关键字 → 留人工
                     return;   // 本群已配 autoPass，以它为准，不再走旧全局行为
                 }
@@ -1829,7 +1831,7 @@ static int realMain(int argc, char* argv[]) {
                 DICE_LOG_INFO("event: auto-approved group join request for group {}", e.groupId);
             }
         } else if (e.type == ET::kPoke) {
-            if (!ev.value("poke_enabled", true)) return;   // C#70：戳一戳回复总开关（默认开）
+            if (!ev.value("poke_enabled", true)) return;   // 戳一戳回复总开关（默认开）
             // Only react when the BOT itself is poked, in a group.
             if (e.userId != e.selfId || e.groupId.empty()) return;
             if (cmdRouter.isGroupDisabledFor(e.platform, e.groupId)) return;
@@ -1915,7 +1917,7 @@ static int realMain(int argc, char* argv[]) {
     app.setClientMaxBodySize(128 * 1024 * 1024);
     app.setClientMaxMemoryBodySize(128 * 1024 * 1024);
 
-    // ── C#34 WebUI 登录鉴权 ───────────────────────────────────
+    // ── WebUI 登录鉴权 ───────────────────────────────────
     dice::WebAuth::instance().setPassword(configMgr.get<std::string>("webui/password", ""));
     // 前置拦截：设了口令时，/api/* 需有效会话 Cookie（放行登录/状态查询与静态文件）。
     app.registerPreHandlingAdvice(
@@ -2043,10 +2045,10 @@ static int realMain(int argc, char* argv[]) {
 
     // Console log mode: human-readable by default; raw JSON dump if configured.
     dice::OneBotV11Adapter::s_rawEventLog = configMgr.get<bool>("log/raw_events", false);
-    // C#69 自响应（用骰娘账号自身发指令自控）：默认关。
+    // 自响应（用骰娘账号自身发指令自控）：默认关。
     dice::OneBotV11Adapter::s_respondSelf = configMgr.get<bool>("dice/respond_self", false);
 
-    // C#56：图片发送方式（[img,file=..] 发送期解析要读 dice/image_send 配置）。
+    // 图片发送方式（[img,file=..] 发送期解析要读 dice/image_send 配置）。
     dice::imgsend::init(configMgr);
 
     // ── Register real REST API endpoints ─────────────────────
@@ -2068,7 +2070,7 @@ static int realMain(int argc, char* argv[]) {
                 msg.id         = "playground";
                 msg.platform   = body.value("platform", std::string("onebot_v11"));
                 msg.content    = body.value("text", std::string(""));
-                msg.rawContent = body.value("rawContent", msg.content);   // C#85：可带 CQ 图码测识图
+                msg.rawContent = body.value("rawContent", msg.content);   // 可带 CQ 图码测识图
                 msg.displayContent = msg.content;
                 msg.senderId   = body.value("userId", std::string("10001"));
                 msg.senderName = body.value("nickname", std::string("\xe6\xb5\x8b\xe8\xaf\x95\xe5\x91\x98"));
@@ -2100,7 +2102,7 @@ static int realMain(int argc, char* argv[]) {
                     bool replyOff = msg.type == dice::MessageType::kGroup && !msg.targetId.empty()
                                     && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId);
                     reply = cmdRouter.handleMessage(msg, forced);
-                    std::string replySrc = "builtin";   // C#68：来源分类（同 live 管线）
+                    std::string replySrc = "builtin";   // 来源分类（同 live 管线）
                     if (reply.empty() && (!disabled || forcedByAt) && !replyOff) {
                         if (jsMod.ready()) {
                             if (auto bd = cmdRouter.commandBody(msg.content); bd && !bd->empty()) {
@@ -2138,7 +2140,7 @@ static int realMain(int argc, char* argv[]) {
                     // 测试台不读 chat.db 上下文（用空上下文），仅验证触发+生成+发送。
                     if (reply.empty() && !disabled && (dice::aichat::enabled(configMgr) || dice::ainpc::enabled(configMgr))
                         && (msg.targetId.empty() || (cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId)
-                            && cmdRouter.aiWhitelistOk(msg.platform, msg.targetId, true)))) {  // C#84 开关 + AI 白名单
+                            && cmdRouter.aiWhitelistOk(msg.platform, msg.targetId, true)))) {  // 开关 + AI 白名单
                         bool atMe = !msg.selfId.empty()
                             && std::find(msg.atList.begin(), msg.atList.end(), msg.selfId) != msg.atList.end();
                         std::string gkNpc = msg.platform + ":" + msg.targetId;
@@ -2170,7 +2172,7 @@ static int realMain(int argc, char* argv[]) {
                                 pMood = dice::ainpc::getMood(db.getChatStorage(), gkNpc, pnpc.id, msg.senderId);
                             std::string sysOv = pNpcHit ? dice::ainpc::systemPrompt(pnpc, pMood, sn) : std::string();
                             std::string modelOv = pNpcHit ? pnpc.modelId : std::string();
-                            // C#85：测试台也走图像识别注入（便于骰主预览）。
+                            // 测试台也走图像识别注入（便于骰主预览）。
                             std::string pcur = dice::aichat::cleanForAi(configMgr, msg.content);
                             if (dice::aivision::enabled(configMgr) && !msg.rawContent.empty()) {
                                 std::string vd = dice::aivision::describe(configMgr, msg.rawContent);
@@ -2185,7 +2187,7 @@ static int realMain(int argc, char* argv[]) {
                     // shouldn't consume a real broadcast push; it only fires on live
                     // group messages (see adapterMgr.onMessage above).
                     if (!reply.empty()) reply = cmdRouter.applySelf(msg, reply);
-                    // C#68/C#78：测试台同样走 AI 润色 + 翻译（与 live 一致），方便骰主在
+                    // 测试台同样走 AI 润色 + 翻译（与 live 一致），方便骰主在
                     // 「指令测试」页直接预览效果；失败/破坏数字回退原文。
                     std::string aiCat = (replySrc == "plugin") ? "plugin"
                                       : (replySrc == "reply")  ? "custom"
@@ -2214,7 +2216,7 @@ static int realMain(int argc, char* argv[]) {
             cb(resp);
         }, {drogon::Post});
 
-    // ── C#12 可视化生成器：对未保存的规则包 JSON 实时测试一条指令 ──────────
+    // ── 可视化生成器：对未保存的规则包 JSON 实时测试一条指令 ──────────
     app.registerHandler("/api/rules/test",
         [&cmdRouter](const drogon::HttpRequestPtr& req,
                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
@@ -2240,7 +2242,7 @@ static int realMain(int argc, char* argv[]) {
             cb(resp);
         }, {drogon::Post});
 
-    // ── C#6 Lua mod 管理（列表 / 启停 / 删除 / 重载）──────────────────
+    // ── Lua mod 管理（列表 / 启停 / 删除 / 重载）──────────────────
     {
         auto jsonResp = [](const nlohmann::json& out) {
             auto resp = drogon::HttpResponse::newHttpResponse();
@@ -2370,7 +2372,7 @@ static int realMain(int argc, char* argv[]) {
             }, {drogon::Post});
     }
 
-    // ── 插件分群启停（C#27 地基）：列出全部插件 + 在某群的启用状态；按群切换 ──
+    // ── 插件分群启停（地基）：列出全部插件 + 在某群的启用状态；按群切换 ──
     {
         auto jResp = [](const nlohmann::json& out) {
             auto resp = drogon::HttpResponse::newHttpResponse();
@@ -2418,7 +2420,7 @@ static int realMain(int argc, char* argv[]) {
             }, {drogon::Post});
     }
 
-    // ── C#27 规则包 bundle 管理（data/rulepacks/<包>/）：列表 / 上传zip / 启停 / 删除 ──
+    // ── 规则包 bundle 管理（data/rulepacks/<包>/）：列表 / 上传zip / 启停 / 删除 ──
     {
         namespace fs = std::filesystem;
         auto jResp = [](const nlohmann::json& out) {
@@ -2435,7 +2437,7 @@ static int realMain(int argc, char* argv[]) {
             try {
                 dice::CommandRouter::reloadRulePacks({"rules", "data/rules"});   // 重载 rules + bundles(内含 loadRulePackBundles)
                 dice::CommandRouter::loadHelpDocs();                             // 刷新帮助文档（含包内 helpdoc）
-                // C#27：重算规则包附加插件目录并热重载 lua/js（包内插件按群激活 gating）。
+                // 重算规则包附加插件目录并热重载 lua/js（包内插件按群激活 gating）。
                 std::vector<std::string> luaDirs, jsDirs;
                 dice::CommandRouter::packPluginDirs(luaDirs, jsDirs);
                 luaMod.setExtraDirs(luaDirs); luaMod.reload();
@@ -2617,7 +2619,7 @@ static int realMain(int argc, char* argv[]) {
                                        drogon::utils::genRandomString(6) + "." + safeExt;
                     std::filesystem::create_directories("data/assets");
                     { std::ofstream f("data/assets/" + name, std::ios::binary); f.write(bytes.data(), (std::streamsize)bytes.size()); }
-                    // C#56/57：不再把访问时的 host（往往是 localhost，跨设备失效）烧进
+                    // 不再把访问时的 host（往往是 localhost，跨设备失效）烧进
                     // 链接。回复里存平台中立码 [img,file=<本地路径>]，发送时按「图片发送
                     // 方式」配置转换；url 返回相对路径，仅供 WebUI 预览。
                     out = {{"code",0},{"message","ok"},{"data", {{"url","/api/assets/" + name},{"name",name},
@@ -2771,7 +2773,7 @@ static int realMain(int argc, char* argv[]) {
         adapterMgr.startAll();
     });
 
-    // ── C#44：聊天记录保留期清理（启动后 1 分钟 + 之后每 6 小时）──
+    // ── 聊天记录保留期清理（启动后 1 分钟 + 之后每 6 小时）──
     // 删除 chat.db 里早于 chat/retention_days（默认 7 天，0=不清理）的消息。
     {
         auto chatCleanup = [&db, &configMgr]() {
@@ -2782,14 +2784,14 @@ static int realMain(int argc, char* argv[]) {
                 namespace orm = sqlite_orm;
                 int64_t cutoff = static_cast<int64_t>(std::time(nullptr)) - (int64_t)days * 86400;
                 cst->remove_all<dice::ChatMsgRow>(orm::where(orm::c(&dice::ChatMsgRow::time) < cutoff));
-                dice::chatimg::pruneOld(cutoff);   // C#65：同步清理超期的缓存图片
+                dice::chatimg::pruneOld(cutoff);   // 同步清理超期的缓存图片
             } catch (...) {}
         };
         app.getLoop()->runAfter(60.0, chatCleanup);
         app.getLoop()->runEvery(21600.0, chatCleanup);
     }
 
-    // ── C#52：自动清理好友（N 天未在任何位置触发指令 → 删除好友）──
+    // ── 自动清理好友（N 天未在任何位置触发指令 → 删除好友）──
     // dice/friend_clean_days（0=关闭）。豁免：骰主/白名单(信任)用户/trustLevel>0。
     // 无玩家档案的好友跳过（无法判断，宁可不删）；lastCmdAt 为空回退 createdAt。
     {
@@ -2827,7 +2829,7 @@ static int realMain(int argc, char* argv[]) {
                         int64_t last = parseIsoUtc(lastIso);
                         if (last <= 0 || last >= cutoff) continue;
                         a->deleteFriend(uid);
-                        DICE_LOG_INFO("C#52 自动清理好友：{}（{} 天无指令，最后 {}）", uid, days, lastIso);
+                        DICE_LOG_INFO("自动清理好友：{}（{} 天无指令，最后 {}）", uid, days, lastIso);
                     } catch (...) {}
                 }
             }
@@ -2895,7 +2897,7 @@ static int realMain(int argc, char* argv[]) {
     });
 
     // System tray icon (Windows): 打开应用目录 / 显示·隐藏控制台 / 打开网页面板 / 退出。
-    // C#13：默认启动即最小化到托盘（隐藏控制台+弹气泡+禁用其X）；config dice/console_start_hidden=false 可保留旧行为（启动就显示控制台）。
+    // 默认启动即最小化到托盘（隐藏控制台+弹气泡+禁用其X）；config dice/console_start_hidden=false 可保留旧行为（启动就显示控制台）。
     bool startHidden = configMgr.get<bool>("dice/console_start_hidden", true);
     dice::startSystemTray(static_cast<uint16_t>(port), [] {
         g_running.store(false);

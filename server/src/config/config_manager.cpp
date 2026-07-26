@@ -28,8 +28,8 @@ static json makeDefaultConfig() {
             {"self_name", ""},                   // strSelfName: 自我介绍场合的名称（空=用登录昵称）
             {"self_call", ""},                   // strSelfCall: 回执自称，{self} 的重定向目标（空=用 self_name）
             {"blacklist_quit_level", "member"},  // 黑名单退群默认等级: member=任一成员触发 / admin=仅群主级触发
-            {"respond_self", false},             // C#69 自响应：用骰娘账号自身消息自控（默认关）
-            {"console_start_hidden", true},      // C#13 启动即最小化到托盘（隐藏控制台，退出走托盘）
+            {"respond_self", false},             // 自响应：用骰娘账号自身消息自控（默认关）
+            {"console_start_hidden", true},      // 启动即最小化到托盘（隐藏控制台，退出走托盘）
             {"rules", {
                 {"coc_enabled", true},
                 {"coc_critical_range", 1},
@@ -48,8 +48,8 @@ static json makeDefaultConfig() {
             {"auto_approve_group", false},     // 加群/邀请请求自动同意
             {"group_keyword", ""},            // 仅当验证信息含此关键词才同意（空=不限）
             {"friend_welcome", ""},            // 被加好友后的私聊欢迎语（空=用内置文案）
-            {"welcome_min_delay", 0},            // C#76: welcome delay 全局最低值（秒）
-            {"welcome_min_cooldown", 0}           // C#76: welcome cooldown 全局最低值（秒）
+            {"welcome_min_delay", 0},            // welcome delay 全局最低值（秒）
+            {"welcome_min_cooldown", 0}           // welcome cooldown 全局最低值（秒）
         }},
         {"adapters", json::array()},
         {"hot_reload", {

@@ -51,7 +51,7 @@ inline std::string slashTime(const std::string& iso) {
 }
 
 /// Render a log transcript in the portable .txt format. @p cfg lets us swap临时图片
-/// 链接为稳定图床 URL（C#3）；传 nullptr 则按原 content 输出（不替换）。
+/// 链接为稳定图床 URL；传 nullptr 则按原 content 输出（不替换）。
 inline std::string renderSealdice(Database& db, int logId, ConfigManager* cfg = nullptr) {
     auto* st = db.getLogStorage();
     if (!st) return "";
@@ -74,7 +74,7 @@ inline std::string renderSealdice(Database& db, int logId, ConfigManager* cfg = 
     return out;
 }
 
-/// C#98：把日志渲染成自包含网页（图片 base64 内嵌 / 远端 URL 原样引用）。
+/// 把日志渲染成自包含网页（图片 base64 内嵌 / 远端 URL 原样引用）。
 /// 网页导出与 `.log type html` 的群文件上传共用这一实现。
 inline std::string renderHtml(Database& db, int logId) {
     auto* st = db.getLogStorage();
@@ -97,7 +97,7 @@ inline std::string renderHtml(Database& db, int logId) {
             reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size());
     };
     std::ostringstream h;
-    // C#103：重复图片只内嵌一份 base64，占位 <img data-i> 由末尾脚本按下标水合，
+    // 重复图片只内嵌一份 base64，占位 <img data-i> 由末尾脚本按下标水合，
     // 避免同一张图（如反复出现的表情）被重复存成多个 base64 撑大文件。
     std::map<std::string, int> imgIndex;   // data URI → 数组下标
     std::vector<std::string> imgData;      // 唯一 data URI 列表
@@ -123,10 +123,10 @@ inline std::string renderHtml(Database& db, int logId) {
                         std::string src;
                         std::string norm = u; for (auto& ch : norm) if (ch == '\\') ch = '/';
                         if (u.rfind("http", 0) == 0) src = u;                          // 远端
-                        else if (norm.rfind("data/assets/", 0) == 0) src = fileToDataSrc(norm, norm);   // C#57：本地资产
+                        else if (norm.rfind("data/assets/", 0) == 0) src = fileToDataSrc(norm, norm);   // 本地资产
                         else src = fileToDataSrc("data/logs/images/" + u, u);          // 本地落地图
                         if (src.empty()) continue;
-                        if (src.rfind("data:", 0) == 0) {   // C#103：本地图 base64 去重引用
+                        if (src.rfind("data:", 0) == 0) {   // 本地图 base64 去重引用
                             auto it = imgIndex.find(src);
                             int idx;
                             if (it == imgIndex.end()) { idx = (int)imgData.size(); imgIndex[src] = idx; imgData.push_back(src); }
@@ -140,7 +140,7 @@ inline std::string renderHtml(Database& db, int logId) {
             }
             h << "</div>";
         }
-        // C#103：唯一图片 base64 一次性声明为 JS 数组，占位 img 按下标水合（结果不变、省体积）。
+        // 唯一图片 base64 一次性声明为 JS 数组，占位 img 按下标水合（结果不变、省体积）。
         if (!imgData.empty()) {
             h << "<script>var D=[";
             for (size_t i = 0; i < imgData.size(); ++i) { if (i) h << ','; h << '"' << imgData[i] << '"'; }
@@ -160,11 +160,12 @@ inline std::string uploadUrl(ConfigManager& cfg) {
     return u.empty() ? std::string(kOfficialLogsite) : u;
 }
 
-/// 上传协议：seal（SealDice V1，默认）/ legacy（旧版多段 txt POST，自建旧端点用）。
+/// 上传协议：dicenext（DiceNext 专属 zstd JSON，默认）/ seal（SealDice V1）/
+/// seal_v105（Parquet）/ legacy（旧版多段 txt POST，自建旧端点用）。
 inline std::string uploadFormat(ConfigManager& cfg) {
-    std::string f = cfg.get<std::string>("dice/logsite_format", std::string("seal"));
-    if (f == "legacy" || f == "seal_v105" || f == "dicenext") return f;   // seal_v105：Parquet；dicenext：zstd JSON
-    return std::string("seal");
+    std::string f = cfg.get<std::string>("dice/logsite_format", std::string("dicenext"));
+    if (f == "legacy" || f == "seal_v105" || f == "seal" || f == "dicenext") return f;
+    return std::string("dicenext");
 }
 
 /// Build the upload uniform_id. The log site requires it to be UNIQUE per upload;

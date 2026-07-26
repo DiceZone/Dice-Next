@@ -30,7 +30,7 @@
 #include <set>
 
 namespace dice {
-// Forward declarations (C#30: used as pointers in runImport for post-import reload)
+// Forward declarations (used as pointers in runImport for post-import reload)
 class CardDeck;
 class LuaPluginManager;
 }  // namespace dice
@@ -42,7 +42,7 @@ namespace orm = sqlite_orm;
 using json = nlohmann::json;
 
 // ═══════════════════════════════════════════════════════════════
-// C#30: Structured import result types
+// Structured import result types
 // ═══════════════════════════════════════════════════════════════
 
 /// Options controlling import behavior.
@@ -57,7 +57,7 @@ struct ImportDetail {
     std::string reason;  ///< explanation (especially for skipped/failed)
 };
 
-/// Structured result returned by importMods/importDecks (C#30).
+/// Structured result returned by importMods/importDecks.
 struct ImportResult {
     int success = 0;
     int skipped = 0;
@@ -451,7 +451,7 @@ inline int importMasters(ConfigManager& cfg, const fs::path& confDir) {
 // ── <root>/mod/ → data/mod/（Lua 模块目录）──────────────────────────
 // 模块目录包含 descriptor.json、model.xml、rulebook 和 reply.lua 等资源。
 // 或 DiceDir/mod/<名>.json。整棵复制到我们的 data/mod/，启动扫描即自动识别。
-// C#30: Enhanced with ImportResult return + ImportOptions (skip/overwrite).
+// Enhanced with ImportResult return + ImportOptions (skip/overwrite).
 inline ImportResult importMods(const fs::path& root, const ImportOptions& opts = {}) {
     ImportResult result;
     fs::path src = root / "mod";
@@ -496,7 +496,7 @@ inline ImportResult importMods(const fs::path& root, const ImportOptions& opts =
 }
 
 // ── <root>/PublicDeck/ → data/decks/（外置牌堆）─────────────────────
-// C#30: Enhanced with ImportResult return + ImportOptions + JSON format validation.
+// Enhanced with ImportResult return + ImportOptions + JSON format validation.
 // Non-.json files are marked as skipped in the result.
 inline ImportResult importDecks(const fs::path& root, const ImportOptions& opts = {}) {
     ImportResult result;
@@ -642,7 +642,7 @@ inline int importChatConf(Database& db, const fs::path& userDir, int& groups) {
 }
 
 // ── Orchestrator ─────────────────────────────────────────────
-// C#30: Enhanced runImport accepts CardDeck* and LuaPluginManager* for
+// Enhanced runImport accepts CardDeck* and LuaPluginManager* for
 // post-import reload, and ImportOptions for skip/overwrite control.
 // The deck/mod results are structured ImportResult objects.
 inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager& reply,
@@ -664,11 +664,11 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
     int msgs = importCustomMsg(db, i18n, confDir, orphans);
     int masters = importMasters(cfg, confDir);
 
-    // C#30: Structured deck/mod import results
+    // Structured deck/mod import results
     auto deckResult = importDecks(root, opts);
     auto modResult = importMods(root, opts);
 
-    // C#30: Reload engines if import succeeded and pointers are provided
+    // Reload engines if import succeeded and pointers are provided
     if (deckResult.success > 0 && deck) {
         deck->loadDir("data/decks");
         DICE_LOG_INFO("LegacyImport: reloaded card decks after import");
