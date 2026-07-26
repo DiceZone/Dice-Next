@@ -15,6 +15,7 @@
 #include "service/api_service.h"
 #include "service/web_auth.h"          // WebUI 登录鉴权
 #include "service/chat_image.h"        // 模拟聊天图片本地化
+#include "service/image_host.h"        // 图床（QQ 官方富媒体需要公网 URL）
 #include "service/ai_polish.h"         // AI 回复润色
 #include "service/ai_translate.h"      // AI 回复翻译（.lang 自定义语言）
 #include "service/ai_chat.h"           // 智能化阶段A：AI 对话回复
@@ -23,6 +24,8 @@
 #include "service/ai_npc.h"            // 智能化阶段E：NPC 扮演
 #include "service/ai_vision.h"         // 多模态图像识别
 #include "service/ai_worker.h"         // AI 后台线程（AI 调用不再阻塞消息管线）
+#include "service/heart_service.h"     // 心跳上报（heart.dice.zone）
+#include "service/cloudban_service.h"  // 云黑名单同步（cloudban.dice.zone）
 #include "platform/instance_guard.h"   // 必须在 tray_win.h(<windows.h>) 之前：先引 winsock2.h
 #include "platform/autostart_win.h"    // Windows 注册表开机自启；其他平台提供 no-op 接口。
 #include "platform/tray_win.h"
@@ -636,8 +639,27 @@ static int realMain(int argc, char* argv[]) {
         }
         return out;
     });
+    // 多平台会话定位：按群/用户档案反查其所属平台（OneBot/QQ官方/Discord/KOOK
+    // 同时在线时，Lua sendMsg/eventMsg 不能盲取「第一个已连适配器」，会串平台）。
+    auto resolveChatPlatform = [&db](const std::string& gid, const std::string& uid) -> std::string {
+        namespace orm = sqlite_orm;
+        auto* st = db.getStorage(); if (!st) return {};
+        try {
+            if (!gid.empty()) {
+                auto rows = st->get_all<dice::GroupSettingRow>(orm::where(
+                    orm::c(&dice::GroupSettingRow::groupId) == gid), orm::limit(1));
+                if (!rows.empty()) return rows.front().platform;
+            } else if (!uid.empty()) {
+                auto rows = st->get_all<dice::PlayerProfileRow>(orm::where(
+                    orm::c(&dice::PlayerProfileRow::userId) == uid), orm::limit(1));
+                if (!rows.empty()) return rows.front().platform;
+            }
+        } catch (...) {}
+        return {};
+    };
     // askExtra(json) 透传 {action, params} 到平台扩展查询。
-    // OneBot invokeAction（如 get_group_member_list），其余格式返回失败。
+    // OneBot invokeAction（如 get_group_member_list）；不支持该动作的适配器
+    // （QQ官方/Discord/KOOK 返回 null）跳过，继续问下一个，别让首位非 OneBot 断链。
     luaMod.setAskExtra([&adapterMgr](const std::string& dataJson) -> std::string {
         try {
             auto j = nlohmann::json::parse(dataJson, nullptr, false);
@@ -650,30 +672,35 @@ static int realMain(int argc, char* argv[]) {
                 auto resp = a->invokeAction(action, params);
                 if (resp.is_object() && resp.contains("data") && !resp["data"].is_null())
                     return resp["data"].dump();
-                return {};
             }
         } catch (...) {}
         return {};
     });
-    // Lua 插件 sendMsg(text,gid,uid) → 按已连适配器发群/私聊。
-    luaMod.setSender([&adapterMgr](const std::string& text, const std::string& gid, const std::string& uid) {
-        for (auto& a : adapterMgr.allAdapters()) {
-            if (!a->isConnected()) continue;
+    // Lua 插件 sendMsg(text,gid,uid) → 优先发到该会话所属平台的适配器，找不到再回退首个已连。
+    luaMod.setSender([&adapterMgr, resolveChatPlatform](const std::string& text, const std::string& gid, const std::string& uid) {
+        const std::string plat = resolveChatPlatform(gid, uid);
+        auto send = [&](const dice::AdapterPtr& a) {
             if (!gid.empty()) a->sendGroupMessage(gid, text);
             else if (!uid.empty()) a->sendPrivateMessage(uid, text);
-            return;
-        }
+        };
+        if (!plat.empty())
+            for (auto& a : adapterMgr.allAdapters())
+                if (a->isConnected() && a->platform() == plat) { send(a); return; }
+        for (auto& a : adapterMgr.allAdapters())
+            if (a->isConnected()) { send(a); return; }
     });
     // Lua 插件 eventMsg(text,gid,uid) 将 text 作为消息走完整回复管线。
     // 复用 poke_command 的管线（内置指令→JS插件→Lua因果→自定义回复→applySelf→发送）。
     // 用线程局部深度计数防 eventMsg 递归风暴（eventMsg 的回复又触发 eventMsg）。
-    luaMod.setEventMsg([&adapterMgr, &cmdRouter, &replyManager, &jsMod, &luaMod](
+    luaMod.setEventMsg([&adapterMgr, &cmdRouter, &replyManager, &jsMod, &luaMod, resolveChatPlatform](
             const std::string& text, const std::string& gid, const std::string& uid) {
         static thread_local int depth = 0;
         if (depth >= 4) { DICE_LOG_INFO("eventMsg recursion capped at depth 4: '{}'", text); return; }
         struct Guard { int& d; Guard(int& x):d(x){ ++d; } ~Guard(){ --d; } } guard(depth);
-        std::string platform;
-        for (auto& a : adapterMgr.allAdapters()) if (a->isConnected()) { platform = a->platform(); break; }
+        // 会话所属平台优先（多平台在线时别拿「第一个适配器」的平台冒充）。
+        std::string platform = resolveChatPlatform(gid, uid);
+        if (platform.empty())
+            for (auto& a : adapterMgr.allAdapters()) if (a->isConnected()) { platform = a->platform(); break; }
         dice::Message pm;
         pm.platform = platform;
         pm.senderId = uid;
@@ -1872,21 +1899,9 @@ static int realMain(int argc, char* argv[]) {
         auto adapters = st->get_all<dice::AdapterRow>();
         for (auto& row : adapters) {
             if (row.enabled) {
-                dice::AdapterPtr adapter;
-                if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
-                    auto c = nlohmann::json::parse(row.config, nullptr, false);
-                    auto qq = std::make_shared<dice::QQOfficialAdapter>(std::to_string(row.id));
-                    qq->configure({{"name", row.name}, {"appId", c.value("appId", std::string())},
-                                   {"appSecret", c.value("appSecret", std::string())}});
-                    adapter = qq;
-                } else {
-                    std::string mode = (row.connectionMode == 1) ? "reverse_ws" : (row.connectionMode == 2) ? "http" : "forward_ws";
-                    auto onebot = std::make_shared<dice::OneBotV11Adapter>(std::to_string(row.id));
-                    onebot->configure({{"name", row.name}, {"endpoint", row.endpoint},
-                        {"accessToken", row.accessToken}, {"connectionMode", mode}});
-                    adapter = onebot;
-                }
-                adapterMgr.registerAdapter(adapter);
+                // 与 WebUI 增改共用同一工厂（api_service::makeRuntimeAdapter），
+                // 避免此处漏掉新平台——曾把 Discord/KOOK 行当 OneBot 建导致空端点重连死循环。
+                adapterMgr.registerAdapter(dice::api::makeRuntimeAdapter(row));
             }
         }
     }
@@ -2050,6 +2065,38 @@ static int realMain(int argc, char* argv[]) {
 
     // 图片发送方式（[img,file=..] 发送期解析要读 dice/image_send 配置）。
     dice::imgsend::init(configMgr);
+
+    // QQ 官方富媒体：本地图片 → 公网 URL 发布器（官方 /files 接口只收公网 url，
+    // file_data 官方「暂未支持」）。generic=图床上传；local=public_base 直链。
+    dice::QQOfficialAdapter::setImagePublisher([&configMgr](const std::string& local) -> std::string {
+        namespace ih = dice::imghost;
+        const std::string m = ih::mode(configMgr);
+        if (m == "generic") { auto u = ih::uploadGeneric(configMgr, local); return u.value_or(std::string()); }
+        if (m == "local") {
+            std::string norm = local; for (auto& c : norm) if (c == '\\') c = '/';
+            if (norm.rfind("data/assets/", 0) == 0) return ih::resolveRef(configMgr, norm);
+            if (norm.rfind("data/chat/images/", 0) == 0) {
+                std::string base = ih::publicBase(configMgr);
+                if (base.empty()) return {};
+                if (base.back() == '/') base.pop_back();
+                return base + "/api/chat/images/" + norm.substr(std::string("data/chat/images/").size());
+            }
+        }
+        return {};
+    });
+
+    // ── 心跳上报 + 云黑名单服务（heart.dice.zone / cloudban.dice.zone）──
+    // 单例 init 注入依赖；本地黑名单 CRUD 经回调转发到 cmdRouter（自带去重）。
+    dice::heart::HeartService::instance().init(&configMgr, &adapterMgr);
+    dice::cloudban::CloudbanService::instance().init(&configMgr,
+        [&cmdRouter](int t, int l, const std::string& id) { return cmdRouter.cloudBanHas(t, l, id); },
+        [&cmdRouter](int t, int l, const std::string& id, const std::string& r) { cmdRouter.cloudBanAdd(t, l, id, r); },
+        [&cmdRouter](int t, int l, const std::string& id) { return cmdRouter.cloudBanRemove(t, l, id); },
+        [&cmdRouter]() { return cmdRouter.banlistAll(); });
+    // 主人 .blackqq/.blackgroup 主动拉黑 → 云黑上报（分享开启时；服务内部做门控与去重）。
+    cmdRouter.onMasterBan = [](const std::string& tt, const std::string& id, const std::string& reason) {
+        dice::cloudban::CloudbanService::instance().reportToCloud(tt, id, "other", reason);
+    };
 
     // ── Register real REST API endpoints ─────────────────────
     dice::utils::setStartupEpoch();
@@ -2300,10 +2347,10 @@ static int realMain(int argc, char* argv[]) {
                 luaMod.reload();
                 cb(jsonResp({{"code", 0}, {"message", "ok"}, {"data", luaList()}}));
             }, {drogon::Post});
-        // 导入 Lua mod：上传 zip（base64），解压到 data/mod/<模块名> 后重载。
+        // 导入 Lua mod：上传 .lua/.json/.zip（base64）。归位语义见 LuaPluginManager::importUpload
+        //（对齐原版：json+目录成对、一包多 mod、纯 json 查询类、仅 model/rulebook 的规则类都认）。
         app.registerHandler("/api/mod/lua/upload",
             [jsonResp, luaList, &luaMod](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
-                namespace fs = std::filesystem;
                 try {
                     auto j = nlohmann::json::parse(req->getBody());
                     std::string filename = j.value("filename", std::string("mod.zip"));
@@ -2312,60 +2359,11 @@ static int realMain(int argc, char* argv[]) {
                     if (auto comma = content.find(",base64,"); comma != std::string::npos) content = content.substr(comma + 8);
                     else if (auto c2 = content.find(','); c2 != std::string::npos && content.rfind("data:", 0) == 0) content = content.substr(c2 + 1);
                     std::string bytes = drogon::utils::base64Decode(content);
-                    if (bytes.empty()) { cb(jsonResp({{"code", 1}, {"message", "empty/invalid file"}})); return; }
-                    fs::create_directories("data/mod");
-                    // 单文件 Lua 插件（msg_order）→ data/plugin/；扫描器同时识别两个目录，
-                    // 归位让目录不再混乱）。目录型 mod（zip）仍进 data/mod/。
-                    if (filename.size() > 4 && filename.substr(filename.size() - 4) == ".lua") {
-                        std::string base = filename;
-                        if (auto p = base.find_last_of("/\\"); p != std::string::npos) base = base.substr(p + 1);
-                        fs::create_directories("data/plugin");
-                        { std::ofstream f(fs::path("data/plugin") / base, std::ios::binary); f.write(bytes.data(), (std::streamsize)bytes.size()); }
-                        luaMod.reload();
-                        cb(jsonResp({{"code", 0}, {"message", "ok"}, {"data", luaList()}}));
+                    std::string err; std::vector<std::string> names;
+                    if (!luaMod.importUpload(filename, bytes, &err, &names)) {
+                        cb(jsonResp({{"code", 1}, {"message", err}}));
                         return;
                     }
-                    std::string tag = std::to_string((long long)std::time(nullptr));
-                    fs::path zipPath = fs::path("data/mod") / ("_imp_" + tag + ".zip");
-                    fs::path tmpDir  = fs::path("data/mod") / ("_imp_" + tag);
-                    { std::ofstream f(zipPath, std::ios::binary); f.write(bytes.data(), (std::streamsize)bytes.size()); }
-                    fs::create_directories(tmpDir);
-                    // 解压：Win10+ 自带 tar(bsdtar 可解 zip)；POSIX 用 unzip。
-                    std::error_code ec;
-#if defined(_WIN32)
-                    std::string cmd = "tar -xf \"" + zipPath.string() + "\" -C \"" + tmpDir.string() + "\"";
-#else
-                    std::string cmd = "unzip -o -q \"" + zipPath.string() + "\" -d \"" + tmpDir.string() + "\"";
-#endif
-                    std::system(cmd.c_str());
-                    fs::remove(zipPath, ec);
-                    // 定位 mod 根：若解压结果是「单个子目录」则它是 mod；否则 zip 内容即 mod，用文件名作名。
-                    auto isModDir = [](const fs::path& d) {
-                        std::error_code e; return fs::exists(d / "descriptor.json", e)
-                            || fs::is_directory(d / "reply", e) || fs::is_directory(d / "script", e);
-                    };
-                    fs::path src; std::string modName;
-                    if (isModDir(tmpDir)) {
-                        modName = filename;
-                        if (auto dot = modName.rfind('.'); dot != std::string::npos) modName = modName.substr(0, dot);
-                        src = tmpDir;
-                    } else {
-                        int dirs = 0; fs::path only;
-                        for (auto& e : fs::directory_iterator(tmpDir, ec)) if (e.is_directory()) { ++dirs; only = e.path(); }
-                        if (dirs == 1 && isModDir(only)) { src = only; modName = dnx_u8str(only.filename()); }
-                    }
-                    if (src.empty() || modName.empty()) {
-                        fs::remove_all(tmpDir, ec);
-                        cb(jsonResp({{"code", 1}, {"message", "zip 内未找到 Lua mod（需含 descriptor.json 或 reply/ 或 script/）"}}));
-                        return;
-                    }
-                    // basename 防穿越
-                    if (auto p = modName.find_last_of("/\\"); p != std::string::npos) modName = modName.substr(p + 1);
-                    fs::path dest = fs::path("data/mod") / modName;
-                    fs::remove_all(dest, ec);
-                    fs::rename(src, dest, ec);
-                    if (ec) { fs::copy(src, dest, fs::copy_options::recursive, ec); }
-                    fs::remove_all(tmpDir, ec);
                     luaMod.reload();
                     cb(jsonResp({{"code", 0}, {"message", "ok"}, {"data", luaList()}}));
                 } catch (const std::exception& e) { cb(jsonResp({{"code", 1}, {"message", e.what()}})); }
@@ -2896,6 +2894,14 @@ static int realMain(int argc, char* argv[]) {
         }
     });
 
+    // ── 心跳上报 + 云黑同步：启动后首跳 + 每 60s 驱动（服务内部按各自 interval 自行节流）──
+    app.getLoop()->runAfter(15.0, [] { dice::heart::HeartService::instance().tick(); });      // 上线立即报（等 adapter 连上）
+    app.getLoop()->runAfter(60.0, [] { dice::cloudban::CloudbanService::instance().tick(); }); // 首次云黑同步
+    app.getLoop()->runEvery(60.0, [] {
+        dice::heart::HeartService::instance().tick();
+        dice::cloudban::CloudbanService::instance().tick();
+    });
+
     // System tray icon (Windows): 打开应用目录 / 显示·隐藏控制台 / 打开网页面板 / 退出。
     // 默认启动即最小化到托盘（隐藏控制台+弹气泡+禁用其X）；config dice/console_start_hidden=false 可保留旧行为（启动就显示控制台）。
     bool startHidden = configMgr.get<bool>("dice/console_start_hidden", true);
@@ -2910,6 +2916,9 @@ static int realMain(int argc, char* argv[]) {
 
     // ── 10. Graceful shutdown ────────────────────────────────
     DICE_LOG_INFO("Shutting down...");
+
+    // 正常退出时同步报一次 offline（max-time 5s，服务端据此结算在线时长）。
+    dice::heart::HeartService::instance().shutdownReport();
 
     if (hotReload) {
         hotReload->stop();

@@ -178,6 +178,28 @@ private:
             }
             return;
         }
+        if (msg.platform == "discord" || msg.platform == "kook") {
+            // Discord/KOOK 原生 id 可能与 QQ 号数字碰撞（KOOK 用户 id 纯数字），
+            // 一律经身份系统映射为公共号（未绑定=虚拟号，绑定后=真实 QQ）。
+            const Kind scope = msg.type == MessageType::kPrivate ? Kind::User : Kind::Group;
+            const std::string rawTarget = msg.targetId;
+            const std::string rawSender = msg.senderId;
+            const std::string publicTarget = bindings.observeVirtual(db_, msg.platform, msg.adapterId, rawTarget, scope);
+            const std::string publicSender = bindings.observeVirtual(db_, msg.platform, msg.adapterId, rawSender, Kind::User);
+            msg.extra["__identity_transport"] = msg.platform;
+            msg.extra["__identity_native_target"] = rawTarget;
+            msg.extra["__identity_native_sender"] = rawSender;
+            msg.extra["__identity_qualified_target"] = BindingStore::qualified(scope, publicTarget);
+            msg.extra["__identity_qualified_sender"] = BindingStore::qualified(Kind::User, publicSender);
+            if (!publicTarget.empty()) msg.targetId = publicTarget;
+            if (!publicSender.empty()) msg.senderId = publicSender;
+            for (auto& at : msg.atList) {
+                if (at == msg.selfId || at == "all") continue;
+                const auto pub = bindings.observeVirtual(db_, msg.platform, msg.adapterId, at, Kind::User);
+                if (!pub.empty()) at = pub;
+            }
+            return;
+        }
         if (msg.platform == "onebot_v11" && (msg.type == MessageType::kGroup || msg.type == MessageType::kPrivate)) {
             const std::string rawTarget = msg.targetId;
             const std::string rawSender = msg.senderId;

@@ -1163,7 +1163,9 @@ static std::string stripJsonTrailingCommas(const std::string& s) {
 }
 
 // 解析 mod 描述档（<name>.json 或 <name>/descriptor.json）。字段兼容 mod/title、ver/version。
-static void parseModDescriptor(const fs::path& descPath, LuaPluginManager::LuaMod& m) {
+// speechOut：原版 loadDesc 还认 json 内嵌 speech{}（值为串或数组，数组取首项）。
+static void parseModDescriptor(const fs::path& descPath, LuaPluginManager::LuaMod& m,
+                               std::map<std::string, std::string>* speechOut = nullptr) {
     try {
         std::ifstream f(descPath, std::ios::binary);
         std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -1175,6 +1177,12 @@ static void parseModDescriptor(const fs::path& descPath, LuaPluginManager::LuaMo
         if (j.contains("helpdoc") && j["helpdoc"].is_object())
             for (auto it = j["helpdoc"].begin(); it != j["helpdoc"].end(); ++it)
                 if (it.value().is_string()) m.helpdoc[it.key()] = it.value().get<std::string>();
+        if (speechOut && j.contains("speech") && j["speech"].is_object())
+            for (auto it = j["speech"].begin(); it != j["speech"].end(); ++it) {
+                if (it.value().is_string()) (*speechOut)[it.key()] = it.value().get<std::string>();
+                else if (it.value().is_array() && !it.value().empty() && it.value()[0].is_string())
+                    (*speechOut)[it.key()] = it.value()[0].get<std::string>();
+            }
     } catch (const std::exception& ex) {
         DICE_LOG_ERROR("[lua] mod descriptor '{}' parse error: {}", dnx_u8str(descPath.filename()), ex.what());
     }
@@ -1264,16 +1272,30 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
         if (!isDir(d)) return;
         auto entries = safeList(d);
         std::set<std::string> claimed;
-        for (auto& p : entries) {   // Pass 1
+        for (auto& p : entries) {   // Pass 1：<name>.json 描述档（原版正式登记形态；.json.disabled=停用）
             try {
-                if (!isFile(p) || p.extension() != ".json") continue;
-                std::string name = dnx_u8str(p.stem());
-                LuaMod m; m.name = name; m.title = name; m.enabled = true;
-                parseModDescriptor(p, m);
-                fs::path modPath = d / name;
-                bool hasModDir = isDir(modPath);
-                if (hasModDir) claimed.insert(name);
-                finishMod(m, modPath, hasModDir);
+                if (!isFile(p)) continue;
+                std::string fn = dnx_u8str(p.filename());
+                std::string name; bool disabled = false;
+                const std::string kJson = ".json", kJsonOff = ".json.disabled";
+                if (fn.size() > kJsonOff.size() && fn.compare(fn.size() - kJsonOff.size(), kJsonOff.size(), kJsonOff) == 0) {
+                    name = fn.substr(0, fn.size() - kJsonOff.size()); disabled = true;
+                } else if (fn.size() > kJson.size() && fn.compare(fn.size() - kJson.size(), kJson.size(), kJson) == 0) {
+                    name = fn.substr(0, fn.size() - kJson.size());
+                } else continue;
+                LuaMod m; m.name = name; m.title = name; m.enabled = !disabled;
+                std::map<std::string, std::string> inlineSpeech;
+                parseModDescriptor(p, m, &inlineSpeech);
+                // 成对目录：启用态 <name>，停用态 <name>.disabled（半残状态下两种都探一次）。
+                fs::path modPath = d / fs::path(std::u8string(name.begin(), name.end()));
+                if (!isDir(modPath)) {
+                    fs::path off = d / fs::path(std::u8string(name.begin(), name.end())).concat(".disabled");
+                    if (isDir(off)) modPath = off;
+                }
+                // 有描述档即认领此名，Pass 2 不再把成对目录列成第二个条目。
+                claimed.insert(name);
+                if (m.enabled) for (auto& [k, v] : inlineSpeech) speech_[k] = v;   // 原版 loadDesc: json 内嵌 speech
+                finishMod(m, modPath, isDir(modPath));
             } catch (const std::exception& ex) { DICE_LOG_ERROR("[lua] mod '{}' load failed: {}", dnx_u8str(p.filename()), ex.what()); }
         }
         for (auto& p : entries) {   // Pass 2
@@ -1285,7 +1307,11 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
                 if (claimed.count(name)) continue;
                 fs::path inner = p / "descriptor.json";
                 bool hasInner = isFile(inner);
-                if (!hasInner && !isDir(p / "reply") && !isDir(p / "script")) continue;
+                // 除 reply/script 外，仅含 speech/event/model/rulebook 的（规则/词条类）目录也是 mod。
+                bool looksMod = hasInner;
+                for (const char* sub : {"reply", "script", "speech", "event", "model", "rulebook"})
+                    if (!looksMod && isDir(p / sub)) looksMod = true;
+                if (!looksMod) continue;
                 LuaMod m; m.name = name; m.title = name; m.enabled = !disabled;
                 if (hasInner) parseModDescriptor(inner, m);
                 finishMod(m, p, true);
@@ -1554,29 +1580,180 @@ bool LuaPluginManager::setModEnabled(const std::string& name, bool enabled) {
     std::lock_guard<std::recursive_mutex> lk(mutex_);
     if (dir_.empty()) return false;
     std::error_code ec;
-    // 目录型 <name> ↔ <name>.disabled；单文件型 <name>.lua ↔ <name>.lua.disabled。
+    // 三种形态成对处理：<name>.json（描述档）/<name>（目录）/<name>.lua（单文件）。
+    // 原版 mod 是「json+目录」成对，必须一起改名——只动其一会被扫描拆成两个半残条目。
+    auto u8 = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };
+    const fs::path pluginDir = fs::path(dir_).parent_path() / "plugin";   // 单文件插件在 data/plugin（Pass 4）
     std::pair<fs::path, fs::path> cands[] = {
-        { fs::path(dir_) / name,            fs::path(dir_) / (name + ".disabled") },
-        { fs::path(dir_) / (name + ".lua"), fs::path(dir_) / (name + ".lua.disabled") },
+        { fs::path(dir_) / u8(name + ".json"), fs::path(dir_) / u8(name + ".json.disabled") },
+        { fs::path(dir_) / u8(name),           fs::path(dir_) / u8(name + ".disabled") },
+        { fs::path(dir_) / u8(name + ".lua"),  fs::path(dir_) / u8(name + ".lua.disabled") },
+        { pluginDir / u8(name + ".lua"),       pluginDir / u8(name + ".lua.disabled") },
     };
+    bool changed = false, present = false;
     for (auto& [on, off] : cands) {
-        if (enabled && fs::exists(off, ec)) { fs::rename(off, on, ec); return !ec; }
-        if (!enabled && fs::exists(on, ec)) { fs::rename(on, off, ec); return !ec; }
+        const fs::path& src = enabled ? off : on;
+        const fs::path& dst = enabled ? on : off;
+        if (fs::exists(src, ec)) {
+            fs::rename(src, dst, ec);
+            if (!ec) changed = true;
+            present = true;
+        } else if (fs::exists(dst, ec)) present = true;   // 已是目标状态
+        ec.clear();
     }
-    // 已是目标状态视为成功。
-    for (auto& [on, off] : cands)
-        if (fs::exists(enabled ? on : off, ec)) return true;
-    return false;
+    return changed || present;
 }
 
 bool LuaPluginManager::deleteMod(const std::string& name) {
     std::lock_guard<std::recursive_mutex> lk(mutex_);
     if (dir_.empty()) return false;
     std::error_code ec; bool removed = false;
-    for (const auto& cand : { fs::path(dir_) / name, fs::path(dir_) / (name + ".disabled"),
-                              fs::path(dir_) / (name + ".lua"), fs::path(dir_) / (name + ".lua.disabled") })
+    auto u8 = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };
+    const fs::path pluginDir = fs::path(dir_).parent_path() / "plugin";   // 单文件插件在 data/plugin（Pass 4）
+    // 对齐原版 uninstall：<name>.json 与 <name>/ 一起删（漏删 json 会让 mod 重载后复活）。
+    for (const auto& cand : { fs::path(dir_) / u8(name), fs::path(dir_) / u8(name + ".disabled"),
+                              fs::path(dir_) / u8(name + ".json"), fs::path(dir_) / u8(name + ".json.disabled"),
+                              fs::path(dir_) / u8(name + ".lua"), fs::path(dir_) / u8(name + ".lua.disabled"),
+                              pluginDir / u8(name + ".lua"), pluginDir / u8(name + ".lua.disabled") })
         if (fs::exists(cand, ec)) { fs::remove_all(cand, ec); if (!ec) removed = true; }
     return removed;
+}
+
+bool LuaPluginManager::importUpload(const std::string& filename, const std::string& bytes,
+                                    std::string* err, std::vector<std::string>* imported) {
+    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    auto fail = [&](const std::string& e) { if (err) *err = e; return false; };
+    if (bytes.empty()) return fail("empty/invalid file");
+    auto u8 = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };
+    std::string base = filename;
+    if (auto p = base.find_last_of("/\\"); p != std::string::npos) base = base.substr(p + 1);   // 防穿越
+    if (base.empty()) return fail("bad filename");
+    auto lower = [](std::string s) { for (auto& c : s) if (c >= 'A' && c <= 'Z') c += 32; return s; };
+    auto endsWith = [](const std::string& s, const std::string& sfx) {
+        return s.size() > sfx.size() && s.compare(s.size() - sfx.size(), sfx.size(), sfx) == 0;
+    };
+    auto writeFile = [](const fs::path& p, const std::string& b) {
+        std::ofstream f(p, std::ios::binary);
+        if (!f) return false;
+        f.write(b.data(), (std::streamsize)b.size());
+        return (bool)f;
+    };
+    const fs::path modRoot = dir_.empty() ? fs::path("data/mod") : fs::path(dir_);
+    const fs::path pluginRoot = modRoot.parent_path() / "plugin";
+    std::error_code ec;
+    fs::create_directories(modRoot, ec); ec.clear();
+    const std::string lb = lower(base);
+
+    // 单文件 .lua → data/plugin（msg_order 插件，原版目录语义）。
+    if (endsWith(lb, ".lua")) {
+        fs::create_directories(pluginRoot, ec); ec.clear();
+        if (!writeFile(pluginRoot / u8(base), bytes)) return fail("write failed: " + base);
+        if (imported) imported->push_back(base.substr(0, base.size() - 4));
+        return true;
+    }
+    // 单文件 .json → data/mod（描述档/查询类 mod，原版正式登记形态）。
+    if (endsWith(lb, ".json")) {
+        if (!writeFile(modRoot / u8(base), bytes)) return fail("write failed: " + base);
+        if (imported) imported->push_back(base.substr(0, base.size() - 5));
+        return true;
+    }
+
+    // zip：落盘 → 解压到临时目录 → 归位。Win10+ 自带 tar(bsdtar 可解 zip)；POSIX 用 unzip。
+    const std::string tag = std::to_string((long long)std::time(nullptr));
+    fs::path zipPath = modRoot / ("_imp_" + tag + ".zip");
+    fs::path tmpDir  = modRoot / ("_imp_" + tag);
+    if (!writeFile(zipPath, bytes)) return fail("write failed: " + zipPath.string());
+    fs::create_directories(tmpDir, ec); ec.clear();
+#if defined(_WIN32)
+    std::string cmd = "tar -xf \"" + zipPath.string() + "\" -C \"" + tmpDir.string() + "\"";
+#else
+    std::string cmd = "unzip -o -q \"" + zipPath.string() + "\" -d \"" + tmpDir.string() + "\"";
+#endif
+    std::system(cmd.c_str());
+    fs::remove(zipPath, ec); ec.clear();
+
+    auto safeEntries = [](const fs::path& d) {
+        std::vector<fs::path> out; std::error_code e2;
+        for (fs::directory_iterator it(d, e2), end; it != end; it.increment(e2)) {
+            if (e2) { e2.clear(); continue; }
+            out.push_back(it->path());
+        }
+        return out;
+    };
+    auto isDir = [](const fs::path& p) { std::error_code e2; return fs::is_directory(p, e2); };
+    auto isModDir = [&isDir](const fs::path& p) {
+        std::error_code e2;
+        if (fs::is_regular_file(p / "descriptor.json", e2)) return true;
+        for (const char* sub : {"reply", "script", "speech", "event", "model", "rulebook"})
+            if (fs::is_directory(p / sub, e2)) return true;
+        return false;
+    };
+    std::set<std::string> seen;
+    auto record = [&](const std::string& name) {
+        if (imported && seen.insert(name).second) imported->push_back(name);
+    };
+    auto placeDir = [&](const fs::path& src, const std::string& name) {
+        fs::path dest = modRoot / u8(name);
+        std::error_code e2;
+        fs::remove_all(dest, e2); e2.clear();
+        fs::rename(src, dest, e2);
+        if (e2) { e2.clear(); fs::copy(src, dest, fs::copy_options::recursive, e2); }
+        record(name);
+    };
+    auto placeFile = [&](const fs::path& src, const fs::path& dest) {
+        std::error_code e2;
+        fs::remove(dest, e2); e2.clear();
+        fs::rename(src, dest, e2);
+        if (e2) { e2.clear(); fs::copy_file(src, dest, fs::copy_options::overwrite_existing, e2); }
+    };
+    // 把一个目录当作「mod 库根」归位其顶层内容：<名>.json / mod 目录（或与 json 同名的目录）/ .lua。
+    auto distribute = [&](const fs::path& root) {
+        int moved = 0;
+        auto entries = safeEntries(root);
+        std::set<std::string> jsonStems;
+        for (auto& p : entries) {
+            if (isDir(p)) continue;
+            std::string fn = dnx_u8str(p.filename());
+            if (endsWith(lower(fn), ".json")) jsonStems.insert(fn.substr(0, fn.size() - 5));
+        }
+        for (auto& p : entries) {
+            if (isDir(p)) continue;
+            std::string fn = dnx_u8str(p.filename());
+            std::string lf = lower(fn);
+            if (endsWith(lf, ".json")) {
+                placeFile(p, modRoot / u8(fn));
+                record(fn.substr(0, fn.size() - 5)); ++moved;
+            } else if (endsWith(lf, ".lua")) {
+                std::error_code e2; fs::create_directories(pluginRoot, e2);
+                placeFile(p, pluginRoot / u8(fn));
+                record(fn.substr(0, fn.size() - 4)); ++moved;
+            }
+        }
+        for (auto& p : entries) {
+            if (!isDir(p)) continue;
+            std::string dn = dnx_u8str(p.filename());
+            if (isModDir(p) || jsonStems.count(dn)) { placeDir(p, dn); ++moved; }
+        }
+        return moved;
+    };
+
+    int moved = 0;
+    if (isModDir(tmpDir)) {
+        // zip 内容本身就是一个 mod（无包装目录）→ 以 zip 文件名为 mod 名。
+        std::string modName = base;
+        if (auto dot = modName.rfind('.'); dot != std::string::npos) modName = modName.substr(0, dot);
+        placeDir(tmpDir, modName); moved = 1;
+    } else {
+        moved = distribute(tmpDir);
+        if (!moved) {   // 单层包装目录（用户把 mod 库整个打包的常见形态）→ 下钻一层再归位
+            auto entries = safeEntries(tmpDir);
+            if (entries.size() == 1 && isDir(entries[0])) moved = distribute(entries[0]);
+        }
+    }
+    fs::remove_all(tmpDir, ec); ec.clear();
+    if (!moved)
+        return fail("zip 内未找到可识别的 mod（需含 <名>.json 描述档，或 descriptor.json/reply/script/speech/model/rulebook）");
+    return true;
 }
 
 // ─── 阶段二：模板格式化 + reply 派发 ─────────────────────────────

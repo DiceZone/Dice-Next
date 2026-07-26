@@ -8,14 +8,20 @@
 
 #include "adapter_interface.h"
 #include "qq_gateway_socket.h"
+#include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
 
 #include <drogon/HttpClient.h>
 
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <unordered_map>
 #ifdef _WIN32
 #include <ws2tcpip.h>
@@ -42,8 +48,44 @@ public:
     std::vector<std::string> getGroupMemberList(const std::string&) const override { return {}; }
     bool isGroupAdmin(const std::string&, const std::string&) const override { return false; }
     bool isGroupOwner(const std::string&, const std::string&) const override { return false; }
-    void setGroupKick(const std::string&, const std::string&) override {}
-    void setGroupBan(const std::string&, const std::string&, int) override {}
+
+    json capabilities() const override {
+        json caps = IAdapter::capabilities();
+        caps["kick"] = true;   // DELETE /guilds/{g}/members/{u}
+        caps["ban"] = true;    // 超时禁言 communication_disabled_until
+        return caps;
+    }
+
+    /// 踢出服务器（频道 id → 所属 guild 经消息缓存反查）。
+    void setGroupKick(const std::string& channelId, const std::string& userId) override {
+        const std::string guild = guildOf(channelId);
+        const std::string user = nativeId(userId, identity::Kind::User);
+        if (guild.empty() || user.empty()) { lastError_ = "Discord 无法定位服务器（需先在该频道收到过消息）"; return; }
+        restRequest("DELETE", "/api/v10/guilds/" + guild + "/members/" + user, json(), nullptr);
+    }
+    /// 禁言 = Discord 超时（timeout）。durationSec<=0 解除。上限 28 天。
+    void setGroupBan(const std::string& channelId, const std::string& userId, int durationSec) override {
+        const std::string guild = guildOf(channelId);
+        const std::string user = nativeId(userId, identity::Kind::User);
+        if (guild.empty() || user.empty()) { lastError_ = "Discord 无法定位服务器（需先在该频道收到过消息）"; return; }
+        json body;
+        if (durationSec > 0) {
+            if (durationSec > 28 * 86400) durationSec = 28 * 86400;
+            const std::time_t until = std::time(nullptr) + durationSec;
+            char buf[32]{};
+            std::tm tmv{};
+#ifdef _WIN32
+            gmtime_s(&tmv, &until);
+#else
+            gmtime_r(&until, &tmv);
+#endif
+            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tmv);
+            body = {{"communication_disabled_until", buf}};
+        } else {
+            body = {{"communication_disabled_until", nullptr}};
+        }
+        restRequest("PATCH", "/api/v10/guilds/" + guild + "/members/" + user, body, nullptr);
+    }
     void onMessage(MessageCallback cb) override { messageCb_ = std::move(cb); }
     void onEvent(EventCallback cb) override { eventCb_ = std::move(cb); }
 
@@ -73,69 +115,107 @@ public:
     void sendMessage(const Message& msg) override { sendTo(msg, msg.content); }
     void sendReply(const Message& original, const std::string& text) override { sendTo(original, text); }
     void sendGroupMessage(const std::string& channelId, const std::string& text) override {
-        postChannelMessage(channelId, text);
+        postChannelMessage(nativeId(channelId, identity::Kind::Group), text);
     }
     void sendPrivateMessage(const std::string& userId, const std::string& text) override {
+        const std::string native = nativeId(userId, identity::Kind::User);
         // 需要先建 DM 频道（有缓存则直发）。
         {
             std::lock_guard lock(dmMutex_);
-            auto it = dmChannels_.find(userId);
+            auto it = dmChannels_.find(native);
             if (it != dmChannels_.end()) { postChannelMessage(it->second, text); return; }
         }
         auto self = shared_from_this();
-        restRequest(drogon::Post, "/api/v10/users/@me/channels", json{{"recipient_id", userId}},
-            [self, userId, text](const json& resp) {
+        restRequest("POST", "/api/v10/users/@me/channels", json{{"recipient_id", native}},
+            [self, native, text](const json& resp) {
                 const std::string channel = resp.value("id", std::string());
                 if (channel.empty()) { self->lastError_ = "Discord 无法创建私信频道"; return; }
-                { std::lock_guard lock(self->dmMutex_); self->dmChannels_[userId] = channel; }
+                { std::lock_guard lock(self->dmMutex_); self->dmChannels_[native] = channel; }
                 self->postChannelMessage(channel, text);
             });
     }
 
 private:
-    static std::string resolveIpv4(const std::string& host) {
-        addrinfo hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
-        addrinfo* results = nullptr;
-        if (getaddrinfo(host.c_str(), nullptr, &hints, &results) != 0 || !results) return {};
-        char text[INET_ADDRSTRLEN]{};
-        auto* addr = reinterpret_cast<sockaddr_in*>(results->ai_addr);
-        const char* result = inet_ntop(AF_INET, &addr->sin_addr, text, sizeof(text));
-        freeaddrinfo(results);
-        return result ? std::string(result) : std::string();
+    static std::string runCmdCapture(const std::string& cmd, size_t maxBytes = 2 * 1024 * 1024) {
+#if defined(_WIN32)
+        FILE* p = _popen(cmd.c_str(), "r");
+#else
+        FILE* p = popen(cmd.c_str(), "r");
+#endif
+        if (!p) return "";
+        std::string out; char buf[4096]; size_t n;
+        while ((n = std::fread(buf, 1, sizeof(buf), p)) > 0) { out.append(buf, n); if (out.size() > maxBytes) break; }
+#if defined(_WIN32)
+        _pclose(p);
+#else
+        pclose(p);
+#endif
+        return out;
     }
 
-    /// REST 调用（discord.com）。resp 回调只在 2xx 且 JSON 解析成功时收到对象。
-    void restRequest(drogon::HttpMethod method, const std::string& path, const json& body,
+    /// REST 调用（discord.com），走 curl 子进程 + 独立线程。回调只在 2xx 且 JSON
+    /// 解析成功时收到对象。⚠️ 不能用 drogon HttpClient：discord.com 在 Cloudflare
+    /// 后（TLS 强制校验 SNI，裸 IP 被拒），而 drogon 的 c-ares 解析器在部分
+    /// VPN/公司网络上解析失败——curl 走系统 DNS 且 SNI 正确，两个坑都绕开。
+    /// Token 经 curl -K 配置文件传递，不进命令行（进程列表不可见）。
+    void restRequest(const std::string& method, const std::string& path, const json& body,
                      std::function<void(const json&)> onOk) {
-        const auto ip = resolveIpv4("discord.com");
-        if (ip.empty()) { fail("无法解析 discord.com"); return; }
-        auto client = drogon::HttpClient::newHttpClient(ip, 443, true);
-        auto req = drogon::HttpRequest::newHttpRequest();
-        req->setMethod(method);
-        req->setPath(path);
-        req->addHeader("Host", "discord.com");
-        req->addHeader("Authorization", "Bot " + token_);
-        req->addHeader("User-Agent", "DiceNext (https://github.com/DiceZone/Dice-Next, 3.0)");
-        if (!body.is_null()) { req->setContentTypeCode(drogon::CT_APPLICATION_JSON); req->setBody(body.dump()); }
         auto self = shared_from_this();
-        client->sendRequest(req, [self, path, onOk = std::move(onOk)](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
-            if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
-                std::string detail = resp ? std::string(resp->body()) : std::string("网络请求未完成");
+        const std::string bodyStr = body.is_null() ? std::string() : body.dump();
+        std::thread([self, method, path, bodyStr, onOk = std::move(onOk)] {
+            namespace fs = std::filesystem;
+            auto esc = [](const std::string& s) {
+                std::string o; o.reserve(s.size() + 8);
+                for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; }
+                return o;
+            };
+            static std::atomic<long long> seq{0};
+            const long long id = ++seq;
+            std::error_code ec;
+            fs::path tmp = fs::temp_directory_path(ec);
+            fs::path cfgF = tmp / ("dndc_" + std::to_string(id) + ".cfg");
+            fs::path bodyF = tmp / ("dndc_" + std::to_string(id) + ".body");
+            std::string out;
+            try {
+                {
+                    std::ofstream cf(cfgF, std::ios::binary);
+                    cf << "url = \"https://discord.com" << esc(path) << "\"\n";
+                    cf << "request = \"" << esc(method) << "\"\n";
+                    cf << "max-time = 15\nsilent\nshow-error\n";
+                    cf << "proto = \"=https\"\n";
+                    cf << "write-out = \"\\n%{http_code}\"\n";
+                    cf << "header = \"Authorization: Bot " << esc(self->token_) << "\"\n";
+                    cf << "header = \"User-Agent: DiceNext (https://github.com/DiceZone/Dice-Next, 3.0)\"\n";
+                    if (!bodyStr.empty()) {
+                        cf << "header = \"Content-Type: application/json\"\n";
+                        std::ofstream bf(bodyF, std::ios::binary); bf << bodyStr;
+                        cf << "data-binary = \"@" << esc(bodyF.string()) << "\"\n";
+                    }
+                }
+                out = runCmdCapture("curl -K \"" + cfgF.string() + "\"");
+            } catch (...) {}
+            fs::remove(cfgF, ec); fs::remove(bodyF, ec);
+
+            int status = 0;
+            const auto nl = out.find_last_of('\n');
+            if (nl != std::string::npos) { status = std::atoi(out.c_str() + nl + 1); out.erase(nl); }
+            if (status < 200 || status >= 300) {
                 self->lastError_ = "Discord 请求失败: " + path;
-                DICE_LOG_WARN("Discord '{}': {} failed: HTTP {} {}", self->name_, path,
-                              resp ? static_cast<int>(resp->statusCode()) : 0, detail);
+                self->connecting_ = false;
+                DICE_LOG_WARN("Discord '{}': {} failed: HTTP {} {}", self->name_, path, status,
+                              out.empty() ? std::string("(无响应，请检查网络与 curl)") : out.substr(0, 300));
                 return;
             }
             if (!onOk) return;
-            auto j = json::parse(resp->body(), nullptr, false);
+            auto j = json::parse(out, nullptr, false);
             if (!j.is_discarded()) onOk(j);
-        });
+        }).detach();
     }
 
     void fetchGatewayUrl() {
         auto self = shared_from_this();
         // GET /gateway/bot 同时校验 Token（401 = Token 无效）。
-        restRequest(drogon::Get, "/api/v10/gateway/bot", json(),
+        restRequest("GET", "/api/v10/gateway/bot", json(),
             [self](const json& j) {
                 if (self->stopping_) return;
                 const std::string url = j.value("url", std::string("wss://gateway.discord.gg"));
@@ -168,13 +248,20 @@ private:
         });
     }
 
+    /// 取对象字段；缺失或为 null/非对象时回退空对象（op9 的 d 是布尔等）。
+    static json objOf(const json& j, const char* key) {
+        if (!j.is_object()) return json::object();
+        auto it = j.find(key);
+        return (it != j.end() && it->is_object()) ? *it : json::object();
+    }
+
     void onGateway(const std::string& raw) {
         try {
             auto p = json::parse(raw);
-            if (p.contains("s") && !p["s"].is_null()) seq_ = p["s"].get<int64_t>();
+            if (p.contains("s") && !p["s"].is_null() && p["s"].is_number_integer()) seq_ = p["s"].get<int64_t>();
             const int op = p.value("op", -1);
             if (op == 10) {   // hello
-                beginHeartbeat(p["d"].value("heartbeat_interval", 41250));
+                beginHeartbeat(objOf(p, "d").value("heartbeat_interval", 41250));
                 if (!sessionId_.empty() && seq_ >= 0) resume(); else identify();
                 return;
             }
@@ -186,8 +273,8 @@ private:
             if (op == 7) { if (gateway_) gateway_->stop(); return; }   // reconnect → onClose 走重连
             if (op == 9) { sessionId_.clear(); seq_ = -1; identify(); return; }   // invalid session
             if (op == 0) {
-                const auto t = p.value("t", std::string());
-                const auto d = p.value("d", json::object());
+                const auto t = p.contains("t") && p["t"].is_string() ? p["t"].get<std::string>() : std::string();
+                const auto d = objOf(p, "d");
                 if (t == "READY") {
                     sessionId_ = d.value("session_id", std::string());
                     const auto user = d.value("user", json::object());
@@ -225,7 +312,7 @@ private:
     }
 
     void dispatchMessage(const json& d) {
-        const auto author = d.value("author", json::object());
+        const auto author = objOf(d, "author");
         if (author.value("bot", false)) return;                      // 忽略机器人（含自己）
         if (author.value("id", std::string()) == loginId_) return;
         Message m;
@@ -236,8 +323,8 @@ private:
         m.senderId = author.value("id", std::string());
         if (author.contains("global_name") && author["global_name"].is_string()) m.senderName = author["global_name"].get<std::string>();
         if (m.senderName.empty()) m.senderName = author.value("username", m.senderId);
-        const auto member = d.value("member", json::object());
-        if (member.is_object() && member.contains("nick") && member["nick"].is_string() && !member["nick"].get<std::string>().empty())
+        const auto member = objOf(d, "member");
+        if (member.contains("nick") && member["nick"].is_string() && !member["nick"].get<std::string>().empty())
             m.senderName = member["nick"].get<std::string>();
         m.extra = {{"channel_id", d.value("channel_id", std::string())}};
         if (d.contains("guild_id") && d["guild_id"].is_string()) {
@@ -245,6 +332,8 @@ private:
             m.type = MessageType::kGroup;
             m.targetId = d.value("channel_id", std::string());
             m.extra["guild_id"] = d["guild_id"];
+            // 频道→服务器映射缓存（踢人/禁言等 guild 级操作要用）。
+            { std::lock_guard lock(guildMutex_); channelGuild_[m.targetId] = d["guild_id"].get<std::string>(); }
         } else {
             m.type = MessageType::kPrivate;
             m.targetId = m.senderId;
@@ -275,14 +364,65 @@ private:
 
     void postChannelMessage(const std::string& channelId, const std::string& text) {
         if (channelId.empty() || text.empty()) return;
-        restRequest(drogon::Post, "/api/v10/channels/" + channelId + "/messages", json{{"content", text}}, nullptr);
+        const std::string native = translateCQ(text);
+        if (native.empty()) return;
+        restRequest("POST", "/api/v10/channels/" + channelId + "/messages", json{{"content", native}}, nullptr);
+    }
+
+    /// 频道 → 所属服务器（公共群号先转原生频道号再查缓存）。
+    std::string guildOf(const std::string& channelPublicId) {
+        const std::string channel = nativeId(channelPublicId, identity::Kind::Group);
+        std::lock_guard lock(guildMutex_);
+        auto it = channelGuild_.find(channel);
+        return it != channelGuild_.end() ? it->second : std::string();
+    }
+
+    /// 出站 CQ 码转 Discord 原生：[CQ:at,qq=公共号] → <@原生id>；图片 URL 直贴
+    /// （Discord 自动嵌入）；其余 CQ 段丢弃，避免把 [CQ:...] 原文发给用户。
+    std::string translateCQ(const std::string& text) {
+        std::string out; out.reserve(text.size());
+        size_t i = 0;
+        while (i < text.size()) {
+            if (text.compare(i, 4, "[CQ:") != 0) { out += text[i++]; continue; }
+            const auto end = text.find(']', i);
+            if (end == std::string::npos) { out += text.substr(i); break; }
+            const std::string seg = text.substr(i + 4, end - i - 4);   // type,k=v,...
+            i = end + 1;
+            const auto comma = seg.find(',');
+            const std::string type = seg.substr(0, comma == std::string::npos ? seg.size() : comma);
+            auto param = [&seg](const std::string& key) -> std::string {
+                const auto p = seg.find("," + key + "=");
+                if (p == std::string::npos) return {};
+                const auto v = p + key.size() + 2;
+                const auto e = seg.find(',', v);
+                return seg.substr(v, e == std::string::npos ? std::string::npos : e - v);
+            };
+            if (type == "at") {
+                const std::string qq = param("qq");
+                if (qq == "all") out += "@everyone";
+                else if (!qq.empty()) out += "<@" + nativeId(qq, identity::Kind::User) + ">";
+            } else if (type == "image") {
+                const std::string f = param("file"), u = param("url");
+                const std::string& link = u.rfind("http", 0) == 0 ? u : f;
+                if (link.rfind("http", 0) == 0) out += " " + link + " ";
+            }
+            // 其余（face/poke/reply/record…）丢弃。
+        }
+        return out;
+    }
+
+    /// 公共号（虚拟/真实 QQ）→ Discord 原生 id。非映射产物（本就是原生 id）原样返回。
+    std::string nativeId(const std::string& publicId, identity::Kind kind) {
+        if (publicId.empty() || !db_) return publicId;
+        auto native = identity::BindingStore::instance().transportEndpoint(*db_, "discord", publicId, kind);
+        return native.empty() ? publicId : native;
     }
 
     void sendTo(const Message& m, const std::string& text) {
         std::string channel;
-        if (m.extra.is_object()) channel = m.extra.value("channel_id", std::string());
+        if (m.extra.is_object()) channel = m.extra.value("channel_id", std::string());   // 入站原生频道
         if (channel.empty() && m.type == MessageType::kPrivate) { sendPrivateMessage(m.targetId, text); return; }
-        if (channel.empty()) channel = m.targetId;   // 群/频道消息 targetId 即频道 id
+        if (channel.empty()) channel = nativeId(m.targetId, identity::Kind::Group);
         postChannelMessage(channel, text);
     }
 
@@ -292,6 +432,7 @@ private:
     }
 
     std::string id_, name_, token_, loginId_, loginName_, sessionId_, gatewayUrl_, lastError_;
+    Database* db_{identity::BindingStore::instance().database()};
     std::atomic<bool> connected_{false}, connecting_{false}, stopping_{false};
     int64_t seq_ = -1;
     std::shared_ptr<QQGatewaySocket> gateway_;
@@ -300,6 +441,8 @@ private:
     EventCallback eventCb_;
     std::mutex dmMutex_;
     std::unordered_map<std::string, std::string> dmChannels_;   // userId → DM 频道 id
+    std::mutex guildMutex_;
+    std::unordered_map<std::string, std::string> channelGuild_; // 频道 id → guild id
 };
 
 }  // namespace dice

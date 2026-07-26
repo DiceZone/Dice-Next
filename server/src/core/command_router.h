@@ -435,22 +435,66 @@ private:
         using identity::Kind;
         std::istringstream input(trim(rawArgs)); std::string first, arg; input >> first >> arg;
         Kind kind = msg.type == MessageType::kPrivate ? Kind::User : Kind::Group;
-        if (toLower(first) == "qq") { kind = Kind::User; }
-        else if (toLower(first) == "qqgroup") { kind = Kind::Group; }
-        else { arg = first; }
-        const std::string transport = msg.extra.value("__identity_transport", std::string());
+        const std::string firstL = toLower(first);
+        if (firstL == "qq") { kind = Kind::User; }
+        else if (firstL == "qqgroup") { kind = Kind::Group; }
+        else if (firstL != "discord" && firstL != "kook") { arg = first; }
+        // 测试台等来源的 extra 可能是 null（非对象），value() 会抛 —— 统一安全读取。
+        auto exval = [&msg](const char* k) {
+            return msg.extra.is_object() ? msg.extra.value(k, std::string()) : std::string();
+        };
+        const std::string transport = exval("__identity_transport");
         auto& bindings = BindingStore::instance();
+
+        // Discord/KOOK 用户互通：在 OneBot（真实 QQ）窗口执行，把该平台账号并入
+        // 当前发送者的真实 QQ（虚拟数据合并，人物卡/好感即互通）。
+        if (firstL == "discord" || firstL == "kook") {
+            const std::string label = firstL == "discord" ? "Discord" : "KOOK";
+            if (arg.empty())
+                return "用法：.bind " + firstL + " <" + label + " 用户ID>\n"
+                    "在 OneBot（真实 QQ）窗口执行，把该 " + label + " 账号的数据并入你的 QQ。\n"
+                    "对方需先在 " + label + " 上给机器人发过一条消息。";
+            if (transport != "onebot_v11")
+                return "请在 OneBot（真实 QQ）窗口执行 .bind " + firstL + "，以验证你的 QQ 身份。";
+            if (!BindingStore::isRealQQ(msg.senderId)) return "当前会话没有有效的真实 QQ 号。";
+            std::string error;
+            if (!bindings.bindPlatformToQQ(db_, firstL, arg, msg.senderId, Kind::User, error))
+                return "绑定失败：\n" + error;
+            return "绑定成功。\n" + label + " 用户 " + arg + " 已关联到你的 QQ " + msg.senderId
+                + "，人物卡、好感等数据互通。";
+        }
+
         if (arg.empty())
             return "安全绑定用法（在 OneBot 窗口执行）：\n"
                 ".bind qq QQ-Official-机器人ID:OpenID\n"
                 ".bind qqgroup QQ-Official-机器人ID:OpenID\n"
+                ".bind discord <Discord用户ID> / .bind kook <KOOK用户ID>\n"
                 "QQ群绑定须由该群群主或管理在目标群内执行。\n"
                 "官方窗口直绑真实 QQ 默认关闭，可由骰主在网页系统设置中临时开启。";
 
         const bool sourceOfficial = transport == "qq_official";
         const bool sourceOneBot = transport == "onebot_v11";
-        if (!sourceOfficial && !sourceOneBot)
+        const bool sourcePlatform = transport == "discord" || transport == "kook";
+        if (!sourceOfficial && !sourceOneBot && !sourcePlatform)
             return "当前适配器不支持 QQ 身份绑定。";
+
+        // Discord/KOOK 窗口内直绑真实 QQ：与官方窗口同一风险模型（无法验证发言者
+        // 真实 QQ），共用「身份绑定（高风险）」开关。
+        if (sourcePlatform) {
+            if (kind != Kind::User || !BindingStore::isRealQQ(arg))
+                return "本平台仅支持 .bind qq <真实QQ号>（骰主需在网页系统设置开启高风险直绑），\n"
+                    "或改在 OneBot 窗口执行 .bind " + transport + " <你的平台用户ID>。";
+            if (!cfg_.get<bool>("dice/allow_official_direct_bind", false))
+                return "安全模式已开启：本平台无法验证发言者的真实 QQ 身份。\n"
+                    "请改在 OneBot（真实 QQ）窗口执行：.bind " + transport + " <你的平台用户ID>\n"
+                    "或由骰主在网页「系统设置 → 身份绑定（高风险）」临时开启直绑。";
+            const std::string nativeSender = exval("__identity_native_sender");
+            if (nativeSender.empty()) return "未取得当前平台身份，无法绑定。";
+            std::string error;
+            if (!bindings.bindPlatformToQQ(db_, transport, nativeSender, arg, Kind::User, error))
+                return "绑定失败：\n" + error;
+            return "绑定成功。\n当前账号已关联到真实 QQ " + arg + "，人物卡、好感等数据互通。";
+        }
 
         // QQ 官方机器人只提供隔离的 OpenID，无法验证它背后的真实 QQ 与群管理身份。
         // 默认仅接受 OneBot 会话发起的绑定：该会话的发送者/群号可由 OneBot 提供并校验。
@@ -471,7 +515,7 @@ private:
             return "仅群主或群管理可以绑定本群的 QQ 官方标识。";
 
         const bool chooseUser = kind == Kind::User;
-        const std::string local = msg.extra.value(chooseUser ? "__identity_local_sender" : "__identity_local_target", std::string());
+        const std::string local = exval(chooseUser ? "__identity_local_sender" : "__identity_local_target");
         const std::string current = chooseUser ? msg.senderId : msg.targetId;
         if (local.empty() && sourceOfficial) return "未取得当前官方身份，无法绑定。";
 
@@ -510,7 +554,8 @@ private:
         const Kind scope = selector == "qq" ? Kind::User : selector == "qqgroup" ? Kind::Group
             : (msg.type == MessageType::kPrivate ? Kind::User : Kind::Group);
         const std::string id = scope == Kind::User ? msg.senderId : msg.targetId;
-        const std::string transport = msg.extra.value("__identity_transport", std::string());
+        const std::string transport = msg.extra.is_object()
+            ? msg.extra.value("__identity_transport", std::string()) : std::string();
         std::ostringstream out;
         out << "当前窗口信息\n";
         out << "类型：" << (scope == Kind::Group ? "群聊" : "私聊用户") << "\n";
@@ -5215,7 +5260,13 @@ private:
         int n = 0;
         for (const auto& id : ids) {
             if (erase) { if (banlistRemove(type, list, id)) ++n; }
-            else { banlistAdd(type, list, id, ""); ++n; }
+            else {
+                bool fresh = !banlistHas(type, list, id);
+                banlistAdd(type, list, id, ""); ++n;
+                // 主人主动拉黑（仅黑名单、仅新增）→ 云黑上报钩子。
+                if (fresh && list == 0 && onMasterBan)
+                    onMasterBan(type == 0 ? "user" : "group", id, "");
+            }
             if (!joined.empty()) joined += "、";
             joined += id;
         }
@@ -7630,6 +7681,16 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         else if (op == "trust") banlistAdd(0, 1, id, reason);      // user, whitelist(trust)
         else if (op == "remove") { banlistRemove(0, 0, id); banlistRemove(0, 1, id); }
     }
+
+    /// 主人主动拉黑（.blackqq/.blackgroup 新增）时的外部钩子——云黑上报挂在这里
+    /// （main.cpp 接线到 cloudban_service）。参数：targetType("user"/"group")、id、reason。
+    std::function<void(const std::string&, const std::string&, const std::string&)> onMasterBan;
+
+    /// 云黑同步（cloudban_service）需要的本地黑名单操作转发（banlist* 本体在 private 区，
+    /// 语义不变：自带去重/存在性判断）。
+    bool cloudBanHas(int type, int list, const std::string& id) const { return banlistHas(type, list, id); }
+    void cloudBanAdd(int type, int list, const std::string& id, const std::string& reason) { banlistAdd(type, list, id, reason); }
+    bool cloudBanRemove(int type, int list, const std::string& id) { return banlistRemove(type, list, id); }
 
     /// Gated HTTP request for JS plugins' global fetch(). Reuses the external-API
     /// switch + SSRF/host blocklist + whitelist (#49). Method/headers/body are

@@ -48,6 +48,14 @@ public:
     std::string platform() const override { return "onebot_v11"; }
     std::string version() const override { return "1.0.0"; }
 
+    json capabilities() const override {
+        return {
+            {"friends", true}, {"kick", true}, {"ban", true}, {"poke", true},
+            {"forward", true}, {"group_file", true}, {"group_card", true},
+            {"member_list", true}, {"group_leave", true},
+        };
+    }
+
     bool configure(const json& config) override {
         name_   = config.value("name", id_);
         endpoint_ = config.value("endpoint", "ws://localhost:6700");
