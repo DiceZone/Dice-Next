@@ -96,6 +96,50 @@ public:
         std::lock_guard lock(mu_); return endpointsForPublic(db, publicId, kind);
     }
 
+    // ─── 通用平台（Discord/KOOK 等）：与 QQ 官方同一套虚拟号模型 ──────
+    // 平台原生 id 可能与 QQ 号数字碰撞（KOOK 用户 id 就是纯数字），一律经
+    // 虚拟公共号隔离；绑定真实 QQ 后数据自动合并互通。
+
+    /// 观察一个平台原生端点：已绑定 → 返回绑定的公共号；未绑定 → 分配/复用虚拟号。
+    std::string observeVirtual(Database& db, const std::string& type, const std::string& account,
+                               const std::string& raw, Kind kind) {
+        if (type.empty() || raw.empty()) return {};
+        std::lock_guard lock(mu_);
+        auto row = ensureEndpoint(db, type, account, raw, kind, {}, true);
+        if (row.isVirtual && row.publicId.size() != 13) {   // 升级早期短格式
+            const std::string old = row.publicId;
+            row.publicId = nextVirtual(db, kind); db.getStorage()->update(row);
+            migrateLegacyRows(db, kind, old, row.publicId);
+        }
+        return row.publicId;
+    }
+    /// 公共号 → 该平台的原生 id（任一账号的端点均可；空 = 无此平台端点）。
+    std::string transportEndpoint(Database& db, const std::string& type,
+                                  const std::string& publicId, Kind kind) {
+        std::lock_guard lock(mu_);
+        for (const auto& row : endpointsForPublic(db, publicId, kind))
+            if (row.adapterType == type) return row.endpointId;
+        return {};
+    }
+    /// 该平台是否观察过此原生 id（.bind 防空绑）。
+    bool isKnownPlatform(Database& db, const std::string& type, const std::string& raw, Kind kind) {
+        std::lock_guard lock(mu_);
+        return findEndpointAnyAccount(db, type, raw, kind).id != 0;
+    }
+    /// 把平台原生 id 绑定到真实 QQ/群号（虚拟数据合并迁移）。
+    bool bindPlatformToQQ(Database& db, const std::string& type, const std::string& raw,
+                          const std::string& real, Kind kind, std::string& error) {
+        if (!isRealQQ(real)) { error = "绑定标识格式无效"; return false; }
+        std::lock_guard lock(mu_);
+        auto sourceEp = findEndpointAnyAccount(db, type, raw, kind);
+        if (!sourceEp.id) { error = "未发现该平台身份；请先让机器人在该平台收到对方的一条消息"; return false; }
+        auto source = entity(db, sourceEp.identityId);
+        auto target = findByPublic(db, real, kind);
+        if (!target.id) target = createEntity(db, kind, real, false);
+        if (source.id != target.id) merge(db, source, target, kind);
+        return true;
+    }
+
     // Bind an observed QQ Official endpoint to a real QQ/群号. The real number
     // may be reserved before OneBot sees it. Existing virtual data is migrated.
     bool bindOfficialToQQ(Database& db, const std::string& official, const std::string& real,
@@ -164,6 +208,17 @@ private:
         if (!row.id) row = createEntity(db, kind, wanted, virtualId);
         IdentityEndpointRow ep; ep.identityId = row.id; ep.kind = kindName(kind); ep.adapterType = type; ep.adapterAccount = account; ep.endpointId = raw; ep.createdAt = now();
         db.getStorage()->insert(ep); return row;
+    }
+    IdentityEndpointRow findEndpointAnyAccount(Database& db, const std::string& type,
+                                               const std::string& raw, Kind kind) const {
+        auto* st = db.getStorage(); if (!st) return {};
+        try {
+            auto rows = st->get_all<IdentityEndpointRow>(orm::where(
+                orm::c(&IdentityEndpointRow::adapterType) == type and
+                orm::c(&IdentityEndpointRow::endpointId) == raw and
+                orm::c(&IdentityEndpointRow::kind) == kindName(kind)), orm::limit(1));
+            return rows.empty() ? IdentityEndpointRow{} : rows.front();
+        } catch (...) { return {}; }
     }
     IdentityEndpointRow findEndpoint(Database& db, const std::string& type, const std::string& account,
                                      const std::string& raw, Kind kind) const {

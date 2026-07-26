@@ -95,6 +95,8 @@ enum class AdapterType {
     kOneBotV11 = 1,
     kMilky = 2,
     kQQOfficial = 3,
+    kDiscord = 4,
+    kKook = 5,
 };
 
 inline const char* adapterTypeToString(AdapterType type) {
@@ -102,6 +104,8 @@ inline const char* adapterTypeToString(AdapterType type) {
         case AdapterType::kOneBotV11: return "onebot_v11";
         case AdapterType::kMilky:     return "milky";
         case AdapterType::kQQOfficial: return "qq_official";
+        case AdapterType::kDiscord:   return "discord";
+        case AdapterType::kKook:      return "kook";
         case AdapterType::kUnknown:
         default:                      return "unknown";
     }
@@ -111,6 +115,8 @@ inline AdapterType adapterTypeFromString(const std::string& s) {
     if (s == "onebot_v11") return AdapterType::kOneBotV11;
     if (s == "milky")      return AdapterType::kMilky;
     if (s == "qq_official") return AdapterType::kQQOfficial;
+    if (s == "discord")    return AdapterType::kDiscord;
+    if (s == "kook")       return AdapterType::kKook;
     return AdapterType::kUnknown;
 }
 

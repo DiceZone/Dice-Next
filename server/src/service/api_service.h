@@ -14,6 +14,8 @@
 #include "../adapter/adapter_manager.h"
 #include "../adapter/onebot_v11_adapter.h"
 #include "../adapter/qq_official_adapter.h"
+#include "../adapter/discord_adapter.h"
+#include "../adapter/kook_adapter.h"
 #include "../core/deck/card_deck.h"
 #include "../core/reply/reply_manager.h"
 #include "../core/mod/js_plugin_manager.h"
@@ -33,6 +35,8 @@
 #include "ai_npc.h"         // 智能化阶段E：NPC 扮演
 #include "ai_vision.h"      // 多模态图像识别（默认提示词）
 #include "notice_manager.h" // B：通知系统（全局开关变更推送）
+#include "heart_service.h"  // 心跳上报（heart.dice.zone）
+#include "cloudban_service.h" // 云黑名单同步（cloudban.dice.zone）
 #include "../storage/legacy_import_v2.h"
 #include "../core/causal/causal_rule_manager.h"
 #include "../core/causal/cooldown_manager.h"
@@ -118,10 +122,11 @@ static ReplyRule replyRuleFromJson(const J& j) {
 static J adapterToJson(const AdapterRow& a) {
     J cfg = J::parse(a.config, nullptr, false);
     const bool official = a.type == static_cast<int>(AdapterType::kQQOfficial);
+    const char* typeStr = adapterTypeToString(static_cast<AdapterType>(a.type));
     return J{
         {"id", std::to_string(a.id)},
         {"name", a.name},
-        {"type", official ? "qq_official" : "onebot_v11"},
+        {"type", std::string(typeStr) == "unknown" ? "onebot_v11" : typeStr},
         {"connectionMode", a.connectionMode == 0 ? "forward_ws" : a.connectionMode == 1 ? "reverse_ws" : "http"},
         {"endpoint", a.endpoint},
         {"accessToken", official ? "" : a.accessToken},
@@ -142,6 +147,16 @@ static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
         adapter->configure({{"name", a.name}, {"appId", cfg.value("appId", std::string())},
                             {"appSecret", cfg.value("appSecret", std::string())},
                             {"qqNumber", cfg.value("qqNumber", std::string())}});
+        return adapter;
+    }
+    if (a.type == static_cast<int>(AdapterType::kDiscord)) {
+        auto adapter = std::make_shared<DiscordAdapter>(std::to_string(a.id));
+        adapter->configure({{"name", a.name}, {"token", a.accessToken}});
+        return adapter;
+    }
+    if (a.type == static_cast<int>(AdapterType::kKook)) {
+        auto adapter = std::make_shared<KookAdapter>(std::to_string(a.id));
+        adapter->configure({{"name", a.name}, {"token", a.accessToken}});
         return adapter;
     }
     auto adapter = std::make_shared<OneBotV11Adapter>(std::to_string(a.id));
@@ -1470,7 +1485,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // Upload a mod file (Lua or zip). Writes to data/mod/ and reloads.
+    // Upload a mod file (Lua/json/zip). 归位语义统一走 LuaPluginManager::importUpload
+    //（旧实现把 zip 原样落盘不解压，产生既加载不了也删不掉的孤儿文件）。
     app.registerHandler("/api/mods/upload", [&luaMod](Req req, CB&& cb) {
         try {
             auto j = J::parse(req->body());
@@ -1479,28 +1495,17 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (filename.empty() || content.empty()) {
                 jsonReply(fail("filename and content required"), std::move(cb)); return;
             }
-            namespace fs = std::filesystem;
-            fs::path modDir = "data/mod";
-            fs::create_directories(modDir);
-            fs::path target = modDir / filename;
-
-            // Content may be base64-encoded (for binary files like .zip)
-            if (content.size() > 22 && content.substr(0, 22) == "data:application/octet") {
-                // Strip data URL prefix
+            // Content may be base64-encoded (dataURL, for binary files like .zip)
+            std::string bytes;
+            if (content.rfind("data:", 0) == 0) {
                 size_t comma = content.find(',');
                 if (comma != std::string::npos) content = content.substr(comma + 1);
-                auto decoded = drogon::utils::base64Decode(content);
-                std::ofstream out(target, std::ios::binary);
-                out.write(reinterpret_cast<const char*>(decoded.data()), decoded.size());
-                out.close();
-            } else {
-                std::ofstream out(target, std::ios::binary);
-                out << content;
-                out.close();
-            }
-            // Reload lua mods
+                bytes = drogon::utils::base64Decode(content);
+            } else bytes = content;
+            std::string err; std::vector<std::string> names;
+            if (!luaMod.importUpload(filename, bytes, &err, &names)) { jsonReply(fail(err), std::move(cb)); return; }
             luaMod.reload();
-            jsonReply(ok(J{{"filename", filename}}), std::move(cb));
+            jsonReply(ok(J{{"filename", filename}, {"imported", names}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
@@ -1528,6 +1533,15 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // Live host metrics for the dashboard server-info curve (polled frequently).
     app.registerHandler("/api/system/sysinfo", [](Req, CB&& cb) {
         jsonReply(ok(sysInfoJson()), std::move(cb));
+    }, {drogon::Get});
+
+    // 平台能力位：{platform: {kick,ban,poke,friends,...}}。前端按能力显示/隐藏
+    // 群管按钮等，禁止按 platform 字符串硬编码猜功能。
+    app.registerHandler("/api/platform-caps", [&adapterMgr](Req, CB&& cb) {
+        J caps = J::object();
+        for (auto& a : adapterMgr.allAdapters())
+            if (a && !caps.contains(a->platform())) caps[a->platform()] = a->capabilities();
+        jsonReply(ok(caps), std::move(cb));
     }, {drogon::Get});
 
     app.registerHandler("/api/dashboard/stats", [st, lst, &adapterMgr](Req, CB&& cb) {
@@ -1683,6 +1697,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     a.connectionMode = 0; a.endpoint.clear(); a.accessToken.clear();
                     a.config = J{{"appId", appId}, {"appSecret", appSecret},
                                  {"qqNumber", j.value("qqNumber", std::string())}}.dump();
+                } else if (a.type == static_cast<int>(AdapterType::kDiscord)
+                           || a.type == static_cast<int>(AdapterType::kKook)) {
+                    // Token 存 accessToken 列；无 endpoint / 连接模式概念。
+                    a.accessToken = j.value("accessToken", std::string());
+                    if (a.accessToken.empty()) throw std::runtime_error("需要 Bot Token");
+                    a.connectionMode = 0; a.endpoint.clear(); a.config = "{}";
                 } else {
                     a.endpoint = j.value("endpoint", ""); a.accessToken = j.value("accessToken", "");
                     std::string mode = j.value("connectionMode", "forward_ws");
@@ -1948,6 +1968,125 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             }
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
+
+    // ── 心跳上报（heart.dice.zone）：配置 + 最近状态。token 不回显明文（仅尾 4 位）──
+    app.registerHandler("/api/system/heartbeat", [&cfg](Req req, CB&& cb) {
+        try {
+            auto& hs = dice::heart::HeartService::instance();
+            if (req->method() == drogon::Put) {
+                auto j = J::parse(req->body());
+                if (j.contains("enabled") && j["enabled"].is_boolean())
+                    cfg.set<bool>("dice/heart_enabled", j["enabled"].get<bool>());
+                if (j.contains("url")) {
+                    std::string u = j["url"].is_string() ? j["url"].get<std::string>() : std::string();
+                    if (u.empty()) u = dice::heart::kOfficialHeartUrl;   // 空串=恢复官方默认
+                    cfg.set<std::string>("dice/heart_url", u);
+                }
+                if (j.contains("token") && j["token"].is_string()) {
+                    std::string t = j["token"].get<std::string>();
+                    if (!t.empty()) cfg.set<std::string>("dice/heart_token", t);   // 空串/缺省=不改
+                }
+                if (j.contains("public_show") && j["public_show"].is_boolean())
+                    cfg.set<bool>("dice/heart_public_show", j["public_show"].get<bool>());
+                if (j.contains("interval") && j["interval"].is_number()) {
+                    int v = j["interval"].get<int>();
+                    if (v < 180) v = 180;
+                    if (v > 600) v = 600;
+                    cfg.set<int>("dice/heart_interval", v);
+                }
+                cfg.save();
+            }
+            std::string tok = cfg.get<std::string>("dice/heart_token", std::string());
+            J st = hs.lastState();
+            jsonReply(ok(J{
+                {"enabled", cfg.get<bool>("dice/heart_enabled", false)},
+                {"url", hs.url()},
+                {"token_set", !tok.empty()},
+                {"token_tail", tok.size() > 4 ? tok.substr(tok.size() - 4) : std::string()},
+                {"public_show", cfg.get<bool>("dice/heart_public_show", true)},
+                {"interval", hs.interval()},
+                {"last_status", st.value("last_status", "unknown")},
+                {"last_report_at", st.value("last_report_at", "")},
+                {"last_error", st.value("last_error", "")},
+            }), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Put});
+
+    // 立即按当前状态发一次心跳（分离线程做完再回调，模式同日志站上传）。
+    app.registerHandler("/api/system/heartbeat/test", [](Req, CB&& cb) {
+        std::thread([cb = std::move(cb)]() mutable {
+            std::pair<int, std::string> r{0, ""};
+            try { r = dice::heart::HeartService::instance().testReport(); } catch (...) {}
+            drogon::app().getLoop()->queueInLoop([cb = std::move(cb), r]() mutable {
+                if (r.first == 200) jsonReply(ok(J{{"http", r.first}, {"body", r.second}}), std::move(cb));
+                else jsonReply(fail(r.first == 0
+                    ? (r.second.empty() ? std::string("\xe7\xbd\x91\xe7\xbb\x9c\xe8\xaf\xb7\xe6\xb1\x82\xe5\xa4\xb1\xe8\xb4\xa5") : r.second)
+                    : ("HTTP " + std::to_string(r.first) + ": " + r.second)), std::move(cb));
+            });
+        }).detach();
+    }, {drogon::Post});
+
+    // ── 云黑名单（cloudban.dice.zone）：配置 + 最近同步状态 ────
+    app.registerHandler("/api/system/cloudban", [&cfg](Req req, CB&& cb) {
+        try {
+            auto& cs = dice::cloudban::CloudbanService::instance();
+            if (req->method() == drogon::Put) {
+                auto j = J::parse(req->body());
+                if (j.contains("enabled") && j["enabled"].is_boolean())
+                    cfg.set<bool>("dice/cloudban_enabled", j["enabled"].get<bool>());
+                if (j.contains("url")) {
+                    std::string u = j["url"].is_string() ? j["url"].get<std::string>() : std::string();
+                    if (u.empty()) u = dice::cloudban::kOfficialCloudbanUrl;   // 空串=恢复官方默认
+                    cfg.set<std::string>("dice/cloudban_url", u);
+                }
+                if (j.contains("token") && j["token"].is_string()) {
+                    std::string t = j["token"].get<std::string>();
+                    if (!t.empty()) cfg.set<std::string>("dice/cloudban_token", t);   // 空=不改（回落 heart_token）
+                }
+                if (j.contains("share") && j["share"].is_boolean())
+                    cfg.set<bool>("dice/cloudban_share", j["share"].get<bool>());
+                if (j.contains("min_danger") && j["min_danger"].is_number()) {
+                    int v = j["min_danger"].get<int>();
+                    if (v < 1) v = 1;
+                    if (v > 3) v = 3;
+                    cfg.set<int>("dice/cloudban_min_danger", v);
+                }
+                if (j.contains("sync_interval") && j["sync_interval"].is_number()) {
+                    int v = j["sync_interval"].get<int>();
+                    if (v < 600) v = 600;
+                    cfg.set<int>("dice/cloudban_sync_interval", v);
+                }
+                cfg.save();
+            }
+            std::string tok = cs.token();
+            J st = cs.lastState();
+            jsonReply(ok(J{
+                {"enabled", cfg.get<bool>("dice/cloudban_enabled", false)},
+                {"url", cs.url()},
+                {"token_set", !tok.empty()},
+                {"share", cfg.get<bool>("dice/cloudban_share", true)},
+                {"min_danger", cs.minDanger()},
+                {"sync_interval", cs.syncInterval()},
+                {"cursor", cfg.get<std::string>("dice/cloudban_cursor", std::string())},
+                {"last_sync_at", st.value("last_sync_at", "")},
+                {"last_sync_added", st.value("last_sync_added", 0)},
+                {"last_sync_removed", st.value("last_sync_removed", 0)},
+                {"last_error", st.value("last_error", "")},
+            }), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Put});
+
+    // 手动触发一轮云黑同步（分离线程做完再回调 {added, removed}）。
+    app.registerHandler("/api/system/cloudban/sync", [](Req, CB&& cb) {
+        std::thread([cb = std::move(cb)]() mutable {
+            dice::cloudban::SyncResult r;
+            try { r = dice::cloudban::CloudbanService::instance().syncNow(true); } catch (...) {}
+            drogon::app().getLoop()->queueInLoop([cb = std::move(cb), r]() mutable {
+                if (r.ok) jsonReply(ok(J{{"added", r.added}, {"removed", r.removed}}), std::move(cb));
+                else jsonReply(fail(r.error.empty() ? std::string("\xe5\x90\x8c\xe6\xad\xa5\xe5\xa4\xb1\xe8\xb4\xa5") : r.error), std::move(cb));
+            });
+        }).detach();
+    }, {drogon::Post});
 
     // ── 好友/加群邀请 审批策略 ─────────────────────────────────
     app.registerHandler("/api/system/events", [&cfg, st](Req req, CB&& cb) {
@@ -2315,10 +2454,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     BanlistRow r; r.targetType = type; r.listType = list; r.targetId = id;
                     r.reason = reason; r.createdAt = utils::nowIso8601(); st->insert(r);
                     // 新增黑名单条目后通知骰主。
-                    if (list == 0)
+                    if (list == 0) {
                         dice::notice::notify(cfg, adapterMgr, dice::notice::kCritical,
                             std::string("\xe5\xb7\xb2\xe6\x8b\x89\xe9\xbb\x91") + (type == 0 ? "\xe7\x94\xa8\xe6\x88\xb7 " : "\xe7\xbe\xa4 ") + id
                                 + (reason.empty() ? std::string() : ("\xef\xbc\x88" + reason + "\xef\xbc\x89")), "", "", "blacklist");
+                        // WebUI 主动拉黑 → 云黑上报（分享开启时；"[云黑#..]" 前缀条目内部自动跳过防回声）。
+                        dice::cloudban::CloudbanService::instance().reportToCloud(
+                            type == 0 ? "user" : "group", id, "other", reason);
+                    }
                 }
                 jsonReply(ok(J{{"saved", true}}), std::move(cb));
             }

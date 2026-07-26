@@ -90,6 +90,10 @@ public:
         Message m; m.type = MessageType::kPrivate; m.targetId = userId; sendTo(m, text);
     }
 
+    /// 本地图片 → 公网 URL 的发布器（main.cpp 注入，走 系统设置→图床）。
+    /// 官方富媒体接口只接受公网 url（file_data 官方「暂未支持」），本地图必须先发布。
+    static void setImagePublisher(std::function<std::string(const std::string&)> fn) { imagePublisher_ = std::move(fn); }
+
     struct QrResult { bool ok=false; json data; std::string error; };
     using QrCallback = std::function<void(QrResult)>;
 
@@ -258,8 +262,126 @@ private:
     void rememberPassiveEvent(MessageType type,const std::string& target,const std::string& eventId){if(target.empty()||eventId.empty())return;std::lock_guard lock(replyMu_);pendingEvents_[eventKey(type,target)]={eventId,std::time(nullptr)};}
     std::string takePassiveEvent(MessageType type,const std::string& target){std::lock_guard lock(replyMu_);auto it=pendingEvents_.find(eventKey(type,target));if(it==pendingEvents_.end()||std::time(nullptr)-it->second.second>300)return {};auto id=it->second.first;pendingEvents_.erase(it);return id;}
     int nextReplySeq(const std::string& messageId){if(messageId.empty())return 0;std::lock_guard lock(replyMu_);auto& seq=replySeq_[messageId];if(seq<=0)seq=1;return seq++;}
-    void sendTo(const Message&m,const std::string&text){ if(accessToken_.empty()){lastError_="QQ 官方机器人尚未取得 AccessToken";return;} std::string target; if(m.extra.is_object())target=m.extra.value("__identity_native_target",std::string()); if(target.empty()&&m.type!=MessageType::kChannel&&db_) target=identity::BindingStore::instance().officialTransport(*db_,appId_,m.targetId,m.type==MessageType::kPrivate?identity::Kind::User:identity::Kind::Group); if(target.empty())target=m.targetId; std::string path; if(m.type==MessageType::kPrivate)path="/v2/users/"+target+"/messages"; else if(m.type==MessageType::kGroup)path="/v2/groups/"+target+"/messages"; else path="/channels/"+target+"/messages"; auto c=httpsClient("api.sgroup.qq.com");if(!c){lastError_="无法解析 api.sgroup.qq.com";return;}auto r=drogon::HttpRequest::newHttpRequest();r->setMethod(drogon::Post);r->setPath(path);r->setContentTypeCode(drogon::CT_APPLICATION_JSON);r->addHeader("Host","api.sgroup.qq.com");r->addHeader("Authorization","QQBot "+accessToken_);json body={{"content",text}};if(m.type!=MessageType::kChannel)body["msg_type"]=0;if(!m.id.empty()){body["msg_id"]=m.id;const int seq=nextReplySeq(m.id);if(seq>0&&m.type!=MessageType::kChannel)body["msg_seq"]=seq;}else if(m.type!=MessageType::kChannel){const auto eventId=takePassiveEvent(m.type,target);if(!eventId.empty())body["event_id"]=eventId;}r->setBody(body.dump());c->sendRequest(r,[self=shared_from_this(),path](drogon::ReqResult rr,const drogon::HttpResponsePtr&resp){if(rr!=drogon::ReqResult::Ok||!resp||resp->statusCode()>=300){std::string detail="网络请求未完成";if(resp){const auto responseBody=resp->body();detail.assign(responseBody.data(),responseBody.size());}self->lastError_="QQ 官方消息发送失败";if(resp)DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}",self->name_,path,static_cast<int>(resp->statusCode()),detail);else DICE_LOG_WARN("QQOfficial '{}': POST {} failed: {} {}",self->name_,path,drogon::to_string(rr),detail);}}); }
+
+    // ── 富媒体（图片）───────────────────────────────────────────
+    struct SplitText { std::string text; std::vector<std::string> images; };
+    /// 把 [img,file=..] / [CQ:image,file=..,url=..] 标记从文本中拆出（url 优先）。
+    static SplitText splitImages(const std::string& text) {
+        SplitText out;
+        size_t i = 0;
+        while (i < text.size()) {
+            size_t tag = std::string::npos; size_t head = 0;
+            const size_t a = text.find("[img,", i), b = text.find("[CQ:image,", i);
+            if (a != std::string::npos && (b == std::string::npos || a < b)) { tag = a; head = 5; }
+            else if (b != std::string::npos) { tag = b; head = 10; }
+            if (tag == std::string::npos) { out.text += text.substr(i); break; }
+            out.text += text.substr(i, tag - i);
+            const size_t end = text.find(']', tag);
+            if (end == std::string::npos) { out.text += text.substr(tag); break; }
+            const std::string seg = text.substr(tag + head, end - tag - head);   // k=v,k=v
+            auto param = [&seg](const std::string& key) -> std::string {
+                size_t p = seg.rfind(key + "=", 0) == 0 ? 0 : seg.find("," + key + "=");
+                if (p == std::string::npos) return {};
+                p = (p == 0) ? key.size() + 1 : p + key.size() + 2;
+                const size_t e = seg.find(',', p);
+                return seg.substr(p, e == std::string::npos ? std::string::npos : e - p);
+            };
+            std::string ref = param("url");
+            if (ref.empty()) ref = param("file");
+            if (!ref.empty()) out.images.push_back(ref);
+            i = end + 1;
+        }
+        return out;
+    }
+
+    /// 图片引用 → 公网 URL：外链原样；本机 /api/assets|/api/chat/images URL 还原为
+    /// 本地路径后经图床发布器；发布器缺席/失败 → 空（调用方记日志）。
+    std::string publicImageUrl(const std::string& ref) {
+        std::string v = ref;
+        if (v.rfind("http://", 0) == 0 || v.rfind("https://", 0) == 0) {
+            auto tailOf = [&v](const char* seg) -> std::string {
+                const auto p = v.find(seg);
+                return p == std::string::npos ? std::string() : v.substr(p + std::string(seg).size());
+            };
+            std::string n;
+            if (!(n = tailOf("/api/assets/")).empty()) v = "data/assets/" + n;
+            else if (!(n = tailOf("/api/chat/images/")).empty()) v = "data/chat/images/" + n;
+            else return v;   // 真外链，腾讯可直接拉取
+        }
+        return imagePublisher_ ? imagePublisher_(v) : std::string();
+    }
+
+    /// 富媒体两跳：POST /files 换 file_info → POST /messages (msg_type=7)。
+    void sendMediaTo(const Message& m, const std::string& imageRef) {
+        if (m.type == MessageType::kChannel) { DICE_LOG_WARN("QQOfficial '{}': 频道富媒体暂未接入，跳过图片", name_); return; }
+        const std::string url = publicImageUrl(imageRef);
+        if (url.empty()) {
+            DICE_LOG_WARN("QQOfficial '{}': 发图跳过——官方接口仅接受公网 URL；请在 系统设置→图床 配置 generic（图床上传）或 local（公网可达的 public_base）模式", name_);
+            return;
+        }
+        if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
+        std::string target;
+        if (m.extra.is_object()) target = m.extra.value("__identity_native_target", std::string());
+        if (target.empty() && db_)
+            target = identity::BindingStore::instance().officialTransport(*db_, appId_, m.targetId,
+                m.type == MessageType::kPrivate ? identity::Kind::User : identity::Kind::Group);
+        if (target.empty()) target = m.targetId;
+        const bool priv = m.type == MessageType::kPrivate;
+        const std::string filesPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/files";
+        auto c = httpsClient("api.sgroup.qq.com");
+        if (!c) { lastError_ = "无法解析 api.sgroup.qq.com"; return; }
+        auto r = drogon::HttpRequest::newHttpRequest();
+        r->setMethod(drogon::Post); r->setPath(filesPath);
+        r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+        r->addHeader("Host", "api.sgroup.qq.com");
+        r->addHeader("Authorization", "QQBot " + accessToken_);
+        r->setBody(json{{"file_type", 1}, {"url", url}, {"srv_send_msg", false}}.dump());
+        auto self = shared_from_this();
+        const std::string msgId = m.id; const MessageType mtype = m.type;
+        c->sendRequest(r, [self, priv, target, msgId, mtype, filesPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
+            if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
+                self->lastError_ = "QQ 官方富媒体上传失败";
+                DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, filesPath,
+                              resp ? static_cast<int>(resp->statusCode()) : 0, resp ? std::string(resp->body()) : std::string("网络请求未完成"));
+                return;
+            }
+            auto j = json::parse(resp->body(), nullptr, false);
+            const std::string fileInfo = j.is_object() ? j.value("file_info", std::string()) : std::string();
+            if (fileInfo.empty()) { DICE_LOG_WARN("QQOfficial '{}': /files 未返回 file_info: {}", self->name_, std::string(resp->body())); return; }
+            const std::string msgPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/messages";
+            // 官方要求 msg_type=7 时 content 需非空（文档注明的占位空格）。
+            json body = {{"content", " "}, {"msg_type", 7}, {"media", {{"file_info", fileInfo}}}};
+            if (!msgId.empty()) { body["msg_id"] = msgId; const int seq = self->nextReplySeq(msgId); if (seq > 0) body["msg_seq"] = seq; }
+            else { const auto ev = self->takePassiveEvent(mtype, target); if (!ev.empty()) body["event_id"] = ev; }
+            auto c2 = httpsClient("api.sgroup.qq.com"); if (!c2) return;
+            auto r2 = drogon::HttpRequest::newHttpRequest();
+            r2->setMethod(drogon::Post); r2->setPath(msgPath);
+            r2->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+            r2->addHeader("Host", "api.sgroup.qq.com");
+            r2->addHeader("Authorization", "QQBot " + self->accessToken_);
+            r2->setBody(body.dump());
+            c2->sendRequest(r2, [self, msgPath](drogon::ReqResult rr2, const drogon::HttpResponsePtr& resp2) {
+                if (rr2 != drogon::ReqResult::Ok || !resp2 || resp2->statusCode() >= 300) {
+                    self->lastError_ = "QQ 官方富媒体消息发送失败";
+                    DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, msgPath,
+                                  resp2 ? static_cast<int>(resp2->statusCode()) : 0, resp2 ? std::string(resp2->body()) : std::string("网络请求未完成"));
+                }
+            });
+        });
+    }
+    /// 出站入口：拆出图片标记走富媒体，剩余文本走文字消息。
+    void sendTo(const Message& m, const std::string& text) {
+        auto parts = splitImages(text);
+        for (size_t i = 0; i < parts.images.size() && i < 3; ++i) sendMediaTo(m, parts.images[i]);   // 限 3 张防刷频
+        std::string plain = parts.text;
+        const auto b = plain.find_first_not_of(" \t\r\n");
+        plain = (b == std::string::npos) ? std::string() : plain.substr(b, plain.find_last_not_of(" \t\r\n") - b + 1);
+        if (plain.empty()) { if (parts.images.empty()) sendTextTo(m, text); return; }   // 纯图不再发空文本
+        sendTextTo(m, plain);
+    }
+    void sendTextTo(const Message&m,const std::string&text){ if(accessToken_.empty()){lastError_="QQ 官方机器人尚未取得 AccessToken";return;} std::string target; if(m.extra.is_object())target=m.extra.value("__identity_native_target",std::string()); if(target.empty()&&m.type!=MessageType::kChannel&&db_) target=identity::BindingStore::instance().officialTransport(*db_,appId_,m.targetId,m.type==MessageType::kPrivate?identity::Kind::User:identity::Kind::Group); if(target.empty())target=m.targetId; std::string path; if(m.type==MessageType::kPrivate)path="/v2/users/"+target+"/messages"; else if(m.type==MessageType::kGroup)path="/v2/groups/"+target+"/messages"; else path="/channels/"+target+"/messages"; auto c=httpsClient("api.sgroup.qq.com");if(!c){lastError_="无法解析 api.sgroup.qq.com";return;}auto r=drogon::HttpRequest::newHttpRequest();r->setMethod(drogon::Post);r->setPath(path);r->setContentTypeCode(drogon::CT_APPLICATION_JSON);r->addHeader("Host","api.sgroup.qq.com");r->addHeader("Authorization","QQBot "+accessToken_);json body={{"content",text}};if(m.type!=MessageType::kChannel)body["msg_type"]=0;if(!m.id.empty()){body["msg_id"]=m.id;const int seq=nextReplySeq(m.id);if(seq>0&&m.type!=MessageType::kChannel)body["msg_seq"]=seq;}else if(m.type!=MessageType::kChannel){const auto eventId=takePassiveEvent(m.type,target);if(!eventId.empty())body["event_id"]=eventId;}r->setBody(body.dump());c->sendRequest(r,[self=shared_from_this(),path](drogon::ReqResult rr,const drogon::HttpResponsePtr&resp){if(rr!=drogon::ReqResult::Ok||!resp||resp->statusCode()>=300){std::string detail="网络请求未完成";if(resp){const auto responseBody=resp->body();detail.assign(responseBody.data(),responseBody.size());}self->lastError_="QQ 官方消息发送失败";if(resp)DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}",self->name_,path,static_cast<int>(resp->statusCode()),detail);else DICE_LOG_WARN("QQOfficial '{}': POST {} failed: {} {}",self->name_,path,drogon::to_string(rr),detail);}}); }
     void fail(const std::string&e){lastError_=e;connecting_=false;connected_=false;DICE_LOG_ERROR("QQOfficial '{}': {}",name_,e);}
+    inline static std::function<std::string(const std::string&)> imagePublisher_;   // 本地图 → 公网 URL（图床）
     std::string id_,name_,appId_,appSecret_,displayQQ_,accessToken_,loginId_,loginName_,sessionId_,gatewayUrl_,lastError_; Database* db_{identity::BindingStore::instance().database()}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; int64_t seq_=-1; std::shared_ptr<QQGatewaySocket> gateway_; std::optional<trantor::TimerId> heartbeatTimer_,accessTokenTimer_; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::unordered_map<std::string,int> replySeq_; std::unordered_map<std::string,std::pair<std::string,std::time_t>> pendingEvents_;
 };
 }

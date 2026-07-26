@@ -91,6 +91,14 @@ public:
     bool setModEnabled(const std::string& name, bool enabled);
     bool deleteMod(const std::string& name);
 
+    // 上传导入（对齐原版 mod_dlpkg「整包解压进 mod 根目录」语义）：
+    //   .lua → data/plugin/；.json（描述档/查询类 mod）→ data/mod/；
+    //   .zip → 解压后把顶层 <名>.json、mod 目录（含仅 model/rulebook 的规则类）、.lua 归位，
+    //          支持一包多 mod、json+目录成对、单层包装目录。
+    // bytes=文件原始字节。成功返回 true；err 写失败原因；imported 写导入的 mod 名。不做 reload。
+    bool importUpload(const std::string& filename, const std::string& bytes,
+                      std::string* err = nullptr, std::vector<std::string>* imported = nullptr);
+
     // 注入：drawDeck(牌堆名) → 抽牌结果（main.cpp 接牌堆引擎）。
     using DeckDrawFn = std::function<std::string(const std::string&)>;
     void setDeckDraw(DeckDrawFn f) { deckDraw_ = std::move(f); }
