@@ -235,7 +235,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vcpkg
-          key: vcpkg-${{ runner.os }}-arm64-osx-dynamic-${{ env.VCPKG_BASELINE }}-${{ hashFiles('main/server/vcpkg.json') }}
+          key: vcpkg-${{ runner.os }}-arm64-osx-static-${{ env.VCPKG_BASELINE }}-${{ hashFiles('main/server/vcpkg.json') }}
       - name: Build server
         working-directory: main
         env:
@@ -246,8 +246,8 @@ jobs:
           git -C "$VCPKG_ROOT" fetch --depth=1 origin "$VCPKG_BASELINE"
           git -C "$VCPKG_ROOT" checkout --detach "$VCPKG_BASELINE"
           "$VCPKG_ROOT/bootstrap-vcpkg.sh"
-          "$VCPKG_ROOT/vcpkg" install --x-manifest-root=server --x-install-root="$VCPKG_ROOT/installed" --triplet=arm64-osx-dynamic
-          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=arm64-osx-dynamic -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
+          "$VCPKG_ROOT/vcpkg" install --x-manifest-root=server --x-install-root="$VCPKG_ROOT/installed" --triplet=arm64-osx
+          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=arm64-osx -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
           cmake --build server/build --parallel "$(sysctl -n hw.ncpu)"
       - name: Package
         working-directory: main
