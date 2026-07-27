@@ -41,14 +41,15 @@ $VCPKG_ROOT/vcpkg install \
     zstd \
     quickjs-ng \
     lua \
-    --triplet=arm64-osx-dynamic
+    --triplet=arm64-osx
 
 # 配置 CMake
 echo "配置 CMake..."
 cd "$SERVER_DIR"
 cmake -B build -S . \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+    -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \
+    -DVCPKG_TARGET_TRIPLET=arm64-osx
 
 # 编译
 echo "编译..."

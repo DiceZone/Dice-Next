@@ -15,7 +15,7 @@ WEB_DIST="$WEB_ROOT/dist"
 RELEASE_DIR="$PROJECT_ROOT/release"
 SERVER_BIN="$SERVER_DIR/build/dice-next-server"
 VERSION_SOURCE="$SERVER_DIR/build/generated/version_build.cpp"
-TRIPLET="arm64-osx-dynamic"
+TRIPLET="arm64-osx"
 
 [[ -f "$SERVER_BIN" ]] || { echo "Missing $SERVER_BIN" >&2; exit 1; }
 [[ -d "$WEB_DIST" ]] || { echo "Missing $WEB_DIST; build Dice-Next-WebUI first or set DICENEXT_WEB_ROOT" >&2; exit 1; }
@@ -69,19 +69,24 @@ for doc in roadmap.md commands.json; do
 done
 cp -a "$WEB_DIST" "$STAGING_DIR/web/dist"
 
-LIB_STAGE="$STAGING_DIR/lib"
-mkdir -p "$LIB_STAGE"
-if [[ -n "${VCPKG_ROOT:-}" && -d "$VCPKG_ROOT/installed/$TRIPLET/lib" ]]; then
-    shopt -s nullglob
-    for library in "$VCPKG_ROOT/installed/$TRIPLET/lib/"*.dylib; do cp -a "$library" "$LIB_STAGE/"; done
-    shopt -u nullglob
+# macOS test packages use the static vcpkg triplet.  Keep the distribution to a
+# single application executable: Gatekeeper should only need to assess that one
+# file, not every bundled third-party dylib.  System frameworks remain dynamic
+# and are trusted by macOS.  Refuse to create a misleading "single file" package
+# if a vcpkg dylib was linked by accident.
+if command -v otool >/dev/null 2>&1; then
+    external_libs="$(otool -L "$SERVER_BIN" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' || true)"
+    if [[ -n "$external_libs" ]]; then
+        echo "Unexpected non-system dynamic dependencies in static macOS build:" >&2
+        echo "$external_libs" >&2
+        exit 1
+    fi
 fi
 
 cat > "$STAGING_DIR/start.sh" << 'EOF'
 #!/usr/bin/env bash
 set -e
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export DYLD_LIBRARY_PATH="$ROOT/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 exec "$ROOT/dice-next-server" "$@"
 EOF
 chmod +x "$STAGING_DIR/start.sh"
@@ -97,7 +102,9 @@ Run:
 Notes:
   - First launch creates config/default_config.json automatically.
   - If macOS blocks the binary, allow it in Privacy & Security.
-  - Upgrade by replacing the program, lib, i18n, web/dist and data files;
+  - This package statically links third-party dependencies. macOS may ask to
+    allow dice-next-server once because this beta build is not Apple-signed.
+  - Upgrade by replacing the program, i18n, web/dist and data files;
     keep your config and database files.
   - Feedback: QQ group 933145116.
 EOF

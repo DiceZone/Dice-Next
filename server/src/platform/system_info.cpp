@@ -154,6 +154,12 @@ const StaticHw& staticHw() {
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#include <mach/mach.h>
+#include <mach/mach_host.h>
+#endif
+
 #if defined(__linux__)
 // Read /etc/os-release into key→value (values unquoted).
 static std::map<std::string, std::string> osRelease() {
@@ -210,6 +216,53 @@ static double linuxCpuLoad() {
     return 100.0 * static_cast<double>(dt - di) / static_cast<double>(dt);
 }
 #endif  // __linux__
+
+#if defined(__APPLE__)
+static std::string macSysctlString(const char* name) {
+    size_t size = 0;
+    if (sysctlbyname(name, nullptr, &size, nullptr, 0) != 0 || size == 0) return {};
+    std::string value(size, '\0');
+    if (sysctlbyname(name, value.data(), &size, nullptr, 0) != 0) return {};
+    while (!value.empty() && value.back() == '\0') value.pop_back();
+    return value;
+}
+
+static uint64_t macSysctlU64(const char* name) {
+    uint64_t value = 0;
+    size_t size = sizeof(value);
+    if (sysctlbyname(name, &value, &size, nullptr, 0) != 0) return 0;
+    return value;
+}
+
+static bool macCpuLoadInfo(host_cpu_load_info_data_t& out) {
+    mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
+    return host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO,
+                           reinterpret_cast<host_info_t>(&out), &count) == KERN_SUCCESS;
+}
+
+static double macCpuLoad() {
+    host_cpu_load_info_data_t before{}, after{};
+    if (!macCpuLoadInfo(before)) return -1.0;
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    if (!macCpuLoadInfo(after)) return -1.0;
+    uint64_t busy = 0, total = 0;
+    for (int i = 0; i < CPU_STATE_MAX; ++i) {
+        const uint64_t delta = static_cast<uint64_t>(after.cpu_ticks[i])
+                             - static_cast<uint64_t>(before.cpu_ticks[i]);
+        total += delta;
+        if (i != CPU_STATE_IDLE) busy += delta;
+    }
+    return total ? 100.0 * static_cast<double>(busy) / static_cast<double>(total) : -1.0;
+}
+
+static uint64_t macProcessMemoryMB() {
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO,
+                  reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS) return 0;
+    return info.phys_footprint / (1024ull * 1024ull);
+}
+#endif
 #endif  // platform helpers
 
 namespace dice::sysinfo {
@@ -309,7 +362,30 @@ SysInfo gather() {
 #else   // generic POSIX (macOS / BSD): OS name + root disk usage
     struct utsname un; if (uname(&un) == 0) s.os = un.sysname;
 #if defined(__APPLE__)
-    s.os = "macOS"; s.osId = "macos";
+    s.osId = "macos";
+    const std::string osVersion = macSysctlString("kern.osproductversion");
+    s.os = osVersion.empty() ? "macOS" : "macOS " + osVersion;
+    s.cpuModel = macSysctlString("machdep.cpu.brand_string");
+    if (s.cpuModel.empty()) s.cpuModel = macSysctlString("hw.model");
+    s.cpuPhysical = static_cast<int>(macSysctlU64("hw.physicalcpu"));
+    const uint64_t logical = macSysctlU64("hw.logicalcpu");
+    if (logical > 0) s.cpuCores = static_cast<int>(logical);
+    s.memTotalMB = macSysctlU64("hw.memsize") / (1024ull * 1024ull);
+    vm_statistics64_data_t vm{};
+    mach_msg_type_number_t vmCount = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64,
+                          reinterpret_cast<host_info64_t>(&vm), &vmCount) == KERN_SUCCESS) {
+        vm_size_t pageSize = 0;
+        host_page_size(mach_host_self(), &pageSize);
+        const uint64_t availablePages = static_cast<uint64_t>(vm.free_count)
+                                      + static_cast<uint64_t>(vm.inactive_count)
+                                      + static_cast<uint64_t>(vm.speculative_count);
+        const uint64_t availableMB = availablePages * static_cast<uint64_t>(pageSize) / (1024ull * 1024ull);
+        s.memUsedMB = s.memTotalMB > availableMB ? s.memTotalMB - availableMB : 0;
+        if (s.memTotalMB > 0) s.memLoadPct = static_cast<int>(100ull * s.memUsedMB / s.memTotalMB);
+    }
+    s.cpuLoadPct = macCpuLoad();
+    s.procMemMB = macProcessMemoryMB();
 #else
     s.osId = "linux";
 #endif
