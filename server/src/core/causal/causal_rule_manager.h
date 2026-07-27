@@ -23,6 +23,8 @@
 
 #include <string>
 #include <vector>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <nlohmann/json.hpp>
 
@@ -126,18 +128,28 @@ public:
                                        const std::string& nick,
                                        bool dryRun = false);
 
-    /// List all rules (memory cache).
-    const std::vector<CausalRule>& listRules() const { return rules_; }
+    /// List all rules（返回不可变快照——热重载随时可能换掉整个列表，
+    /// 引用/指针会悬空，调用方持有 shared_ptr 即安全）。
+    std::shared_ptr<const std::vector<CausalRule>> listRules() const { return snapshot(); }
 
-    /// Get a rule by ID. Returns nullptr if not found.
-    const CausalRule* getRuleById(int id) const;
+    /// Get a rule by ID（拷贝；找不到 → nullopt）。
+    std::optional<CausalRule> getRuleById(int id) const;
 
 private:
     Database& db_;
     ConfigManager& cfg_;
     CooldownManager& cooldownMgr_;
     CounterStore& counterStore_;
-    std::vector<CausalRule> rules_;
+    // 规则快照：读者拿 shared_ptr 遍历，loadRules 整体换指针。
+    // 以前是裸 vector——网页保存规则重载时消息线程可能正在遍历，数据竞争。
+    std::shared_ptr<const std::vector<CausalRule>> rules_ =
+        std::make_shared<const std::vector<CausalRule>>();
+    mutable std::mutex rulesMutex_;
+
+    std::shared_ptr<const std::vector<CausalRule>> snapshot() const {
+        std::lock_guard<std::mutex> lock(rulesMutex_);
+        return rules_;
+    }
 
     // ─── Helpers ─────────────────────────────────────────────
 

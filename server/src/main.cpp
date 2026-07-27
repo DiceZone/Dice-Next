@@ -689,10 +689,73 @@ static int realMain(int argc, char* argv[]) {
         for (auto& a : adapterMgr.allAdapters())
             if (a->isConnected()) { send(a); return; }
     });
+    // ── 统一回复兜底链 ───────────────────────────────────────
+    // JS插件指令 → Lua因果 → C++因果规则 → 自定义回复 → JS非指令钩子。
+    // live 消息管线 / 戳一戳映射 / Lua eventMsg / 网页测试台四处共用。
+    // 此前四处各手抄一份且互有出入（eventMsg 与测试台漏掉了因果规则引擎，
+    // eventMsg 还漏了 JS 非指令钩子），统一后不再漂移。
+    auto replyFallback = [&cmdRouter, &replyManager, &jsMod, &luaMod, &causalMgr](
+            const dice::Message& m, std::string& replySrc) -> std::string {
+        std::string reply;
+        const bool pv = m.type == dice::MessageType::kPrivate;
+        const std::string nick = m.senderName.empty() ? m.senderId : m.senderName;
+        // extra 可能是默认构造的 null json（poke/eventMsg/测试台自造的消息），
+        // 对 null 调 .value() 会抛 type_error.306。
+        const std::string card = m.extra.is_object() ? m.extra.value("card", std::string()) : std::string();
+        // JS 插件指令（海豹兼容）优先于自定义回复。
+        if (jsMod.ready()) {
+            if (auto body = cmdRouter.commandBody(m.content); body && !body->empty()) {
+                auto jr = jsMod.handle(m.platform, m.senderId, nick, m.targetId, card, pv, *body,
+                                       cmdRouter.jsPrivilegeLevel(m), m.atList);
+                if (jr.matched && !jr.reply.empty()) { reply = jr.reply; replySrc = "plugin"; }
+            }
+        }
+        // Lua 模块的因果回复。
+        if (reply.empty() && luaMod.ready()) {
+            int trust = cmdRouter.jsPrivilegeLevel(m) >= 70 ? 4 : 0;   // master/信任≥4 → trust4
+            auto lr = luaMod.dispatch(m.content, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform);
+            if (lr.matched && !lr.reply.empty()) { reply = lr.reply; replySrc = "plugin"; }
+        }
+        // C++ 因果规则（优先于普通自定义回复）。
+        if (reply.empty()) {
+            auto cr = causalMgr.matchAndExecute(m.content, m.senderId, pv ? "" : m.targetId, nick);
+            if (cr.matched && !cr.reply.empty()) {
+                // Build counter context for {counter:name} resolution in renderReply
+                std::map<std::string, std::string> counterCtx;
+                for (auto& cc : cr.counterChanges) counterCtx[cc.name] = std::to_string(cc.newValue);
+                cmdRouter.setCounterContext(counterCtx);
+                reply = cmdRouter.renderReply(m, cr.reply, "", dice::MatchType::kKeyword);
+                cmdRouter.clearCounterContext();
+                replySrc = "reply";
+            }
+        }
+        // 普通自定义回复（完整触发管线：匹配→范围→冷却→日限→概率）。
+        if (reply.empty()) {
+            dice::ReplyCtx rctx{m.platform, pv ? "" : m.targetId, m.senderId};
+            auto pk = replyManager.pickReply(m.content, rctx);
+            if (pk.rule) {
+                reply = cmdRouter.renderReply(m, replyManager.pickResult(*pk.rule),
+                                              pk.rule->matchContent, pk.rule->matchType);
+                if (!reply.empty()) replySrc = "reply";
+            } else if (!pk.notice.empty()) {
+                // 冷却/日限提示语（原版 cd@echo / 限额回复）。
+                reply = cmdRouter.renderReply(m, pk.notice, "", dice::MatchType::kKeyword);
+                if (!reply.empty()) replySrc = "reply";
+            }
+        }
+        // 仍无回复 → JS 插件的非指令消息钩子（自动回复 / 随机抓话等）。
+        if (reply.empty() && jsMod.ready()) {
+            auto nc = jsMod.handleNonCommand(m.platform, m.senderId, nick, m.targetId, card, pv, m.content,
+                                             cmdRouter.jsPrivilegeLevel(m), m.atList);
+            if (nc.matched && !nc.reply.empty()) { reply = nc.reply; replySrc = "plugin"; }
+        }
+        return reply;
+    };
+
     // Lua 插件 eventMsg(text,gid,uid) 将 text 作为消息走完整回复管线。
-    // 复用 poke_command 的管线（内置指令→JS插件→Lua因果→自定义回复→applySelf→发送）。
+    // 复用统一兜底链（内置指令→兜底链→applySelf→发送）。
     // 用线程局部深度计数防 eventMsg 递归风暴（eventMsg 的回复又触发 eventMsg）。
-    luaMod.setEventMsg([&adapterMgr, &cmdRouter, &replyManager, &jsMod, &luaMod, resolveChatPlatform](
+    luaMod.setEventMsg([&adapterMgr, &cmdRouter, replyFallback, resolveChatPlatform](
             const std::string& text, const std::string& gid, const std::string& uid) {
         static thread_local int depth = 0;
         if (depth >= 4) { DICE_LOG_INFO("eventMsg recursion capped at depth 4: '{}'", text); return; }
@@ -711,23 +774,8 @@ static int realMain(int argc, char* argv[]) {
         pm.targetId = pv ? uid : gid;
         std::string reply = cmdRouter.handleMessage(pm);
         if (reply.empty() && !cmdRouter.isGroupDisabled(pm)) {
-            if (jsMod.ready()) {
-                if (auto body = cmdRouter.commandBody(pm.content); body && !body->empty()) {
-                    auto jr = jsMod.handle(pm.platform, pm.senderId, pm.senderName, pm.targetId, "", pv, *body,
-                                           cmdRouter.jsPrivilegeLevel(pm), pm.atList);
-                    if (jr.matched && !jr.reply.empty()) reply = jr.reply;
-                }
-            }
-            if (reply.empty() && luaMod.ready()) {
-                int trust = cmdRouter.jsPrivilegeLevel(pm) >= 70 ? 4 : 0;
-                auto lr = luaMod.dispatch(pm.content, pm.senderId, pv ? "" : pm.targetId, pm.senderName, "", pv, trust);
-                if (lr.matched && !lr.reply.empty()) reply = lr.reply;
-            }
-            if (reply.empty()) {
-                auto matches = replyManager.matchMessage(pm.content);
-                if (!matches.empty()) { const auto& r = matches.front();
-                    reply = cmdRouter.renderReply(pm, replyManager.pickResult(r), r.matchContent, r.matchType); }
-            }
+            std::string src;
+            reply = replyFallback(pm, src);
         }
         if (reply.empty()) return;
         reply = cmdRouter.applySelf(pm, reply);
@@ -830,7 +878,7 @@ static int realMain(int argc, char* argv[]) {
 
     // Wire: incoming messages → command router; if no command matched, fall back
     // to the custom-reply word library; then send via the originating adapter.
-    adapterMgr.onMessage([&adapterMgr, &cmdRouter, &replyManager, &jsMod, &luaMod, &causalMgr, &db, &configMgr, &engine, &cardDeck, &makeAiTool](const dice::Message& msg) {
+    adapterMgr.onMessage([&adapterMgr, &cmdRouter, &jsMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, replyFallback](const dice::Message& msg) {
         // Multi-bot群: if another bot is @'d and not us, stay silent.
         if (dice::CommandRouter::isForAnotherBot(msg) && !jsCommandMatches(jsMod, cmdRouter, msg)) return;
         // Black/white-list: ignore blacklisted users/groups (and non-whitelisted in whitelist mode).
@@ -858,57 +906,8 @@ static int realMain(int argc, char* argv[]) {
                         && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId);
         // 自控：操作者用骰娘账号手打的消息走**完整管线**（内置/插件/自定义回复）；
         // 骰娘自己的回复回声已在适配器层被自回声去重丢弃，不会到这里，故无需在此限制。
-        if (reply.empty() && (!disabled || forcedByAt) && !replyOff) {
-            // JS 插件指令（海豹兼容）优先于自定义回复。
-            if (jsMod.ready()) {
-                if (auto body = cmdRouter.commandBody(msg.content); body && !body->empty()) {
-                    auto jr = jsMod.handle(msg.platform, msg.senderId,
-                        msg.senderName.empty() ? msg.senderId : msg.senderName,
-                        msg.targetId, msg.extra.value("card", std::string()), msg.type == dice::MessageType::kPrivate, *body,
-                        cmdRouter.jsPrivilegeLevel(msg), msg.atList);
-                    if (jr.matched && !jr.reply.empty()) { reply = jr.reply; replySrc = "plugin"; }
-                }
-            }
-            // Lua 模块的因果回复。
-            if (reply.empty() && luaMod.ready()) {
-                bool priv = msg.type == dice::MessageType::kPrivate;
-                int trust = cmdRouter.jsPrivilegeLevel(msg) >= 70 ? 4 : 0;   // master/信任≥4 → trust4
-                auto lr = luaMod.dispatch(msg.content, msg.senderId, priv ? "" : msg.targetId,
-                    msg.senderName.empty() ? msg.senderId : msg.senderName, msg.extra.value("card", std::string()), priv, trust, msg.platform);
-                if (lr.matched && !lr.reply.empty()) { reply = lr.reply; replySrc = "plugin"; }
-            }
-            // 因果规则匹配（优先于普通自定义回复）。
-            if (reply.empty()) {
-                std::string nick = msg.senderName.empty() ? msg.senderId : msg.senderName;
-                std::string groupId = msg.type == dice::MessageType::kPrivate ? "" : msg.targetId;
-                auto cr = causalMgr.matchAndExecute(msg.content, msg.senderId, groupId, nick);
-                if (cr.matched && !cr.reply.empty()) {
-                    // Build counter context for {counter:name} resolution in renderReply
-                    std::map<std::string, std::string> counterCtx;
-                    for (auto& cc : cr.counterChanges) counterCtx[cc.name] = std::to_string(cc.newValue);
-                    cmdRouter.setCounterContext(counterCtx);
-                    reply = cmdRouter.renderReply(msg, cr.reply, "", dice::MatchType::kKeyword);
-                    cmdRouter.clearCounterContext();
-                    replySrc = "reply";
-                }
-            }
-            if (reply.empty()) {
-                auto matches = replyManager.matchMessage(msg.content);
-                if (!matches.empty()) {
-                    const auto& r = matches.front();
-                    reply = cmdRouter.renderReply(msg, replyManager.pickResult(r), r.matchContent, r.matchType);
-                    if (!reply.empty()) replySrc = "reply";
-                }
-            }
-            // 仍无回复 → JS 插件的非指令消息钩子（自动回复 / 随机抓话等）。
-            if (reply.empty() && jsMod.ready()) {
-                auto nc = jsMod.handleNonCommand(msg.platform, msg.senderId,
-                    msg.senderName.empty() ? msg.senderId : msg.senderName,
-                    msg.targetId, msg.extra.value("card", std::string()), msg.type == dice::MessageType::kPrivate, msg.content,
-                    cmdRouter.jsPrivilegeLevel(msg));
-                if (nc.matched && !nc.reply.empty()) { reply = nc.reply; replySrc = "plugin"; }
-            }
-        }
+        if (reply.empty() && (!disabled || forcedByAt) && !replyOff)
+            reply = replyFallback(msg, replySrc);
         // ── 先在消息线程消费本条消息的一次性路由状态 ─────────────
         // 回复投递可能转入 AI 后台线程，这些状态晚取会被下一条消息拿走/污染。
         std::string aiCat = (replySrc == "plugin") ? "plugin"
@@ -1255,7 +1254,7 @@ static int realMain(int argc, char* argv[]) {
     });
 
     // Non-message events: 入群欢迎词、被加好友欢迎、加好友/加群条件自动同意。
-    adapterMgr.onEvent([&adapterMgr, &configMgr, &i18n, &localeResolver, &cmdRouter, &jsMod, &luaMod, &replyManager, &db](const dice::BotEvent& e) {
+    adapterMgr.onEvent([&adapterMgr, &configMgr, &i18n, &localeResolver, &cmdRouter, &jsMod, &db, replyFallback](const dice::BotEvent& e) {
         using ET = dice::EventType;
         nlohmann::json cfgAll = configMgr.getAll();
         nlohmann::json ev = (cfgAll.contains("events") && cfgAll["events"].is_object())
@@ -1681,23 +1680,8 @@ static int realMain(int argc, char* argv[]) {
                 pm.targetId = pv ? e.operatorId : e.groupId;
                 std::string reply = cmdRouter.handleMessage(pm);
                 if (reply.empty() && !cmdRouter.isGroupDisabled(pm)) {
-                    if (jsMod.ready()) {
-                        if (auto body = cmdRouter.commandBody(pm.content); body && !body->empty()) {
-                            auto jr = jsMod.handle(pm.platform, pm.senderId, pm.senderName, pm.targetId, "", pv, *body,
-                                                   cmdRouter.jsPrivilegeLevel(pm), pm.atList);
-                            if (jr.matched && !jr.reply.empty()) reply = jr.reply;
-                        }
-                    }
-                    if (reply.empty() && luaMod.ready()) {
-                        int trust = cmdRouter.jsPrivilegeLevel(pm) >= 70 ? 4 : 0;
-                        auto lr = luaMod.dispatch(pm.content, pm.senderId, pv ? "" : pm.targetId, pm.senderName, "", pv, trust, pm.platform);
-                        if (lr.matched && !lr.reply.empty()) reply = lr.reply;
-                    }
-                    if (reply.empty()) {
-                        auto matches = replyManager.matchMessage(pm.content);
-                        if (!matches.empty()) { const auto& r = matches.front();
-                            reply = cmdRouter.renderReply(pm, replyManager.pickResult(r), r.matchContent, r.matchType); }
-                    }
+                    std::string src;
+                    reply = replyFallback(pm, src);
                 }
                 if (!reply.empty()) {
                     reply = cmdRouter.applySelf(pm, reply);
@@ -2107,8 +2091,94 @@ static int realMain(int argc, char* argv[]) {
     // ── Playground test harness ──────────────────────────────
     // The chat UI lives in the React app (sidebar → 测试台). This is the
     // backend it calls: run a fake message through the command router.
+    // ── 定时任务「立即执行」（#48 网页测试按钮）────────────────
+    // 无视触发时刻/当日去重/因果条件直接执行动作（前端对 leave 任务有确认弹窗），
+    // 不写 lastRun（手动执行不消耗当日的定时触发）。返回 conditionMet 供前端提示
+    // 「当前条件不满足，定时触发时会被跳过」。
+    app.registerHandler("/api/schedules/{1}/run",
+        [&db, &cmdRouter](const drogon::HttpRequestPtr&,
+                          std::function<void(const drogon::HttpResponsePtr&)>&& cb, const std::string& sid) {
+            nlohmann::json out;
+            try {
+                auto* st = db.getStorage();
+                int id = 0; try { id = std::stoi(sid); } catch (...) {}
+                auto tk = st ? st->get_pointer<dice::ScheduledTaskRow>(id) : nullptr;
+                if (!tk) { out = {{"code", 1}, {"message", "task not found"}}; }
+                else {
+                    // 单目标：无视条件强制执行，并回报 conditionMet 供前端提示；
+                    // "*" 全群任务：任何时候都尊重条件（强制对所有群退群=自毁），
+                    // conditionMet 恒 true，count 表示实际命中的群数。
+                    bool condMet = tk->targetId == "*"
+                        || cmdRouter.evalScheduledCondition(tk->condition, tk->platform, tk->targetType, tk->targetId);
+                    int count = cmdRouter.execScheduledAction(*tk, /*force=*/true);
+                    DICE_LOG_INFO("scheduled task '{}' 手动执行：count={} conditionMet={}", tk->name, count, condMet);
+                    out = {{"code", 0}, {"data", {{"executed", count > 0}, {"count", count}, {"conditionMet", condMet}}}};
+                }
+            } catch (const std::exception& e) { out = {{"code", 1}, {"message", e.what()}}; }
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+            resp->setBody(out.dump());
+            cb(resp);
+        }, {drogon::Post});
+
+    // ── 自定义回复「真引擎测试」───────────────────────────────
+    // 网页回复页的实时预览以前是前端自己模拟匹配：四种模式的语义全部和后端
+    // 对不上（keyword 当成包含、前缀区分大小写、优先级还排反了）。这里直接
+    // 问真引擎：candidates=按真实顺序的全部命中规则；rule=完整触发管线（范围/
+    // 冷却）选中的那条（dry-run：不消耗冷却、不掷概率）；reply=渲染后的回复。
+    app.registerHandler("/api/replies/test",
+        [&cmdRouter, &replyManager](const drogon::HttpRequestPtr& req,
+                                    std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+            nlohmann::json out;
+            try {
+                auto body = nlohmann::json::parse(req->getBody());
+                const std::string text = body.value("text", std::string());
+                dice::Message msg;
+                msg.id = "reply-test";
+                msg.platform = body.value("platform", std::string("onebot_v11"));
+                msg.content = text; msg.rawContent = text; msg.displayContent = text;
+                msg.senderId = body.value("userId", std::string("10001"));
+                msg.senderName = body.value("nickname", std::string("\xe6\xb5\x8b\xe8\xaf\x95\xe5\x91\x98"));
+                std::string gid = body.value("groupId", std::string());
+                msg.type = gid.empty() ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
+                msg.targetId = gid.empty() ? msg.senderId : gid;
+
+                auto candidates = replyManager.matchMessage(text);
+                nlohmann::json cand = nlohmann::json::array();
+                for (auto& r : candidates)
+                    cand.push_back({{"id", r.id}, {"priority", r.priority},
+                                    {"matchType", dice::matchTypeToString(r.matchType)},
+                                    {"matchContent", r.matchContent},
+                                    {"prob", r.prob}, {"cooldownSec", r.cooldownSec}});
+                dice::ReplyCtx rctx{msg.platform, gid, msg.senderId};
+                auto pk = replyManager.pickReply(text, rctx, /*commit=*/false);
+                nlohmann::json skipped = nlohmann::json::array();
+                for (auto& s : pk.skipped) skipped.push_back({{"id", s.id}, {"reason", s.reason}});
+                std::string rendered;
+                if (pk.rule)
+                    rendered = cmdRouter.renderReply(msg, replyManager.pickResult(*pk.rule),
+                                                     pk.rule->matchContent, pk.rule->matchType);
+                else if (!pk.notice.empty())
+                    rendered = cmdRouter.renderReply(msg, pk.notice, "", dice::MatchType::kKeyword);
+                out = {{"code", 0}, {"data", {
+                    {"matched", pk.rule.has_value()},
+                    {"ruleId", pk.rule ? nlohmann::json(pk.rule->id) : nlohmann::json()},
+                    {"prob", pk.rule ? pk.rule->prob : 100},
+                    {"reply", rendered},
+                    {"notice", !pk.notice.empty()},
+                    {"noticeRuleId", pk.noticeRuleId},
+                    {"candidates", cand},
+                    {"skipped", skipped}
+                }}};
+            } catch (const std::exception& e) { out = {{"code", 1}, {"message", e.what()}}; }
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+            resp->setBody(out.dump());
+            cb(resp);
+        }, {drogon::Post});
+
     app.registerHandler("/api/test/message",
-        [&cmdRouter, &replyManager, &jsMod, &luaMod, &configMgr, &db, &makeAiTool](const drogon::HttpRequestPtr& req,
+        [&cmdRouter, &jsMod, &configMgr, &db, &makeAiTool, replyFallback](const drogon::HttpRequestPtr& req,
                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
             nlohmann::json out;
             try {
@@ -2150,39 +2220,8 @@ static int realMain(int argc, char* argv[]) {
                                     && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId);
                     reply = cmdRouter.handleMessage(msg, forced);
                     std::string replySrc = "builtin";   // 来源分类（同 live 管线）
-                    if (reply.empty() && (!disabled || forcedByAt) && !replyOff) {
-                        if (jsMod.ready()) {
-                            if (auto bd = cmdRouter.commandBody(msg.content); bd && !bd->empty()) {
-                                auto jr = jsMod.handle(msg.platform, msg.senderId,
-                                    msg.senderName.empty() ? msg.senderId : msg.senderName,
-                                    msg.targetId, msg.extra.value("card", std::string()), msg.type == dice::MessageType::kPrivate, *bd,
-                                    cmdRouter.jsPrivilegeLevel(msg), msg.atList);
-                                if (jr.matched && !jr.reply.empty()) { reply = jr.reply; replySrc = "plugin"; }
-                            }
-                        }
-                        if (reply.empty() && luaMod.ready()) {
-                            bool priv = msg.type == dice::MessageType::kPrivate;
-                            int trust = cmdRouter.jsPrivilegeLevel(msg) >= 70 ? 4 : 0;
-                            auto lr = luaMod.dispatch(msg.content, msg.senderId, priv ? "" : msg.targetId,
-                                msg.senderName.empty() ? msg.senderId : msg.senderName, msg.extra.value("card", std::string()), priv, trust, msg.platform);
-                            if (lr.matched && !lr.reply.empty()) { reply = lr.reply; replySrc = "plugin"; }
-                        }
-                        if (reply.empty()) {
-                            auto matches = replyManager.matchMessage(msg.content);
-                            if (!matches.empty()) {
-                                const auto& r = matches.front();
-                                reply = cmdRouter.renderReply(msg, replyManager.pickResult(r), r.matchContent, r.matchType);
-                                if (!reply.empty()) replySrc = "reply";
-                            }
-                        }
-                        if (reply.empty() && jsMod.ready()) {
-                            auto nc = jsMod.handleNonCommand(msg.platform, msg.senderId,
-                                msg.senderName.empty() ? msg.senderId : msg.senderName,
-                                msg.targetId, msg.extra.value("card", std::string()), msg.type == dice::MessageType::kPrivate, msg.content,
-                                cmdRouter.jsPrivilegeLevel(msg), msg.atList);
-                            if (nc.matched && !nc.reply.empty()) { reply = nc.reply; replySrc = "plugin"; }
-                        }
-                    }
+                    if (reply.empty() && (!disabled || forcedByAt) && !replyOff)
+                        reply = replyFallback(msg, replySrc);   // 与 live 完全同链（含因果规则）
                     // 智能化阶段A：测试台也走 AI 对话（无其它回复+触发时），方便骰主预览。
                     // 测试台不读 chat.db 上下文（用空上下文），仅验证触发+生成+发送。
                     if (reply.empty() && !disabled && (dice::aichat::enabled(configMgr) || dice::ainpc::enabled(configMgr))
@@ -2836,8 +2875,46 @@ static int realMain(int argc, char* argv[]) {
         app.getLoop()->runEvery(43200.0, friendCleanup);   // 之后每 12 小时
     }
 
-    // ── 调度循环 (#48 定时任务 / #47 不活跃自动退群)，每 30s 一跳 ──
-    app.getLoop()->runEvery(30.0, [&db, &cmdRouter, &i18n, &localeResolver, &configMgr]() {
+    // ── 旧「不活跃自动退群」配置 → 定时任务迁移 ─────────────────
+    // 以前是写死每天 04:00 的独立代码路径（config dice/inactive_group_line 天），
+    // 和「定时任务 condition=inactive>=N action=leave」重复且不可见。现在迁成
+    // 一条 targetId="*"（全部群）的普通任务，网页定时任务页可见可改可停；
+    // 迁移后把旧配置清零防止双跑（设置页该字段已移除）。
+    try {
+        int days = 0;
+        {
+            nlohmann::json all = configMgr.getAll();
+            if (all.contains("dice") && all["dice"].contains("inactive_group_line"))
+                days = all["dice"]["inactive_group_line"].get<int>();
+        }
+        if (days > 0) {
+            if (auto* st = db.getStorage()) {
+                const std::string sysName = "\xe4\xb8\x8d\xe6\xb4\xbb\xe8\xb7\x83\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe7\xbe\xa4";   // 不活跃自动退群
+                bool exists = false;
+                for (auto& tk : st->get_all<dice::ScheduledTaskRow>())
+                    if (tk.name == sysName) {
+                        auto up = tk; up.condition = "inactive>=" + std::to_string(days); up.enabled = 1;
+                        st->update(up); exists = true; break;
+                    }
+                if (!exists) {
+                    dice::ScheduledTaskRow tk;
+                    tk.name = sysName; tk.platform = ""; tk.targetType = "group"; tk.targetId = "*";
+                    tk.cronTime = "04:00"; tk.action = "leave";
+                    tk.condition = "inactive>=" + std::to_string(days);
+                    tk.content = ""; tk.enabled = 1;
+                    st->insert(tk);
+                }
+                configMgr.set<int>("dice/inactive_group_line", 0);
+                configMgr.save();
+                DICE_LOG_INFO("migrated inactive_group_line={} to scheduled task '*' leave", days);
+            }
+        }
+    } catch (const std::exception& e) {
+        DICE_LOG_ERROR("inactive_group_line migration failed: {}", e.what());
+    }
+
+    // ── 调度循环 (#48 定时任务，含迁移进来的不活跃自动退群)，每 30s 一跳 ──
+    app.getLoop()->runEvery(30.0, [&db, &cmdRouter]() {
         auto* st = db.getStorage(); if (!st) return;
         std::time_t now = std::time(nullptr); std::tm lt{};
 #if defined(_WIN32)
@@ -2850,48 +2927,99 @@ static int realMain(int argc, char* argv[]) {
         std::strftime(ymd, sizeof(ymd), "%Y-%m-%d", &lt);
         std::string curHM = hm, curYMD = ymd; int wday = lt.tm_wday;   // 0=周日
 
-        // 定时任务：到点且当天未触发则发送。
+        // 定时任务：时刻已过、当天未触发、且在 60 分钟补发窗口内 → 发送。
+        // 以前是 cronTime==curHM 的精确分钟匹配：事件循环卡顿/系统睡眠唤醒/DST
+        // 跳变（如 02:30 在夏令时被整段跳过）越过那一分钟就整天漏发。补发窗口
+        // 覆盖这些场景；停机超过窗口（如半天后才启动）不补发——早安消息深夜才
+        // 补发出来更糟——标记当日已处理并留日志。
         try {
+            auto hmMin = [](const std::string& s) -> int {   // "HH:MM" → 分钟数；畸形 → -1
+                if (s.size() != 5 || s[2] != ':') return -1;
+                for (int i : {0, 1, 3, 4}) if (s[i] < '0' || s[i] > '9') return -1;
+                return ((s[0]-'0')*10 + (s[1]-'0')) * 60 + (s[3]-'0')*10 + (s[4]-'0');
+            };
+            const int nowMin = hmMin(curHM);
+            // "YYYY-MM-DD HH:MM" → epoch 秒；畸形 → -1（interval 型 lastRun 用）。
+            auto parseYmdHm = [](const std::string& s) -> int64_t {
+                if (s.size() != 16 || s[4] != '-' || s[7] != '-' || s[10] != ' ' || s[13] != ':') return -1;
+                std::tm tm{};
+                try { tm.tm_year = std::stoi(s.substr(0, 4)) - 1900;
+                      tm.tm_mon  = std::stoi(s.substr(5, 2)) - 1;
+                      tm.tm_mday = std::stoi(s.substr(8, 2));
+                      tm.tm_hour = std::stoi(s.substr(11, 2));
+                      tm.tm_min  = std::stoi(s.substr(14, 2)); } catch (...) { return -1; }
+                tm.tm_isdst = -1;
+                std::time_t t = std::mktime(&tm);
+                return t <= 0 ? -1 : static_cast<int64_t>(t);
+            };
+            auto fire = [&](dice::ScheduledTaskRow& tk) {
+                // 执行（含 targetId="*" 全群展开，条件逐群评估；leave 内部已通知骰主）。
+                int done = cmdRouter.execScheduledAction(tk, /*force=*/false);
+                if (done <= 0) return;
+                DICE_LOG_INFO("scheduled task fired: {} -> {}:{} ({} target(s))",
+                              tk.name, tk.platform.empty() ? "any" : tk.platform, tk.targetId, done);
+                if (tk.action != "leave") {
+                    // B：定时任务触发通知骰主。
+                    cmdRouter.notifyMasters(dice::notice::kImportant,
+                        "\xe5\xae\x9a\xe6\x97\xb6\xe4\xbb\xbb\xe5\x8a\xa1\xe3\x80\x8c" + tk.name + "\xe3\x80\x8d\xe5\xb7\xb2\xe6\x89\xa7\xe8\xa1\x8c \xe2\x86\x92 " + tk.targetId, "schedule");
+                }
+            };
             for (auto& tk : st->get_all<dice::ScheduledTaskRow>()) {
-                if (!tk.enabled || tk.cronTime != curHM || tk.lastRun == curYMD) continue;
+                if (!tk.enabled) continue;
+
+                // ── interval：每 N 分钟（lastRun 存 "YYYY-MM-DD HH:MM"）──
+                if (tk.triggerType == "interval") {
+                    if (tk.intervalMin <= 0) continue;
+                    int64_t last = parseYmdHm(tk.lastRun);
+                    if (last < 0) {   // 无/坏时间戳 → 从现在起算一个间隔（防导入老数据立刻触发）
+                        tk.lastRun = curYMD + " " + curHM; st->update(tk); continue;
+                    }
+                    if (static_cast<int64_t>(now) - last < static_cast<int64_t>(tk.intervalMin) * 60) continue;
+                    tk.lastRun = curYMD + " " + curHM; st->update(tk);
+                    fire(tk);
+                    continue;
+                }
+
+                // ── once：onceDate 当天 cronTime 执行一次后自动停用 ──
+                if (tk.triggerType == "once") {
+                    if (!tk.lastRun.empty()) continue;   // 已执行/已标记
+                    if (tk.onceDate != curYMD) {
+                        if (!tk.onceDate.empty() && tk.onceDate < curYMD) {   // 停机跨过了整天
+                            tk.lastRun = curYMD + " " + curHM; tk.enabled = 0; st->update(tk);
+                            DICE_LOG_INFO("scheduled once task '{}' 已过期（{}），标记完成并停用", tk.name, tk.onceDate);
+                        }
+                        continue;
+                    }
+                    const int dueMin = hmMin(tk.cronTime);
+                    if (dueMin < 0 || nowMin < dueMin) continue;
+                    tk.lastRun = curYMD + " " + curHM; tk.enabled = 0; st->update(tk);   // 单次：跑完即停用
+                    if (nowMin - dueMin > 60) {
+                        DICE_LOG_INFO("scheduled once task '{}' 超过补发窗口（迟 {} 分钟），跳过并停用", tk.name, nowMin - dueMin);
+                        continue;
+                    }
+                    fire(tk);
+                    continue;
+                }
+
+                // ── daily（默认）：每日 cronTime + 星期过滤 ──
+                if (tk.lastRun == curYMD) continue;
+                const int dueMin = hmMin(tk.cronTime);
+                if (dueMin < 0 || nowMin < dueMin) continue;   // 畸形时刻 / 今天还没到点
                 if (!tk.days.empty()) {
                     bool ok = false; std::stringstream ss(tk.days); std::string d;
                     while (std::getline(ss, d, ',')) { try { if (!d.empty() && std::stoi(d) == wday) { ok = true; break; } } catch (...) {} }
                     if (!ok) continue;
                 }
                 tk.lastRun = curYMD; st->update(tk);   // 当天已评估（防 30s 重复触发），无论条件是否满足
-                // 因果条件（如 inactive>=7：本群 ≥7 天无指令）不满足 → 本次跳过。
-                if (!cmdRouter.evalScheduledCondition(tk.condition, tk.platform, tk.targetType, tk.targetId)) continue;
-                if (tk.action == "leave") {
-                    cmdRouter.leaveGroupWith(tk.platform, tk.targetId, tk.content);   // content=告别语（内部已通知骰主）
-                    DICE_LOG_INFO("scheduled leave: {} -> group {}", tk.name, tk.targetId);
-                } else {
-                    cmdRouter.sendScheduled(tk.platform, tk.targetType, tk.targetId, tk.content);
-                    DICE_LOG_INFO("scheduled task fired: {} -> {}:{}", tk.name, tk.platform, tk.targetId);
-                    // B：定时任务触发通知骰主。
-                    cmdRouter.notifyMasters(dice::notice::kImportant,
-                        "\xe5\xae\x9a\xe6\x97\xb6\xe4\xbb\xbb\xe5\x8a\xa1\xe3\x80\x8c" + tk.name + "\xe3\x80\x8d\xe5\xb7\xb2\xe6\x89\xa7\xe8\xa1\x8c \xe2\x86\x92 " + tk.targetId, "schedule");
+                if (nowMin - dueMin > 60) {
+                    DICE_LOG_INFO("scheduled task '{}' 超过补发窗口（迟 {} 分钟），今日跳过", tk.name, nowMin - dueMin);
+                    continue;
                 }
+                fire(tk);
             }
         } catch (...) {}
-
-        // 不活跃自动退群：每天 04:00 检查一次（config dice/inactive_group_line 天）。
-        if (curHM == "04:00") {
-            int days = 0;
-            try {
-                nlohmann::json all = configMgr.getAll();
-                if (all.contains("dice") && all["dice"].contains("inactive_group_line"))
-                    days = all["dice"]["inactive_group_line"].get<int>();
-            } catch (...) {}
-            if (days > 0) {
-                for (auto& [plat, gid] : cmdRouter.inactiveGroups(days)) {
-                    dice::Message lm; lm.platform = plat; lm.targetId = gid; lm.type = dice::MessageType::kGroup;
-                    cmdRouter.leaveGroupWith(plat, gid,
-                        i18n.tr(localeResolver.resolve(lm), "event.leave_unused", {{"day", std::to_string(days)}}));
-                    DICE_LOG_INFO("inactive auto-leave: group {} (> {} days)", gid, days);
-                }
-            }
-        }
+        // 注：原「每天 04:00 硬编码不活跃自动退群」已并入定时任务——启动时把
+        // config dice/inactive_group_line 迁移为一条 targetId="*" 的可管理任务。
     });
 
     // ── 心跳上报 + 云黑同步：启动后首跳 + 每 60s 驱动（服务内部按各自 interval 自行节流）──

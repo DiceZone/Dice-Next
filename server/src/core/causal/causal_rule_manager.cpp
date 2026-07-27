@@ -188,10 +188,11 @@ CausalRuleManager::CausalRuleManager(Database& db, ConfigManager& cfg,
 void CausalRuleManager::loadRules() {
     auto* st = db_.getStorage();
     if (!st) return;
-    rules_.clear();
+    // 在本地建好完整列表再整体换指针——正在遍历旧快照的消息线程不受影响。
+    auto next = std::make_shared<std::vector<CausalRule>>();
     try {
         auto rows = st->get_all<CausalRuleRow>();
-        rules_.reserve(rows.size());
+        next->reserve(rows.size());
         for (auto& row : rows) {
             CausalRule r;
             r.id = row.id;
@@ -263,12 +264,14 @@ void CausalRuleManager::loadRules() {
                 } catch (...) {}
             }
 
-            rules_.push_back(std::move(r));
+            next->push_back(std::move(r));
         }
         // Sort by priority descending
-        std::sort(rules_.begin(), rules_.end(),
+        std::sort(next->begin(), next->end(),
                   [](const CausalRule& a, const CausalRule& b) { return a.priority > b.priority; });
-        DICE_LOG_INFO("CausalRuleManager: loaded {} rules", rules_.size());
+        DICE_LOG_INFO("CausalRuleManager: loaded {} rules", next->size());
+        std::lock_guard<std::mutex> lock(rulesMutex_);
+        rules_ = std::move(next);
     } catch (const std::exception& e) {
         DICE_LOG_ERROR("CausalRuleManager: loadRules failed: {}", e.what());
     }
@@ -442,9 +445,10 @@ bool CausalRuleManager::toggleRule(int id) {
     }
 }
 
-const CausalRule* CausalRuleManager::getRuleById(int id) const {
-    for (auto& r : rules_) if (r.id == id) return &r;
-    return nullptr;
+std::optional<CausalRule> CausalRuleManager::getRuleById(int id) const {
+    auto snap = snapshot();
+    for (auto& r : *snap) if (r.id == id) return r;
+    return std::nullopt;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -457,7 +461,8 @@ CausalMatchResult CausalRuleManager::matchAndExecute(const std::string& msg,
                                                       const std::string& nick,
                                                       bool dryRun) {
     CausalMatchResult result;
-    for (auto& rule : rules_) {
+    auto snap = snapshot();
+    for (auto& rule : *snap) {
         if (!rule.enabled) continue;
         if (!checkScope(rule, userId, groupId)) continue;
 
