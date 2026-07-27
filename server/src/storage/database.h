@@ -32,6 +32,16 @@ struct ReplyRuleRow {
     std::string conditions;   // JSON array of {"type":"keyword|prefix|regex|search","content":"…"}
     std::string logic;        // "and" | "or" (how to combine conditions; default "or")
     std::string results;      // JSON array of reply strings (random pick on hit)
+    // 触发限制（原版 DiceTriggerLimit 的常用子集，以前只有因果规则才有）：
+    int prob = 100;           // 触发概率 0-100（100=必回）
+    int cooldownSec = 0;      // 冷却秒数（按 规则×群/私聊按人；0=无冷却）
+    std::string scopeMode;    // ""=不限 | "allow"=仅列表内群 | "deny"=排除列表内群
+    std::string scopeIds;     // 逗号分隔群号（配合 scopeMode）
+    std::string cooldownNotice;   // 冷却中回这句（原版 cd@echo；空=沉默）
+    int dayLimit = 0;             // 每日触发上限（按 规则×窗口；原版 today 默认 Chat 维度；0=不限）
+    std::string dayLimitNotice;   // 达到日限回这句（原版 daylimit_notice；空=沉默）
+    std::string scopeUsersMode;   // ""=不限 | "allow"=仅列表内用户 | "deny"=排除列表内用户
+    std::string scopeUsers;       // 逗号分隔用户ID（原版 user_id 白/黑名单）
 };
 
 /// Key-value dice configuration (extensible rule storage).
@@ -257,10 +267,13 @@ struct ScheduledTaskRow {
     std::string days;        // 星期过滤，逗号分隔 0-6(0=周日)；空=每天
     std::string content;     // 发送内容（支持 {self}{group}{date}{roll:..}{draw:..} 等变量/函数）
     int enabled = 1;
-    std::string lastRun;     // 上次触发日期 "YYYY-MM-DD"（防当天重复）
+    std::string lastRun;     // daily: 上次触发日期 "YYYY-MM-DD"；interval/once: "YYYY-MM-DD HH:MM"
     std::string createdAt;
     std::string action;      // 因果动作："send"(默认,发内容) | "leave"(退群,内容作告别语)
     std::string condition;   // 因果条件（空=无条件）。如 "inactive>=7"：本群 ≥7 天无指令才触发
+    std::string triggerType; // "daily"(默认,每日 cronTime+days) | "interval"(每 N 分钟) | "once"(onceDate+cronTime 执行一次后自动停用)
+    int intervalMin = 0;     // interval: 间隔分钟
+    std::string onceDate;    // once: 执行日期 "YYYY-MM-DD"
 };
 
 /// Causal rule row — a rule with conditions, actions, cooldown, and scope.
@@ -377,7 +390,16 @@ private:
             orm::make_column("updated_at", &ReplyRuleRow::updatedAt),
             orm::make_column("conditions", &ReplyRuleRow::conditions),
             orm::make_column("logic", &ReplyRuleRow::logic),
-            orm::make_column("results", &ReplyRuleRow::results)
+            orm::make_column("results", &ReplyRuleRow::results),
+            orm::make_column("prob", &ReplyRuleRow::prob, orm::default_value(100)),
+            orm::make_column("cooldown_sec", &ReplyRuleRow::cooldownSec, orm::default_value(0)),
+            orm::make_column("scope_mode", &ReplyRuleRow::scopeMode, orm::default_value("")),
+            orm::make_column("scope_ids", &ReplyRuleRow::scopeIds, orm::default_value("")),
+            orm::make_column("cooldown_notice", &ReplyRuleRow::cooldownNotice, orm::default_value("")),
+            orm::make_column("day_limit", &ReplyRuleRow::dayLimit, orm::default_value(0)),
+            orm::make_column("day_limit_notice", &ReplyRuleRow::dayLimitNotice, orm::default_value("")),
+            orm::make_column("scope_users_mode", &ReplyRuleRow::scopeUsersMode, orm::default_value("")),
+            orm::make_column("scope_users", &ReplyRuleRow::scopeUsers, orm::default_value(""))
         ),
         orm::make_table("dice_config",
             orm::make_column("id", &DiceConfigRow::id,
@@ -518,7 +540,10 @@ private:
             orm::make_column("last_run", &ScheduledTaskRow::lastRun),
             orm::make_column("created_at", &ScheduledTaskRow::createdAt),
             orm::make_column("action", &ScheduledTaskRow::action),
-            orm::make_column("cond", &ScheduledTaskRow::condition)
+            orm::make_column("cond", &ScheduledTaskRow::condition),
+            orm::make_column("trigger_type", &ScheduledTaskRow::triggerType, orm::default_value("")),
+            orm::make_column("interval_min", &ScheduledTaskRow::intervalMin, orm::default_value(0)),
+            orm::make_column("once_date", &ScheduledTaskRow::onceDate, orm::default_value(""))
         ),
         // Causal rule engine tables
         orm::make_table("causal_rules",

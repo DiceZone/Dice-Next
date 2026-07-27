@@ -23,8 +23,10 @@
 
 #include <nlohmann/json.hpp>
 #include <sqlite_orm/sqlite_orm.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <map>
 #include <set>
@@ -248,22 +250,51 @@ inline int importBlacklist(Database& db, const fs::path& confDir) {
 }
 
 // ── CustomMsgReply.json → reply_rules (via ReplyManager) ─────
+// 原版 DiceMsgReply::writeJson 的真实格式（见 Dice-Old DiceMsgReply.cpp）：
+//   match[]/prefix[]/search[]/regex[]  四种模式各一个词表（可并存，任一命中）
+//   mode+keyword                       更老的单模式写法（keyword 按 | 分行，Regex 除外）
+//   echo: Text|Deck|Lua|JS|Py          回复形式；answer: 字符串或数组（Deck）
+//   limit: "prob:30;cd:15;grp_id:!123&456;…"  触发限制串
+// 以前只认 match[]（完全匹配）：原版的前缀/包含/正则规则、mode 写法、触发限制
+// 全部被丢弃。Lua/JS/Py 代码型回复无法转成文本规则，跳过并留日志。
 inline int importReplies(ReplyManager& reply, const fs::path& confDir) {
     std::string body = readFile(confDir / "CustomMsgReply.json");
     if (body.empty()) return 0;
-    int imported = 0;
+    int imported = 0, skippedCode = 0;
     try {
         json obj = json::parse(body);
         if (!obj.is_object()) return 0;
         // Dedup against existing rules by first-condition content (idempotent re-import).
         std::set<std::string> existing;
-        for (auto& er : reply.listRules()) existing.insert(er.matchContent);
+        for (auto& er : *reply.listRules()) existing.insert(er.matchContent);
         for (auto& [key, r] : obj.items()) {
             if (!r.is_object()) continue;
+            // Lua/JS/Py 代码回复导不进文本规则 → 跳过（保留在原文件里，可手工移植为插件）。
+            std::string echo = r.value("echo", std::string("Text"));
+            if (echo == "Lua" || echo == "JS" || echo == "Py") { ++skippedCode; continue; }
             ReplyRule rule; rule.logic = "or"; rule.priority = 100; rule.enabled = true;
-            if (r.contains("match") && r["match"].is_array())
-                for (auto& m : r["match"]) if (m.is_string() && !m.get<std::string>().empty())
-                    rule.conditions.push_back({MatchType::kKeyword, m.get<std::string>()});
+            auto addWords = [&rule](const json& arr, MatchType t) {
+                if (!arr.is_array()) return;
+                for (auto& m : arr) if (m.is_string() && !m.get<std::string>().empty())
+                    rule.conditions.push_back({t, m.get<std::string>()});
+            };
+            if (r.contains("match"))  addWords(r["match"],  MatchType::kKeyword);
+            if (r.contains("prefix")) addWords(r["prefix"], MatchType::kPrefix);
+            if (r.contains("search")) addWords(r["search"], MatchType::kSearch);
+            if (r.contains("regex"))  addWords(r["regex"],  MatchType::kRegex);
+            // 更老的 mode+keyword 单模式写法（非 Regex 模式的 keyword 按 | 分多个词）。
+            if (rule.conditions.empty() && r.contains("mode")) {
+                std::string mode = r.value("mode", std::string("Match"));
+                MatchType t = mode == "Prefix" ? MatchType::kPrefix
+                            : mode == "Search" ? MatchType::kSearch
+                            : mode == "Regex"  ? MatchType::kRegex : MatchType::kKeyword;
+                std::string kw = r.value("keyword", key);
+                if (t == MatchType::kRegex) { if (!kw.empty()) rule.conditions.push_back({t, kw}); }
+                else {
+                    std::stringstream ss(kw); std::string w;
+                    while (std::getline(ss, w, '|')) if (!w.empty()) rule.conditions.push_back({t, w});
+                }
+            }
             if (rule.conditions.empty()) continue;
             if (existing.count(rule.conditions[0].content)) continue;   // already present
             // echo Deck = random-pick among answers (the answers ARE the deck);
@@ -274,9 +305,47 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir) {
                 else if (r["answer"].is_string() && !r["answer"].get<std::string>().empty()) rule.results.push_back(r["answer"].get<std::string>());
             }
             if (rule.results.empty()) continue;
+            // 触发限制串 → 概率/冷却(+提示语)/每日上限(+提示语)/群范围/用户范围。
+            if (r.contains("limit") && r["limit"].is_string()) {
+                std::stringstream ls(r["limit"].get<std::string>()); std::string seg;
+                // 拆 "15&@echo=提示" 形式：数字子项 → num，@echo= → notice。
+                auto parseCntEcho = [](const std::string& v, int& num, std::string& notice) {
+                    std::stringstream ss(v); std::string sub;
+                    while (std::getline(ss, sub, '&')) {
+                        if (sub.rfind("@echo=", 0) == 0) notice = sub.substr(6);
+                        else { try { num = (std::max)(0, std::stoi(sub)); } catch (...) {} }
+                    }
+                };
+                auto parseIdList = [](const std::string& v, std::string& mode, std::string& ids) {
+                    bool neg = !v.empty() && v[0] == '!';
+                    std::string list = neg ? v.substr(1) : v;
+                    for (auto& ch : list) if (ch == '&') ch = ',';   // 原版 & 分隔 → 逗号
+                    if (!list.empty()) { mode = neg ? "deny" : "allow"; ids = list; }
+                };
+                while (std::getline(ls, seg, ';')) {
+                    size_t colon = seg.find(':');
+                    if (colon == std::string::npos) continue;
+                    std::string k = seg.substr(0, colon), v = seg.substr(colon + 1);
+                    if (k == "prob") {
+                        try { rule.prob = (std::clamp)(std::stoi(v), 0, 100); } catch (...) {}
+                    } else if (k == "cd") {
+                        int n = 0; parseCntEcho(v, n, rule.cooldownNotice);
+                        rule.cooldownSec = n;
+                    } else if (k == "today") {
+                        int n = 0; parseCntEcho(v, n, rule.dayLimitNotice);
+                        rule.dayLimit = n;
+                    } else if (k == "grp_id") {
+                        parseIdList(v, rule.scopeMode, rule.scopeIds);
+                    } else if (k == "user_id") {
+                        parseIdList(v, rule.scopeUsersMode, rule.scopeUsers);
+                    }
+                }
+            }
             if (reply.addRule(rule) >= 0) { existing.insert(rule.conditions[0].content); ++imported; }
         }
     } catch (...) {}
+    if (skippedCode > 0)
+        DICE_LOG_INFO("importReplies: {} 条 Lua/JS/Py 代码型回复无法转为文本规则，已跳过", skippedCode);
     return imported;
 }
 

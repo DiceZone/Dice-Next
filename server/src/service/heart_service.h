@@ -72,7 +72,7 @@ public:
     int interval() const {
         int v = cfg_ ? cfg_->get<int>("dice/heart_interval", 240) : 240;
         if (v < 180) v = 180;
-        if (v > 600) v = 600;
+        if (v > 480) v = 480;   // 服务端 600s 无心跳判离线，上限留巡检余量防在线状态抖动
         return v;
     }
 
@@ -107,6 +107,12 @@ public:
     /// 返回 {HTTP 状态码, 响应体}（0 = curl 失败）。
     std::pair<int, std::string> testReport() {
         std::string desired = anyConnected() ? "online" : "offline";
+        // 从未上线过就别报 offline：否则服务端会用遗留 login_time 反复重算并虚增在线时长/会话数
+        if (desired == "offline") {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (lastStatus_ != "online")
+                return {200, std::string("{\"status\":\"skipped\",\"reason\":\"never online\"}")};
+        }
         return doReport(desired, true, 15);
     }
 
@@ -259,11 +265,21 @@ private:
     }
 
     /// 从 429 响应体里解析惩罚秒数（retry_after / penalty / seconds），拿不到默认 600。
+    /// FastAPI 会把 HTTPException 的 detail 包一层，故顶层与 detail 子对象都查。
     static long long parsePenaltySeconds(const std::string& resp) {
+        auto pick = [](const json& o) -> long long {
+            for (const char* k : {"retry_after", "penalty", "penalty_seconds", "seconds"})
+                if (o.contains(k) && o[k].is_number()) return (std::max)((long long)o[k].get<double>(), 1LL);
+            return 0;
+        };
         try {
             json j = json::parse(resp);
-            for (const char* k : {"retry_after", "penalty", "penalty_seconds", "seconds"})
-                if (j.contains(k) && j[k].is_number()) return (std::max)((long long)j[k].get<double>(), 1LL);
+            long long v = pick(j);
+            if (v) return v;
+            if (j.contains("detail") && j["detail"].is_object()) {
+                v = pick(j["detail"]);
+                if (v) return v;
+            }
         } catch (...) {}
         return 600;
     }

@@ -54,7 +54,16 @@ bool Database::open(const std::string& path) {
                     orm::make_column("updated_at", &ReplyRuleRow::updatedAt),
                     orm::make_column("conditions", &ReplyRuleRow::conditions),
                     orm::make_column("logic", &ReplyRuleRow::logic),
-                    orm::make_column("results", &ReplyRuleRow::results)
+                    orm::make_column("results", &ReplyRuleRow::results),
+                    orm::make_column("prob", &ReplyRuleRow::prob, orm::default_value(100)),
+                    orm::make_column("cooldown_sec", &ReplyRuleRow::cooldownSec, orm::default_value(0)),
+                    orm::make_column("scope_mode", &ReplyRuleRow::scopeMode, orm::default_value("")),
+                    orm::make_column("scope_ids", &ReplyRuleRow::scopeIds, orm::default_value("")),
+                    orm::make_column("cooldown_notice", &ReplyRuleRow::cooldownNotice, orm::default_value("")),
+                    orm::make_column("day_limit", &ReplyRuleRow::dayLimit, orm::default_value(0)),
+                    orm::make_column("day_limit_notice", &ReplyRuleRow::dayLimitNotice, orm::default_value("")),
+                    orm::make_column("scope_users_mode", &ReplyRuleRow::scopeUsersMode, orm::default_value("")),
+                    orm::make_column("scope_users", &ReplyRuleRow::scopeUsers, orm::default_value(""))
                 ),
                 // ── dice_config ──
                 orm::make_table("dice_config",
@@ -205,7 +214,10 @@ bool Database::open(const std::string& path) {
                     orm::make_column("last_run", &ScheduledTaskRow::lastRun),
                     orm::make_column("created_at", &ScheduledTaskRow::createdAt),
                     orm::make_column("action", &ScheduledTaskRow::action),
-                    orm::make_column("cond", &ScheduledTaskRow::condition)
+                    orm::make_column("cond", &ScheduledTaskRow::condition),
+                    orm::make_column("trigger_type", &ScheduledTaskRow::triggerType, orm::default_value("")),
+                    orm::make_column("interval_min", &ScheduledTaskRow::intervalMin, orm::default_value(0)),
+                    orm::make_column("once_date", &ScheduledTaskRow::onceDate, orm::default_value(""))
                 ),
                 // low-code causal rule engine
                 orm::make_table("causal_rules",

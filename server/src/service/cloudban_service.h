@@ -175,8 +175,10 @@ public:
         std::string serverTime;
         int mind = minDanger();
         int page = 1;
-        const int pageSize = 200;
+        const int pageSize = 500;      // 协议上限：尽量减少页数以避开服务端 IP 频控
+        const int maxPages = 200;      // 兜底：单轮最多 10 万条
         bool netOk = true;
+        bool drained = false;          // 是否真正取完（未取完不推进游标，否则尾部记录永久漏拉）
 
         while (true) {
             std::string u = base + "/api/v1/blacklist?page=" + std::to_string(page)
@@ -184,7 +186,16 @@ public:
             if (!cursor.empty()) u += "&since=" + urlEncode(cursor);
             int st = 0;
             std::string body = httpGetJson(u, 20, st);
-            if (st != 200) {
+            if (st == 429) {
+                // 撞频控：退避后重试同一页（最多两次），仍失败则本轮中止且不推进游标，下轮再来
+                bool recovered = false;
+                for (int retry = 0; retry < 2; ++retry) {
+                    std::this_thread::sleep_for(std::chrono::seconds(6));
+                    st = 0; body = httpGetJson(u, 20, st);
+                    if (st == 200) { recovered = true; break; }
+                }
+                if (!recovered) { netOk = false; r.error = "HTTP 429"; break; }
+            } else if (st != 200) {
                 netOk = false;
                 r.error = st == 0 ? "\xe7\xbd\x91\xe7\xbb\x9c\xe8\xaf\xb7\xe6\xb1\x82\xe5\xa4\xb1\xe8\xb4\xa5" : ("HTTP " + std::to_string(st));   // 网络请求失败
                 break;
@@ -199,8 +210,9 @@ public:
                     for (const auto& e : j["entries"]) applyEntry(e, mind, r);
                 }
             } catch (...) { netOk = false; r.error = "\xe5\x93\x8d\xe5\xba\x94\xe8\xa7\xa3\xe6\x9e\x90\xe5\xa4\xb1\xe8\xb4\xa5"; break; }   // 响应解析失败
-            if (entryCount < pageSize || page * pageSize >= total) break;
-            if (++page > 50) break;   // 兜底：单轮最多 50 页（1 万条）
+            if (entryCount < pageSize || page * pageSize >= total) { drained = true; break; }
+            if (++page > maxPages) break;   // 未取完但达上限：drained=false，不推进游标（下轮从当前 since 继续）
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));   // 页间轻节流，进一步避开频控
         }
 
         {
@@ -211,7 +223,8 @@ public:
                 r.ok = true;
                 lastSyncIso_ = nowUtcIso();
                 lastError_.clear();
-                if (!serverTime.empty()) {
+                // 仅在真正取完整轮时推进游标：否则中途截断会让未取到的尾部记录被永久跳过
+                if (drained && !serverTime.empty()) {
                     try { cfg_->set<std::string>("dice/cloudban_cursor", serverTime); cfg_->save(); } catch (...) {}
                 }
             } else {

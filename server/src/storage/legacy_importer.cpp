@@ -228,7 +228,7 @@ int LegacyImporter::importReplies(const std::string& file) {
                     else                      row.matchType = 0;
                 }
 
-                if (entry.contains("keyword") || entry.contains("keyword")) {
+                if (entry.contains("keyword")) {
                     row.matchContent = entry.value("keyword",
                         entry.value("match", entry.value("pattern", "")));
                 } else if (entry.contains("match")) {

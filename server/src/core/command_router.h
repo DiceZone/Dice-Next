@@ -7955,47 +7955,59 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         if (gid.empty()) return;
         setGroupSettingFor(platform, gid, "lastActiveAt", todayYMD());
     }
+    /// "YYYY-MM-DD" → 距今整天数（正午锚点避开 DST 边界）；无法解析 → -1。
+    /// inactiveGroups / groupInactiveDays 共用（此前两处各抄一份解析逻辑）。
+    static int daysSinceYmd(const std::string& ymd) {
+        if (ymd.size() < 10) return -1;
+        std::tm tm{};
+        try { tm.tm_year = std::stoi(ymd.substr(0, 4)) - 1900;
+              tm.tm_mon  = std::stoi(ymd.substr(5, 2)) - 1;
+              tm.tm_mday = std::stoi(ymd.substr(8, 2)); } catch (...) { return -1; }
+        tm.tm_hour = 12;
+        std::time_t then = std::mktime(&tm);
+        if (then <= 0) return -1;
+        int d = static_cast<int>((std::time(nullptr) - then) / 86400.0);
+        return d < 0 ? 0 : d;
+    }
     /// Groups whose last activity is older than @p days (0 → none). For #47.
     std::vector<std::pair<std::string, std::string>> inactiveGroups(int days) const {
         std::vector<std::pair<std::string, std::string>> out;
         if (days <= 0) return out;
         auto* st = db_.getStorage(); if (!st) return out;
-        std::time_t now = std::time(nullptr);
         try {
             namespace orm = sqlite_orm;
             for (auto& r : st->get_all<GroupSettingRow>(
                     orm::where(orm::c(&GroupSettingRow::key) == std::string("lastActiveAt")))) {
-                if (r.value.size() < 10) continue;
-                std::tm tm{};
-                try {
-                    tm.tm_year = std::stoi(r.value.substr(0, 4)) - 1900;
-                    tm.tm_mon  = std::stoi(r.value.substr(5, 2)) - 1;
-                    tm.tm_mday = std::stoi(r.value.substr(8, 2));
-                } catch (...) { continue; }
-                tm.tm_hour = 12;
-                std::time_t then = std::mktime(&tm);
-                if (then <= 0) continue;
-                if ((now - then) / 86400.0 > days) out.emplace_back(r.platform, r.groupId);
+                int d = daysSinceYmd(r.value);
+                if (d >= 0 && d >= days) out.emplace_back(r.platform, r.groupId);
             }
         } catch (...) {}
         return out;
     }
     /// 距某群上次活跃的天数（按 lastActiveAt）。无记录 → 一个很大的数（视为长期不活跃）。
     int groupInactiveDays(const std::string& platform, const std::string& gid) const {
-        std::string last = groupSettingValue(platform, gid, "lastActiveAt");
-        if (last.size() < 10) return 100000;
-        std::tm tm{};
-        try { tm.tm_year = std::stoi(last.substr(0, 4)) - 1900;
-              tm.tm_mon = std::stoi(last.substr(5, 2)) - 1;
-              tm.tm_mday = std::stoi(last.substr(8, 2)); } catch (...) { return 100000; }
-        tm.tm_hour = 12;
-        std::time_t then = std::mktime(&tm);
-        if (then <= 0) return 100000;
-        int d = static_cast<int>((std::time(nullptr) - then) / 86400.0);
-        return d < 0 ? 0 : d;
+        int d = daysSinceYmd(groupSettingValue(platform, gid, "lastActiveAt"));
+        return d < 0 ? 100000 : d;
+    }
+    /// 校验定时任务条件串。合法：空（无条件）或 inactive<op>N（op ∈ >= > <= < == =）。
+    /// 网页保存时先过这关，别让拼错的条件（如 inactve>=7）静默变成「无条件天天执行」。
+    static bool isValidScheduledCondition(const std::string& cond) {
+        std::string c = trim(cond);
+        if (c.empty()) return true;
+        std::string lc = toLower(c);
+        if (lc.rfind("inactive", 0) != 0) return false;
+        std::string rest = trim(lc.substr(8));
+        std::string op; size_t i = 0;
+        while (i < rest.size() && (rest[i] == '>' || rest[i] == '<' || rest[i] == '=')) op += rest[i++];
+        if (op != ">=" && op != ">" && op != "<=" && op != "<" && op != "==" && op != "=") return false;
+        std::string num = trim(rest.substr(i));
+        if (num.empty()) return false;
+        for (char ch : num) if (ch < '0' || ch > '9') return false;
+        return true;
     }
     /// 因果条件求值（定时任务）。空 → 恒真。支持：
-    ///   inactive>=N / inactive>N / inactive<N（本群 N 天无指令）；其它 → 暂当真（向前兼容）。
+    ///   inactive>=N / inactive>N / inactive<N（本群 N 天无指令）。
+    /// 无法识别的旧数据仍放行（新数据已被 isValidScheduledCondition 挡在保存时），但留日志。
     bool evalScheduledCondition(const std::string& cond, const std::string& platform,
                                 const std::string& type, const std::string& targetId) const {
         std::string c = trim(cond);
@@ -8016,28 +8028,88 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
             if (op == "==" || op == "=") return days == n;
             return days >= n;   // 默认 >=
         }
-        return true;   // 未知条件 → 不阻塞（保守放行）
+        DICE_LOG_INFO("scheduled condition '{}' 无法识别，按无条件放行（建议在网页重新保存该任务）", cond);
+        return true;
     }
 
+    /// 按平台挑已连接适配器。多平台在线时严禁「拿第一个适配器」发别的平台的目标
+    /// （群号跨平台没有意义，会把消息发进错误平台的同号会话）。
+    /// platform 为空（老数据）才退回任意已连接适配器。
+    AdapterPtr adapterForPlatform(const std::string& platform) const {
+        AdapterPtr any;
+        for (auto& x : adapters_.allAdapters()) {
+            if (!x->isConnected()) continue;
+            if (!platform.empty() && x->platform() == platform) return x;
+            if (!any) any = x;
+        }
+        return platform.empty() ? any : nullptr;
+    }
     /// Send one scheduled message to a target (定时任务). type: "group"|"private".
     /// 内容走 renderReply：支持 {self}{group}{date}{time}{roll:..}{draw:..}{a|b|c} 等变量/函数。
-    void sendScheduled(const std::string& platform, const std::string& type,
+    /// 返回是否真的发出（false=目标平台无已连接适配器/目标为空）。
+    bool sendScheduled(const std::string& platform, const std::string& type,
                        const std::string& targetId, const std::string& content) {
-        auto a = adapters_.getAdapter(std::string());
-        if (!a) for (auto& x : adapters_.allAdapters()) if (x->isConnected()) { a = x; break; }
-        if (!a || targetId.empty()) return;
-        Message lm; lm.platform = platform; lm.targetId = targetId;
+        auto a = adapterForPlatform(platform);
+        if (!a || targetId.empty()) {
+            DICE_LOG_INFO("scheduled send skipped: platform '{}' 无已连接适配器（target {}）", platform, targetId);
+            return false;
+        }
+        Message lm; lm.platform = a->platform(); lm.targetId = targetId;
         lm.type = (type == "private") ? MessageType::kPrivate : MessageType::kGroup;
         std::string text = applySelf(lm, renderReply(lm, content, "", MatchType::kKeyword));
         if (type == "private") a->sendPrivateMessage(targetId, text);
         else a->sendGroupMessageCQ(targetId, text);
+        return true;
     }
+    /// 所有已知群 [(platform, groupId)]（有 enabled 配置行、未退群、未删除记录）。
+    /// 定时任务 targetId="*" 的展开来源。
+    std::vector<std::pair<std::string, std::string>> allKnownGroups() const {
+        std::vector<std::pair<std::string, std::string>> out;
+        auto* st = db_.getStorage(); if (!st) return out;
+        try {
+            std::set<std::pair<std::string, std::string>> skip;
+            std::vector<std::pair<std::string, std::string>> all;
+            std::set<std::pair<std::string, std::string>> seen;
+            for (auto& r : st->get_all<GroupSettingRow>()) {
+                auto key = std::make_pair(r.platform, r.groupId);
+                if (r.key == "enabled" && seen.insert(key).second) all.push_back(key);
+                if ((r.key == "left" || r.key == "__removed") && r.value == "1") skip.insert(key);
+            }
+            for (auto& k : all) if (!skip.count(k)) out.push_back(k);
+        } catch (...) {}
+        return out;
+    }
+
+    /// 执行一条定时任务的动作（含 targetId="*" 的全群展开）。返回实际执行的目标数。
+    /// @p force 单目标任务无视因果条件直接执行（网页「立即执行」）；
+    ///          "*" 任务任何时候都尊重条件——强制对所有群退群等于自毁，不提供。
+    int execScheduledAction(const ScheduledTaskRow& tk, bool force) {
+        const std::string action = tk.action.empty() ? "send" : tk.action;
+        if (tk.targetId == "*" && tk.targetType != "private") {
+            int done = 0;
+            for (auto& [plat, gid] : allKnownGroups()) {
+                if (!tk.platform.empty() && plat != tk.platform) continue;
+                if (!evalScheduledCondition(tk.condition, plat, "group", gid)) continue;
+                if (action == "leave") { if (leaveGroupWith(plat, gid, tk.content)) ++done; }
+                else if (groupSettingValue(plat, gid, "enabled") != "0"
+                         && sendScheduled(plat, "group", gid, tk.content)) ++done;
+            }
+            return done;
+        }
+        if (!force && !evalScheduledCondition(tk.condition, tk.platform, tk.targetType, tk.targetId)) return 0;
+        if (action == "leave") return leaveGroupWith(tk.platform, tk.targetId, tk.content) ? 1 : 0;
+        return sendScheduled(tk.platform, tk.targetType, tk.targetId, tk.content) ? 1 : 0;
+    }
+
     /// Leave a group with the given (already-rendered) reason. For #47.
-    void leaveGroupWith(const std::string& platform, const std::string& gid, const std::string& reason) {
-        auto a = adapters_.getAdapter(std::string());
-        if (!a) for (auto& x : adapters_.allAdapters()) if (x->isConnected()) { a = x; break; }
-        if (!a || gid.empty()) return;
-        Message lm; lm.platform = platform; lm.targetId = gid; lm.type = MessageType::kGroup;
+    /// 返回是否执行（false=目标平台无已连接适配器/群号为空）。
+    bool leaveGroupWith(const std::string& platform, const std::string& gid, const std::string& reason) {
+        auto a = adapterForPlatform(platform);
+        if (!a || gid.empty()) {
+            DICE_LOG_INFO("scheduled leave skipped: platform '{}' 无已连接适配器（group {}）", platform, gid);
+            return false;
+        }
+        Message lm; lm.platform = a->platform(); lm.targetId = gid; lm.type = MessageType::kGroup;
         if (!reason.empty()) a->sendGroupMessage(gid, applySelf(lm, reason));
         a->leaveGroup(gid);
         // B：退群通知骰主（定时任务退群/不活跃自动退群/网页退群等都走这里）。
@@ -8045,6 +8117,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
             "\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe7\xbe\xa4 " + gid
                 + (reason.empty() ? std::string() : ("\xef\xbc\x88" + reason + "\xef\xbc\x89")),
             platform, gid, "leave");
+        return true;
     }
 
 private:

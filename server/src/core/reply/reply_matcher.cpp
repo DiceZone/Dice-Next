@@ -81,19 +81,50 @@ bool ReplyMatcher::matchPrefix(const std::string& input,
     );
 }
 
-bool ReplyMatcher::matchRegex(const std::string& input,
-                               const std::string& pattern) const {
+bool ReplyMatcher::validateRegex(const std::string& pattern, std::string* err) {
+    if (pattern.empty()) { if (err) *err = "empty pattern"; return false; }
+    if (pattern.size() > kMaxRegexLen) {
+        if (err) *err = "pattern too long (max " + std::to_string(kMaxRegexLen) + " bytes)";
+        return false;
+    }
     try {
         std::regex re(pattern, std::regex::ECMAScript | std::regex::icase);
+        (void)re;
+        return true;
+    } catch (const std::regex_error& e) {
+        if (err) *err = e.what();
+        return false;
+    }
+}
+
+bool ReplyMatcher::matchRegex(const std::string& input,
+                               const std::string& pattern) const {
+    if (pattern.size() > kMaxRegexLen) return false;   // 对齐原版 400 字上限（防 ReDoS）
+    std::shared_ptr<const std::regex> re;
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex_);
+        auto it = regexCache_.find(pattern);
+        if (it != regexCache_.end()) {
+            re = it->second;                            // 命中缓存（nullptr=已知坏正则）
+        } else {
+            try {
+                re = std::make_shared<const std::regex>(
+                    pattern, std::regex::ECMAScript | std::regex::icase);
+            } catch (const std::regex_error& e) {
+                DICE_LOG_WARN("ReplyMatcher: invalid regex pattern '{}': {}", pattern, e.what());
+            }
+            if (regexCache_.size() >= 256) regexCache_.clear();   // 规则量级远小于此，防御性上限
+            regexCache_.emplace(pattern, re);
+        }
+    }
+    if (!re) return false;
+    try {
         // Anchor at the START of the message: "测试(.*)" should match "测试一些功能"
         // but NOT "在测试一些功能". match_continuous requires the match to begin at
         // the first character (it still allows a partial-length match, so capture
         // groups work). Use the kSearch type for "appears anywhere" behavior.
-        return std::regex_search(input, re, std::regex_constants::match_continuous);
-    } catch (const std::regex_error& e) {
-        DICE_LOG_WARN("ReplyMatcher: invalid regex pattern '{}': {}", pattern, e.what());
-        return false;
-    }
+        return std::regex_search(input, *re, std::regex_constants::match_continuous);
+    } catch (...) { return false; }
 }
 
 bool ReplyMatcher::matchSearch(const std::string& input,

@@ -116,7 +116,35 @@ static ReplyRule replyRuleFromJson(const J& j) {
     rule.matchType = rule.conditions[0].type;
     rule.matchContent = rule.conditions[0].content;
     rule.replyContent = rule.results[0];
+    // 触发限制（原版 DiceTriggerLimit 常用子集）。
+    rule.prob        = (std::clamp)(j.value("prob", 100), 0, 100);
+    rule.cooldownSec = (std::max)(0, j.value("cooldownSec", 0));
+    rule.scopeMode   = j.value("scopeMode", std::string());
+    if (rule.scopeMode != "allow" && rule.scopeMode != "deny") rule.scopeMode.clear();
+    rule.scopeIds    = j.value("scopeIds", std::string());
+    rule.cooldownNotice = j.value("cooldownNotice", std::string());
+    rule.dayLimit       = (std::max)(0, j.value("dayLimit", 0));
+    rule.dayLimitNotice = j.value("dayLimitNotice", std::string());
+    rule.scopeUsersMode = j.value("scopeUsersMode", std::string());
+    if (rule.scopeUsersMode != "allow" && rule.scopeUsersMode != "deny") rule.scopeUsersMode.clear();
+    rule.scopeUsers     = j.value("scopeUsers", std::string());
     return rule;
+}
+
+// 保存前校验规则（返回空串=通过）。正则写错以前会静默存库，变成永不命中的死规则。
+static std::string replyRuleValidate(const ReplyRule& rule) {
+    for (const auto& c : rule.conditions) {
+        if (c.type == MatchType::kRegex) {
+            std::string err;
+            if (!ReplyMatcher::validateRegex(c.content, &err))
+                return "invalid regex '" + c.content + "': " + err;
+        }
+    }
+    bool hasResult = false;
+    for (const auto& r : rule.results) if (!r.empty()) { hasResult = true; break; }
+    if (!hasResult) return "reply content required";
+    if (rule.conditions.empty() || rule.conditions[0].content.empty()) return "match content required";
+    return {};
 }
 
 static J adapterToJson(const AdapterRow& a) {
@@ -191,6 +219,15 @@ static J replyToJson(const ReplyRuleRow& r) {
         {"results", results},
         {"priority", r.priority},
         {"enabled", r.enabled},
+        {"prob", r.prob},
+        {"cooldownSec", r.cooldownSec},
+        {"scopeMode", r.scopeMode},
+        {"scopeIds", r.scopeIds},
+        {"cooldownNotice", r.cooldownNotice},
+        {"dayLimit", r.dayLimit},
+        {"dayLimitNotice", r.dayLimitNotice},
+        {"scopeUsersMode", r.scopeUsersMode},
+        {"scopeUsers", r.scopeUsers},
         {"createdAt", r.createdAt.empty() ? "2026-06-14T00:00:00.000Z" : r.createdAt},
         {"updatedAt", r.updatedAt.empty() ? "2026-06-14T00:00:00.000Z" : r.updatedAt}
     };
@@ -1991,7 +2028,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (j.contains("interval") && j["interval"].is_number()) {
                     int v = j["interval"].get<int>();
                     if (v < 180) v = 180;
-                    if (v > 600) v = 600;
+                    if (v > 480) v = 480;   // 服务端 600s 判离线，留巡检余量避免在线状态抖动
                     cfg.set<int>("dice/heart_interval", v);
                 }
                 cfg.save();
@@ -2034,9 +2071,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 auto j = J::parse(req->body());
                 if (j.contains("enabled") && j["enabled"].is_boolean())
                     cfg.set<bool>("dice/cloudban_enabled", j["enabled"].get<bool>());
+                // 换服务器或调低危险门槛都会让旧的增量游标失效（新站/低危记录 updated_at 早于游标而漏拉）
+                // → 这两种情况清空游标，下轮触发一次全量重拉。
+                bool resetCursor = false;
                 if (j.contains("url")) {
                     std::string u = j["url"].is_string() ? j["url"].get<std::string>() : std::string();
                     if (u.empty()) u = dice::cloudban::kOfficialCloudbanUrl;   // 空串=恢复官方默认
+                    if (u != cfg.get<std::string>("dice/cloudban_url", std::string(dice::cloudban::kOfficialCloudbanUrl)))
+                        resetCursor = true;
                     cfg.set<std::string>("dice/cloudban_url", u);
                 }
                 if (j.contains("token") && j["token"].is_string()) {
@@ -2049,6 +2091,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     int v = j["min_danger"].get<int>();
                     if (v < 1) v = 1;
                     if (v > 3) v = 3;
+                    if (v < cfg.get<int>("dice/cloudban_min_danger", 2)) resetCursor = true;   // 降门槛需重拉
                     cfg.set<int>("dice/cloudban_min_danger", v);
                 }
                 if (j.contains("sync_interval") && j["sync_interval"].is_number()) {
@@ -2056,14 +2099,16 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     if (v < 600) v = 600;
                     cfg.set<int>("dice/cloudban_sync_interval", v);
                 }
+                if (resetCursor) cfg.set<std::string>("dice/cloudban_cursor", std::string());
                 cfg.save();
             }
-            std::string tok = cs.token();
+            std::string tok = cs.token();   // 实际生效 token（可能回落 heart_token），尾号据此取
             J st = cs.lastState();
             jsonReply(ok(J{
                 {"enabled", cfg.get<bool>("dice/cloudban_enabled", false)},
                 {"url", cs.url()},
                 {"token_set", !tok.empty()},
+                {"token_tail", tok.size() > 4 ? tok.substr(tok.size() - 4) : std::string()},
                 {"share", cfg.get<bool>("dice/cloudban_share", true)},
                 {"min_danger", cs.minDanger()},
                 {"sync_interval", cs.syncInterval()},
@@ -2494,7 +2539,60 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                  {"targetType", r.targetType}, {"targetId", r.targetId}, {"cronTime", r.cronTime},
                  {"days", r.days}, {"content", r.content}, {"enabled", r.enabled != 0},
                  {"lastRun", r.lastRun},
-                 {"action", r.action.empty() ? "send" : r.action}, {"condition", r.condition}};
+                 {"action", r.action.empty() ? "send" : r.action}, {"condition", r.condition},
+                 {"triggerType", r.triggerType.empty() ? "daily" : r.triggerType},
+                 {"intervalMin", r.intervalMin}, {"onceDate", r.onceDate}};
+    };
+    // 保存前校验（拼错的条件/畸形时刻以前会静默存库，跑起来才出怪行为）。
+    // 返回空串=通过，否则为错误消息。校验规则与 CommandRouter::evalScheduledCondition 对齐。
+    static auto schedValidate = [](const ScheduledTaskRow& r) -> std::string {
+        auto validHM = [](const std::string& s) {
+            if (s.size() != 5 || s[2] != ':') return false;
+            for (int i : {0, 1, 3, 4}) if (s[i] < '0' || s[i] > '9') return false;
+            int h = (s[0]-'0')*10 + (s[1]-'0'), m = (s[3]-'0')*10 + (s[4]-'0');
+            return h < 24 && m < 60;
+        };
+        auto validYMD = [](const std::string& s) {
+            if (s.size() != 10 || s[4] != '-' || s[7] != '-') return false;
+            for (int i : {0,1,2,3,5,6,8,9}) if (s[i] < '0' || s[i] > '9') return false;
+            int mo = (s[5]-'0')*10 + (s[6]-'0'), dd = (s[8]-'0')*10 + (s[9]-'0');
+            return mo >= 1 && mo <= 12 && dd >= 1 && dd <= 31;
+        };
+        const std::string ttype = r.triggerType.empty() ? "daily" : r.triggerType;
+        if (ttype != "daily" && ttype != "interval" && ttype != "once")
+            return "triggerType must be daily|interval|once";
+        if (r.targetId.empty()) return "targetId required";
+        if (ttype == "interval") {
+            if (r.intervalMin < 1 || r.intervalMin > 10080) return "intervalMin must be 1-10080";
+        } else {
+            if (!validHM(r.cronTime)) return "cronTime must be HH:MM";
+        }
+        if (ttype == "once" && !validYMD(r.onceDate)) return "onceDate must be YYYY-MM-DD";
+        if (r.targetType != "group" && r.targetType != "private") return "targetType must be group|private";
+        if (r.targetId == "*" && r.targetType != "group") return "targetId=* (all groups) requires targetType=group";
+        if (!r.action.empty() && r.action != "send" && r.action != "leave") return "action must be send|leave";
+        if (r.action == "leave" && r.targetType != "group") return "action=leave requires a group target";
+        if (r.action != "leave" && r.content.empty()) return "content required";
+        if (!CommandRouter::isValidScheduledCondition(r.condition))
+            return "condition must be empty or inactive>=N (ops: >= > <= < ==)";
+        std::stringstream ss(r.days); std::string d;
+        while (std::getline(ss, d, ',')) {
+            if (d.empty()) continue;
+            if (d.size() != 1 || d[0] < '0' || d[0] > '6') return "days must be comma-separated 0-6";
+        }
+        return {};
+    };
+    // 当前本地 "HH:MM" / "YYYY-MM-DD"（lastRun 播种用）。
+    static auto schedNow = [](std::string& hm, std::string& ymd) {
+        std::time_t now = std::time(nullptr); std::tm lt{};
+#if defined(_WIN32)
+        localtime_s(&lt, &now);
+#else
+        lt = *std::localtime(&now);
+#endif
+        char a[8], b[16];
+        std::strftime(a, sizeof(a), "%H:%M", &lt); std::strftime(b, sizeof(b), "%Y-%m-%d", &lt);
+        hm = a; ymd = b;
     };
     app.registerHandler("/api/schedules", [st, schedToJson](Req req, CB&& cb) {
         try {
@@ -2515,7 +2613,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 r.enabled = j.value("enabled", true) ? 1 : 0;
                 r.action = j.value("action", std::string("send"));
                 r.condition = j.value("condition", std::string());
+                r.triggerType = j.value("triggerType", std::string("daily"));
+                if (r.triggerType == "daily") r.triggerType = "";   // 默认类型存空，兼容旧行
+                r.intervalMin = j.value("intervalMin", 0);
+                r.onceDate = j.value("onceDate", std::string());
                 r.lastRun = ""; r.createdAt = "";
+                if (auto err = schedValidate(r); !err.empty()) { jsonReply(fail(err), std::move(cb)); return; }
+                // lastRun 播种：daily 时刻已过 → 从明天开始（补发窗口会把「刚建的
+                // 09:00 任务」在 09:30 立刻触发，吓人）；interval → 从现在起算一个
+                // 间隔后首发；once → 留空等 onceDate 到点。
+                std::string hm, ymd; schedNow(hm, ymd);
+                if (r.enabled && r.triggerType.empty() && r.cronTime <= hm) r.lastRun = ymd;
+                if (r.triggerType == "interval") r.lastRun = ymd + " " + hm;
                 int id = st->insert(r);
                 jsonReply(ok(J{{"id", id}}), std::move(cb));
             }
@@ -2523,13 +2632,19 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Get, drogon::Post});
     app.registerHandler("/api/schedules/{1}", [st](Req req, CB&& cb, const std::string& sid) {
         try {
-            int id = std::stoi(sid);
+            int id = 0;
+            try { id = std::stoi(sid); } catch (...) { jsonReply(fail("bad id"), std::move(cb)); return; }
             if (req->method() == drogon::Delete) {
                 st->remove<ScheduledTaskRow>(id);
                 jsonReply(ok(), std::move(cb));
             } else {
                 auto j = J::parse(req->body());
-                auto r = st->get<ScheduledTaskRow>(id);
+                auto rp = st->get_pointer<ScheduledTaskRow>(id);
+                if (!rp) { jsonReply(fail("task not found"), std::move(cb)); return; }
+                auto r = *rp;
+                const std::string oldCron = r.cronTime; const int oldEnabled = r.enabled;
+                const std::string oldType = r.triggerType; const int oldInterval = r.intervalMin;
+                const std::string oldOnce = r.onceDate;
                 if (j.contains("name")) r.name = j["name"].get<std::string>();
                 if (j.contains("platform")) r.platform = j["platform"].get<std::string>();
                 if (j.contains("targetType")) r.targetType = j["targetType"].get<std::string>();
@@ -2540,6 +2655,25 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (j.contains("enabled")) r.enabled = j["enabled"].get<bool>() ? 1 : 0;
                 if (j.contains("action")) r.action = j["action"].get<std::string>();
                 if (j.contains("condition")) r.condition = j["condition"].get<std::string>();
+                if (j.contains("triggerType")) {
+                    r.triggerType = j["triggerType"].get<std::string>();
+                    if (r.triggerType == "daily") r.triggerType = "";
+                }
+                if (j.contains("intervalMin")) r.intervalMin = j["intervalMin"].get<int>();
+                if (j.contains("onceDate")) r.onceDate = j["onceDate"].get<std::string>();
+                if (auto err = schedValidate(r); !err.empty()) { jsonReply(fail(err), std::move(cb)); return; }
+                // 触发定义变了（类型/时刻/间隔/日期）或重新启用 → 重新播种 lastRun：
+                //   daily    时刻已过今天 → 明天开始；没过 → 今天照常触发
+                //   interval 从现在起算一个间隔
+                //   once     清空重新武装（改到过去的日期会在下个 tick 标记完成）
+                const bool trigChanged = r.cronTime != oldCron || r.triggerType != oldType
+                    || r.intervalMin != oldInterval || r.onceDate != oldOnce;
+                if (trigChanged || (r.enabled && !oldEnabled)) {
+                    std::string hm, ymd; schedNow(hm, ymd);
+                    if (r.triggerType == "interval")   r.lastRun = ymd + " " + hm;
+                    else if (r.triggerType == "once")  r.lastRun = "";
+                    else                               r.lastRun = (r.cronTime <= hm) ? ymd : std::string();
+                }
                 st->update(r);
                 jsonReply(ok(), std::move(cb));
             }
@@ -2572,6 +2706,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             } else if (req->method() == drogon::Post) {
                 auto j = J::parse(req->body());
                 ReplyRule rule = replyRuleFromJson(j);
+                if (auto err = replyRuleValidate(rule); !err.empty()) { jsonReply(fail(err), std::move(cb)); return; }
                 int id = replyMgr.addRule(rule);
                 if (id < 0) { jsonReply(fail("add failed"), std::move(cb)); return; }
                 auto row = st->get<ReplyRuleRow>(id);
@@ -2587,16 +2722,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (req->method() == drogon::Put || req->method() == drogon::Patch) {
                 auto j = J::parse(req->body());
                 auto existing = st->get<ReplyRuleRow>(rid);   // for fields not in the body
-                // Merge body over current values, then rebuild the rule.
-                if (!j.contains("matchContent")) j["matchContent"] = existing.matchContent;
-                if (!j.contains("replyContent")) j["replyContent"] = existing.replyContent;
-                if (!j.contains("matchType")) {
-                    const char* modes[] = {"keyword","prefix","regex","search"};
-                    j["matchType"] = modes[static_cast<size_t>(existing.matchType) % 4];
-                }
-                if (!j.contains("priority")) j["priority"] = existing.priority;
-                if (!j.contains("enabled")) j["enabled"] = existing.enabled;
-                ReplyRule rule = replyRuleFromJson(j);
+                // 以现值（含 conditions/results/触发限制）打底，body 覆盖其上再重建。
+                // 以前只回填 matchContent 等五个旧标量：网页开关一下（PUT {enabled}）
+                // 就把多条件/多回复规则静默塌成单条件，触发限制也被重置。
+                J base = replyToJson(existing);
+                for (auto& [k, v] : j.items()) base[k] = v;
+                ReplyRule rule = replyRuleFromJson(base);
+                if (auto err = replyRuleValidate(rule); !err.empty()) { jsonReply(fail(err), std::move(cb)); return; }
                 if (!replyMgr.updateRule(rid, rule)) { jsonReply(fail("not found"), std::move(cb)); return; }
                 auto row = st->get<ReplyRuleRow>(rid);
                 jsonReply(ok(replyToJson(row)), std::move(cb));
@@ -4008,7 +4140,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // List all causal rules
     app.registerHandler("/api/causal/rules", [&causalMgr](Req, CB&& cb) {
         J arr = J::array();
-        for (auto& r : causalMgr.listRules()) arr.push_back(r.toJSON());
+        for (auto& r : *causalMgr.listRules()) arr.push_back(r.toJSON());
         jsonReply(ok(arr), std::move(cb));
     }, {drogon::Get});
 
@@ -4049,7 +4181,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             int id = std::stoi(idStr);
             if (!causalMgr.toggleRule(id)) { jsonReply(fail("rule not found"), std::move(cb)); return; }
-            const auto* r = causalMgr.getRuleById(id);
+            auto r = causalMgr.getRuleById(id);
             jsonReply(ok(J{{"enabled", r ? r->enabled : false}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
