@@ -1004,8 +1004,8 @@ TEST(CausalCRUD, AddAndGetRule) {
     int id = mgr.addRule(rule);
     ASSERT_TRUE(id > 0);
 
-    const CausalRule* retrieved = mgr.getRuleById(id);
-    ASSERT_TRUE(retrieved != nullptr);
+    auto retrieved = mgr.getRuleById(id);
+    ASSERT_TRUE(retrieved.has_value());
     ASSERT_EQ(retrieved->name, "test_rule");
 }
 
@@ -1023,7 +1023,7 @@ TEST(CausalCRUD, DeleteRule) {
     bool deleted = mgr.deleteRule(id);
     ASSERT_TRUE(deleted);
 
-    ASSERT_TRUE(mgr.getRuleById(id) == nullptr);
+    ASSERT_FALSE(mgr.getRuleById(id).has_value());
 }
 
 TEST(CausalCRUD, ToggleRule) {
@@ -1038,13 +1038,13 @@ TEST(CausalCRUD, ToggleRule) {
     int id = mgr.addRule(rule);
 
     mgr.toggleRule(id);
-    const CausalRule* r = mgr.getRuleById(id);
-    ASSERT_TRUE(r != nullptr);
+    auto r = mgr.getRuleById(id);
+    ASSERT_TRUE(r.has_value());
     ASSERT_FALSE(r->enabled);
 
     mgr.toggleRule(id);
     r = mgr.getRuleById(id);
-    ASSERT_TRUE(r != nullptr);
+    ASSERT_TRUE(r.has_value());
     ASSERT_TRUE(r->enabled);
 }
 
@@ -1063,8 +1063,8 @@ TEST(CausalCRUD, UpdateRule) {
     bool success = mgr.updateRule(id, updated);
     ASSERT_TRUE(success);
 
-    const CausalRule* r = mgr.getRuleById(id);
-    ASSERT_TRUE(r != nullptr);
+    auto r = mgr.getRuleById(id);
+    ASSERT_TRUE(r.has_value());
     ASSERT_EQ(r->name, "updated_rule");
     ASSERT_EQ(r->conditions[0].content, "new");
 }
