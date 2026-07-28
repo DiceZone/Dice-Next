@@ -360,6 +360,11 @@ public:
     const std::string& logPath() const noexcept { return logDbPath_; }
     /// Path of the separate character-card database file.
     const std::string& cardPath() const noexcept { return cardDbPath_; }
+    /// Path of the separate chat-history database file.
+    const std::string& chatPath() const noexcept { return chatDbPath_; }
+
+    /// Flush WAL files for every store before a filesystem backup is made.
+    bool checkpoint();
 
     /// Execute a raw SQL statement. Returns true on success.
     bool execute(const std::string& sql);
