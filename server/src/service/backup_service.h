@@ -240,26 +240,36 @@ inline std::string runCapture(const std::string& command, int& code) {
     return out;
 }
 
+inline bool archiveIsAutomatic(const fs::path& archive, bool fallback) {
+    int rc = 0;
+    try {
+        const std::string content = runCapture(archiveManifestCommand(archive), rc);
+        if (rc == 0) return json::parse(content).value("automatic", fallback);
+    } catch (...) {}
+    return fallback;
+}
+
 inline json listArchives(bool automaticOnly = false) {
     json out = json::array();
     std::error_code ec;
-    for (const bool automatic : {false, true}) {
+    const fs::path dir = archiveDirectory();
+    if (!fs::is_directory(dir, ec)) { ec.clear(); return out; }
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (ec || !entry.is_regular_file(ec)) continue;
+        const std::string name = entry.path().filename().string();
+        if (!isSafeArchiveName(name)) continue;
+        // Archives produced before the unified directory were only placed in
+        // data/backups by the scheduler, so missing metadata means automatic.
+        const bool automatic = archiveIsAutomatic(entry.path(), true);
         if (automaticOnly && !automatic) continue;
-        const fs::path dir = archiveDirectory(automatic);
-        if (!fs::is_directory(dir, ec)) { ec.clear(); continue; }
-        for (const auto& entry : fs::directory_iterator(dir, ec)) {
-            if (ec || !entry.is_regular_file(ec)) continue;
-            const std::string name = entry.path().filename().string();
-            if (!isSafeArchiveName(name)) continue;
-            const auto when = entry.last_write_time(ec);
-            const auto size = entry.file_size(ec);
-            if (ec) { ec.clear(); continue; }
-            const auto systemWhen = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                when - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
-            out.push_back({{"name", name}, {"size", size},
-                           {"createdAt", std::chrono::duration_cast<std::chrono::seconds>(systemWhen.time_since_epoch()).count()},
-                           {"automatic", automatic}});
-        }
+        const auto when = entry.last_write_time(ec);
+        const auto size = entry.file_size(ec);
+        if (ec) { ec.clear(); continue; }
+        const auto systemWhen = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            when - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+        out.push_back({{"name", name}, {"size", size},
+                       {"createdAt", std::chrono::duration_cast<std::chrono::seconds>(systemWhen.time_since_epoch()).count()},
+                       {"automatic", automatic}});
     }
     std::sort(out.begin(), out.end(), [](const json& a, const json& b) {
         return a.value("createdAt", 0LL) > b.value("createdAt", 0LL);

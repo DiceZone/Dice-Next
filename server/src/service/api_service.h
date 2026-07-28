@@ -1523,7 +1523,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // Stored backup management.  Archives remain in backups/ after download so
+    // Stored backup management.  Archives remain in data/backups/ after download so
     // the WebUI can list, download again, or delete them later.
     app.registerHandler("/api/backup/list", [](Req, CB&& cb) {
         jsonReply(ok(backup::listArchives()), std::move(cb));
