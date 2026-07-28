@@ -9,6 +9,7 @@
 #include <string>
 #include <map>
 #include <set>
+#include <cstdint>
 #include <sqlite_orm/sqlite_orm.h>
 
 // Provide complete definitions for forward-declared classes so that
@@ -16,7 +17,17 @@
 // the import tests only test utility functions + importDecks/importMods.
 namespace dice {
 class CardDeck { public: void loadDir(const std::string&) {} };
-class LuaPluginManager { public: void reload() {} };
+class LuaPluginManager {
+public:
+    void reload() {}
+    void confSet(const std::string& scope, const std::string& key, const std::string& value) { conf_[scope][key] = value; }
+    std::string confGet(const std::string& scope, const std::string& key) const {
+        auto it = conf_.find(scope); if (it == conf_.end()) return {};
+        auto kv = it->second.find(key); return kv == it->second.end() ? std::string() : kv->second;
+    }
+private:
+    std::map<std::string, std::map<std::string, std::string>> conf_;
+};
 }
 
 // Include database.h which defines the row structs
@@ -234,6 +245,24 @@ static void cleanupTempDir(const fs::path& p) {
     // Change to a safe directory before removing
     fs::current_path(fs::temp_directory_path());
     fs::remove_all(p);
+}
+
+// Small writers for authentic Dice! V2 binary containers.  Keeping these in
+// the test suite makes the parser test independent from a developer's private
+// DiceData directory.
+template <typename T>
+static void writeRaw(std::ofstream& out, T value) {
+    out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+static void writeLegacyStr(std::ofstream& out, const std::string& value) {
+    writeRaw<int16_t>(out, static_cast<int16_t>(value.size()));
+    out.write(value.data(), static_cast<std::streamsize>(value.size()));
+}
+static void writeLegacyInt(std::ofstream& out, int value) {
+    out.put(2); writeRaw<int32_t>(out, value);
+}
+static void writeLegacyUtf8(std::ofstream& out, const std::string& value) {
+    out.put(20); writeLegacyStr(out, value);
 }
 
 TEST(ImportDecks, ValidDeckImported) {
@@ -527,6 +556,198 @@ TEST(ImportMods, NoModDirReturnsEmpty) {
     ASSERT_EQ(result.failed, 0);
 
     cleanupTempDir(root);
+}
+
+TEST(ImportPlugins, ValidPluginImported) {
+    fs::path root = makeTempDir("plugins_valid");
+    fs::create_directories(root / "plugin");
+    { std::ofstream f(root / "plugin" / "legacy.lua"); f << "msg_order = {}"; }
+    fs::path origCwd = fs::current_path(); fs::current_path(root);
+    auto result = importPlugins(root);
+    fs::current_path(origCwd);
+    ASSERT_EQ(result.success, 1);
+    ASSERT_TRUE(fs::exists(root / "data" / "plugin" / "legacy.lua"));
+    cleanupTempDir(root);
+}
+
+TEST(ImportBinaryCards, PreservesMetadataAndActiveCardBinding) {
+    fs::path root = makeTempDir("binary_cards");
+    fs::create_directories(root / "user");
+    {
+        std::ofstream out(root / "user" / "PlayerCards.RDconf", std::ios::binary);
+        writeRaw<int32_t>(out, 1); writeRaw<int64_t>(out, 10001);
+        writeRaw<int16_t>(out, 2); writeRaw<int16_t>(out, 1); writeRaw<uint16_t>(out, 0);
+        writeLegacyStr(out, "Tag"); writeLegacyStr(out, "默认卡");
+        writeLegacyStr(out, "Type"); writeLegacyStr(out, "coc7");
+        writeLegacyStr(out, "Attr"); writeRaw<int16_t>(out, 3);
+        writeLegacyStr(out, "力量"); writeLegacyInt(out, 70);
+        writeLegacyStr(out, "备注"); writeLegacyUtf8(out, "测试文本");
+        writeLegacyStr(out, "&伤害"); writeLegacyUtf8(out, "1d6+1");
+        writeLegacyStr(out, "DiceExp"); writeRaw<int16_t>(out, 1); writeLegacyStr(out, "侦查"); writeLegacyStr(out, "1d100");
+        writeLegacyStr(out, "Lock"); writeRaw<int16_t>(out, 1); writeLegacyStr(out, "力量");
+        writeLegacyStr(out, "Info"); writeRaw<int16_t>(out, 1); writeLegacyStr(out, "来源"); writeLegacyStr(out, "旧版");
+        writeLegacyStr(out, "Note"); writeLegacyStr(out, "卡片注记");
+        writeLegacyStr(out, "END");
+        writeRaw<int16_t>(out, 1); writeRaw<uint64_t>(out, 20001); writeRaw<uint16_t>(out, 0);
+    }
+    Database db; ASSERT_TRUE(db.open((root / "app.db").string()));
+    int users = 0;
+    ASSERT_EQ(importCards(db, root / "user", users), 1);
+    ASSERT_EQ(users, 1);
+    auto cards = db.getCardStorage()->get_all<CharacterCardRow>();
+    ASSERT_EQ(cards.size(), (size_t)1);
+    ASSERT_EQ(cards[0].userId, "10001");
+    ASSERT_EQ(cards[0].name, "");
+    auto attrs = json::parse(cards[0].attrs);
+    ASSERT_EQ(attrs["力量"], 70);
+    ASSERT_EQ(attrs["__meta"]["texts"]["备注"], "测试文本");
+    ASSERT_EQ(attrs["__meta"]["texts"]["note"], "卡片注记");
+    ASSERT_EQ(attrs["__meta"]["legacyExpressions"]["伤害"], "1d6+1");
+    ASSERT_EQ(attrs["__meta"]["legacyType"], "coc7");
+    auto binds = db.getStorage()->get_all<UserSettingRow>();
+    ASSERT_EQ(binds.size(), (size_t)1);
+    ASSERT_EQ(binds[0].userId, "10001"); ASSERT_EQ(binds[0].groupId, "20001");
+    ASSERT_EQ(binds[0].key, "cardBind"); ASSERT_EQ(binds[0].value, "");
+    db.close(); cleanupTempDir(root);
+}
+
+TEST(ImportBinaryUsers, KeepsScalarOnlyLuaConfiguration) {
+    fs::path root = makeTempDir("binary_users");
+    fs::create_directories(root / "user");
+    {
+        std::ofstream out(root / "user" / "UserConf.dat", std::ios::binary);
+        writeRaw<int32_t>(out, 1); writeRaw<int64_t>(out, 10002);
+        writeLegacyStr(out, "Cfg"); writeRaw<int16_t>(out, 1);
+        writeLegacyStr(out, "pluginFlag"); writeLegacyInt(out, 7);
+        writeLegacyStr(out, "END");
+    }
+    Database db; ASSERT_TRUE(db.open((root / "app.db").string()));
+    LuaPluginManager lua;
+    ASSERT_EQ(importUsers(db, root / "user", &lua), 1);
+    ASSERT_EQ(lua.confGet("u:10002", "pluginFlag"), "7");
+    ASSERT_EQ(db.getStorage()->count<PlayerProfileRow>(), 1);
+    db.close(); cleanupTempDir(root);
+}
+
+TEST(ImportBinaryGroups, KeepsCoreAndLuaCompatibleSettings) {
+    fs::path root = makeTempDir("binary_groups");
+    fs::create_directories(root / "user");
+    {
+        std::ofstream out(root / "user" / "ChatConf.dat", std::ios::binary);
+        writeRaw<int32_t>(out, 1); writeRaw<int64_t>(out, 20001); writeRaw<int64_t>(out, 20001);
+        writeRaw<int16_t>(out, 4); writeLegacyStr(out, "旧群名");
+        writeRaw<int16_t>(out, 11); writeRaw<int16_t>(out, 4);
+        writeLegacyStr(out, "停用指令"); writeLegacyInt(out, 1);
+        writeLegacyStr(out, "rc房规"); writeLegacyInt(out, 6);
+        writeLegacyStr(out, "入群欢迎"); writeLegacyUtf8(out, "欢迎 {at}");
+        writeLegacyStr(out, "pluginOption"); writeLegacyInt(out, 9);
+        writeRaw<int16_t>(out, -1);
+    }
+    Database db; ASSERT_TRUE(db.open((root / "app.db").string()));
+    LuaPluginManager lua;
+    int groups = 0;
+    ASSERT_EQ(importChatConf(db, root / "user", groups, &lua), 4);
+    ASSERT_EQ(groups, 1);
+    ASSERT_EQ(lua.confGet("g:20001", "pluginOption"), "9");
+    auto rows = db.getStorage()->get_all<GroupSettingRow>();
+    std::map<std::string, std::string> values;
+    for (const auto& row : rows) values[row.key] = row.value;
+    ASSERT_EQ(values["legacyGroupName"], "旧群名");
+    ASSERT_EQ(values["enabled"], "0");
+    ASSERT_EQ(values["cocRule"], "6");
+    ASSERT_EQ(values["welcome"], "欢迎 {at}");
+    db.close(); cleanupTempDir(root);
+}
+
+TEST(ImportLinks, ConvertsOnlySafeGroupLinks) {
+    fs::path root = makeTempDir("links_valid");
+    fs::create_directories(root / "conf");
+    { std::ofstream out(root / "conf" / "LinkList.json");
+      out << R"([{"origin":{"gid":20001},"target":{"gid":20002},"type":"to","linking":false},{"origin":{"uid":10001},"target":{"gid":20003},"type":"with","linking":true}])"; }
+    ConfigManager cfg((root / "config.json").string()); ASSERT_TRUE(cfg.load());
+    ASSERT_EQ(importLinks(cfg, root / "conf"), 1);
+    auto links = cfg.get<json>("dice/links", json::array());
+    ASSERT_EQ(links.size(), (size_t)1);
+    ASSERT_EQ(links[0]["platform"], "onebot_v11");
+    ASSERT_EQ(links[0]["home"], "20001"); ASSERT_EQ(links[0]["target"], "20002");
+    ASSERT_EQ(links[0]["mode"], "to"); ASSERT_EQ(links[0]["active"], false);
+    cleanupTempDir(root);
+}
+
+TEST(ImportNotices, ConvertsUserAndGroupWindows) {
+    fs::path root = makeTempDir("notices_valid");
+    fs::create_directories(root / "conf");
+    { std::ofstream out(root / "conf" / "NoticeList.json");
+      out << R"([{"uid":10001,"type":14},{"gid":20001,"type":3},{"gid":0,"type":15}])"; }
+    ConfigManager cfg((root / "config.json").string()); ASSERT_TRUE(cfg.load());
+    ASSERT_EQ(importNotices(cfg, root / "conf"), 2);
+    auto windows = cfg.get<json>("dice/notice/windows", json::array());
+    ASSERT_EQ(windows.size(), (size_t)2);
+    ASSERT_EQ(windows[0]["chat_id"], "10001"); ASSERT_EQ(windows[0]["is_group"], false);
+    ASSERT_EQ(windows[0]["level_mask"], 14);
+    ASSERT_EQ(windows[1]["chat_id"], "20001"); ASSERT_EQ(windows[1]["is_group"], true);
+    ASSERT_EQ(windows[1]["level_mask"], 3);
+    cleanupTempDir(root);
+}
+
+TEST(CustomMessageMigration, MapsOnlyAuditedSlots) {
+    const auto& map = msgKeyMap();
+    ASSERT_EQ(map.at("strRollDice"), "dice.roll.result");
+    ASSERT_EQ(map.at("strGameJoined"), "game.joined");
+    ASSERT_EQ(map.at("strObEnter"), "ob.joined");
+    ASSERT_EQ(map.at("strLeaveUnused"), "event.leave_unused");
+    ASSERT_EQ(map.at("strPropNotFound"), "card.attr_missing");
+    // New log off/end callbacks no longer provide the old name/file variables.
+    ASSERT_TRUE(map.find("strLogOff") == map.end());
+    ASSERT_TRUE(map.find("strLogEnd") == map.end());
+}
+
+TEST(CustomMessageMigration, NormalizesAuditedLegacyPlaceholders) {
+    ASSERT_EQ(normalizeLegacyTemplate("strRollDice", "{pc}掷骰: {res}"), "{nick}掷骰: {res}");
+    ASSERT_EQ(normalizeLegacyTemplate("strDeckNotFound", "{self}找不到{deck_name}"), "{self}找不到{name}");
+    ASSERT_EQ(normalizeLegacyTemplate("strLogNew", "{game.log_name}"), "{name}");
+}
+
+TEST(LegacyLog, ParsesOriginalHeader) {
+    std::string sender, uid, stamp;
+    ASSERT_TRUE(legacyLogHeader("测试玩家(123456) 2026-07-28 12:34:56", sender, uid, stamp));
+    ASSERT_EQ(sender, "测试玩家");
+    ASSERT_EQ(uid, "123456");
+    ASSERT_EQ(stamp, "2026-07-28 12:34:56");
+    ASSERT_FALSE(legacyLogHeader("not a header", sender, uid, stamp));
+}
+
+TEST(ImportSessions, ConvertsSessionAndLogContext) {
+    fs::path root = makeTempDir("sessions_valid");
+    fs::create_directories(root / "user" / "session");
+    {
+        std::ofstream f(root / "user" / "session" / "coc#1.json");
+        f << R"({"master":[10001],"player":[10002],"data":{"rule":"COC7"},"roulette":{"100":{"copy":1,"pool":[1,2,3]}},"chats":[{"gid":20001}],"create_time":1700000000,"log":{"start":1700000000,"name":"测试日志","file":"coc#1_测试日志.txt","logging":false}})";
+    }
+    LuaPluginManager lua;
+    std::map<std::string, LegacyLogContext> contexts;
+    ASSERT_EQ(importSessions(root, &lua, contexts), 1);
+    ASSERT_TRUE(!lua.confGet("game:index", "sessions").empty());
+    ASSERT_TRUE(!lua.confGet("game:20001", "__session").empty());
+    ASSERT_EQ(contexts.size(), (size_t)1);
+    ASSERT_EQ(contexts.begin()->second.groupId, "20001");
+    ASSERT_EQ(contexts.begin()->second.status, 1);
+    cleanupTempDir(root);
+}
+
+TEST(ImportLogs, ConvertsTranscriptMessages) {
+    fs::path root = makeTempDir("logs_valid");
+    fs::create_directories(root / "user" / "log");
+    { std::ofstream f(root / "user" / "log" / "20001_test.txt");
+      f << "Alice(10001) 2026-07-28 12:00:00\n\n第一行\n第二行\n\nBot(99999) 2026-07-28 12:01:00\n\n回复"; }
+    Database db; ASSERT_TRUE(db.open((root / "app.db").string()));
+    std::map<std::string, LegacyLogContext> contexts;
+    int messageCount = 0;
+    ASSERT_EQ(importLogs(db, root, contexts, messageCount), 1);
+    ASSERT_EQ(messageCount, 2);
+    ASSERT_EQ(db.getLogStorage()->count<GameLogRow>(), 1);
+    ASSERT_EQ(db.getLogStorage()->count<GameLogMessageRow>(), 2);
+    db.close(); cleanupTempDir(root);
 }
 
 // ─── Backward Compatibility Tests ─────────────────────────────
