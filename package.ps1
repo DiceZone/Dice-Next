@@ -16,6 +16,7 @@ $server    = Join-Path $root 'server'
 $buildDir  = if ($Architecture -eq 'arm64') { 'build-arm64' } else { 'build' }
 $relDir    = Join-Path $server "$buildDir\Release"
 $exe       = Join-Path $relDir 'dice-next-server.exe'
+$launcher  = Join-Path $relDir 'dice-next.exe'
 $utf8      = New-Object System.Text.UTF8Encoding($false)       # UTF-8 no BOM
 
 function Resolve-ProjectInput([string]$envName, [string]$projectName, [string]$legacyPath) {
@@ -35,6 +36,7 @@ $webDist  = if ($webRoot) { Join-Path $webRoot 'dist' } else { $null }
 function Fail($m) { Write-Host "[X] $m" -ForegroundColor Red; exit 1 }
 
 if (-not (Test-Path $exe))     { Fail "未找到 $exe，请先编译后端 (cmake --build ...)" }
+if (-not (Test-Path $launcher)){ Fail "未找到 $launcher，请先重新编译 Windows 管理器" }
 if (-not $webRoot -or -not (Test-Path $webDist)) { Fail "未找到前端 dist，请先在 Dice-Next-WebUI 构建，或设置 DICENEXT_WEB_ROOT" }
 if (-not $docsRoot) { Fail "未找到文档项目，请设置 DICENEXT_DOC_ROOT 或放在同级 Dice-Next-Doc" }
 
@@ -67,17 +69,24 @@ $name = "DiceNext-beta-$ver($build)-windows-$Architecture-$ts"
 
 $out   = [Environment]::GetEnvironmentVariable('DICENEXT_RELEASE_ROOT')
 if ([string]::IsNullOrWhiteSpace($out)) { $out = Join-Path $root 'release' }
-$stage = Join-Path $out 'DiceNext-beta'  # 内层文件夹固定，避免解压出无数版本文件夹
+$stageRoot = Join-Path ([IO.Path]::GetTempPath()) ("dicenext-package-" + [guid]::NewGuid().ToString('N'))
+$stage = Join-Path $stageRoot 'DiceNext-beta'  # 内层文件夹固定，避免解压出无数版本文件夹
 New-Item -ItemType Directory -Force -Path $out   | Out-Null
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 Write-Host "打包 $name ..." -ForegroundColor Cyan
 
-# ── 1. 可执行文件 + 运行所需 DLL（排除 old-*.exe） ───────────
-Copy-Item $exe (Join-Path $stage 'dice-next-server.exe')
-Get-ChildItem (Join-Path $relDir '*.dll') | Copy-Item -Destination $stage
-$dllCount = (Get-ChildItem (Join-Path $stage '*.dll') | Measure-Object).Count
+# ── 1. 管理器 / 核心程序 + 包内运行库 ─────────────────────────
+# Windows 会在进入 main() 前加载依赖 DLL，不能由主程序在运行后再设置
+# DLL 搜索路径。因此顶层管理器先设置 PATH，再拉起 app/ 内的核心程序。
+Copy-Item $launcher (Join-Path $stage 'dice-next.exe')
+$appStage = Join-Path $stage 'app'
+New-Item -ItemType Directory -Force -Path $appStage | Out-Null
+Copy-Item $exe (Join-Path $appStage 'dice-next-core.exe')
+$libStage = Join-Path $stage 'lib'
+New-Item -ItemType Directory -Force -Path $libStage | Out-Null
+Get-ChildItem (Join-Path $relDir '*.dll') | Copy-Item -Destination $libStage
+$dllCount = (Get-ChildItem (Join-Path $libStage '*.dll') | Measure-Object).Count
 
 # MSVC runtime. An ARM64 host exposes matching DLLs through System32; an x64
 # host can still package ARM64 redists when Visual Studio provides them.
@@ -95,7 +104,7 @@ if ($Architecture -eq 'arm64' -and ${env:ProgramFiles(x86)}) {
 foreach ($d in 'vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll') {
     foreach ($runtimeDir in $runtimeDirs) {
         $source = Join-Path $runtimeDir $d
-        if (Test-Path $source) { Copy-Item $source $stage -ErrorAction SilentlyContinue; break }
+        if (Test-Path $source) { Copy-Item $source $libStage -ErrorAction SilentlyContinue; break }
     }
 }
 
@@ -139,7 +148,7 @@ DiceNext $ver($build) — Windows $Architecture 盲测版使用说明
 
 【运行】
 1. 解压本压缩包到任意文件夹（路径建议不含特殊字符）。
-2. 双击 dice-next-server.exe 启动服务器。首次启动会自动创建配置文件。
+2. 双击 dice-next.exe 启动服务器。首次启动会自动创建配置文件。
 3. 浏览器打开管理后台： http://localhost:$port
 
 【接入 QQ 机器人】
@@ -163,10 +172,11 @@ QQ 官方机器人 2.0：
 
 【说明】
   - 首次运行会自动生成 config\default_config.json，无需手动创建。
-  - 升级时解压完整覆盖所有文件即可，exe / DLL / i18n / web\dist\ / data\ 都需要更新。你的配置文件（config\default_config.json）在解压包之外，不会丢失。
+  - 升级时解压完整覆盖所有文件即可，dice-next.exe / app\ / lib\ / i18n / web\dist\ / data\ 都需要更新。你的配置文件（config\default_config.json）在解压包之外，不会丢失。
   - 端口 $port，可在 config\default_config.json 的 server.port 修改；若该端口被占用会自动顺延到下一个可用端口并写回配置（可右键托盘图标→打开网页面板，自动用正确端口）。
   - 同一套数据（同一安装目录）只能运行一个进程，重复启动会自动退出，避免数据冲突。
-  - 仅支持 64 位 Windows 10/11。已附带常见运行库，通常无需额外安装。
+  - 仅支持 64 位 Windows 10/11。dice-next.exe 是管理器，负责启动 app\dice-next-core.exe；所有依赖与运行库收纳在 lib\，通常无需额外安装。
+  - 托管面板可设置系统环境变量 DICENEXT_UPDATE_RESTART=NO：管理器在应用在线升级后只退出，不会自行重启 core，避免与面板的进程守护逻辑冲突。
   - 这是盲测版，欢迎通过 QQ 群 933145116 反馈问题与建议！
 
 —— DiceZone / Shia
@@ -182,7 +192,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.CompressionLevel]::Optimal,
     $true,                       # 顶层包含 $name 文件夹
     [System.Text.Encoding]::UTF8)
-Remove-Item $stage -Recurse -Force
+Remove-Item $stageRoot -Recurse -Force
 
 $sizeMB = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host "[OK] 打包完成: release\$name.zip  ($sizeMB MB, $dllCount 个 DLL)" -ForegroundColor Green
