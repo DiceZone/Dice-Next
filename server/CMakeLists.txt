@@ -147,6 +147,17 @@ target_include_directories(dice-next-server PRIVATE ${LUA_INCLUDE_DIR})
 # ─── Platform-specific settings ──────────────────────────────
 
 if(WIN32)
+    # The package manager intentionally has no third-party DLL dependency. It
+    # starts dice-next-core.exe with the package-local lib/ directory on PATH.
+    add_executable(dice-next-launcher src/platform/launcher_win.cpp)
+    set_target_properties(dice-next-launcher PROPERTIES OUTPUT_NAME "dice-next")
+    # The manager must run before lib/ is added to PATH, so do not make it
+    # depend on the package's MSVC runtime DLLs.
+    set_property(TARGET dice-next-launcher PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_link_libraries(dice-next-launcher PRIVATE shell32)
+    target_compile_options(dice-next-launcher PRIVATE /W4 /utf-8)
+    target_sources(dice-next-launcher PRIVATE src/resources/app.rc)
+
     # Windows: link additional system libraries for ReadDirectoryChangesW
     target_link_libraries(dice-next-server PRIVATE
         ws2_32

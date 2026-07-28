@@ -83,10 +83,25 @@ static inline std::string dnx_u8str(const std::filesystem::path& p) {
     return std::string(u.begin(), u.end());
 }
 
-/// 重启本程序（改 IP/端口后用）：派生一个分离的 cmd——等本进程退出(2秒，让单
-/// 实例锁与端口释放)→ 重新拉起同一个 exe(继承当前工作目录)，随后本进程优雅退出。
+// Exit code understood by dice-next.exe.  The manager restarts the core only
+// after its process and port have fully exited.
+constexpr int kManagedRestartExitCode = 42;
+std::atomic<int> g_requestedExitCode{0};
+
+/// Request a restart.  A package managed by dice-next.exe lets that manager
+/// perform the restart; direct legacy launches retain the old self-relaunch.
 inline void relaunchSelf() {
 #if defined(_WIN32) || defined(_WIN64)
+    wchar_t managed[8]{};
+    if (GetEnvironmentVariableW(L"DICENEXT_MANAGED", managed, static_cast<DWORD>(std::size(managed))) > 0 &&
+        std::wstring_view(managed) == L"1") {
+        g_requestedExitCode.store(kManagedRestartExitCode);
+        std::thread([] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            drogon::app().quit();
+        }).detach();
+        return;
+    }
     wchar_t exePath[MAX_PATH] = {0};
     if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) > 0) {
         std::wstring cmd = L"cmd.exe /c timeout /t 2 /nobreak >nul & start \"\" \"";
@@ -3112,7 +3127,7 @@ static int realMain(int argc, char* argv[]) {
     db.close();
     DICE_LOG_INFO("Dice!Next stopped. Goodbye!");
 
-    return 0;
+    return g_requestedExitCode.load();
 }
 
 // ── 崩溃诊断：main 整体包裹——未捕获 C++ 异常在此直接拿到 what() 落盘
