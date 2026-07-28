@@ -22,3 +22,6 @@
 *.user
 *.log
 *.err
+/backups/
+/restore-pending/
+/restore-rollbacks/

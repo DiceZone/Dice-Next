@@ -690,11 +690,11 @@
       "result": "{nick} 的「{attr}」检定：{roll} {mod} = {total}"
     },
     "rdc": {
-      "usage": "DND 调整值检定：.rdc [轮数#] [B/P] [属性或技能] [±加值] [理由] [成功阈值]。属性按(属性值-10)/2向下取整，技能读取独立检定加值；B取高、P取低，轮数最多9。例：.rdc 3# B 力量+2 破门 15",
+      "usage": "DND 调整值检定：.rdc [轮数#] [B/P] [属性或技能] [±加值或骰式] [理由] [成功阈值]。属性按(属性值-10)/2向下取整，技能读取独立检定加值；B取高、P取低，轮数最多9。加值可写 +2 或 +1d4，支持紧凑写法 .rdc3#+1d4力量 15。",
       "mode_off": ".rdc 仅能在已开启 DND5e 模式的群中使用（.setdnd on）。",
       "turns": "轮数必须为 1 至 9。",
       "no_value": "找不到 DND 属性或技能「{attr}」。",
-      "result": "{nick} 的「{attr}」调整值检定{reason}：\n{detail}"
+      "result": "{nick}进行{attr}检定{reason}:\n{detail}"
     }
   },
   "setdnd": {

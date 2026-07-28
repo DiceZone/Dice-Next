@@ -411,6 +411,25 @@ void Database::close() {
     }
 }
 
+bool Database::checkpoint() {
+    if (!isOpen()) return false;
+    bool ok = true;
+    const std::string paths[] = {dbPath_, logDbPath_, cardDbPath_, chatDbPath_};
+    for (const auto& path : paths) {
+        if (path.empty()) continue;
+        sqlite3* raw = nullptr;
+        if (sqlite3_open(path.c_str(), &raw) != SQLITE_OK) { if (raw) sqlite3_close(raw); ok = false; continue; }
+        int logFrames = 0, checkpointed = 0;
+        int rc = sqlite3_wal_checkpoint_v2(raw, nullptr, SQLITE_CHECKPOINT_TRUNCATE, &logFrames, &checkpointed);
+        if (rc != SQLITE_OK) {
+            DICE_LOG_WARN("Database: WAL checkpoint failed for '{}': {}", path, sqlite3_errmsg(raw));
+            ok = false;
+        }
+        sqlite3_close(raw);
+    }
+    return ok;
+}
+
 bool Database::execute(const std::string& sql) {
     if (!isOpen()) {
         DICE_LOG_ERROR("Database: execute called but not open");

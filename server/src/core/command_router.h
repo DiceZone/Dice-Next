@@ -2636,7 +2636,8 @@ private:
 
         std::vector<std::string> tokens;
         { std::istringstream iss(s); std::string token; while (iss >> token) tokens.push_back(token); }
-        int turns = 1, advantage = 0, extra = 0, threshold = -1;
+        int turns = 1, advantage = 0, staticExtra = 0, threshold = -1;
+        std::string diceExtra;
         if (!tokens.empty()) {
             size_t hash = tokens.front().find('#');
             if (hash != std::string::npos) {
@@ -2656,24 +2657,61 @@ private:
             threshold = parseIntOr(tokens.back(), -1);
             tokens.pop_back();
         }
+        // .rdc accepts both the documented spaced form (`力量 +2`) and the
+        // original Dice! compact form (`+1d4力量`).  A dice expression is rolled
+        // afresh for every round; a plain signed integer remains a static bonus.
+        auto appendExtra = [&](const std::string& raw) {
+            if (raw.empty()) return;
+            if (raw.find_first_of("dD") != std::string::npos) diceExtra += raw;
+            else staticExtra += parseIntOr(raw, 0);
+        };
+        auto takeLeadingExtra = [&](std::string& token) {
+            if (token.empty() || (token[0] != '+' && token[0] != '-')) return false;
+            size_t end = 1;
+            while (end < token.size()) {
+                const unsigned char ch = static_cast<unsigned char>(token[end]);
+                if (!(std::isdigit(ch) || ch == 'd' || ch == 'D' || ch == '+' || ch == '-' ||
+                      ch == '*' || ch == '/' || ch == '(' || ch == ')')) break;
+                ++end;
+            }
+            if (end == 1) return false;
+            appendExtra(token.substr(0, end));
+            token.erase(0, end);
+            return true;
+        };
+
+        // A compact leading modifier may be immediately followed by a Chinese
+        // (or ASCII) ability/skill name: `+1d4力量` / `+1d4strength`.
+        if (!tokens.empty() && !tokens.front().empty() &&
+            (tokens.front()[0] == '+' || tokens.front()[0] == '-')) {
+            std::string first = tokens.front();
+            if (takeLeadingExtra(first)) {
+                if (first.empty()) tokens.erase(tokens.begin());
+                else tokens.front() = first;
+            }
+        }
+
         std::string attr;
         if (!tokens.empty() && !tokens.front().empty() && tokens.front()[0] != '+' && tokens.front()[0] != '-') {
             attr = tokens.front();
             tokens.erase(tokens.begin());
             size_t plusMinus = attr.find_first_of("+-");
             if (plusMinus != std::string::npos && plusMinus > 0) {
-                extra += parseIntOr(attr.substr(plusMinus), 0);
+                appendExtra(attr.substr(plusMinus));
                 attr = attr.substr(0, plusMinus);
             }
         }
-        if (!tokens.empty() && (tokens.front()[0] == '+' || tokens.front()[0] == '-')) {
-            extra += parseIntOr(tokens.front(), 0);
-            tokens.erase(tokens.begin());
+        if (!tokens.empty() && !tokens.front().empty() && (tokens.front()[0] == '+' || tokens.front()[0] == '-')) {
+            std::string extraToken = tokens.front();
+            if (takeLeadingExtra(extraToken)) {
+                tokens.erase(tokens.begin());
+                if (!extraToken.empty()) tokens.insert(tokens.begin(), extraToken);
+            }
         }
         std::string reason;
         for (const auto& token : tokens) { if (!reason.empty()) reason += " "; reason += token; }
 
-        int modifier = extra;
+        int abilityModifier = 0;
         std::string label = attr.empty() ? "D20" : attr;
         if (!attr.empty()) {
             std::string canonical = CharacterCardStore::canonical(attr);
@@ -2692,27 +2730,52 @@ private:
                 // active derived value stay consistent with `.rc` / `.st show`.
                 // effectiveAttr already includes a temporary buff in the score, so do
                 // not add getBuff again here.
-                modifier += dndAbilityModifier(*score);
+                abilityModifier = dndAbilityModifier(*score);
             } else {
                 auto skill = dndSkillValue(msg, canonical);
                 if (!skill) return i18n_.tr(loc, "dnd.rdc.no_value", {{"attr", attr}});
-                modifier += *skill + getBuff(msg, canonical);
+                abilityModifier = *skill + getBuff(msg, canonical);
             }
         }
 
         std::string detail;
         for (int round = 1; round <= turns; ++round) {
             int first = engine_.roll("1d20").modifiedTotal, chosen = first;
-            std::string roll = "1D20=" + std::to_string(first);
+            int second = 0;
             if (advantage != 0) {
-                int second = engine_.roll("1d20").modifiedTotal;
+                second = engine_.roll("1d20").modifiedTotal;
                 chosen = advantage > 0 ? (first > second ? first : second) : (first < second ? first : second);
-                roll = std::string(advantage > 0 ? "B" : "P") + "[" + std::to_string(first) + "," + std::to_string(second) + "]=" + std::to_string(chosen);
             }
-            int total = chosen + modifier;
+            int rolledExtra = 0;
+            if (!diceExtra.empty()) {
+                auto extraRoll = engine_.roll("0" + diceExtra);  // "+1d4" → "0+1d4"
+                if (!extraRoll.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", extraRoll.error}});
+                rolledExtra = extraRoll.modifiedTotal;
+            }
+            int total = chosen + rolledExtra + staticExtra + abilityModifier;
+            std::string formula = advantage == 0 ? "D20" :
+                std::string(advantage > 0 ? "B(" : "P(") + std::to_string(first) + "," + std::to_string(second) + ")";
+            std::string values = std::to_string(chosen);
+            if (!diceExtra.empty()) {
+                std::string diceFormula = diceExtra;
+                for (char& ch : diceFormula) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                formula += diceFormula;
+                values += (rolledExtra >= 0 ? "+" : "") + std::to_string(rolledExtra);
+            }
+            if (staticExtra != 0) {
+                formula += (staticExtra >= 0 ? "+" : "") + std::to_string(staticExtra);
+                values += (staticExtra >= 0 ? "+" : "") + std::to_string(staticExtra);
+            }
+            if (abilityModifier != 0) {
+                formula += (abilityModifier >= 0 ? "+" : "") + std::to_string(abilityModifier);
+                values += (abilityModifier >= 0 ? "+" : "") + std::to_string(abilityModifier);
+            }
             if (!detail.empty()) detail += "\n";
-            detail += std::to_string(round) + ". " + roll + (modifier >= 0 ? "+" : "") + std::to_string(modifier) + "=" + std::to_string(total);
-            if (threshold >= 0) detail += total >= threshold ? " 成功" : " 失败";
+            detail += formula + "=" + values + "=" + std::to_string(total);
+            if (threshold >= 0) {
+                detail += total > threshold ? ">" : total < threshold ? "<" : "=";
+                detail += std::to_string(threshold) + (total >= threshold ? " 成功" : " 失败");
+            }
         }
         return i18n_.tr(loc, "dnd.rdc.result", {{"nick", displayName(msg)}, {"attr", label},
             {"reason", reason.empty() ? "" : "（" + reason + "）"}, {"detail", detail},
@@ -3797,6 +3860,27 @@ public:
     // ─── 骰娘探测 ───────────────────────────────────────
     /// 是否已识别为骰娘（banlist listType=2）。
     bool isDiceBot(const std::string& userId) const { return banlistHas(0, 2, userId); }
+
+    /// Whether this message explicitly targets a *known* other dice bot.
+    /// This is intentionally stricter than isForAnotherBot(): roll/card commands
+    /// may @ a player as an argument, but an account already recorded in the dice
+    /// bot list must never be treated as that player.  The check happens before
+    /// command/plugin dispatch so self-control cannot accidentally execute a
+    /// command meant for another dice bot.
+    bool mentionsOtherKnownDiceBot(const Message& msg) const {
+        if (msg.atList.empty()) return false;
+        bool atSelf = false, atAll = false;
+        for (const auto& id : msg.atList) {
+            if (id == "all") atAll = true;
+            else if (!msg.selfId.empty() && id == msg.selfId) atSelf = true;
+        }
+        // When this bot is explicitly included (or @all is used), retain normal
+        // multi-target semantics: this bot was addressed too.
+        if (atSelf || atAll) return false;
+        for (const auto& id : msg.atList)
+            if (id != "all" && id != msg.selfId && isDiceBot(id)) return true;
+        return false;
+    }
 
     // 每群最近一次 .bot 探测的时间戳（epoch 秒）。只有骰子横幅在探测后很短时间
     // 内出现，才判定发送者是骰娘——防止有人复制粘贴 .bot 回执被误识别为骰娘。

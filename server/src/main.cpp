@@ -26,6 +26,7 @@
 #include "service/ai_worker.h"         // AI 后台线程（AI 调用不再阻塞消息管线）
 #include "service/heart_service.h"     // 心跳上报（heart.dice.zone）
 #include "service/cloudban_service.h"  // 云黑名单同步（cloudban.dice.zone）
+#include "service/backup_service.h"
 #include "platform/instance_guard.h"   // 必须在 tray_win.h(<windows.h>) 之前：先引 winsock2.h
 #include "platform/autostart_win.h"    // Windows 注册表开机自启；其他平台提供 no-op 接口。
 #include "platform/tray_win.h"
@@ -246,6 +247,17 @@ static int realMain(int argc, char* argv[]) {
     dice::crashdiag::setPhase("logger");
     dice::initLogger("info");
     DICE_LOG_INFO("Dice!Next starting...");
+    // A restore uploaded from the WebUI is only applied during startup, before
+    // config/database/plugin files are opened.  This is the safe point to
+    // replace an entire data directory.
+    {
+        std::string restoreNotice;
+        if (!dice::backup::applyPendingRestore(restoreNotice)) {
+            DICE_LOG_ERROR("{}", restoreNotice);
+            return 1;
+        }
+        if (!restoreNotice.empty()) DICE_LOG_WARN("{}", restoreNotice);
+    }
 
     // ── 2. Register signal handlers ──────────────────────────
     std::signal(SIGINT, signalHandler);
@@ -879,8 +891,10 @@ static int realMain(int argc, char* argv[]) {
     // Wire: incoming messages → command router; if no command matched, fall back
     // to the custom-reply word library; then send via the originating adapter.
     adapterMgr.onMessage([&adapterMgr, &cmdRouter, &jsMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, replyFallback](const dice::Message& msg) {
-        // Multi-bot群: if another bot is @'d and not us, stay silent.
-        if (dice::CommandRouter::isForAnotherBot(msg) && !jsCommandMatches(jsMod, cmdRouter, msg)) return;
+        // Multi-bot群: a known dice bot always wins over @-as-argument and JS
+        // plugin exceptions.  Otherwise retain the plugin @-argument exception.
+        if (cmdRouter.mentionsOtherKnownDiceBot(msg) ||
+            (dice::CommandRouter::isForAnotherBot(msg) && !jsCommandMatches(jsMod, cmdRouter, msg))) return;
         // Black/white-list: ignore blacklisted users/groups (and non-whitelisted in whitelist mode).
         if (cmdRouter.isBlocked(msg)) return;
         // 群自动化：消息命中「自动踢出/禁言」关键字则执行并跳过后续处理。
@@ -2212,7 +2226,8 @@ static int realMain(int argc, char* argv[]) {
                     if (!lc.empty()) forced = dice::localeFromString(lc);
                 }
                 std::string reply;
-                if ((!dice::CommandRouter::isForAnotherBot(msg) || jsCommandMatches(jsMod, cmdRouter, msg))
+                if (!cmdRouter.mentionsOtherKnownDiceBot(msg)
+                    && (!dice::CommandRouter::isForAnotherBot(msg) || jsCommandMatches(jsMod, cmdRouter, msg))
                     && !cmdRouter.isBlocked(msg)) {
                     bool disabled = cmdRouter.isGroupDisabled(msg);
                     bool forcedByAt = dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);

@@ -32,6 +32,7 @@ private:
 
 // Include database.h which defines the row structs
 #include "../src/storage/database.h"
+#include "../src/service/backup_service.h"
 
 // Now include the full import header — CardDeck/LuaPluginManager are complete
 #include "../src/storage/legacy_import_v2.h"
@@ -688,6 +689,37 @@ TEST(ImportNotices, ConvertsUserAndGroupWindows) {
     ASSERT_EQ(windows[1]["chat_id"], "20001"); ASSERT_EQ(windows[1]["is_group"], true);
     ASSERT_EQ(windows[1]["level_mask"], 3);
     cleanupTempDir(root);
+}
+
+TEST(BackupRestore, ArchivesStagesAndAppliesAtStartup) {
+    fs::path root = makeTempDir("backup_restore");
+    fs::path oldCwd = fs::current_path(); fs::current_path(root);
+    fs::create_directories("config"); fs::create_directories("data");
+    { std::ofstream f("config/default_config.json"); f << R"({"server":{"port":18088}})"; }
+    { std::ofstream f("data/custom.txt"); f << "before-restore"; }
+    fs::path archive; std::string error;
+    {
+        Database db;
+        ASSERT_TRUE(db.open("data/dice.db"));
+        ASSERT_TRUE(backup::createArchive(db, "config/default_config.json", archive, error));
+        db.close();
+    }
+    ASSERT_TRUE(fs::is_regular_file(archive));
+    std::ifstream backupFile(archive, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(backupFile)), std::istreambuf_iterator<char>());
+    backupFile.close();
+    ASSERT_TRUE(backup::stageRestore(bytes, error));
+    { std::ofstream f("data/custom.txt"); f << "changed"; }
+    { std::ofstream f("config/default_config.json"); f << "{}"; }
+    std::string notice; ASSERT_TRUE(backup::applyPendingRestore(notice));
+    ASSERT_TRUE(notice.find("已应用") != std::string::npos);
+    std::ifstream restored("data/custom.txt"); std::string content; std::getline(restored, content);
+    ASSERT_EQ(content, "before-restore");
+    ASSERT_TRUE(fs::exists("restore-rollbacks"));
+    fs::current_path(oldCwd);
+    // SQLite may still release a WAL sidecar asynchronously on Windows; cleanup is best-effort.
+    std::error_code cleanupError;
+    fs::remove_all(root, cleanupError);
 }
 
 TEST(CustomMessageMigration, MapsOnlyAuditedSlots) {

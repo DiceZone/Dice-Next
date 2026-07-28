@@ -37,6 +37,7 @@
 #include "notice_manager.h" // B：通知系统（全局开关变更推送）
 #include "heart_service.h"  // 心跳上报（heart.dice.zone）
 #include "cloudban_service.h" // 云黑名单同步（cloudban.dice.zone）
+#include "backup_service.h"
 #include "../storage/legacy_import_v2.h"
 #include "../core/causal/causal_rule_manager.h"
 #include "../core/causal/cooldown_manager.h"
@@ -1492,6 +1493,32 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             J report = legacyv2::runImport(db, cfg, i18n, replyMgr, dir, &cardDeck, &luaMod, opts);
             if (report.value("ok", false)) jsonReply(ok(report), std::move(cb));
             else jsonReply(fail(report.value("error", std::string("import failed"))), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Post});
+
+    // Full local backup.  The archive contains config/default_config.json and
+    // runtime data/ after all SQLite WAL stores have been checkpointed.
+    app.registerHandler("/api/backup/export", [&db, &cfg](Req, CB&& cb) {
+        try {
+            std::filesystem::path archive; std::string error;
+            if (!backup::createArchive(db, cfg.configPath(), archive, error)) { jsonReply(fail(error), std::move(cb)); return; }
+            auto resp = drogon::HttpResponse::newFileResponse(archive.string());
+            resp->setContentTypeString("application/gzip");
+            resp->addHeader("Content-Disposition", "attachment; filename=\"" + archive.filename().string() + "\"");
+            cb(resp);
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get});
+
+    // Restore is deliberately staged instead of touching live stores.  The
+    // next process start applies it before opening config/database and keeps a
+    // rollback copy of the current data directory.
+    app.registerHandler("/api/backup/restore", [](Req req, CB&& cb) {
+        try {
+            constexpr size_t kMaxBackupBytes = 2ull * 1024 * 1024 * 1024;
+            if (req->body().size() > kMaxBackupBytes) { jsonReply(fail("备份文件超过 2 GiB 上限"), std::move(cb)); return; }
+            std::string error;
+            if (!backup::stageRestore(std::string(req->body()), error)) { jsonReply(fail(error), std::move(cb)); return; }
+            jsonReply(ok(J{{"restartRequired", true}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
