@@ -10,6 +10,7 @@ set(TEST_SOURCES
     test_cooldown_manager.cpp
     test_counter_store.cpp
     test_causal_rule_manager.cpp
+    test_config_manager.cpp
     test_persona_manager.cpp
     test_i18n_persona.cpp
     test_import_v2.cpp
