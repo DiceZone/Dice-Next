@@ -1503,11 +1503,70 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             std::filesystem::path archive; std::string error;
             if (!backup::createArchive(db, cfg.configPath(), archive, error)) { jsonReply(fail(error), std::move(cb)); return; }
             auto resp = drogon::HttpResponse::newFileResponse(archive.string());
-            resp->setContentTypeString("application/gzip");
+            resp->setContentTypeString("application/zip");
             resp->addHeader("Content-Disposition", "attachment; filename=\"" + archive.filename().string() + "\"");
             cb(resp);
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
+
+    // Stored backup management.  Archives remain in backups/ after download so
+    // the WebUI can list, download again, or delete them later.
+    app.registerHandler("/api/backup/list", [](Req, CB&& cb) {
+        jsonReply(ok(backup::listArchives()), std::move(cb));
+    }, {drogon::Get});
+    app.registerHandler("/api/backup/download", [](Req req, CB&& cb) {
+        try {
+            const std::string name = req->getParameter("name");
+            if (!backup::isSafeArchiveName(name)) { jsonReply(fail("无效的备份文件名"), std::move(cb)); return; }
+            const auto path = backup::archiveDirectory(backup::isAutomaticArchiveName(name)) / name;
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(path, ec)) { jsonReply(fail("备份文件不存在"), std::move(cb)); return; }
+            auto resp = drogon::HttpResponse::newFileResponse(path.string());
+            resp->setContentTypeString("application/zip");
+            resp->addHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
+            cb(resp);
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get});
+    app.registerHandler("/api/backup/{1}", [](Req, CB&& cb, const std::string& name) {
+        try {
+            std::string error;
+            if (!backup::deleteArchive(name, error)) { jsonReply(fail(error), std::move(cb)); return; }
+            jsonReply(ok(), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Delete});
+
+    app.registerHandler("/api/backup/config", [&cfg](Req, CB&& cb) {
+        jsonReply(ok(J{{"enabled", cfg.get<bool>("backup/auto_enabled", false)},
+                       {"schedule", cfg.get<std::string>("backup/auto_schedule", "interval")},
+                       {"intervalHours", cfg.get<int>("backup/auto_interval_hours", 24)},
+                       {"dailyTime", cfg.get<std::string>("backup/auto_daily_time", "04:00")},
+                       {"keepCount", cfg.get<int>("backup/auto_keep_count", 7)},
+                       {"lastAutoAt", cfg.get<long long>("backup/auto_last_at", 0)}}), std::move(cb));
+    }, {drogon::Get});
+    app.registerHandler("/api/backup/config", [&cfg](Req req, CB&& cb) {
+        try {
+            const J j = J::parse(req->body());
+            const bool enabled = j.value("enabled", false);
+            const std::string schedule = j.value("schedule", std::string("interval"));
+            const int hours = j.value("intervalHours", 24);
+            const std::string daily = j.value("dailyTime", std::string("04:00"));
+            const int keep = j.value("keepCount", 7);
+            const bool validTime = daily.size() == 5 && daily[2] == ':' &&
+                std::isdigit(static_cast<unsigned char>(daily[0])) && std::isdigit(static_cast<unsigned char>(daily[1])) &&
+                std::isdigit(static_cast<unsigned char>(daily[3])) && std::isdigit(static_cast<unsigned char>(daily[4])) &&
+                std::stoi(daily.substr(0, 2)) < 24 && std::stoi(daily.substr(3, 2)) < 60;
+            if ((schedule != "interval" && schedule != "daily") || hours < 1 || hours > 720 || keep < 1 || keep > 100 || !validTime) {
+                jsonReply(fail("自动备份配置无效"), std::move(cb)); return;
+            }
+            cfg.set<bool>("backup/auto_enabled", enabled);
+            cfg.set<std::string>("backup/auto_schedule", schedule);
+            cfg.set<int>("backup/auto_interval_hours", hours);
+            cfg.set<std::string>("backup/auto_daily_time", daily);
+            cfg.set<int>("backup/auto_keep_count", keep);
+            if (!cfg.save()) { jsonReply(fail("保存自动备份配置失败"), std::move(cb)); return; }
+            jsonReply(ok(), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Post});
 
     // Restore is deliberately staged instead of touching live stores.  The
     // next process start applies it before opening config/database and keeps a

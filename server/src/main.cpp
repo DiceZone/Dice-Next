@@ -3037,6 +3037,46 @@ static int realMain(int argc, char* argv[]) {
         // config dice/inactive_group_line 迁移为一条 targetId="*" 的可管理任务。
     });
 
+    // ── 自动备份：按间隔或每日时刻执行，成功后按保留数量滚动清理 ──
+    auto autoBackupTick = [&db, &configMgr]() {
+        try {
+            if (!configMgr.get<bool>("backup/auto_enabled", false)) return;
+            const std::time_t now = std::time(nullptr);
+            const long long last = configMgr.get<long long>("backup/auto_last_at", 0);
+            const std::string schedule = configMgr.get<std::string>("backup/auto_schedule", "interval");
+            bool due = false;
+            if (schedule == "daily") {
+                const std::string at = configMgr.get<std::string>("backup/auto_daily_time", "04:00");
+                if (at.size() != 5 || at[2] != ':') return;
+                const int dueMin = std::stoi(at.substr(0, 2)) * 60 + std::stoi(at.substr(3, 2));
+                std::tm current{}, previous{};
+#if defined(_WIN32)
+                localtime_s(&current, &now);
+                std::time_t old = static_cast<std::time_t>(last); if (last > 0) localtime_s(&previous, &old);
+#else
+                current = *std::localtime(&now);
+                std::time_t old = static_cast<std::time_t>(last); if (last > 0) previous = *std::localtime(&old);
+#endif
+                const int currentMin = current.tm_hour * 60 + current.tm_min;
+                due = currentMin >= dueMin && (last <= 0 || current.tm_year != previous.tm_year || current.tm_yday != previous.tm_yday);
+            } else {
+                const int hours = configMgr.get<int>("backup/auto_interval_hours", 24);
+                due = last <= 0 || static_cast<long long>(now) - last >= static_cast<long long>(hours) * 3600;
+            }
+            if (!due) return;
+            std::filesystem::path archive; std::string error;
+            if (!dice::backup::createArchive(db, configMgr.configPath(), archive, error, true)) {
+                DICE_LOG_ERROR("automatic backup failed: {}", error); return;
+            }
+            configMgr.set<long long>("backup/auto_last_at", static_cast<long long>(now));
+            configMgr.save();
+            dice::backup::cleanupArchives(configMgr.get<int>("backup/auto_keep_count", 7));
+            DICE_LOG_INFO("automatic backup created: {}", archive.string());
+        } catch (const std::exception& e) { DICE_LOG_ERROR("automatic backup failed: {}", e.what()); }
+    };
+    app.getLoop()->runAfter(20.0, autoBackupTick);
+    app.getLoop()->runEvery(60.0, autoBackupTick);
+
     // ── 心跳上报 + 云黑同步：启动后首跳 + 每 60s 驱动（服务内部按各自 interval 自行节流）──
     app.getLoop()->runAfter(15.0, [] { dice::heart::HeartService::instance().tick(); });      // 上线立即报（等 adapter 连上）
     app.getLoop()->runAfter(60.0, [] { dice::cloudban::CloudbanService::instance().tick(); }); // 首次云黑同步

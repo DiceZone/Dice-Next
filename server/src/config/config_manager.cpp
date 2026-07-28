@@ -52,6 +52,14 @@ static json makeDefaultConfig() {
             {"welcome_min_cooldown", 0}           // welcome cooldown 全局最低值（秒）
         }},
         {"adapters", json::array()},
+        {"backup", {
+            {"auto_enabled", false},
+            {"auto_schedule", "interval"},
+            {"auto_interval_hours", 24},
+            {"auto_daily_time", "04:00"},
+            {"auto_keep_count", 7},
+            {"auto_last_at", 0}
+        }},
         {"hot_reload", {
             {"enabled", true},
             {"debounce_ms", 500},

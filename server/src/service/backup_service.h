@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <ctime>
+#include <atomic>
+#include <algorithm>
 
 namespace dice::backup {
 namespace fs = std::filesystem;
@@ -28,6 +30,13 @@ inline std::string stamp() {
 #endif
     char out[32]; std::strftime(out, sizeof(out), "%Y%m%d-%H%M%S", &tm);
     return out;
+}
+
+inline std::string uniqueStamp() {
+    static std::atomic<unsigned long long> sequence{0};
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count() % 1000;
+    return stamp() + "-" + std::to_string(millis) + "-" + std::to_string(++sequence);
 }
 
 inline std::string quote(const fs::path& path) {
@@ -47,12 +56,65 @@ inline bool copyTree(const fs::path& from, const fs::path& to, std::string& erro
     return true;
 }
 
-inline bool createArchive(Database& db, const fs::path& configPath, fs::path& archive, std::string& error) {
+inline std::string runCapture(const std::string& command, int& code);
+
+inline fs::path archiveDirectory(bool automatic = false) {
+    return automatic ? fs::path("data") / "backups" : fs::path("backups");
+}
+
+inline bool isAutomaticArchiveName(const std::string& name) {
+    return name.rfind("DiceNext-auto-backup-", 0) == 0;
+}
+
+inline bool isSafeArchiveName(const std::string& name) {
+    return !name.empty() && name.find('/') == std::string::npos && name.find('\\') == std::string::npos &&
+           name.rfind("DiceNext-", 0) == 0 && name.size() > 4 &&
+           name.compare(name.size() - 4, 4, ".zip") == 0;
+}
+
+inline std::string archiveListCommand(const fs::path& archive) {
+#ifdef _WIN32
+    return "tar -tf " + quote(archive);
+#else
+    return "unzip -Z1 " + quote(archive);
+#endif
+}
+
+inline std::string archiveCreateCommand(const fs::path& stage, const fs::path& archive) {
+#ifdef _WIN32
+    return "tar -a -cf " + quote(archive) + " -C " + quote(stage) + " manifest.json config data";
+#else
+    return "cd " + quote(stage) + " && zip -qr " + quote(fs::absolute(archive)) + " manifest.json config data";
+#endif
+}
+
+inline std::string archiveExtractCommand(const fs::path& archive, const fs::path& destination) {
+#ifdef _WIN32
+    return "tar -xf " + quote(archive) + " -C " + quote(destination);
+#else
+    return "unzip -q " + quote(archive) + " -d " + quote(destination);
+#endif
+}
+
+inline bool validateArchiveFile(const fs::path& archive, std::string& error) {
+    int rc = 0;
+    const std::string entries = runCapture(archiveListCommand(archive), rc);
+    if (rc != 0 || entries.find("manifest.json") == std::string::npos) {
+        error = "备份压缩包校验失败";
+        return false;
+    }
+    return true;
+}
+
+inline bool createArchive(Database& db, const fs::path& configPath, fs::path& archive, std::string& error,
+                          bool automatic = false) {
     std::error_code ec;
-    fs::path stage = fs::temp_directory_path() / ("dicenext-backup-" + stamp());
+    fs::path stage = fs::temp_directory_path() / ("dicenext-backup-" + uniqueStamp());
     fs::remove_all(stage, ec); fs::create_directories(stage / "config", ec);
     if (ec) { error = ec.message(); return false; }
     if (!db.checkpoint()) { error = "无法完成 SQLite checkpoint"; fs::remove_all(stage, ec); return false; }
+    fs::create_directories(stage / "data", ec);
+    if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
     if (!copyTree("data", stage / "data", error)) { fs::remove_all(stage, ec); return false; }
     if (fs::exists(configPath, ec)) {
         fs::copy_file(configPath, stage / "config" / "default_config.json", fs::copy_options::overwrite_existing, ec);
@@ -61,12 +123,13 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
     json manifest{{"format", "dice-next-backup"}, {"version", 1}, {"created_at", stamp()},
                   {"includes", json::array({"data", "config/default_config.json"})}};
     { std::ofstream f(stage / "manifest.json", std::ios::binary); f << manifest.dump(2); }
-    fs::path backupDir = "backups"; fs::create_directories(backupDir, ec);
+    fs::path backupDir = archiveDirectory(automatic); fs::create_directories(backupDir, ec);
     if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
-    archive = backupDir / ("DiceNext-backup-" + stamp() + ".tar.gz");
-    std::string cmd = "tar -czf " + quote(archive) + " -C " + quote(stage) + " manifest.json config data";
-    if (std::system(cmd.c_str()) != 0 || !fs::is_regular_file(archive, ec)) {
-        error = "无法创建备份压缩包（需要系统 tar 命令）"; fs::remove_all(stage, ec); return false;
+    archive = backupDir / (std::string("DiceNext-") + (automatic ? "auto-" : "") + "backup-" + uniqueStamp() + ".zip");
+    std::string cmd = archiveCreateCommand(stage, archive);
+    if (std::system(cmd.c_str()) != 0 || !fs::is_regular_file(archive, ec) || !validateArchiveFile(archive, error)) {
+        if (error.empty()) error = "无法创建备份压缩包（需要系统 ZIP 工具）";
+        fs::remove_all(stage, ec); return false;
     }
     fs::remove_all(stage, ec);
     return true;
@@ -89,6 +152,52 @@ inline std::string runCapture(const std::string& command, int& code) {
     return out;
 }
 
+inline json listArchives(bool automaticOnly = false) {
+    json out = json::array();
+    std::error_code ec;
+    for (const bool automatic : {false, true}) {
+        if (automaticOnly && !automatic) continue;
+        const fs::path dir = archiveDirectory(automatic);
+        if (!fs::is_directory(dir, ec)) { ec.clear(); continue; }
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+            if (ec || !entry.is_regular_file(ec)) continue;
+            const std::string name = entry.path().filename().string();
+            if (!isSafeArchiveName(name) || isAutomaticArchiveName(name) != automatic) continue;
+            const auto when = entry.last_write_time(ec);
+            const auto size = entry.file_size(ec);
+            if (ec) { ec.clear(); continue; }
+            const auto systemWhen = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                when - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+            out.push_back({{"name", name}, {"size", size},
+                           {"createdAt", std::chrono::duration_cast<std::chrono::seconds>(systemWhen.time_since_epoch()).count()},
+                           {"automatic", automatic}});
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const json& a, const json& b) {
+        return a.value("createdAt", 0LL) > b.value("createdAt", 0LL);
+    });
+    return out;
+}
+
+inline bool deleteArchive(const std::string& name, std::string& error) {
+    if (!isSafeArchiveName(name)) { error = "无效的备份文件名"; return false; }
+    std::error_code ec;
+    const fs::path path = archiveDirectory(isAutomaticArchiveName(name)) / name;
+    if (!fs::is_regular_file(path, ec) || !fs::remove(path, ec)) {
+        error = ec ? ec.message() : "备份文件不存在";
+        return false;
+    }
+    return true;
+}
+
+inline void cleanupArchives(int keepCount) {
+    if (keepCount < 1) return;
+    json archives = listArchives(true);
+    std::string ignored;
+    for (size_t i = static_cast<size_t>(keepCount); i < archives.size(); ++i)
+        deleteArchive(archives[i].value("name", std::string()), ignored);
+}
+
 inline bool allowedArchivePath(const std::string& name) {
     if (name.empty() || name.front() == '/' || name.find("..") != std::string::npos || name.find('\\') != std::string::npos) return false;
     return name == "manifest.json" || name == "config/" || name == "config/default_config.json"
@@ -98,11 +207,11 @@ inline bool allowedArchivePath(const std::string& name) {
 inline bool stageRestore(const std::string& bytes, std::string& error) {
     if (bytes.empty()) { error = "备份文件为空"; return false; }
     std::error_code ec;
-    fs::path uploadDir = "backups"; fs::create_directories(uploadDir, ec);
+    fs::path uploadDir = archiveDirectory(); fs::create_directories(uploadDir, ec);
     if (ec) { error = ec.message(); return false; }
-    fs::path archive = uploadDir / ("restore-upload-" + stamp() + ".tar.gz");
+    fs::path archive = uploadDir / ("restore-upload-" + uniqueStamp() + ".zip");
     { std::ofstream f(archive, std::ios::binary); f.write(bytes.data(), static_cast<std::streamsize>(bytes.size())); }
-    int rc = 0; std::string entries = runCapture("tar -tzf " + quote(archive), rc);
+    int rc = 0; std::string entries = runCapture(archiveListCommand(archive), rc);
     if (rc != 0) { error = "不是有效的 Dice!Next 备份压缩包"; return false; }
     std::istringstream lines(entries); std::string line; bool manifestSeen = false;
     while (std::getline(lines, line)) {
@@ -113,7 +222,7 @@ inline bool stageRestore(const std::string& bytes, std::string& error) {
     if (!manifestSeen) { error = "备份缺少 manifest.json"; return false; }
     fs::path stage = "restore-pending"; fs::remove_all(stage, ec); fs::create_directories(stage, ec);
     if (ec) { error = ec.message(); return false; }
-    if (std::system(("tar -xzf " + quote(archive) + " -C " + quote(stage)).c_str()) != 0) {
+    if (std::system(archiveExtractCommand(archive, stage).c_str()) != 0) {
         error = "无法解压备份文件"; fs::remove_all(stage, ec); return false;
     }
     try {
