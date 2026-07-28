@@ -694,9 +694,10 @@ TEST(ImportNotices, ConvertsUserAndGroupWindows) {
 TEST(BackupRestore, ArchivesStagesAndAppliesAtStartup) {
     fs::path root = makeTempDir("backup_restore");
     fs::path oldCwd = fs::current_path(); fs::current_path(root);
-    fs::create_directories("config"); fs::create_directories("data");
+    fs::create_directories("config"); fs::create_directories("data/backups");
     { std::ofstream f("config/default_config.json"); f << R"({"server":{"port":18088}})"; }
     { std::ofstream f("data/custom.txt"); f << "before-restore"; }
+    { std::ofstream f("data/backups/older-backup.zip"); f << "must-not-be-nested"; }
     fs::path archive; std::string error;
     {
         Database db;
@@ -707,6 +708,9 @@ TEST(BackupRestore, ArchivesStagesAndAppliesAtStartup) {
     ASSERT_TRUE(fs::is_regular_file(archive));
     ASSERT_TRUE(archive.filename().string().rfind("dicenext_bak_", 0) == 0);
     ASSERT_TRUE(archive.extension() == ".zip");
+    int listRc = 0;
+    ASSERT_TRUE(backup::runCapture(backup::archiveListCommand(archive), listRc).find("data/backups/") == std::string::npos);
+    ASSERT_EQ(listRc, 0);
     std::ifstream backupFile(archive, std::ios::binary);
     std::string bytes((std::istreambuf_iterator<char>(backupFile)), std::istreambuf_iterator<char>());
     backupFile.close();
