@@ -108,8 +108,8 @@ bool applyPendingRestore(const fs::path& root) {
         std::wcerr << L"Dice!Next restore failed: " << error << L"\n";
         return false;
     }
-    const fs::path stagedConfig = stage / L"config" / L"default_config.json";
-    if (fs::exists(stagedConfig, ec) && !moveTree(stagedConfig, root / L"config" / L"default_config.json", rollback / L"config" / L"default_config.json", error)) {
+    const fs::path stagedConfig = stage / L"config";
+    if (fs::exists(stagedConfig, ec) && !moveTree(stagedConfig, root / L"config", rollback / L"config", error)) {
         std::wcerr << L"Dice!Next restore failed: " << error << L"\n";
         return false;
     }

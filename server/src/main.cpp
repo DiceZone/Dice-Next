@@ -56,6 +56,8 @@
 #include <chrono>
 #include <vector>
 #include <filesystem>
+#include <unordered_map>
+#include <unordered_set>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -286,16 +288,20 @@ static int realMain(int argc, char* argv[]) {
     }
 
     dice::ConfigManager configMgr(configPath);
-    if (!configMgr.load()) {
-        DICE_LOG_ERROR("Failed to load configuration from '{}'", configPath);
-        return 1;
-    }
-    DICE_LOG_INFO("Configuration loaded from '{}'", configPath);
+    const bool configLoaded = configMgr.load();
+    bool adaptersNeedExport = !configLoaded || configMgr.createdOnLoad();
+    const std::string databasePathForRecovery = configLoaded
+        ? configMgr.get<std::string>("server/db_path", "./data/dice.db")
+        : configMgr.recoveryDatabasePath("./data/dice.db");
+    if (!configLoaded)
+        DICE_LOG_ERROR("Configuration files are invalid; database snapshot recovery will be attempted after opening the database");
+    else
+        DICE_LOG_INFO("Configuration loaded from '{}'", configPath);
 
     // ── 3.4. 单实例守卫（同一套数据只允许一个进程）────────────
     {
         namespace fs = std::filesystem;
-        std::string dbp = configMgr.get<std::string>("server/db_path", "./data/dice.db");
+        const std::string& dbp = databasePathForRecovery;
         fs::path dataDir = fs::path(dbp).parent_path();
         if (dataDir.empty()) dataDir = ".";
         std::error_code ec; fs::create_directories(dataDir, ec);
@@ -308,9 +314,8 @@ static int realMain(int argc, char* argv[]) {
             return 1;
         }
     }
-
     // ── 3.45. 解析可用的 WebUI 端口（被占用则自动 +1 并写回配置）──
-    {
+    if (configLoaded) {
         int wantPort = configMgr.get<int>("server/port", 18088);
         uint16_t got = dice::findAvailablePort(static_cast<uint16_t>(wantPort));
         if (got != wantPort) {
@@ -320,7 +325,46 @@ static int realMain(int argc, char* argv[]) {
         }
     }
 
-    // ── 3.5. Initialize i18n translation engine ──────────────
+    // ── 4. Open database ─────────────────────────────────────
+    dice::crashdiag::setPhase("database");
+    const std::string dbPath = databasePathForRecovery;
+    dice::Database db;
+    if (!db.open(dbPath)) {
+        DICE_LOG_ERROR("Failed to open database at '{}'", dbPath);
+        return 1;
+    }
+    if (auto* configStorage = db.getStorage()) {
+        configMgr.setSnapshotWriter([configStorage](const dice::json& snapshot) {
+            const std::string key = "system_config_snapshot";
+            auto rows = configStorage->get_all<dice::DiceConfigRow>(
+                sqlite_orm::where(sqlite_orm::c(&dice::DiceConfigRow::key) == key));
+            if (rows.empty()) configStorage->insert(dice::DiceConfigRow{0, key, snapshot.dump()});
+            else { rows.front().value = snapshot.dump(); configStorage->update(rows.front()); }
+        });
+        if (!configLoaded) {
+            try {
+                const auto rows = configStorage->get_all<dice::DiceConfigRow>(
+                    sqlite_orm::where(sqlite_orm::c(&dice::DiceConfigRow::key) == "system_config_snapshot"));
+                if (!rows.empty() && configMgr.restoreSnapshot(dice::json::parse(rows.front().value)) && configMgr.save()) {
+                    adaptersNeedExport = false;
+                    DICE_LOG_WARN("Invalid configuration files restored from the last database snapshot");
+                } else {
+                    // A pre-snapshot installation still has adapter rows in the
+                    // database. Start from safe defaults once, then export those
+                    // rows into adapters.json below.
+                    if (!configMgr.save()) return 1;
+                    DICE_LOG_WARN("No database configuration snapshot found; created safe split defaults");
+                }
+            } catch (const std::exception& e) {
+                DICE_LOG_ERROR("Database configuration snapshot recovery failed: {}", e.what());
+                return 1;
+            }
+        } else {
+            configMgr.save();
+        }
+    }
+
+    // ── 4.5. Initialize i18n from the validated/recovered config ──
     std::string i18nDir = configMgr.get<std::string>("i18n/resource_dir", "i18n");
     std::string defaultLocaleCode = configMgr.get<std::string>("i18n/default_locale", "zh-Hans");
     dice::I18n i18n(i18nDir, dice::localeFromString(defaultLocaleCode));
@@ -331,15 +375,6 @@ static int realMain(int argc, char* argv[]) {
             defaultLocaleCode, i18n.availableLocales().size());
     }
     // Persona system initialized later (after DB open + migration)
-
-    // ── 4. Open database ─────────────────────────────────────
-    dice::crashdiag::setPhase("database");
-    std::string dbPath = configMgr.get<std::string>("server/db_path", "./data/dice.db");
-    dice::Database db;
-    if (!db.open(dbPath)) {
-        DICE_LOG_ERROR("Failed to open database at '{}'", dbPath);
-        return 1;
-    }
 
     // ── 5. Run migration ────────────────────────────────────
     dice::crashdiag::setPhase("migration");
@@ -1882,31 +1917,71 @@ static int realMain(int argc, char* argv[]) {
     // Register adapters from DB (don't start yet — wait for event loop)
     auto* st = db.getStorage();
     if (st) {
-        // First-run bootstrap: if the adapters table is empty, seed it from the
-        // config file. Without this, a freshly-built bot has zero adapters in the
-        // DB and connects to nothing — the web UI then becomes the source of truth.
-        if (st->count<dice::AdapterRow>() == 0) {
-            nlohmann::json cfgAll = configMgr.getAll();
-            if (cfgAll.contains("adapters") && cfgAll["adapters"].is_array()) {
-                for (auto& a : cfgAll["adapters"]) {
-                    dice::AdapterRow row;
-                    row.name           = a.value("name", std::string("Bot"));
-                    row.type           = static_cast<int>(dice::adapterTypeFromString(
-                                             a.value("type", std::string("onebot_v11"))));
-                    row.connectionMode = static_cast<int>(dice::connectionModeFromString(
-                                             a.value("connection_mode", std::string("forward_ws"))));
-                    row.endpoint       = a.value("endpoint", std::string(""));
-                    row.accessToken    = a.value("access_token", std::string(""));
-                    row.enabled        = a.value("enabled", false);
-                    row.config         = (row.type == static_cast<int>(dice::AdapterType::kQQOfficial))
-                        ? nlohmann::json{{"appId", a.value("app_id", a.value("appId", std::string()))},
-                                         {"appSecret", a.value("app_secret", a.value("appSecret", std::string()))}}.dump()
-                        : "{}";
-                    st->insert(row);
-                }
-                DICE_LOG_INFO("Seeded {} adapter(s) from config into database",
-                    cfgAll["adapters"].size());
+        auto rowFromConfig = [](const nlohmann::json& a) {
+            dice::AdapterRow row;
+            row.name = a.value("name", std::string("Bot"));
+            row.type = static_cast<int>(dice::adapterTypeFromString(a.value("type", std::string("onebot_v11"))));
+            const std::string mode = a.value("connection_mode", a.value("connectionMode", std::string("forward_ws")));
+            row.connectionMode = static_cast<int>(dice::connectionModeFromString(mode));
+            row.endpoint = a.value("endpoint", std::string());
+            row.accessToken = a.value("access_token", a.value("accessToken", std::string()));
+            row.enabled = a.value("enabled", false);
+            row.config = row.type == static_cast<int>(dice::AdapterType::kQQOfficial)
+                ? nlohmann::json{{"appId", a.value("app_id", a.value("appId", std::string()))},
+                                 {"appSecret", a.value("app_secret", a.value("appSecret", std::string()))},
+                                 {"qqNumber", a.value("qq_number", a.value("qqNumber", std::string()))}}.dump()
+                : "{}";
+            return row;
+        };
+        auto configFromRow = [](const dice::AdapterRow& row) {
+            nlohmann::json extra = nlohmann::json::parse(row.config, nullptr, false);
+            if (!extra.is_object()) extra = nlohmann::json::object();
+            nlohmann::json a{{"id", row.id}, {"name", row.name}, {"type", dice::adapterTypeToString(static_cast<dice::AdapterType>(row.type))},
+                             {"connection_mode", row.connectionMode == 1 ? "reverse_ws" : row.connectionMode == 2 ? "http" : "forward_ws"},
+                             {"endpoint", row.endpoint}, {"access_token", row.accessToken}, {"enabled", row.enabled}};
+            if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
+                a["app_id"] = extra.value("appId", std::string());
+                a["app_secret"] = extra.value("appSecret", std::string());
+                a["qq_number"] = extra.value("qqNumber", std::string());
             }
+            return a;
+        };
+        if (adaptersNeedExport) {
+            nlohmann::json exported = nlohmann::json::array();
+            for (const auto& row : st->get_all<dice::AdapterRow>()) exported.push_back(configFromRow(row));
+            configMgr.set<nlohmann::json>("adapters", exported);
+            configMgr.save();
+            DICE_LOG_INFO("Exported {} database adapter(s) into adapters.json", exported.size());
+        } else {
+            const nlohmann::json cfgAll = configMgr.getAll();
+            std::unordered_set<int> configuredIds;
+            std::unordered_map<int, dice::AdapterRow> existing;
+            for (const auto& row : st->get_all<dice::AdapterRow>()) existing.emplace(row.id, row);
+            nlohmann::json normalized = nlohmann::json::array();
+            if (cfgAll.contains("adapters") && cfgAll["adapters"].is_array()) {
+                for (const auto& a : cfgAll["adapters"]) {
+                    if (!a.is_object()) continue;
+                    dice::AdapterRow row = rowFromConfig(a);
+                    int configuredId = 0;
+                    try {
+                        if (a.contains("id") && a["id"].is_number_integer()) configuredId = a["id"].get<int>();
+                        else if (a.contains("id") && a["id"].is_string()) configuredId = std::stoi(a["id"].get<std::string>());
+                    } catch (...) { configuredId = 0; }
+                    if (configuredId > 0 && existing.count(configuredId)) {
+                        row.id = configuredId;
+                        st->update(row);
+                    } else {
+                        row.id = st->insert(row);
+                    }
+                    configuredIds.insert(row.id);
+                    normalized.push_back(configFromRow(row));
+                }
+            }
+            for (const auto& [id, row] : existing) if (!configuredIds.count(id)) st->remove<dice::AdapterRow>(id);
+            // New entries and old UUID-style IDs become concrete, stable IDs.
+            configMgr.set<nlohmann::json>("adapters", normalized);
+            configMgr.save();
+            DICE_LOG_INFO("Loaded {} adapter(s) from adapters.json", normalized.size());
         }
 
         auto adapters = st->get_all<dice::AdapterRow>();
@@ -1946,7 +2021,8 @@ static int realMain(int argc, char* argv[]) {
     app.setClientMaxMemoryBodySize(128 * 1024 * 1024);
 
     // ── WebUI 登录鉴权 ───────────────────────────────────
-    dice::WebAuth::instance().setPassword(configMgr.get<std::string>("webui/password", ""));
+    dice::WebAuth::instance().configure(configMgr.get<std::string>("webui/password", ""),
+        std::filesystem::path(configPath).parent_path() / "webui_sessions.json");
     // 前置拦截：设了口令时，/api/* 需有效会话 Cookie（放行登录/状态查询与静态文件）。
     app.registerPreHandlingAdvice(
         [](const drogon::HttpRequestPtr& req,
@@ -1986,10 +2062,12 @@ static int realMain(int argc, char* argv[]) {
                     auto j = nlohmann::json::parse(req->getBody());
                     std::string pw = j.value("password", "");
                     if (!dice::WebAuth::instance().hasPassword() || dice::WebAuth::instance().checkPassword(pw)) {
-                        std::string token = dice::WebAuth::instance().issueToken();
+                        const bool trustDevice = j.value("trust_device", false);
+                        std::string token = dice::WebAuth::instance().issueToken(trustDevice);
                         auto resp = jResp({{"code", 0}, {"message", "ok"}, {"data", {{"authed", true}}}});
                         drogon::Cookie ck("dice_session", token);
-                        ck.setPath("/"); ck.setHttpOnly(true); ck.setMaxAge(7 * 24 * 3600);
+                        ck.setPath("/"); ck.setHttpOnly(true);
+                        if (trustDevice) ck.setMaxAge(30 * 24 * 3600);
                         resp->addCookie(ck);
                         cb(resp);
                     } else {

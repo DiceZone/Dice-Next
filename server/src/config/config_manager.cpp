@@ -7,6 +7,8 @@
 #include <filesystem>
 #include <sstream>
 #include <thread>
+#include <algorithm>
+#include <cctype>
 
 namespace dice {
 
@@ -51,6 +53,13 @@ static json makeDefaultConfig() {
             {"welcome_min_delay", 0},            // welcome delay 全局最低值（秒）
             {"welcome_min_cooldown", 0}           // welcome cooldown 全局最低值（秒）
         }},
+        {"webui", {
+            {"password", ""}
+        }},
+        {"i18n", {
+            {"resource_dir", "i18n"},
+            {"default_locale", "zh-Hans"}
+        }},
         {"adapters", json::array()},
         {"backup", {
             {"auto_enabled", false},
@@ -70,6 +79,74 @@ static json makeDefaultConfig() {
     };
 }
 
+static constexpr const char* kSplitFormat = "dice-next-config";
+
+static bool isSafeSectionName(const std::string& name) {
+    return !name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char c) {
+        return std::isalnum(c) || c == '_' || c == '-';
+    });
+}
+
+static fs::path configDirectory(const std::string& configPath) {
+    const fs::path parent = fs::path(configPath).parent_path();
+    return parent.empty() ? fs::path(".") : parent;
+}
+
+static bool writeJsonFile(const fs::path& path, const json& value, std::string& error) {
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) { error = ec.message(); return false; }
+    const fs::path temp = path.string() + ".tmp";
+    {
+        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        if (!out) { error = "无法写入 " + path.string(); return false; }
+        out << value.dump(2) << '\n';
+        if (!out) { error = "写入 " + path.string() + " 失败"; return false; }
+    }
+    fs::remove(path, ec); ec.clear();
+    fs::rename(temp, path, ec);
+    if (ec) { error = ec.message(); fs::remove(temp, ec); return false; }
+    return true;
+}
+
+static bool validateConfig(const json& value, std::string& error) {
+    if (!value.is_object()) { error = "配置根节点必须是对象"; return false; }
+    const auto server = value.value("server", json::object());
+    if (!server.is_object()) { error = "server 配置必须是对象"; return false; }
+    const int port = server.value("port", 18088);
+    if (port < 1 || port > 65535) { error = "server.port 必须在 1-65535 之间"; return false; }
+    if (value.contains("adapters") && !value["adapters"].is_array()) { error = "adapters 配置必须是数组"; return false; }
+    for (const char* section : {"dice", "events", "webui", "i18n", "backup", "hot_reload"}) {
+        if (value.contains(section) && !value[section].is_object()) { error = std::string(section) + " 配置必须是对象"; return false; }
+    }
+    return true;
+}
+
+static bool writeSplitConfig(const std::string& configPath, const json& value, std::string& error) {
+    const fs::path dir = configDirectory(configPath);
+    json manifest{{"format", kSplitFormat}, {"version", 2}, {"sections", json::array()}};
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        if (!isSafeSectionName(it.key())) continue;
+        if (!writeJsonFile(dir / (it.key() + ".json"), it.value(), error)) return false;
+        manifest["sections"].push_back(it.key());
+    }
+    return writeJsonFile(configPath, manifest, error);
+}
+
+static bool readSplitConfig(const std::string& configPath, const json& manifest, json& value, std::string& error) {
+    if (!manifest.value("sections", json::array()).is_array()) { error = "配置清单缺少 sections 数组"; return false; }
+    value = makeDefaultConfig();
+    const fs::path dir = configDirectory(configPath);
+    for (const auto& item : manifest["sections"]) {
+        if (!item.is_string() || !isSafeSectionName(item.get<std::string>())) { error = "配置清单包含无效功能区"; return false; }
+        const std::string name = item.get<std::string>();
+        std::ifstream in(dir / (name + ".json"), std::ios::binary);
+        if (!in) { error = "缺少配置文件：" + name + ".json"; return false; }
+        value[name] = json::parse(in);
+    }
+    return true;
+}
+
 // ─── Constructor ─────────────────────────────────────────────
 
 ConfigManager::ConfigManager(const std::string& configPath)
@@ -81,52 +158,40 @@ ConfigManager::ConfigManager(const std::string& configPath)
 
 bool ConfigManager::load() {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    if (!fs::exists(configPath_)) {
-        DICE_LOG_WARN("ConfigManager: config file not found at '{}', using defaults", configPath_);
-        // Write defaults to disk
-        try {
-            fs::create_directories(fs::path(configPath_).parent_path());
-            std::ofstream ofs(configPath_);
-            ofs << config_.dump(2);
-            DICE_LOG_INFO("ConfigManager: default config written to '{}'", configPath_);
-        } catch (const std::exception& e) {
-            DICE_LOG_ERROR("ConfigManager: failed to write default config: {}", e.what());
-            return false;
-        }
-        return true;
-    }
-
+    createdOnLoad_ = false;
     try {
-        std::ifstream ifs(configPath_);
-        if (!ifs.is_open()) {
-            DICE_LOG_ERROR("ConfigManager: failed to open '{}'", configPath_);
+        if (!fs::exists(configPath_)) {
+            std::string error;
+            config_ = makeDefaultConfig();
+            if (!writeSplitConfig(configPath_, config_, error)) {
+                DICE_LOG_ERROR("ConfigManager: failed to create default configuration: {}", error);
+                return false;
+            }
+            splitLayout_ = true;
+            createdOnLoad_ = true;
+            return true;
+        }
+        std::ifstream in(configPath_, std::ios::binary);
+        if (!in) return false;
+        const json manifest = json::parse(in);
+        if (manifest.value("format", std::string()) != kSplitFormat || manifest.value("version", 0) != 2) {
+            DICE_LOG_ERROR("ConfigManager: '{}' is not a split configuration manifest", configPath_);
             return false;
         }
-
-        json loaded = json::parse(ifs);
-
-        // Merge with defaults to ensure all keys exist
-        // nlohmann::json::update() recursively merges loaded over defaults
-        config_ = makeDefaultConfig();
-        config_.update(loaded);
-
-        // Auto-generate API key if empty
-        if (config_["server"]["api_key"].get<std::string>().empty()) {
-            config_["server"]["api_key"] = utils::generateUuidV4();
+        json loaded; std::string error;
+        if (!readSplitConfig(configPath_, manifest, loaded, error) || !validateConfig(loaded, error)) {
+            DICE_LOG_ERROR("ConfigManager: configuration validation failed: {}", error);
+            return false;
+        }
+        if (loaded["server"].value("api_key", std::string()).empty()) {
+            loaded["server"]["api_key"] = utils::generateUuidV4();
             DICE_LOG_INFO("ConfigManager: auto-generated API key");
         }
-
-        DICE_LOG_INFO("ConfigManager: config loaded from '{}'", configPath_);
+        config_ = std::move(loaded);
+        splitLayout_ = true;
         return true;
-    } catch (const json::parse_error& e) {
-        DICE_LOG_ERROR("ConfigManager: JSON parse error in '{}': {}", configPath_, e.what());
-        // Fall back to defaults
-        config_ = makeDefaultConfig();
-        return false;
     } catch (const std::exception& e) {
         DICE_LOG_ERROR("ConfigManager: failed to load config: {}", e.what());
-        config_ = makeDefaultConfig();
         return false;
     }
 }
@@ -137,6 +202,12 @@ bool ConfigManager::reload() {
 
     bool ok = load();
     if (ok) {
+        // A direct edit to a configuration file has passed validation.  Write
+        // the normalized split layout and update the database recovery
+        // snapshot before notifying runtime listeners.
+        ok = save();
+    }
+    if (ok) {
         emitConfigChanged();
     }
     return ok;
@@ -145,25 +216,71 @@ bool ConfigManager::reload() {
 bool ConfigManager::save() {
     ++writing_;  // suppress self-triggered hot reload
     bool ok = false;
+    json snapshot;
+    std::function<void(const json&)> snapshotWriter;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         try {
-            fs::create_directories(fs::path(configPath_).parent_path());
-            std::ofstream ofs(configPath_);
-            if (!ofs.is_open()) {
-                DICE_LOG_ERROR("ConfigManager: failed to open '{}' for writing", configPath_);
-            } else {
-                ofs << config_.dump(2);
+            std::string error;
+            if (validateConfig(config_, error) && writeSplitConfig(configPath_, config_, error)) {
+                splitLayout_ = true;
                 DICE_LOG_INFO("ConfigManager: config saved to '{}'", configPath_);
+                snapshot = config_;
+                snapshotWriter = snapshotWriter_;
                 ok = true;
+            } else {
+                DICE_LOG_ERROR("ConfigManager: failed to save config: {}", error);
             }
         } catch (const std::exception& e) {
             DICE_LOG_ERROR("ConfigManager: failed to save config: {}", e.what());
         }
     }
+    if (ok && snapshotWriter) {
+        try { snapshotWriter(snapshot); }
+        catch (const std::exception& e) { DICE_LOG_ERROR("ConfigManager: failed to persist database snapshot: {}", e.what()); }
+    }
     // Delay decrement to cover the file-watcher debounce window
     std::thread([](std::atomic<int>& w) { std::this_thread::sleep_for(std::chrono::milliseconds(1500)); --w; }, std::ref(writing_)).detach();
     return ok;
+}
+
+bool ConfigManager::restoreSnapshot(const json& snapshot) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string error;
+    if (!validateConfig(snapshot, error)) {
+        DICE_LOG_ERROR("ConfigManager: database configuration snapshot is invalid: {}", error);
+        return false;
+    }
+    config_ = snapshot;
+    if (config_["server"].value("api_key", std::string()).empty())
+        config_["server"]["api_key"] = utils::generateUuidV4();
+    return true;
+}
+
+std::string ConfigManager::recoveryDatabasePath(const std::string& fallback) const {
+    try {
+        std::ifstream manifestFile(configPath_, std::ios::binary);
+        if (!manifestFile) return fallback;
+        const json manifest = json::parse(manifestFile);
+        if (manifest.value("format", std::string()) != kSplitFormat || manifest.value("version", 0) != 2)
+            return fallback;
+        const auto sections = manifest.value("sections", json::array());
+        if (!sections.is_array() || std::find(sections.begin(), sections.end(), "server") == sections.end())
+            return fallback;
+        std::ifstream serverFile(configDirectory(configPath_) / "server.json", std::ios::binary);
+        if (!serverFile) return fallback;
+        const json server = json::parse(serverFile);
+        if (!server.is_object() || !server.contains("db_path") || !server["db_path"].is_string()) return fallback;
+        const std::string path = server["db_path"].get<std::string>();
+        return path.empty() ? fallback : path;
+    } catch (...) {
+        return fallback;
+    }
+}
+
+void ConfigManager::setSnapshotWriter(std::function<void(const json&)> writer) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    snapshotWriter_ = std::move(writer);
 }
 
 void ConfigManager::resetDefault() {

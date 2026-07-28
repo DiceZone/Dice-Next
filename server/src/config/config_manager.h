@@ -46,6 +46,15 @@ public:
     /// Returns true on success.
     bool save();
 
+    /// Restore a validated full configuration snapshot, normally recovered from
+    /// the database after an invalid on-disk edit.
+    bool restoreSnapshot(const json& snapshot);
+
+    /// When normal validation fails, read only a string db_path from the
+    /// current split server section so startup can locate its last snapshot.
+    /// This does not accept any legacy layout and does not load the config.
+    std::string recoveryDatabasePath(const std::string& fallback) const;
+
     /// Reset to factory defaults (does NOT write to disk).
     void resetDefault();
 
@@ -90,15 +99,29 @@ public:
     /// Manually trigger all registered change callbacks.
     void emitConfigChanged();
 
+    /// Installs the durable snapshot sink after the database is open. Every
+    /// successful save writes the full validated configuration to this sink.
+    void setSnapshotWriter(std::function<void(const json&)> writer);
+
     // ─── Path ────────────────────────────────────────────────
 
     const std::string& configPath() const noexcept { return configPath_; }
+
+    /// True after the configuration has been loaded from the split manifest.
+    bool usingSplitLayout() const noexcept { return splitLayout_; }
+
+    /// True only for the startup that had to create a fresh config directory.
+    /// The caller can use this to export existing runtime state once.
+    bool createdOnLoad() const noexcept { return createdOnLoad_; }
 
 private:
     std::string configPath_;
     json config_;
     mutable std::mutex mutex_;
     std::vector<ConfigChangeCallback> changeCallbacks_;
+    std::function<void(const json&)> snapshotWriter_;
+    bool splitLayout_ = false;
+    bool createdOnLoad_ = false;
 
     std::atomic<int> writing_{0};  // >0 when save() is writing (suppress self-triggered reload)
     // ─── Internal helpers ────────────────────────────────────

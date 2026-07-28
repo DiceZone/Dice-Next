@@ -168,6 +168,27 @@ static J adapterToJson(const AdapterRow& a) {
     };
 }
 
+static J adapterToConfigJson(const AdapterRow& a) {
+    J extra = J::parse(a.config, nullptr, false); if (!extra.is_object()) extra = J::object();
+    J out{{"id", a.id}, {"name", a.name}, {"type", adapterTypeToString(static_cast<AdapterType>(a.type))},
+          {"connection_mode", a.connectionMode == 1 ? "reverse_ws" : a.connectionMode == 2 ? "http" : "forward_ws"},
+          {"endpoint", a.endpoint}, {"access_token", a.accessToken}, {"enabled", a.enabled}};
+    if (a.type == static_cast<int>(AdapterType::kQQOfficial)) {
+        out["app_id"] = extra.value("appId", std::string());
+        out["app_secret"] = extra.value("appSecret", std::string());
+        out["qq_number"] = extra.value("qqNumber", std::string());
+    }
+    return out;
+}
+
+template <typename Storage>
+static void persistAdaptersToConfig(Storage* st, ConfigManager& cfg) {
+    J adapters = J::array();
+    for (const auto& adapter : st->template get_all<AdapterRow>()) adapters.push_back(adapterToConfigJson(adapter));
+    cfg.set<J>("adapters", adapters);
+    if (!cfg.save()) throw std::runtime_error("适配器已变更，但写入 adapters.json 失败");
+}
+
 static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
     if (a.type == static_cast<int>(AdapterType::kQQOfficial)) {
         J cfg = J::parse(a.config, nullptr, false);
@@ -1496,8 +1517,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // Full local backup.  The archive contains config/default_config.json and
-    // runtime data/ after all SQLite WAL stores have been checkpointed.
+    // Full local backup. The archive contains the complete split config/
+    // directory and runtime data/ after all SQLite WAL stores are checkpointed.
     app.registerHandler("/api/backup/export", [&db, &cfg](Req, CB&& cb) {
         try {
             std::filesystem::path archive; std::string error;
@@ -1816,7 +1837,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Get});
 
     // ── Adapters (DB-backed, status from AdapterManager) ──────
-    app.registerHandler("/api/adapters", [st, &adapterMgr](Req req, CB&& cb) {
+    app.registerHandler("/api/adapters", [st, &adapterMgr, &cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Get) {
                 auto rows = st->get_all<AdapterRow>();
@@ -1860,6 +1881,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     a.connectionMode = (mode == "reverse_ws") ? 1 : (mode == "http") ? 2 : 0; a.config = "{}";
                 }
                 a.id = st->insert(a);
+                persistAdaptersToConfig(st, cfg);
 
                 // Create real adapter instance and auto-start if enabled
                 if (a.enabled) {
@@ -1874,7 +1896,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Get, drogon::Post});
 
     // PUT/DELETE /api/adapters/{id}
-    app.registerHandler("/api/adapters/{1}", [st, &adapterMgr](Req req, CB&& cb, const std::string& id) {
+    app.registerHandler("/api/adapters/{1}", [st, &adapterMgr, &cfg](Req req, CB&& cb, const std::string& id) {
         try {
             int aid = std::stoi(id);
             if (req->method() == drogon::Put || req->method() == drogon::Patch) {
@@ -1897,6 +1919,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     a.connectionMode = (m == "reverse_ws") ? 1 : (m == "http") ? 2 : 0;
                 }
                 st->update(a);
+                persistAdaptersToConfig(st, cfg);
 
                 // Handle toggle in AdapterManager
                 if (a.enabled && !wasEnabled) {
@@ -1927,6 +1950,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 adapterMgr.stopAdapter(std::to_string(aid));
                 adapterMgr.unregisterAdapter(std::to_string(aid));
                 st->remove<AdapterRow>(aid);
+                persistAdaptersToConfig(st, cfg);
                 jsonReply(ok(nullptr), std::move(cb));
             } else { jsonReply(fail("Method not allowed"), std::move(cb)); }
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }

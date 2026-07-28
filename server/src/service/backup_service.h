@@ -199,11 +199,11 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
         }
     }
     if (selection.config && fs::exists(configPath, ec)) {
-        fs::copy_file(configPath, stage / "config" / "default_config.json", fs::copy_options::overwrite_existing, ec);
-        if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
+        const fs::path configDir = configPath.parent_path().empty() ? fs::path("config") : configPath.parent_path();
+        if (!copyTree(configDir, stage / "config", error)) { fs::remove_all(stage, ec); return false; }
     }
     json manifest{{"format", "dice-next-backup"}, {"version", 2}, {"created_at", stamp()}, {"automatic", automatic},
-                  {"selection", selection.toJson()}, {"includes", json::array({"data", "config/default_config.json"})}};
+                  {"selection", selection.toJson()}, {"includes", json::array({"data", "config"})}};
     { std::ofstream f(stage / "manifest.json", std::ios::binary); f << manifest.dump(2); }
     fs::path backupDir = archiveDirectory(automatic); fs::create_directories(backupDir, ec);
     if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
@@ -302,7 +302,7 @@ inline void cleanupArchives(int keepDays) {
 
 inline bool allowedArchivePath(const std::string& name) {
     if (name.empty() || name.front() == '/' || name.find("..") != std::string::npos || name.find('\\') != std::string::npos) return false;
-    return name == "manifest.json" || name == "config/" || name == "config/default_config.json"
+    return name == "manifest.json" || name == "config/" || name.rfind("config/", 0) == 0
         || name == "data/" || name.rfind("data/", 0) == 0;
 }
 
@@ -366,29 +366,17 @@ inline bool applyPendingRestore(std::string& notice) {
             // without ever deleting unrelated current data.
             std::string copyError;
             if (!copyTree("data", rollback / "data", copyError)) throw std::runtime_error(copyError);
-            if (fs::exists("config/default_config.json")) {
-                fs::create_directories(rollback / "config");
-                fs::copy_file("config/default_config.json", rollback / "config" / "default_config.json", fs::copy_options::overwrite_existing);
-            }
+            if (fs::exists("config")) copyTree("config", rollback / "config", copyError);
             if (fs::exists(stage / "data") && !copyTree(stage / "data", "data", copyError)) throw std::runtime_error(copyError);
-            if (fs::exists(stage / "config" / "default_config.json")) {
-                fs::create_directories("config");
-                fs::copy_file(stage / "config" / "default_config.json", "config/default_config.json", fs::copy_options::overwrite_existing);
-            }
+            if (fs::exists(stage / "config") && !copyTree(stage / "config", "config", copyError)) throw std::runtime_error(copyError);
             fs::remove_all(stage, ec);
             notice = "已应用局部待恢复备份；恢复前的数据保存在 " + rollback.string();
             return true;
         }
         if (fs::exists("data")) fs::rename("data", rollback / "data");
-        if (fs::exists("config/default_config.json")) {
-            fs::create_directories(rollback / "config");
-            fs::copy_file("config/default_config.json", rollback / "config" / "default_config.json", fs::copy_options::overwrite_existing);
-        }
+        if (fs::exists("config")) fs::rename("config", rollback / "config");
         if (fs::exists(stage / "data")) fs::rename(stage / "data", "data"); else fs::create_directories("data");
-        if (fs::exists(stage / "config" / "default_config.json")) {
-            fs::create_directories("config");
-            fs::copy_file(stage / "config" / "default_config.json", "config/default_config.json", fs::copy_options::overwrite_existing);
-        }
+        if (fs::exists(stage / "config")) fs::rename(stage / "config", "config");
         fs::remove_all(stage, ec);
         notice = "已应用待恢复备份；恢复前的数据保存在 " + rollback.string();
         return true;
