@@ -3052,7 +3052,7 @@ static int realMain(int argc, char* argv[]) {
         // config dice/inactive_group_line 迁移为一条 targetId="*" 的可管理任务。
     });
 
-    // ── 自动备份：按间隔或每日时刻执行，成功后按保留数量滚动清理 ──
+    // ── 自动备份：按间隔或每日时刻执行，按保留天数清理旧档案 ──
     auto autoBackupTick = [&db, &configMgr]() {
         try {
             if (!configMgr.get<bool>("backup/auto_enabled", false)) return;
@@ -3079,13 +3079,15 @@ static int realMain(int argc, char* argv[]) {
                 due = last <= 0 || static_cast<long long>(now) - last >= static_cast<long long>(hours) * 3600;
             }
             if (!due) return;
+            const auto selection = dice::backup::Selection::fromJson(
+                configMgr.get<dice::json>("backup/auto_selection", dice::json::object()));
             std::filesystem::path archive; std::string error;
-            if (!dice::backup::createArchive(db, configMgr.configPath(), archive, error, true)) {
+            if (!dice::backup::createArchive(db, configMgr.configPath(), archive, error, selection, true)) {
                 DICE_LOG_ERROR("automatic backup failed: {}", error); return;
             }
             configMgr.set<long long>("backup/auto_last_at", static_cast<long long>(now));
             configMgr.save();
-            dice::backup::cleanupArchives(configMgr.get<int>("backup/auto_keep_count", 7));
+            dice::backup::cleanupArchives(configMgr.get<int>("backup/auto_keep_days", 7));
             DICE_LOG_INFO("automatic backup created: {}", archive.string());
         } catch (const std::exception& e) { DICE_LOG_ERROR("automatic backup failed: {}", e.what()); }
     };

@@ -20,6 +20,35 @@ namespace dice::backup {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
+// Selection mirrors the useful separation in mature dice-bot backup systems:
+// core state is always explicit, while bulky/user-managed resources can be
+// opted in independently.  All categories are enabled by default for a full
+// portable backup.
+struct Selection {
+    bool config = true;
+    bool databases = true;
+    bool logs = true;
+    bool resources = true;
+    bool plugins = true;
+    bool media = true;
+
+    bool complete() const { return config && databases && logs && resources && plugins && media; }
+    json toJson() const { return {{"config", config}, {"databases", databases}, {"logs", logs},
+                                  {"resources", resources}, {"plugins", plugins}, {"media", media},
+                                  {"all", complete()}}; }
+    static Selection fromJson(const json& value) {
+        Selection result;
+        if (!value.is_object()) return result;
+        result.config = value.value("config", result.config);
+        result.databases = value.value("databases", result.databases);
+        result.logs = value.value("logs", result.logs);
+        result.resources = value.value("resources", result.resources);
+        result.plugins = value.value("plugins", result.plugins);
+        result.media = value.value("media", result.media);
+        return result;
+    }
+};
+
 inline std::string stamp() {
     auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm tm{};
@@ -56,20 +85,31 @@ inline bool copyTree(const fs::path& from, const fs::path& to, std::string& erro
     return true;
 }
 
+inline bool copyItem(const fs::path& from, const fs::path& to, std::string& error) {
+    std::error_code ec;
+    if (!fs::exists(from, ec)) return true;
+    if (fs::is_directory(from, ec)) return copyTree(from, to, error);
+    fs::create_directories(to.parent_path(), ec);
+    if (ec) { error = ec.message(); return false; }
+    fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+    if (ec) { error = ec.message(); return false; }
+    return true;
+}
+
 inline std::string runCapture(const std::string& command, int& code);
 
 inline fs::path archiveDirectory(bool automatic = false) {
-    return automatic ? fs::path("data") / "backups" : fs::path("backups");
-}
-
-inline bool isAutomaticArchiveName(const std::string& name) {
-    return name.rfind("DiceNext-auto-backup-", 0) == 0;
+    // Manual and scheduled backups deliberately share one user-visible store.
+    // `automatic` is retained in the API so callers can classify/clean them,
+    // but it must not create a second archive location.
+    (void)automatic;
+    return fs::path("data") / "backups";
 }
 
 inline bool isSafeArchiveName(const std::string& name) {
     return !name.empty() && name.find('/') == std::string::npos && name.find('\\') == std::string::npos &&
-           name.rfind("DiceNext-", 0) == 0 && name.size() > 4 &&
-           name.compare(name.size() - 4, 4, ".zip") == 0;
+           name.size() > 4 && name.compare(name.size() - 4, 4, ".zip") == 0 &&
+           (name.rfind("dicenext_bak_", 0) == 0 || name.rfind("DiceNext-", 0) == 0);
 }
 
 inline std::string archiveListCommand(const fs::path& archive) {
@@ -96,6 +136,14 @@ inline std::string archiveExtractCommand(const fs::path& archive, const fs::path
 #endif
 }
 
+inline std::string archiveManifestCommand(const fs::path& archive) {
+#ifdef _WIN32
+    return "tar -xOf " + quote(archive) + " manifest.json";
+#else
+    return "unzip -p " + quote(archive) + " manifest.json";
+#endif
+}
+
 inline bool validateArchiveFile(const fs::path& archive, std::string& error) {
     int rc = 0;
     const std::string entries = runCapture(archiveListCommand(archive), rc);
@@ -107,7 +155,7 @@ inline bool validateArchiveFile(const fs::path& archive, std::string& error) {
 }
 
 inline bool createArchive(Database& db, const fs::path& configPath, fs::path& archive, std::string& error,
-                          bool automatic = false) {
+                          const Selection& selection, bool automatic = false) {
     std::error_code ec;
     fs::path stage = fs::temp_directory_path() / ("dicenext-backup-" + uniqueStamp());
     fs::remove_all(stage, ec); fs::create_directories(stage / "config", ec);
@@ -115,17 +163,52 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
     if (!db.checkpoint()) { error = "无法完成 SQLite checkpoint"; fs::remove_all(stage, ec); return false; }
     fs::create_directories(stage / "data", ec);
     if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
-    if (!copyTree("data", stage / "data", error)) { fs::remove_all(stage, ec); return false; }
-    if (fs::exists(configPath, ec)) {
+    if (selection.complete()) {
+        if (!copyTree("data", stage / "data", error)) { fs::remove_all(stage, ec); return false; }
+        // Backups always live below data/.  Never put that store into an
+        // archive, otherwise each new backup recursively contains all older
+        // backups.
+        fs::remove_all(stage / "data" / "backups", ec);
+        if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
+    } else {
+        if (selection.databases && fs::is_directory("data", ec)) {
+            for (const auto& entry : fs::directory_iterator("data", ec)) {
+                if (ec) break;
+                if (entry.is_regular_file(ec) && entry.path().extension() == ".db" &&
+                    !copyItem(entry.path(), stage / "data" / entry.path().filename(), error)) {
+                    fs::remove_all(stage, ec); return false;
+                }
+            }
+        }
+        if (selection.logs) {
+            for (const auto& item : {fs::path("data/logs"), fs::path("data/audit"), fs::path("data/logs.db")})
+                if (!copyItem(item, stage / item, error)) { fs::remove_all(stage, ec); return false; }
+        }
+        if (selection.resources) {
+            for (const auto& item : {fs::path("data/decks"), fs::path("data/rules"), fs::path("data/rulepacks"),
+                                     fs::path("data/help"), fs::path("data/helpdoc"), fs::path("data/card-templates")})
+                if (!copyItem(item, stage / item, error)) { fs::remove_all(stage, ec); return false; }
+        }
+        if (selection.plugins) {
+            for (const auto& item : {fs::path("data/plugins"), fs::path("data/mod")})
+                if (!copyItem(item, stage / item, error)) { fs::remove_all(stage, ec); return false; }
+        }
+        if (selection.media) {
+            for (const auto& item : {fs::path("data/images"), fs::path("data/chat_images"), fs::path("data/logs/images")})
+                if (!copyItem(item, stage / item, error)) { fs::remove_all(stage, ec); return false; }
+        }
+    }
+    if (selection.config && fs::exists(configPath, ec)) {
         fs::copy_file(configPath, stage / "config" / "default_config.json", fs::copy_options::overwrite_existing, ec);
         if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
     }
-    json manifest{{"format", "dice-next-backup"}, {"version", 1}, {"created_at", stamp()},
-                  {"includes", json::array({"data", "config/default_config.json"})}};
+    json manifest{{"format", "dice-next-backup"}, {"version", 2}, {"created_at", stamp()}, {"automatic", automatic},
+                  {"selection", selection.toJson()}, {"includes", json::array({"data", "config/default_config.json"})}};
     { std::ofstream f(stage / "manifest.json", std::ios::binary); f << manifest.dump(2); }
     fs::path backupDir = archiveDirectory(automatic); fs::create_directories(backupDir, ec);
     if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
-    archive = backupDir / (std::string("DiceNext-") + (automatic ? "auto-" : "") + "backup-" + uniqueStamp() + ".zip");
+    archive = backupDir / ("dicenext_bak_" + stamp() + ".zip");
+    if (fs::exists(archive, ec)) { error = "同一秒内已有备份，请稍后重试"; fs::remove_all(stage, ec); return false; }
     std::string cmd = archiveCreateCommand(stage, archive);
     if (std::system(cmd.c_str()) != 0 || !fs::is_regular_file(archive, ec) || !validateArchiveFile(archive, error)) {
         if (error.empty()) error = "无法创建备份压缩包（需要系统 ZIP 工具）";
@@ -133,6 +216,11 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
     }
     fs::remove_all(stage, ec);
     return true;
+}
+
+inline bool createArchive(Database& db, const fs::path& configPath, fs::path& archive, std::string& error,
+                          bool automatic = false) {
+    return createArchive(db, configPath, archive, error, Selection{}, automatic);
 }
 
 inline std::string runCapture(const std::string& command, int& code) {
@@ -162,7 +250,7 @@ inline json listArchives(bool automaticOnly = false) {
         for (const auto& entry : fs::directory_iterator(dir, ec)) {
             if (ec || !entry.is_regular_file(ec)) continue;
             const std::string name = entry.path().filename().string();
-            if (!isSafeArchiveName(name) || isAutomaticArchiveName(name) != automatic) continue;
+            if (!isSafeArchiveName(name)) continue;
             const auto when = entry.last_write_time(ec);
             const auto size = entry.file_size(ec);
             if (ec) { ec.clear(); continue; }
@@ -179,10 +267,10 @@ inline json listArchives(bool automaticOnly = false) {
     return out;
 }
 
-inline bool deleteArchive(const std::string& name, std::string& error) {
+inline bool deleteArchive(const std::string& name, bool automatic, std::string& error) {
     if (!isSafeArchiveName(name)) { error = "无效的备份文件名"; return false; }
     std::error_code ec;
-    const fs::path path = archiveDirectory(isAutomaticArchiveName(name)) / name;
+    const fs::path path = archiveDirectory(automatic) / name;
     if (!fs::is_regular_file(path, ec) || !fs::remove(path, ec)) {
         error = ec ? ec.message() : "备份文件不存在";
         return false;
@@ -190,12 +278,16 @@ inline bool deleteArchive(const std::string& name, std::string& error) {
     return true;
 }
 
-inline void cleanupArchives(int keepCount) {
-    if (keepCount < 1) return;
+inline void cleanupArchives(int keepDays) {
+    if (keepDays < 1) return;
     json archives = listArchives(true);
+    const auto threshold = std::chrono::system_clock::now() - std::chrono::hours(24 * keepDays);
+    const auto thresholdSeconds = std::chrono::duration_cast<std::chrono::seconds>(threshold.time_since_epoch()).count();
     std::string ignored;
-    for (size_t i = static_cast<size_t>(keepCount); i < archives.size(); ++i)
-        deleteArchive(archives[i].value("name", std::string()), ignored);
+    for (const auto& archive : archives) {
+        if (archive.value("createdAt", 0LL) < thresholdSeconds)
+            deleteArchive(archive.value("name", std::string()), true, ignored);
+    }
 }
 
 inline bool allowedArchivePath(const std::string& name) {
@@ -204,13 +296,9 @@ inline bool allowedArchivePath(const std::string& name) {
         || name == "data/" || name.rfind("data/", 0) == 0;
 }
 
-inline bool stageRestore(const std::string& bytes, std::string& error) {
-    if (bytes.empty()) { error = "备份文件为空"; return false; }
+inline bool stageRestoreArchive(const fs::path& archive, std::string& error) {
     std::error_code ec;
-    fs::path uploadDir = archiveDirectory(); fs::create_directories(uploadDir, ec);
-    if (ec) { error = ec.message(); return false; }
-    fs::path archive = uploadDir / ("restore-upload-" + uniqueStamp() + ".zip");
-    { std::ofstream f(archive, std::ios::binary); f.write(bytes.data(), static_cast<std::streamsize>(bytes.size())); }
+    if (!fs::is_regular_file(archive, ec)) { error = "备份文件不存在"; return false; }
     int rc = 0; std::string entries = runCapture(archiveListCommand(archive), rc);
     if (rc != 0) { error = "不是有效的 Dice!Next 备份压缩包"; return false; }
     std::istringstream lines(entries); std::string line; bool manifestSeen = false;
@@ -227,10 +315,27 @@ inline bool stageRestore(const std::string& bytes, std::string& error) {
     }
     try {
         std::ifstream f(stage / "manifest.json"); json manifest; f >> manifest;
-        if (manifest.value("format", std::string()) != "dice-next-backup" || manifest.value("version", 0) != 1)
+        const int version = manifest.value("version", 0);
+        if (manifest.value("format", std::string()) != "dice-next-backup" || (version != 1 && version != 2))
             throw std::runtime_error("format");
     } catch (...) { error = "备份清单格式不受支持"; fs::remove_all(stage, ec); return false; }
     return true;
+}
+
+inline bool stageRestore(const std::string& bytes, std::string& error) {
+    if (bytes.empty()) { error = "备份文件为空"; return false; }
+    std::error_code ec;
+    fs::path uploadDir = archiveDirectory(); fs::create_directories(uploadDir, ec);
+    if (ec) { error = ec.message(); return false; }
+    fs::path archive = uploadDir / ("restore-upload-" + uniqueStamp() + ".zip");
+    { std::ofstream f(archive, std::ios::binary); f.write(bytes.data(), static_cast<std::streamsize>(bytes.size())); }
+    return stageRestoreArchive(archive, error);
+}
+
+inline bool stageStoredRestore(const std::string& name, bool automatic, std::string& error) {
+    if (!isSafeArchiveName(name)) { error = "无效的备份文件名"; return false; }
+    const fs::path archive = archiveDirectory(automatic) / name;
+    return stageRestoreArchive(archive, error);
 }
 
 // Called after logging is ready but before ConfigManager and Database are opened.
@@ -241,6 +346,29 @@ inline bool applyPendingRestore(std::string& notice) {
     fs::create_directories(rollback, ec);
     if (ec) { notice = "恢复失败：无法创建回滚目录：" + ec.message(); return false; }
     try {
+        json manifest;
+        { std::ifstream f(stage / "manifest.json"); f >> manifest; }
+        const bool partial = manifest.value("version", 1) >= 2 &&
+            !Selection::fromJson(manifest.value("selection", json::object())).complete();
+        if (partial) {
+            // A partial archive overlays only its selected paths.  Keep a full
+            // rollback copy so individual plugins/resources can be restored
+            // without ever deleting unrelated current data.
+            std::string copyError;
+            if (!copyTree("data", rollback / "data", copyError)) throw std::runtime_error(copyError);
+            if (fs::exists("config/default_config.json")) {
+                fs::create_directories(rollback / "config");
+                fs::copy_file("config/default_config.json", rollback / "config" / "default_config.json", fs::copy_options::overwrite_existing);
+            }
+            if (fs::exists(stage / "data") && !copyTree(stage / "data", "data", copyError)) throw std::runtime_error(copyError);
+            if (fs::exists(stage / "config" / "default_config.json")) {
+                fs::create_directories("config");
+                fs::copy_file(stage / "config" / "default_config.json", "config/default_config.json", fs::copy_options::overwrite_existing);
+            }
+            fs::remove_all(stage, ec);
+            notice = "已应用局部待恢复备份；恢复前的数据保存在 " + rollback.string();
+            return true;
+        }
         if (fs::exists("data")) fs::rename("data", rollback / "data");
         if (fs::exists("config/default_config.json")) {
             fs::create_directories(rollback / "config");

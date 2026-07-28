@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -93,6 +94,14 @@ bool applyPendingRestore(const fs::path& root) {
     const fs::path stage = root / L"restore-pending";
     std::error_code ec;
     if (!fs::is_regular_file(stage / L"manifest.json", ec)) return true;
+    // Partial backups are applied by core's JSON-aware restore service.  The
+    // manager intentionally leaves them staged so it never replaces the whole
+    // data directory for a plugin/resource-only restore.
+    {
+        std::ifstream manifest(stage / L"manifest.json", std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(manifest)), std::istreambuf_iterator<char>());
+        if (text.find("\"version\": 2") != std::string::npos && text.find("\"all\": false") != std::string::npos) return true;
+    }
     const fs::path rollback = root / L"restore-rollbacks" / timestamp();
     std::wstring error;
     if (!moveTree(stage / L"data", root / L"data", rollback / L"data", error)) {

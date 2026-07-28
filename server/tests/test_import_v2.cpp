@@ -705,10 +705,13 @@ TEST(BackupRestore, ArchivesStagesAndAppliesAtStartup) {
         db.close();
     }
     ASSERT_TRUE(fs::is_regular_file(archive));
+    ASSERT_TRUE(archive.filename().string().rfind("dicenext_bak_", 0) == 0);
+    ASSERT_TRUE(archive.extension() == ".zip");
     std::ifstream backupFile(archive, std::ios::binary);
     std::string bytes((std::istreambuf_iterator<char>(backupFile)), std::istreambuf_iterator<char>());
     backupFile.close();
     ASSERT_TRUE(backup::stageRestore(bytes, error));
+    ASSERT_TRUE(backup::stageStoredRestore(archive.filename().string(), false, error));
     { std::ofstream f("data/custom.txt"); f << "changed"; }
     { std::ofstream f("config/default_config.json"); f << "{}"; }
     std::string notice; ASSERT_TRUE(backup::applyPendingRestore(notice));
@@ -720,6 +723,36 @@ TEST(BackupRestore, ArchivesStagesAndAppliesAtStartup) {
     // SQLite may still release a WAL sidecar asynchronously on Windows; cleanup is best-effort.
     std::error_code cleanupError;
     fs::remove_all(root, cleanupError);
+}
+
+TEST(BackupRestore, PartialArchiveOverlaysOnlySelectedContent) {
+    fs::path root = makeTempDir("backup_partial_restore");
+    fs::path oldCwd = fs::current_path(); fs::current_path(root);
+    fs::create_directories("config"); fs::create_directories("data/plugins/js");
+    { std::ofstream f("config/default_config.json"); f << "{}"; }
+    { std::ofstream f("data/plugins/js/example.js"); f << "original"; }
+    { std::ofstream f("data/unrelated.txt"); f << "keep-me"; }
+    fs::path archive; std::string error;
+    {
+        Database db;
+        ASSERT_TRUE(db.open("data/dice.db"));
+        backup::Selection selection{};
+        selection.config = false; selection.databases = false; selection.logs = false;
+        selection.resources = false; selection.plugins = true; selection.media = false;
+        ASSERT_TRUE(backup::createArchive(db, "config/default_config.json", archive, error, selection));
+        db.close();
+    }
+    std::ifstream backupFile(archive, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(backupFile)), std::istreambuf_iterator<char>());
+    ASSERT_TRUE(backup::stageRestore(bytes, error));
+    { std::ofstream f("data/plugins/js/example.js"); f << "changed"; }
+    { std::ofstream f("data/unrelated.txt"); f << "still-here"; }
+    std::string notice; ASSERT_TRUE(backup::applyPendingRestore(notice));
+    std::ifstream restoredPlugin("data/plugins/js/example.js"); std::string plugin; std::getline(restoredPlugin, plugin);
+    std::ifstream untouched("data/unrelated.txt"); std::string unrelated; std::getline(untouched, unrelated);
+    ASSERT_EQ(plugin, "original");
+    ASSERT_EQ(unrelated, "still-here");
+    fs::current_path(oldCwd); std::error_code cleanupError; fs::remove_all(root, cleanupError);
 }
 
 TEST(CustomMessageMigration, MapsOnlyAuditedSlots) {
