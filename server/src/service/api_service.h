@@ -1509,6 +1509,20 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 
+    // Create a server-side archive. Downloading is deliberately a separate
+    // action so operators can keep a local restore point without a browser.
+    app.registerHandler("/api/backup/create", [&db, &cfg](Req req, CB&& cb) {
+        try {
+            const J body = req->body().empty() ? J::object() : J::parse(req->body());
+            const backup::Selection selection = backup::Selection::fromJson(body.value("selection", J::object()));
+            std::filesystem::path archive; std::string error;
+            if (!backup::createArchive(db, cfg.configPath(), archive, error, selection)) { jsonReply(fail(error), std::move(cb)); return; }
+            std::error_code ec;
+            jsonReply(ok(J{{"name", archive.filename().string()}, {"size", std::filesystem::file_size(archive, ec)},
+                           {"automatic", false}, {"selection", selection.toJson()}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Post});
+
     // Stored backup management.  Archives remain in backups/ after download so
     // the WebUI can list, download again, or delete them later.
     app.registerHandler("/api/backup/list", [](Req, CB&& cb) {
@@ -1518,7 +1532,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             const std::string name = req->getParameter("name");
             if (!backup::isSafeArchiveName(name)) { jsonReply(fail("无效的备份文件名"), std::move(cb)); return; }
-            const auto path = backup::archiveDirectory(backup::isAutomaticArchiveName(name)) / name;
+            const bool automatic = req->getParameter("automatic") == "1";
+            const auto path = backup::archiveDirectory(automatic) / name;
             std::error_code ec;
             if (!std::filesystem::is_regular_file(path, ec)) { jsonReply(fail("备份文件不存在"), std::move(cb)); return; }
             auto resp = drogon::HttpResponse::newFileResponse(path.string());
@@ -1527,10 +1542,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             cb(resp);
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
-    app.registerHandler("/api/backup/{1}", [](Req, CB&& cb, const std::string& name) {
+    app.registerHandler("/api/backup/{1}", [](Req req, CB&& cb, const std::string& name) {
         try {
             std::string error;
-            if (!backup::deleteArchive(name, error)) { jsonReply(fail(error), std::move(cb)); return; }
+            if (!backup::deleteArchive(name, req->getParameter("automatic") == "1", error)) { jsonReply(fail(error), std::move(cb)); return; }
             jsonReply(ok(), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Delete});
@@ -1540,7 +1555,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                        {"schedule", cfg.get<std::string>("backup/auto_schedule", "interval")},
                        {"intervalHours", cfg.get<int>("backup/auto_interval_hours", 24)},
                        {"dailyTime", cfg.get<std::string>("backup/auto_daily_time", "04:00")},
-                       {"keepCount", cfg.get<int>("backup/auto_keep_count", 7)},
+                       {"keepDays", cfg.get<int>("backup/auto_keep_days", 7)},
+                       {"selection", cfg.get<J>("backup/auto_selection", J::object())},
                        {"lastAutoAt", cfg.get<long long>("backup/auto_last_at", 0)}}), std::move(cb));
     }, {drogon::Get});
     app.registerHandler("/api/backup/config", [&cfg](Req req, CB&& cb) {
@@ -1550,19 +1566,21 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             const std::string schedule = j.value("schedule", std::string("interval"));
             const int hours = j.value("intervalHours", 24);
             const std::string daily = j.value("dailyTime", std::string("04:00"));
-            const int keep = j.value("keepCount", 7);
+            const int keepDays = j.value("keepDays", 7);
+            const backup::Selection selection = backup::Selection::fromJson(j.value("selection", J::object()));
             const bool validTime = daily.size() == 5 && daily[2] == ':' &&
                 std::isdigit(static_cast<unsigned char>(daily[0])) && std::isdigit(static_cast<unsigned char>(daily[1])) &&
                 std::isdigit(static_cast<unsigned char>(daily[3])) && std::isdigit(static_cast<unsigned char>(daily[4])) &&
                 std::stoi(daily.substr(0, 2)) < 24 && std::stoi(daily.substr(3, 2)) < 60;
-            if ((schedule != "interval" && schedule != "daily") || hours < 1 || hours > 720 || keep < 1 || keep > 100 || !validTime) {
+            if ((schedule != "interval" && schedule != "daily") || hours < 1 || hours > 720 || keepDays < 1 || keepDays > 3650 || !validTime) {
                 jsonReply(fail("自动备份配置无效"), std::move(cb)); return;
             }
             cfg.set<bool>("backup/auto_enabled", enabled);
             cfg.set<std::string>("backup/auto_schedule", schedule);
             cfg.set<int>("backup/auto_interval_hours", hours);
             cfg.set<std::string>("backup/auto_daily_time", daily);
-            cfg.set<int>("backup/auto_keep_count", keep);
+            cfg.set<int>("backup/auto_keep_days", keepDays);
+            cfg.set<J>("backup/auto_selection", selection.toJson());
             if (!cfg.save()) { jsonReply(fail("保存自动备份配置失败"), std::move(cb)); return; }
             jsonReply(ok(), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
@@ -1571,6 +1589,16 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // Restore is deliberately staged instead of touching live stores.  The
     // next process start applies it before opening config/database and keeps a
     // rollback copy of the current data directory.
+    app.registerHandler("/api/backup/restore-stored", [](Req req, CB&& cb) {
+        try {
+            const J body = J::parse(req->body());
+            const std::string name = body.value("name", std::string());
+            const bool automatic = body.value("automatic", false);
+            std::string error;
+            if (!backup::stageStoredRestore(name, automatic, error)) { jsonReply(fail(error), std::move(cb)); return; }
+            jsonReply(ok(J{{"restartRequired", true}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Post});
     app.registerHandler("/api/backup/restore", [](Req req, CB&& cb) {
         try {
             constexpr size_t kMaxBackupBytes = 2ull * 1024 * 1024 * 1024;

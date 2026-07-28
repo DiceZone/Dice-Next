@@ -57,7 +57,9 @@ static json makeDefaultConfig() {
             {"auto_schedule", "interval"},
             {"auto_interval_hours", 24},
             {"auto_daily_time", "04:00"},
-            {"auto_keep_count", 7},
+            {"auto_keep_days", 7},
+            {"auto_selection", {{"config", true}, {"databases", true}, {"logs", true},
+                                {"resources", true}, {"plugins", true}, {"media", true}}},
             {"auto_last_at", 0}
         }},
         {"hot_reload", {
