@@ -164,6 +164,10 @@ struct LegacyCard {
     std::string name;                          // UTF-8
     std::string type;                          // __Type (coc7/dnd/…)
     std::map<std::string, AttrVal> attrs;
+    std::vector<std::string> locks;            // CharaCard::locks
+    std::map<std::string, std::string> info;   // old Info fields
+    std::string note;                          // old Note field
+    std::map<std::string, std::string> diceExp;
 };
 struct LegacyPlayer {
     std::vector<LegacyCard> cards;
@@ -180,9 +184,24 @@ inline LegacyCard readCharaCard(BReader& r, unsigned short idx) {
         else if (tag == "Type")      c.type = r.rStr();
         else if (tag == "Attr")      c.attrs = readAnysTableImpl(r, false);
         else if (tag == "Attrs")     c.attrs = readAnysTableImpl(r, true);
-        else if (tag == "DiceExp") { int16_t n = r.rShort(); for (int i = 0; i < n; ++i) { std::string k = r.rStr(); std::string v = r.rStr(); AttrVal av; av.kind = AttrVal::Kind::Str; av.s = v; c.attrs["&" + k] = av; } }
-        else if (tag == "Lock")    { int16_t n = r.rShort(); for (int i = 0; i < n; ++i) r.rStr(); }
-        else if (tag == "Note" || tag == "Info") { r.rStr(); }
+        else if (tag == "DiceExp") {
+            int16_t n = r.rShort();
+            for (int i = 0; i < n && r.good(); ++i) {
+                std::string k = r.rStr(), v = r.rStr();
+                c.diceExp[k] = v;
+            }
+        }
+        else if (tag == "Lock") {
+            int16_t n = r.rShort();
+            for (int i = 0; i < n && r.good(); ++i) c.locks.push_back(r.rStr());
+        }
+        // Info is an old unordered_map<string,string>; its generic binary map
+        // layout starts with an int16 count, followed by key/value strings.
+        else if (tag == "Info") {
+            int16_t n = r.rShort();
+            for (int i = 0; i < n && r.good(); ++i) c.info[r.rStr()] = r.rStr();
+        }
+        else if (tag == "Note") c.note = r.rStr();
         else break;   // unknown tag → can't size payload, stop safely
     }
     return c;

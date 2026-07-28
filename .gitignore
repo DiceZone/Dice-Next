@@ -6,6 +6,11 @@
 /server/data/*.db
 /server/data/*.db-shm
 /server/data/*.db-wal
+# Test runs and an accidental direct launch may create the same SQLite stores
+# at the repository root or under server/. They are runtime data, never source.
+*.db
+*.db-shm
+*.db-wal
 /server/logs/
 /server/uploads/
 /vcpkg/
@@ -17,4 +22,3 @@
 *.user
 *.log
 *.err
-
