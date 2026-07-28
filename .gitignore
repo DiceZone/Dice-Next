@@ -3,25 +3,36 @@
 /server/build/
 /server/build-arm64/
 /server/cmake-build-*/
-/server/data/*.db
-/server/data/*.db-shm
-/server/data/*.db-wal
-# Test runs and an accidental direct launch may create the same SQLite stores
-# at the repository root or under server/. They are runtime data, never source.
+# Runtime data (databases, logs, plugins, media, backups and user content).
+# The server can be started from either repository root or server/.
+/data/
+/server/data/
+/server/backups/
+/server/restore-pending/
+/server/restore-rollbacks/
+# Test runs and an accidental direct launch may create SQLite stores at the
+# repository root or under server/. They are runtime data, never source.
 *.db
 *.db-shm
 *.db-wal
 /server/logs/
 /server/uploads/
+/server/tests/output.txt
 /vcpkg/
 
 # Local configuration and editor files
 /config/default_config.json
+/config/*.local.json
+/server/config/*.local.json
 /.vs/
 /.vscode/
 *.user
 *.log
 *.err
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
 /backups/
 /restore-pending/
 /restore-rollbacks/

@@ -1,10 +1,10 @@
 {
   "adapters": [
     {
-      "access_token": "a60da7f7575cf7f1a5f5052254b3efa64e92db134ba9e850ff976ecaa0b81878",
+      "access_token": "",
       "connection_mode": "forward_ws",
-      "enabled": true,
-      "endpoint": "ws://192.168.6.245:3001/",
+      "enabled": false,
+      "endpoint": "ws://127.0.0.1:3001/",
       "id": "adapter-default-0000-0000-000000000001",
       "name": "MyQQBot",
       "type": "onebot_v11"
@@ -47,7 +47,7 @@
     "resource_dir": "i18n"
   },
   "server": {
-    "api_key": "auto-generated-uuid",
+    "api_key": "",
     "db_path": "./data/dice.db",
     "host": "0.0.0.0",
     "log_level": "info",
