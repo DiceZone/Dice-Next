@@ -1,0 +1,69 @@
+name: 问题反馈 / 功能建议
+description: 提交可复现的问题、兼容性反馈或功能建议。
+title: "[反馈] "
+labels:
+  - feedback
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: 类型
+      options:
+        - 程序问题
+        - 适配器或平台兼容性
+        - WebUI 问题
+        - 文档问题
+        - 功能建议
+        - 其他
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Dice!Next 版本与构建号
+      placeholder: 例如 v3.0.0-beta.761
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 运行平台
+      options:
+        - Windows amd64
+        - Windows arm64
+        - Linux amd64
+        - Linux arm64
+        - macOS arm64
+        - Docker
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题或建议
+      description: 请清楚说明实际行为、期望行为；功能建议请说明使用场景。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. …
+        2. …
+        3. …
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志、截图或配置片段（请脱敏）
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前检查
+      options:
+        - label: 我已搜索现有 Issue，确认没有重复反馈。
+          required: true
+        - label: 我已移除 Token、密码、AppSecret 和个人隐私信息。
+          required: true

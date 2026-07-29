@@ -113,7 +113,7 @@ Run:
   3. Open the WebUI: http://localhost:18088
 
 Notes:
-  - First launch creates config/default_config.json automatically.
+  - First launch creates the config/ directory automatically.
   - Package-local runtime libraries are loaded by start.sh.
   - Upgrade by replacing the program, lib, i18n, web/dist and data files;
     keep your config and database files.

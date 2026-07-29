@@ -79,7 +79,9 @@ static json makeDefaultConfig() {
     };
 }
 
-static constexpr const char* kSplitFormat = "dice-next-config";
+static constexpr const char* kRequiredSections[] = {
+    "server", "dice", "events", "webui", "i18n", "adapters", "backup", "hot_reload"
+};
 
 static bool isSafeSectionName(const std::string& name) {
     return !name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char c) {
@@ -88,8 +90,7 @@ static bool isSafeSectionName(const std::string& name) {
 }
 
 static fs::path configDirectory(const std::string& configPath) {
-    const fs::path parent = fs::path(configPath).parent_path();
-    return parent.empty() ? fs::path(".") : parent;
+    return fs::path(configPath);
 }
 
 static bool writeJsonFile(const fs::path& path, const json& value, std::string& error) {
@@ -124,24 +125,39 @@ static bool validateConfig(const json& value, std::string& error) {
 
 static bool writeSplitConfig(const std::string& configPath, const json& value, std::string& error) {
     const fs::path dir = configDirectory(configPath);
-    json manifest{{"format", kSplitFormat}, {"version", 2}, {"sections", json::array()}};
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) { error = ec.message(); return false; }
     for (auto it = value.begin(); it != value.end(); ++it) {
         if (!isSafeSectionName(it.key())) continue;
         if (!writeJsonFile(dir / (it.key() + ".json"), it.value(), error)) return false;
-        manifest["sections"].push_back(it.key());
     }
-    return writeJsonFile(configPath, manifest, error);
+    // v3.0.0 briefly used this file as a split-layout manifest. The config
+    // directory is now the only entry point, so remove that obsolete file.
+    fs::remove(dir / "default_config.json", ec);
+    return true;
 }
 
-static bool readSplitConfig(const std::string& configPath, const json& manifest, json& value, std::string& error) {
-    if (!manifest.value("sections", json::array()).is_array()) { error = "配置清单缺少 sections 数组"; return false; }
+static bool readSplitConfig(const std::string& configPath, json& value, std::string& error) {
     value = makeDefaultConfig();
     const fs::path dir = configDirectory(configPath);
-    for (const auto& item : manifest["sections"]) {
-        if (!item.is_string() || !isSafeSectionName(item.get<std::string>())) { error = "配置清单包含无效功能区"; return false; }
-        const std::string name = item.get<std::string>();
+    for (const char* section : kRequiredSections) {
+        const std::string name = section;
         std::ifstream in(dir / (name + ".json"), std::ios::binary);
         if (!in) { error = "缺少配置文件：" + name + ".json"; return false; }
+        value[name] = json::parse(in);
+    }
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (ec) { error = ec.message(); return false; }
+        if (!entry.is_regular_file(ec) || entry.path().extension() != ".json") continue;
+        const std::string name = entry.path().stem().string();
+        if (!isSafeSectionName(name) || name == "webui_sessions" || name == "default_config") continue;
+        bool required = false;
+        for (const char* section : kRequiredSections) if (name == section) { required = true; break; }
+        if (required) continue;
+        std::ifstream in(entry.path(), std::ios::binary);
+        if (!in) { error = "无法读取配置文件：" + entry.path().filename().string(); return false; }
         value[name] = json::parse(in);
     }
     return true;
@@ -171,15 +187,12 @@ bool ConfigManager::load() {
             createdOnLoad_ = true;
             return true;
         }
-        std::ifstream in(configPath_, std::ios::binary);
-        if (!in) return false;
-        const json manifest = json::parse(in);
-        if (manifest.value("format", std::string()) != kSplitFormat || manifest.value("version", 0) != 2) {
-            DICE_LOG_ERROR("ConfigManager: '{}' is not a split configuration manifest", configPath_);
+        if (!fs::is_directory(configPath_)) {
+            DICE_LOG_ERROR("ConfigManager: '{}' must be a configuration directory", configPath_);
             return false;
         }
         json loaded; std::string error;
-        if (!readSplitConfig(configPath_, manifest, loaded, error) || !validateConfig(loaded, error)) {
+        if (!readSplitConfig(configPath_, loaded, error) || !validateConfig(loaded, error)) {
             DICE_LOG_ERROR("ConfigManager: configuration validation failed: {}", error);
             return false;
         }
@@ -259,14 +272,6 @@ bool ConfigManager::restoreSnapshot(const json& snapshot) {
 
 std::string ConfigManager::recoveryDatabasePath(const std::string& fallback) const {
     try {
-        std::ifstream manifestFile(configPath_, std::ios::binary);
-        if (!manifestFile) return fallback;
-        const json manifest = json::parse(manifestFile);
-        if (manifest.value("format", std::string()) != kSplitFormat || manifest.value("version", 0) != 2)
-            return fallback;
-        const auto sections = manifest.value("sections", json::array());
-        if (!sections.is_array() || std::find(sections.begin(), sections.end(), "server") == sections.end())
-            return fallback;
         std::ifstream serverFile(configDirectory(configPath_) / "server.json", std::ios::binary);
         if (!serverFile) return fallback;
         const json server = json::parse(serverFile);

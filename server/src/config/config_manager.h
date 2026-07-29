@@ -15,10 +15,10 @@ using json = nlohmann::json;
 using ConfigChangeCallback = std::function<void()>;
 
 // ─── ConfigManager ───────────────────────────────────────────
-// Thread-safe JSON configuration manager with hot-reload support.
+// Thread-safe JSON configuration-directory manager with hot-reload support.
 //
 // Usage:
-//   ConfigManager mgr("config/default_config.json");
+//   ConfigManager mgr("config");
 //   mgr.load();
 //   int port = mgr.get<int>("server/port");
 //   mgr.set<std::string>("server/host", "127.0.0.1");
@@ -32,8 +32,8 @@ public:
 
     // ─── Lifecycle ───────────────────────────────────────────
 
-    /// Load configuration from the JSON file. If the file does
-    /// not exist, creates one from built-in defaults.
+    /// Load configuration from the configuration directory. If the directory
+    /// does not exist, creates all functional JSON files from built-in defaults.
     /// Returns true on success.
     bool load();
 
@@ -42,7 +42,7 @@ public:
     /// Returns true on success.
     bool reload();
 
-    /// Persist current in-memory configuration back to disk.
+    /// Persist current in-memory configuration back to its functional files.
     /// Returns true on success.
     bool save();
 
@@ -50,9 +50,8 @@ public:
     /// the database after an invalid on-disk edit.
     bool restoreSnapshot(const json& snapshot);
 
-    /// When normal validation fails, read only a string db_path from the
-    /// current split server section so startup can locate its last snapshot.
-    /// This does not accept any legacy layout and does not load the config.
+    /// When normal validation fails, read only a string db_path from server.json
+    /// so startup can locate its last snapshot without loading the config.
     std::string recoveryDatabasePath(const std::string& fallback) const;
 
     /// Reset to factory defaults (does NOT write to disk).
@@ -107,7 +106,7 @@ public:
 
     const std::string& configPath() const noexcept { return configPath_; }
 
-    /// True after the configuration has been loaded from the split manifest.
+    /// True after the configuration has been loaded from the split directory.
     bool usingSplitLayout() const noexcept { return splitLayout_; }
 
     /// True only for the startup that had to create a fresh config directory.

@@ -19,7 +19,7 @@ static std::unique_ptr<Database> makeDb() {
 }
 
 static std::unique_ptr<ConfigManager> makeCfg() {
-    auto cfg = std::make_unique<ConfigManager>("config/default_config.json");
+    auto cfg = std::make_unique<ConfigManager>("config");
     cfg->load();
     return cfg;
 }

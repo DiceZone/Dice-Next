@@ -199,7 +199,8 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
         }
     }
     if (selection.config && fs::exists(configPath, ec)) {
-        const fs::path configDir = configPath.parent_path().empty() ? fs::path("config") : configPath.parent_path();
+        const fs::path configDir = fs::is_directory(configPath, ec)
+            ? configPath : (configPath.parent_path().empty() ? fs::path("config") : configPath.parent_path());
         if (!copyTree(configDir, stage / "config", error)) { fs::remove_all(stage, ec); return false; }
     }
     json manifest{{"format", "dice-next-backup"}, {"version", 2}, {"created_at", stamp()}, {"automatic", automatic},

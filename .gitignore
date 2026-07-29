@@ -21,7 +21,6 @@
 /vcpkg/
 
 # Local configuration and editor files
-/config/default_config.json
 /config/webui_sessions.json
 /server/config/webui_sessions.json
 /config/*.local.json
