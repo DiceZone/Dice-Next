@@ -1,17 +1,18 @@
 # Dice!Next
 
-Dice!Next 是面向 QQ 跑团与骰点场景的本地部署骰娘。它通过 OneBot v11 接入机器人平台，提供掷骰、人物卡、跑团日志、规则包与插件能力，并在本机托管管理后台。
+Dice!Next 是面向 TRPG 跑团与骰点场景的本地部署骰娘。它提供掷骰、人物卡、跑团日志、规则包与插件能力，并在本机托管管理后台；可同时接入 OneBot、QQ 官方机器人、Discord 与 KOOK。
 
 > 项目仍在开发与内部测试阶段。问题、建议和测试反馈请通过 QQ 群 `933145116` 提交。
 
 ## 核心能力
 
-- OneBot v11 正向 / 反向 WebSocket 适配与多平台会话管理。
+- 多适配器会话管理：OneBot v11 正向 / 反向 WebSocket、QQ 官方机器人 2.0 Gateway WebSocket、Discord 与 KOOK。
+- QQ 官方机器人支持 AppID + AppSecret 连接与扫码绑定；官方群聊获得的昵称会缓存并在同一官方机器人的私聊中复用，暂无昵称时显示为“用户”。
 - COC、DND 等规则指令，人物卡、NPC、先攻、牌堆与自定义回复。
 - 群日志、团务、多群跑团与 TXT、Excel、网页等日志导出。
 - WebUI 管理后台：群组、用户、插件、规则包、日志、适配器和系统设置。
 - JavaScript / Lua 插件与可扩展规则包。
-- 本地数据存储；默认管理后台地址为 `http://localhost:18088`。
+- 本地数据存储、手动/定时 ZIP 备份与网页恢复；默认管理后台地址为 `http://localhost:18088`。
 
 ## 项目组成
 
@@ -100,7 +101,9 @@ Dice!Next 是对 [Dice!](https://github.com/Dice-Developer-Team/Dice) 的致敬�
 
 ## 运行与数据
 
-首次启动会自动生成配置。生产环境请保留安装目录外的配置和数据库；升级时替换程序、资源与 WebUI 文件即可。更多配置、指令与更新记录请查看 `Dice-Next-Doc`。
+首次启动会生成 `config/` 目录：`default_config.json` 是清单，各功能区分别保存在 `server.json`、`adapters.json`、`dice.json` 等文件中。WebUI 保存与通过热重载校验的手工修改都会回写这些文件；若配置损坏，程序会使用数据库中最近一次有效快照恢复并写回。
+
+可在 WebUI 登录时选择“信任此设备 30 天”；可信会话仅保存在本机 `config/webui_sessions.json`。升级时替换程序、资源与 WebUI 文件即可，保留安装目录中的 `config/` 与 `data/`。更多配置、指令与更新记录请查看 `Dice-Next-Doc`。
 
 ## 开源许可证
 
