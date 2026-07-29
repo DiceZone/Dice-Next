@@ -94,17 +94,32 @@ public:
         const std::string content = translateCQ(text);
         if (native.empty() || content.empty()) return;
         restRequest(drogon::Post, "/api/v3/message/create",
-                    json{{"type", 1}, {"target_id", native}, {"content", content}}, nullptr);
+                    outboundPayload(native, content), nullptr);
     }
     void sendPrivateMessage(const std::string& userId, const std::string& text) override {
         const std::string native = nativeId(userId, identity::Kind::User);
         const std::string content = translateCQ(text);
         if (native.empty() || content.empty()) return;
         restRequest(drogon::Post, "/api/v3/direct-message/create",
-                    json{{"type", 1}, {"target_id", native}, {"content", content}}, nullptr);
+                    outboundPayload(native, content), nullptr);
     }
 
 private:
+    /// KOOK CardMessage is a documented rich-message type.  Keep oversized
+    /// messages in the existing KMarkdown/text path so no reply is truncated.
+    static json outboundPayload(const std::string& target, const std::string& content) {
+        if (!IAdapter::cardMessageMode() || content.size() > 5000)
+            return json{{"type", 1}, {"target_id", target}, {"content", content}};
+        const json card = json::array({{
+            {"type", "card"}, {"theme", "primary"}, {"size", "sm"},
+            {"modules", json::array({{
+                {"type", "section"},
+                {"text", {{"type", "kmarkdown"}, {"content", content}}}
+            }})}
+        }});
+        return json{{"type", 10}, {"target_id", target}, {"content", card.dump()}};
+    }
+
     static std::string resolveIpv4(const std::string& host) {
         addrinfo hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
         addrinfo* results = nullptr;
@@ -338,11 +353,11 @@ private:
         if (content.empty()) return;
         if (m.type == MessageType::kPrivate) {
             if (!native.empty()) restRequest(drogon::Post, "/api/v3/direct-message/create",
-                                             json{{"type", 1}, {"target_id", native}, {"content", content}}, nullptr);
+                                             outboundPayload(native, content), nullptr);
             else sendPrivateMessage(m.targetId, text);
         } else {
             if (!native.empty()) restRequest(drogon::Post, "/api/v3/message/create",
-                                             json{{"type", 1}, {"target_id", native}, {"content", content}}, nullptr);
+                                             outboundPayload(native, content), nullptr);
             else sendGroupMessage(m.targetId, text);
         }
     }

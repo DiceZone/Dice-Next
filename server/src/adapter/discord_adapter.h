@@ -366,7 +366,16 @@ private:
         if (channelId.empty() || text.empty()) return;
         const std::string native = translateCQ(text);
         if (native.empty()) return;
-        restRequest("POST", "/api/v10/channels/" + channelId + "/messages", json{{"content", native}}, nullptr);
+        // Discord embeds are universally available to bot messages.  Keep long
+        // replies as plain text because an embed description is limited to 4096
+        // characters and silently truncating dice/log output would be worse.
+        json body;
+        if (IAdapter::cardMessageMode() && native.size() <= 4096) {
+            body = {{"embeds", json::array({{{"description", native}, {"color", 0x5865F2}}})}};
+        } else {
+            body = {{"content", native}};
+        }
+        restRequest("POST", "/api/v10/channels/" + channelId + "/messages", body, nullptr);
     }
 
     /// 频道 → 所属服务器（公共群号先转原生频道号再查缓存）。

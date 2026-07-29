@@ -9,6 +9,7 @@
 #include <memory>
 #include <vector>
 #include <utility>
+#include <atomic>
 #include <nlohmann/json.hpp>
 
 namespace dice {
@@ -84,6 +85,11 @@ struct BotEvent {
 class IAdapter {
 public:
     virtual ~IAdapter() = default;
+
+    /// Global outbound presentation selected by the dice owner.  Adapters that
+    /// have no rich-message equivalent simply keep sending traditional text.
+    static void setCardMessageMode(bool enabled) noexcept { cardMessageMode_.store(enabled); }
+    static bool cardMessageMode() noexcept { return cardMessageMode_.load(); }
 
     /// Unique adapter identifier (e.g. "onebot-v11-1")
     virtual std::string id() const = 0;
@@ -270,6 +276,9 @@ public:
             {"loginName", getLoginName()}
         };
     }
+
+private:
+    inline static std::atomic_bool cardMessageMode_{false};
 };
 
 using AdapterPtr = std::shared_ptr<IAdapter>;

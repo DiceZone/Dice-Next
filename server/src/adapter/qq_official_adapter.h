@@ -379,7 +379,60 @@ private:
         if (plain.empty()) { if (parts.images.empty()) sendTextTo(m, text); return; }   // 纯图不再发空文本
         sendTextTo(m, plain);
     }
-    void sendTextTo(const Message&m,const std::string&text){ if(accessToken_.empty()){lastError_="QQ 官方机器人尚未取得 AccessToken";return;} std::string target; if(m.extra.is_object())target=m.extra.value("__identity_native_target",std::string()); if(target.empty()&&m.type!=MessageType::kChannel&&db_) target=identity::BindingStore::instance().officialTransport(*db_,appId_,m.targetId,m.type==MessageType::kPrivate?identity::Kind::User:identity::Kind::Group); if(target.empty())target=m.targetId; std::string path; if(m.type==MessageType::kPrivate)path="/v2/users/"+target+"/messages"; else if(m.type==MessageType::kGroup)path="/v2/groups/"+target+"/messages"; else path="/channels/"+target+"/messages"; auto c=httpsClient("api.sgroup.qq.com");if(!c){lastError_="无法解析 api.sgroup.qq.com";return;}auto r=drogon::HttpRequest::newHttpRequest();r->setMethod(drogon::Post);r->setPath(path);r->setContentTypeCode(drogon::CT_APPLICATION_JSON);r->addHeader("Host","api.sgroup.qq.com");r->addHeader("Authorization","QQBot "+accessToken_);json body={{"content",text}};if(m.type!=MessageType::kChannel)body["msg_type"]=0;if(!m.id.empty()){body["msg_id"]=m.id;const int seq=nextReplySeq(m.id);if(seq>0&&m.type!=MessageType::kChannel)body["msg_seq"]=seq;}else if(m.type!=MessageType::kChannel){const auto eventId=takePassiveEvent(m.type,target);if(!eventId.empty())body["event_id"]=eventId;}r->setBody(body.dump());c->sendRequest(r,[self=shared_from_this(),path](drogon::ReqResult rr,const drogon::HttpResponsePtr&resp){if(rr!=drogon::ReqResult::Ok||!resp||resp->statusCode()>=300){std::string detail="网络请求未完成";if(resp){const auto responseBody=resp->body();detail.assign(responseBody.data(),responseBody.size());}self->lastError_="QQ 官方消息发送失败";if(resp)DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}",self->name_,path,static_cast<int>(resp->statusCode()),detail);else DICE_LOG_WARN("QQOfficial '{}': POST {} failed: {} {}",self->name_,path,drogon::to_string(rr),detail);}}); }
+    /// QQ 官方机器人支持 Markdown，但它仍受机器人后台能力开关约束。卡片模式
+    /// 下优先以 Markdown 发送；收到明确 HTTP 拒绝后自动用传统文本重试一次。
+    void sendTextTo(const Message& m, const std::string& text, bool forceTraditional = false) {
+        if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
+        std::string target;
+        if (m.extra.is_object()) target = m.extra.value("__identity_native_target", std::string());
+        if (target.empty() && m.type != MessageType::kChannel && db_)
+            target = identity::BindingStore::instance().officialTransport(
+                *db_, appId_, m.targetId, m.type == MessageType::kPrivate ? identity::Kind::User : identity::Kind::Group);
+        if (target.empty()) target = m.targetId;
+
+        std::string path;
+        if (m.type == MessageType::kPrivate) path = "/v2/users/" + target + "/messages";
+        else if (m.type == MessageType::kGroup) path = "/v2/groups/" + target + "/messages";
+        else path = "/channels/" + target + "/messages";
+
+        auto client = httpsClient("api.sgroup.qq.com");
+        if (!client) { lastError_ = "无法解析 api.sgroup.qq.com"; return; }
+        const bool useCard = IAdapter::cardMessageMode() && !forceTraditional && m.type != MessageType::kChannel;
+
+        auto request = drogon::HttpRequest::newHttpRequest();
+        request->setMethod(drogon::Post); request->setPath(path);
+        request->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+        request->addHeader("Host", "api.sgroup.qq.com");
+        request->addHeader("Authorization", "QQBot " + accessToken_);
+        json body = useCard
+            ? json{{"content", " "}, {"msg_type", 2}, {"markdown", {{"content", text}}}}
+            : json{{"content", text}};
+        if (!useCard && m.type != MessageType::kChannel) body["msg_type"] = 0;
+        if (!m.id.empty()) {
+            body["msg_id"] = m.id;
+            const int seq = nextReplySeq(m.id);
+            if (seq > 0 && m.type != MessageType::kChannel) body["msg_seq"] = seq;
+        } else if (m.type != MessageType::kChannel) {
+            const auto eventId = takePassiveEvent(m.type, target);
+            if (!eventId.empty()) body["event_id"] = eventId;
+        }
+        request->setBody(body.dump());
+        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, useCard](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
+            const bool httpRejected = response && response->statusCode() >= 300;
+            if (useCard && httpRejected) {
+                DICE_LOG_WARN("QQOfficial '{}': Markdown/card message rejected by {}, retrying traditional text", self->name_, path);
+                self->sendTextTo(message, text, true);
+                return;
+            }
+            if (result != drogon::ReqResult::Ok || !response || httpRejected) {
+                std::string detail = "网络请求未完成";
+                if (response) { const auto responseBody = response->body(); detail.assign(responseBody.data(), responseBody.size()); }
+                self->lastError_ = "QQ 官方消息发送失败";
+                if (response) DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, path, static_cast<int>(response->statusCode()), detail);
+                else DICE_LOG_WARN("QQOfficial '{}': POST {} failed: {} {}", self->name_, path, drogon::to_string(result), detail);
+            }
+        });
+    }
     void fail(const std::string&e){lastError_=e;connecting_=false;connected_=false;DICE_LOG_ERROR("QQOfficial '{}': {}",name_,e);}
     inline static std::function<std::string(const std::string&)> imagePublisher_;   // 本地图 → 公网 URL（图床）
     std::string id_,name_,appId_,appSecret_,displayQQ_,accessToken_,loginId_,loginName_,sessionId_,gatewayUrl_,lastError_; Database* db_{identity::BindingStore::instance().database()}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; int64_t seq_=-1; std::shared_ptr<QQGatewaySocket> gateway_; std::optional<trantor::TimerId> heartbeatTimer_,accessTokenTimer_; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::unordered_map<std::string,int> replySeq_; std::unordered_map<std::string,std::pair<std::string,std::time_t>> pendingEvents_;

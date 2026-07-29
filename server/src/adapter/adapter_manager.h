@@ -170,6 +170,14 @@ private:
         if (msg.type != MessageType::kGroup || msg.targetId.empty()) return;
         auto* st = db_.getStorage(); if (!st) return;
         try {
+            // A message from the group proves that the bot is still present.
+            // Restore a record hidden by a previous WebUI deletion; otherwise a
+            // QQ Official group could remain invisible forever because that
+            // platform has no separate re-join event in this path.
+            st->remove_all<GroupSettingRow>(orm::where(
+                orm::c(&GroupSettingRow::platform) == msg.platform and
+                orm::c(&GroupSettingRow::groupId) == msg.targetId and
+                orm::c(&GroupSettingRow::key) == std::string("__removed")));
             auto rows = st->get_all<GroupSettingRow>(orm::where(
                 orm::c(&GroupSettingRow::platform) == msg.platform and
                 orm::c(&GroupSettingRow::groupId) == msg.targetId and

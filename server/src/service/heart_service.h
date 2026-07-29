@@ -17,6 +17,7 @@
 #include "../config/config_manager.h"
 #include "../adapter/adapter_interface.h"
 #include "../adapter/adapter_manager.h"
+#include "../adapter/qq_official_adapter.h"
 #include "ai_gateway.h"   // dice::ai::httpPostJson —— curl 配置文件出站模板
 
 #include <nlohmann/json.hpp>
@@ -25,6 +26,9 @@
 #include <chrono>
 #include <ctime>
 #include <mutex>
+#include <random>
+#include <sstream>
+#include <iomanip>
 #include <string>
 #include <thread>
 #include <utility>
@@ -56,6 +60,7 @@ public:
     void init(ConfigManager* cfg, AdapterManager* adapters) {
         cfg_ = cfg;
         adapters_ = adapters;
+        ensureInstanceId();
     }
 
     // ── 配置读取（每次现读 → 热更即生效）────────────────────
@@ -153,18 +158,64 @@ private:
         return false;
     }
 
-    /// 骰娘自身 QQ/昵称：优先已连接 adapter 的登录信息，回退 config dice/self_qq。
-    void selfInfo(std::string& id, std::string& nick) const {
-        if (adapters_) {
-            for (auto& a : adapters_->allAdapters()) {
-                if (a && a->isConnected() && !a->getLoginId().empty()) {
-                    id = a->getLoginId();
-                    nick = a->getLoginName();
-                    return;
+    std::string instanceId() const {
+        return cfg_ ? cfg_->get<std::string>("dice/heart_instance_id", std::string()) : std::string();
+    }
+
+    void ensureInstanceId() {
+        if (!cfg_ || !instanceId().empty()) return;
+        std::random_device rd;
+        std::ostringstream out;
+        out << "dn-";
+        for (int i = 0; i < 16; ++i)
+            out << std::hex << std::setw(2) << std::setfill('0') << (rd() & 0xff);
+        try {
+            cfg_->set<std::string>("dice/heart_instance_id", out.str());
+            cfg_->save();
+        } catch (...) {}
+    }
+
+    json adapterEndpoints(std::string& preferredId, std::string& preferredNick,
+                          std::string& aggregateFrame) const {
+        json result = json::array();
+        if (!adapters_) return result;
+        bool choseOneBot = false;
+        for (const auto& adapter : adapters_->allAdapters()) {
+            if (!adapter) continue;
+            const std::string platform = adapter->platform();
+            const std::string nativeId = adapter->getLoginId();
+            std::string accountId = nativeId;
+            std::string displayId;
+            if (platform == "onebot_v11") {
+                displayId = nativeId;
+            } else if (platform == "qq_official") {
+                if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(adapter)) {
+                    accountId = official->appId();
+                    displayId = official->displayQQ();
                 }
             }
+            // 未连接的适配器可能还拿不到平台账号；QQ 官方使用 AppID，
+            // 其余平台等首次连上取得原生 Bot ID 后再纳入心跳端点。
+            if (accountId.empty()) continue;
+            result.push_back(json{
+                {"platform", platform},
+                {"account_id", accountId},
+                {"native_id", nativeId},
+                {"display_id", displayId},
+                {"nickname", adapter->getLoginName()},
+                {"protocol", adapter->version()},
+                {"connected", adapter->isConnected()},
+                {"adapter_id", adapter->id()},
+            });
+            if (adapter->isConnected() && (!choseOneBot || platform == "onebot_v11")) {
+                preferredId = !displayId.empty() ? displayId : accountId;
+                preferredNick = adapter->getLoginName();
+                choseOneBot = platform == "onebot_v11";
+            }
         }
-        if (cfg_) id = cfg_->get<std::string>("dice/self_qq", std::string());
+        if (result.size() == 1) aggregateFrame = result.front().value("protocol", std::string());
+        else if (!result.empty()) aggregateFrame = "multi-adapter";
+        return result;
     }
 
     /// 骰主 QQ：config dice/masters 第一条（兼容裸字符串与 {platform,id} 两种形态）。
@@ -196,13 +247,16 @@ private:
             if (!bypassThrottle && epoch() < penaltyUntil_) return {0, "处于切换惩罚期"};
         }
 
-        std::string selfId, selfNick;
-        selfInfo(selfId, selfNick);
+        std::string selfId, selfNick, frame;
+        json endpoints = adapterEndpoints(selfId, selfNick, frame);
+        if (selfId.empty() && cfg_) selfId = cfg_->get<std::string>("dice/self_qq", std::string());
         std::string bn = std::to_string(buildNumber());
         while (bn.size() < 3) bn = "0" + bn;
 
         json body{
             {"access_token", tk},
+            {"instance_id", instanceId()},
+            {"adapters", std::move(endpoints)},
             {"status", status},
             {"dice_info", json{
                 {"dice_id", selfId},
@@ -212,7 +266,7 @@ private:
             }},
             {"dice_type", "dicenext"},
             {"dice_version", versionString() + "(" + bn + ")"},
-            {"frame", "onebot-v11"},
+            {"frame", frame.empty() ? std::string("dicenext") : frame},
             {"plugin_version", versionString()},
             {"public_show", publicShow()},
         };
