@@ -2,6 +2,7 @@
   "command_prefix": ".",
   "self_name": "",
   "self_call": "",
+  "message_format": "traditional",
   "blacklist_quit_level": "member",
   "respond_self": false,
   "console_start_hidden": true,

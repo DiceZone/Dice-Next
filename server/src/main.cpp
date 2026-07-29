@@ -365,6 +365,8 @@ static int realMain(int argc, char* argv[]) {
     }
 
     // ── 4.5. Initialize i18n from the validated/recovered config ──
+    dice::IAdapter::setCardMessageMode(
+        configMgr.get<std::string>("dice/message_format", "traditional") == "card");
     std::string i18nDir = configMgr.get<std::string>("i18n/resource_dir", "i18n");
     std::string defaultLocaleCode = configMgr.get<std::string>("i18n/default_locale", "zh-Hans");
     dice::I18n i18n(i18nDir, dice::localeFromString(defaultLocaleCode));

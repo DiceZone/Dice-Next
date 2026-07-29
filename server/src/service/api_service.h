@@ -21,6 +21,7 @@
 #include "../core/mod/js_plugin_manager.h"
 #include "../core/mod/lua_plugin_manager.h"
 #include "../core/command_router.h"
+#include "../core/identity/identity_binding.h"
 #include "../platform/system_info.h"
 #include "../i18n/i18n.h"
 #include "../common/types.h"
@@ -1150,6 +1151,24 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             // 前端占位提示用的默认 host。
             cur["default_host"] = "localhost:" + std::to_string(cfg.get<int>("server/port", 18088));
             jsonReply(ok(cur), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Put});
+
+    // 出站消息表现形式。传统模式始终发送纯文本；卡片模式由各适配器按其
+    // 官方能力渲染，无法使用富消息的平台会安全回退为传统文本。
+    app.registerHandler("/api/system/message-format", [&cfg](Req req, CB&& cb) {
+        try {
+            if (req->method() == drogon::Put) {
+                auto j = J::parse(req->body());
+                std::string mode = j.value("mode", std::string("traditional"));
+                if (mode != "card") mode = "traditional";
+                cfg.set<std::string>("dice/message_format", mode);
+                cfg.save();
+                IAdapter::setCardMessageMode(mode == "card");
+            }
+            const std::string mode = cfg.get<std::string>("dice/message_format", "traditional") == "card"
+                ? "card" : "traditional";
+            jsonReply(ok(J{{"mode", mode}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
@@ -3681,6 +3700,27 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         return account.empty() ? any : nullptr;
     };
 
+    // WebUI stores and displays conversations under a public identity, while
+    // adapters must send to their own native endpoint.  Resolve the selected
+    // binding exactly so a virtual public number is never sent to a platform
+    // API as though it were a real group/user id.
+    static auto selectedTransportEndpoint = [](Database& database, const std::string& publicId,
+                                               const std::string& type, const std::string& account,
+                                               const std::string& requestedEndpoint,
+                                               identity::Kind kind) -> std::string {
+        const auto endpoints = identity::BindingStore::instance().endpoints(database, publicId, kind);
+        if (endpoints.empty()) {
+            return identity::BindingStore::isVirtual(publicId) ? std::string{} : publicId;
+        }
+        for (const auto& endpoint : endpoints) {
+            if (endpoint.adapterType != type) continue;
+            if (!account.empty() && endpoint.adapterAccount != account) continue;
+            if (!requestedEndpoint.empty() && endpoint.endpointId != requestedEndpoint) continue;
+            return endpoint.endpointId;
+        }
+        return {};
+    };
+
     // Read an id field that may be a number or string (OneBot inconsistency).
     static auto idStr = [](const J& m, const char* key) -> std::string {
         if (!m.contains(key) || m[key].is_null()) return "";
@@ -4108,10 +4148,23 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (!j.is_object()) { jsonReply(fail("invalid JSON request"), std::move(cb)); return; }
                 std::string text = j.value("text", "");
                 std::string adapterAccount = j.value("adapterAccount", std::string());
+                std::string endpointId = j.value("endpointId", std::string());
                 if (text.empty()) { jsonReply(fail("empty"), std::move(cb)); return; }
                 auto a = pickAdapter(adapterMgr, plat, adapterAccount);
                 if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
-                a->sendGroupMessage(gid, text);
+                // QQ Official bindings are keyed by AppID, not necessarily by
+                // the adapter display id.  Let a selected connected adapter
+                // fill in the account when older WebUI data omitted it.
+                if (adapterAccount.empty() && plat == "qq_official") {
+                    if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(a)) adapterAccount = official->appId();
+                }
+                const auto targetId = selectedTransportEndpoint(db, gid, plat, adapterAccount, endpointId,
+                                                                identity::Kind::Group);
+                if (targetId.empty()) {
+                    jsonReply(fail("selected adapter is not bound to this group"), std::move(cb));
+                    return;
+                }
+                a->sendGroupMessage(targetId, text);
                 std::string me = a->getLoginName().empty() ? std::string("\xe9\xaa\xb0\xe5\xa8\x98") : a->getLoginName();  // 骰娘
                 GroupChatLog::instance().add(key, me, a->getLoginId(), text, true);
                 // 网页发送的消息也持久化。
@@ -4157,10 +4210,20 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (!j.is_object()) { jsonReply(fail("invalid JSON request"), std::move(cb)); return; }
                 std::string text = j.value("text", "");
                 std::string adapterAccount = j.value("adapterAccount", std::string());
+                std::string endpointId = j.value("endpointId", std::string());
                 if (text.empty()) { jsonReply(fail("empty"), std::move(cb)); return; }
                 auto a = pickAdapter(adapterMgr, plat, adapterAccount);
                 if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
-                a->sendPrivateMessage(uid, text);
+                if (adapterAccount.empty() && plat == "qq_official") {
+                    if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(a)) adapterAccount = official->appId();
+                }
+                const auto targetId = selectedTransportEndpoint(db, uid, plat, adapterAccount, endpointId,
+                                                                identity::Kind::User);
+                if (targetId.empty()) {
+                    jsonReply(fail("selected adapter is not bound to this user"), std::move(cb));
+                    return;
+                }
+                a->sendPrivateMessage(targetId, text);
                 if (auto* cst = db.getChatStorage()) {
                     try {
                         ChatMsgRow r; r.platform = plat; r.groupId = scope;

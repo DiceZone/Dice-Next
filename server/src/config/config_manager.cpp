@@ -29,6 +29,7 @@ static json makeDefaultConfig() {
             {"command_prefix", "."},
             {"self_name", ""},                   // strSelfName: 自我介绍场合的名称（空=用登录昵称）
             {"self_call", ""},                   // strSelfCall: 回执自称，{self} 的重定向目标（空=用 self_name）
+            {"message_format", "traditional"},   // 出站消息表现形式：traditional / card
             {"blacklist_quit_level", "member"},  // 黑名单退群默认等级: member=任一成员触发 / admin=仅群主级触发
             {"respond_self", false},             // 自响应：用骰娘账号自身消息自控（默认关）
             {"console_start_hidden", true},      // 启动即最小化到托盘（隐藏控制台，退出走托盘）
