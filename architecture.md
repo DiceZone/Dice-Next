@@ -144,7 +144,9 @@ server/
 ├── CMakeLists.txt                              # 顶层 CMake 构建
 ├── vcpkg.json                                  # vcpkg 依赖清单
 ├── config/
-│   └── default_config.json                     # 默认配置（命令前缀、端口等）
+│   ├── server.json                             # 服务端口、数据库路径等
+│   ├── dice.json                               # 骰娘与规则配置
+│   └── adapters.json                           # 适配器连接配置
 ├── src/
 │   ├── main.cpp                                # 入口：启动 drogon + 注册适配器
 │   ├── common/
@@ -1019,7 +1021,7 @@ sequenceDiagram
 **后端 (server/):**
 - `CMakeLists.txt` — CMake 项目配置（drogon/sqlite_orm/spdlog/nlohmann 依赖）
 - `vcpkg.json` — vcpkg 包清单
-- `config/default_config.json` — 默认 JSON 配置（端口、DB 路径、API Key、默认命令前缀 `.`、OneBot 连接预设）
+- `config/` — 按功能拆分的 JSON 配置目录（如 `server.json`、`dice.json`、`adapters.json`）；首次启动自动生成。
 - `src/main.cpp` — C++ 入口：初始化 spdlog → 加载配置 → 打开 SQLite → 启动 drogon → 注册适配器 → 打印启动信息
 - `src/common/types.h` — 全局枚举与类型（`AdapterType`, `ConnectionMode`, `MatchType`, `DiceType`, `ApiErrorCode`）
 - `src/common/errors.h` — 错误码枚举 + `AppException` 异常类

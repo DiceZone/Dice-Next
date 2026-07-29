@@ -141,7 +141,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stage 'web') | Out-Null
 Copy-Item $webDist (Join-Path $stage 'web\dist') -Recurse
 
 # ── 3. 使用说明（中文，UTF-8 no BOM） ────────────────────────
-$port = 18088 # 默认端口，与 config\default_config.json 保持一致
+$port = 18088 # 默认端口，与 config\server.json 保持一致
 $readme = @"
 DiceNext $ver($build) — Windows $Architecture 盲测版使用说明
 =======================================
@@ -171,7 +171,7 @@ QQ 官方机器人 2.0：
   - 支持简体/繁体/英文（后台右上角切换界面语言；群内可设回复语言）。
 
 【说明】
-  - 首次运行会自动生成 config\ 目录：default_config.json 是清单，各功能区分别保存在 server.json、adapters.json 等文件中。
+  - 首次运行会自动生成 config\ 目录，各功能区分别保存在 server.json、adapters.json 等文件中。
   - 升级时解压完整覆盖所有文件即可，dice-next.exe / app\ / lib\ / i18n / web\dist\ / data\ 都需要更新。你的 config\ 目录在解压包之外，不会丢失。
   - 端口 $port，可在 config\server.json 的 port 修改；若该端口被占用会自动顺延到下一个可用端口并写回配置（可右键托盘图标→打开网页面板，自动用正确端口）。
   - 同一套数据（同一安装目录）只能运行一个进程，重复启动会自动退出，避免数据冲突。

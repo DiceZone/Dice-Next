@@ -665,7 +665,7 @@ TEST(ImportLinks, ConvertsOnlySafeGroupLinks) {
     fs::create_directories(root / "conf");
     { std::ofstream out(root / "conf" / "LinkList.json");
       out << R"([{"origin":{"gid":20001},"target":{"gid":20002},"type":"to","linking":false},{"origin":{"uid":10001},"target":{"gid":20003},"type":"with","linking":true}])"; }
-    ConfigManager cfg((root / "config.json").string()); ASSERT_TRUE(cfg.load());
+    ConfigManager cfg((root / "config").string()); ASSERT_TRUE(cfg.load());
     ASSERT_EQ(importLinks(cfg, root / "conf"), 1);
     auto links = cfg.get<json>("dice/links", json::array());
     ASSERT_EQ(links.size(), (size_t)1);
@@ -680,7 +680,7 @@ TEST(ImportNotices, ConvertsUserAndGroupWindows) {
     fs::create_directories(root / "conf");
     { std::ofstream out(root / "conf" / "NoticeList.json");
       out << R"([{"uid":10001,"type":14},{"gid":20001,"type":3},{"gid":0,"type":15}])"; }
-    ConfigManager cfg((root / "config.json").string()); ASSERT_TRUE(cfg.load());
+    ConfigManager cfg((root / "config").string()); ASSERT_TRUE(cfg.load());
     ASSERT_EQ(importNotices(cfg, root / "conf"), 2);
     auto windows = cfg.get<json>("dice/notice/windows", json::array());
     ASSERT_EQ(windows.size(), (size_t)2);
@@ -695,14 +695,14 @@ TEST(BackupRestore, ArchivesStagesAndAppliesAtStartup) {
     fs::path root = makeTempDir("backup_restore");
     fs::path oldCwd = fs::current_path(); fs::current_path(root);
     fs::create_directories("config"); fs::create_directories("data/backups");
-    { std::ofstream f("config/default_config.json"); f << R"({"server":{"port":18088}})"; }
+    { std::ofstream f("config/server.json"); f << R"({"server":{"port":18088}})"; }
     { std::ofstream f("data/custom.txt"); f << "before-restore"; }
     { std::ofstream f("data/backups/older-backup.zip"); f << "must-not-be-nested"; }
     fs::path archive; std::string error;
     {
         Database db;
         ASSERT_TRUE(db.open("data/dice.db"));
-        ASSERT_TRUE(backup::createArchive(db, "config/default_config.json", archive, error));
+        ASSERT_TRUE(backup::createArchive(db, "config", archive, error));
         db.close();
     }
     ASSERT_TRUE(fs::is_regular_file(archive));
@@ -717,7 +717,7 @@ TEST(BackupRestore, ArchivesStagesAndAppliesAtStartup) {
     ASSERT_TRUE(backup::stageRestore(bytes, error));
     ASSERT_TRUE(backup::stageStoredRestore(archive.filename().string(), false, error));
     { std::ofstream f("data/custom.txt"); f << "changed"; }
-    { std::ofstream f("config/default_config.json"); f << "{}"; }
+    { std::ofstream f("config/server.json"); f << "{}"; }
     std::string notice; ASSERT_TRUE(backup::applyPendingRestore(notice));
     ASSERT_TRUE(notice.find("已应用") != std::string::npos);
     std::ifstream restored("data/custom.txt"); std::string content; std::getline(restored, content);
@@ -733,7 +733,7 @@ TEST(BackupRestore, PartialArchiveOverlaysOnlySelectedContent) {
     fs::path root = makeTempDir("backup_partial_restore");
     fs::path oldCwd = fs::current_path(); fs::current_path(root);
     fs::create_directories("config"); fs::create_directories("data/plugins/js");
-    { std::ofstream f("config/default_config.json"); f << "{}"; }
+    { std::ofstream f("config/server.json"); f << "{}"; }
     { std::ofstream f("data/plugins/js/example.js"); f << "original"; }
     { std::ofstream f("data/unrelated.txt"); f << "keep-me"; }
     fs::path archive; std::string error;
@@ -743,7 +743,7 @@ TEST(BackupRestore, PartialArchiveOverlaysOnlySelectedContent) {
         backup::Selection selection{};
         selection.config = false; selection.databases = false; selection.logs = false;
         selection.resources = false; selection.plugins = true; selection.media = false;
-        ASSERT_TRUE(backup::createArchive(db, "config/default_config.json", archive, error, selection));
+        ASSERT_TRUE(backup::createArchive(db, "config", archive, error, selection));
         db.close();
     }
     std::ifstream backupFile(archive, std::ios::binary);

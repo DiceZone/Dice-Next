@@ -282,7 +282,7 @@ static int realMain(int argc, char* argv[]) {
 
     // ── 3. Load configuration ────────────────────────────────
     dice::crashdiag::setPhase("config");
-    std::string configPath = "config/default_config.json";
+    std::string configPath = "config";
     if (argc > 1) {
         configPath = argv[1];
     }
@@ -2022,7 +2022,7 @@ static int realMain(int argc, char* argv[]) {
 
     // ── WebUI 登录鉴权 ───────────────────────────────────
     dice::WebAuth::instance().configure(configMgr.get<std::string>("webui/password", ""),
-        std::filesystem::path(configPath).parent_path() / "webui_sessions.json");
+        std::filesystem::path(configPath) / "webui_sessions.json");
     // 前置拦截：设了口令时，/api/* 需有效会话 Cookie（放行登录/状态查询与静态文件）。
     app.registerPreHandlingAdvice(
         [](const drogon::HttpRequestPtr& req,

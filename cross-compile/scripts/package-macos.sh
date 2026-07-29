@@ -100,7 +100,7 @@ Run:
   3. Open the WebUI: http://localhost:18088
 
 Notes:
-  - First launch creates config/default_config.json automatically.
+  - First launch creates the config/ directory automatically.
   - If macOS blocks the binary, allow it in Privacy & Security.
   - This package statically links third-party dependencies. macOS may ask to
     allow dice-next-server once because this beta build is not Apple-signed.

@@ -17,23 +17,22 @@ fs::path temporaryConfigRoot(const char* name) {
 
 TEST(ConfigManager, SplitConfigRoundTripAndSnapshotRecovery) {
     const fs::path root = temporaryConfigRoot("config");
-    const fs::path manifest = root / "config" / "default_config.json";
+    const fs::path configDir = root / "config";
     std::error_code ec;
     fs::remove_all(root, ec);
 
-    ConfigManager cfg(manifest.string());
+    ConfigManager cfg(configDir.string());
     ASSERT_TRUE(cfg.load());
     ASSERT_TRUE(cfg.createdOnLoad());
-    ASSERT_TRUE(fs::exists(manifest));
-    ASSERT_TRUE(fs::exists(root / "config" / "server.json"));
-    ASSERT_TRUE(fs::exists(root / "config" / "adapters.json"));
+    ASSERT_TRUE(fs::exists(configDir / "server.json"));
+    ASSERT_TRUE(fs::exists(configDir / "adapters.json"));
 
     cfg.set<int>("server/port", 19001);
     cfg.set<std::string>("webui/password", "test-password");
     ASSERT_TRUE(cfg.save());
     const json good = cfg.getAll();
 
-    ConfigManager reloaded(manifest.string());
+    ConfigManager reloaded(configDir.string());
     ASSERT_TRUE(reloaded.load());
     ASSERT_EQ(reloaded.get<int>("server/port"), 19001);
     ASSERT_EQ(reloaded.get<std::string>("webui/password"), std::string("test-password"));
@@ -44,7 +43,7 @@ TEST(ConfigManager, SplitConfigRoundTripAndSnapshotRecovery) {
     ASSERT_TRUE(reloaded.restoreSnapshot(good));
     ASSERT_TRUE(reloaded.save());
 
-    ConfigManager recovered(manifest.string());
+    ConfigManager recovered(configDir.string());
     ASSERT_TRUE(recovered.load());
     ASSERT_EQ(recovered.get<int>("server/port"), 19001);
     fs::remove_all(root, ec);

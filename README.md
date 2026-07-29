@@ -2,7 +2,7 @@
 
 Dice!Next 是面向 TRPG 跑团与骰点场景的本地部署骰娘。它提供掷骰、人物卡、跑团日志、规则包与插件能力，并在本机托管管理后台；可同时接入 OneBot、QQ 官方机器人、Discord 与 KOOK。
 
-> 项目仍在开发与内部测试阶段。问题、建议和测试反馈请通过 QQ 群 `933145116` 提交。
+> 项目目前处于公测（Beta）阶段。问题与功能建议请优先通过 [GitHub Issues](https://github.com/DiceZone/Dice-Next/issues) 提交；也欢迎加入 QQ 群 `933145116` 交流与反馈。
 
 ## 核心能力
 
@@ -20,10 +20,10 @@ Dice!Next 是面向 TRPG 跑团与骰点场景的本地部署骰娘。它提供�
 
 | 项目 | 用途 |
 | --- | --- |
-| `Dice-Next` | 本仓库：后端、消息处理、打包与 Release 工作流。 |
-| `Dice-Next-WebUI` | React 管理后台前端。 |
-| `Dice-Next-Doc` | 文档站、路线图与内置指令数据。 |
-| `onedice-cpp-lib` | 掷骰表达式解析与计算引擎。 |
+| [Dice-Next](https://github.com/DiceZone/Dice-Next) | 本仓库：后端、消息处理、打包与 Release 工作流。 |
+| [Dice-Next-WebUI](https://github.com/DiceZone/Dice-Next-WebUI) | React 管理后台前端。 |
+| [Dice-Next-Doc](https://github.com/DiceZone/Dice-Next-Doc) | 文档站、路线图与内置指令数据。 |
+| [onedice-cpp-lib](https://github.com/DiceZone/onedice-cpp-lib) | 掷骰表达式解析与计算引擎。 |
 
 建议保持以下目录结构：
 
@@ -35,53 +35,9 @@ workspace/
 └─ onedice-cpp-lib/
 ```
 
-## 本地构建
+## 开发与构建
 
-### 环境要求
-
-- Windows 10/11 64 位
-- Visual Studio 2022（C++ 桌面开发组件）与 CMake 3.20+
-- vcpkg
-- Node.js 20+
-
-### 构建前端
-
-```powershell
-cd ..\Dice-Next-WebUI
-npm ci
-npm run build
-```
-
-### 构建后端
-
-在本仓库根目录执行，替换为本机 vcpkg 路径：
-
-```powershell
-cmake -S server -B server\build -G "Visual Studio 17 2022" -A x64 `
-  -DCMAKE_TOOLCHAIN_FILE=D:\vcpkg\scripts\buildsystems\vcpkg.cmake `
-  -DVCPKG_TARGET_TRIPLET=x64-windows
-cmake --build server\build --config Release -j 6
-```
-
-### 生成测试包
-
-```powershell
-$env:DICENEXT_WEB_ROOT = "..\Dice-Next-WebUI"
-$env:DICENEXT_DOC_ROOT = "..\Dice-Next-Doc"
-powershell -File package.ps1
-```
-
-默认输出到 `release/`。可用 `DICENEXT_RELEASE_ROOT` 指定其他输出目录。
-
-## 自动发布
-
-推送 `v*` 格式的 Git 标签会触发 Release 工作流，自动构建并发布：
-
-- Linux：amd64、arm64
-- Windows：amd64、arm64
-- macOS：arm64
-
-工作流会检出同级的前端、文档与 OneDice 项目并组装完整发行包。三个依赖仓库在私有阶段需要配置一个可读取它们的 CI token secret。
+从源码构建、生成本地测试包和自动发布的说明均维护在文档站的[开发构建文档](https://github.com/DiceZone/Dice-Next-Doc/blob/main/src/develop/build.md)。
 
 ## 致谢
 
@@ -93,17 +49,18 @@ Dice!Next 是对 [Dice!](https://github.com/Dice-Developer-Team/Dice) 的致敬�
 
 - [OneDice](https://github.com/OlivOS-Team/lib-onedice)：统一骰点表达式标准；本项目使用同级的 `onedice-cpp-lib` 实现。
 - [SealDice](https://github.com/sealdice/sealdice-core)：骰娘生态的开放实践，以及日志与插件互操作的参考。
+- [OlivaDice](https://github.com/OlivOS-Team/OlivaDiceCore)：开放的 TRPG 骰娘项目与 OneDice 生态实践。
 - [OneBot v11](https://github.com/botuniverse/onebot-11)：机器人平台适配协议。
 - [NapCat](https://github.com/NapNeko/NapCatQQ)：基于 NTQQ 的机器人协议端实现。
 - [LLOneBot](https://www.llonebot.com/)：QQ 机器人框架与 OneBot 协议实现。
 - [SnowLuma](https://snowluma.github.io/)：面向 NTQQ 与 OneBot 生态的远程协议框架。
 - 所有为 TRPG 工具、规则包和模组做出贡献的开发者、骰主和测试用户。
 
-## 运行与数据
+## 运行
 
-首次启动会生成 `config/` 目录：`default_config.json` 是清单，各功能区分别保存在 `server.json`、`adapters.json`、`dice.json` 等文件中。WebUI 保存与通过热重载校验的手工修改都会回写这些文件；若配置损坏，程序会使用数据库中最近一次有效快照恢复并写回。
+启动程序后，默认管理后台地址为 [http://localhost:18088](http://localhost:18088)。需要修改启动端口时，停止程序并编辑 `config/server.json` 中的 `port`，再重新启动。
 
-可在 WebUI 登录时选择“信任此设备 30 天”；可信会话仅保存在本机 `config/webui_sessions.json`。升级时替换程序、资源与 WebUI 文件即可，保留安装目录中的 `config/` 与 `data/`。更多配置、指令与更新记录请查看 `Dice-Next-Doc`。
+配置、部署、备份和升级说明见 [Dice!Next 文档站](https://github.com/DiceZone/Dice-Next-Doc)。
 
 ## 开源许可证
 
