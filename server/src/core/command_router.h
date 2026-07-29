@@ -8009,7 +8009,9 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
             if (rows.empty()) {
                 PlayerProfileRow r;
                 r.platform = msg.platform; r.userId = msg.senderId;
-                r.nickname = msg.senderName;
+                const bool fallbackName = msg.extra.is_object()
+                    && msg.extra.value("__sender_name_fallback", false);
+                r.nickname = fallbackName ? std::string() : msg.senderName;
                 r.trustLevel = 0;
                 r.cmdCount = didCommand ? 1 : 0;
                 r.lastCmdAt = didCommand ? nowIso() : "";
@@ -8017,7 +8019,9 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                 st->insert(r);
             } else {
                 auto r = rows.front();
-                if (!msg.senderName.empty()) r.nickname = msg.senderName;
+                const bool fallbackName = msg.extra.is_object()
+                    && msg.extra.value("__sender_name_fallback", false);
+                if (!fallbackName && !msg.senderName.empty()) r.nickname = msg.senderName;
                 if (didCommand) { r.cmdCount += 1; r.lastCmdAt = nowIso(); }
                 st->update(r);
             }
@@ -9036,7 +9040,8 @@ private:
     /// nickname → id. Once a card is bound via .pc, the card's name is what
     /// shows on every roll (overriding QQ nickname / group card / .nn).
     /// Best-known display name for a user id (used for 代骰 perspective): the
-    /// cached player-profile nickname, else the id itself.
+    /// cached player-profile nickname, else the id itself. QQ Official never
+    /// exposes a private OpenID/virtual QQ number as a display name.
 public:   // 供 main.cpp 的戳一戳等事件解析昵称（getMembers 不可用时回退到记录的昵称）。
     std::string lookupNick(const std::string& platform, const std::string& userId) const {
         auto* st = db_.getStorage();
@@ -9049,7 +9054,7 @@ public:   // 供 main.cpp 的戳一戳等事件解析昵称（getMembers 不可�
                 if (!rows.empty() && !rows.front().nickname.empty()) return rows.front().nickname;
             } catch (...) {}
         }
-        return userId;
+        return platform == "qq_official" ? std::string("用户") : userId;
     }
 
     // ─── Bot self-name / self-call (原版 strSelfName / strSelfCall) ──────
@@ -9233,7 +9238,8 @@ private:
 
     // 变量三来源（乾净值，无包裹符号）：QQ昵称 / 群名片 / 人物卡名。
     std::string qqNickOf(const Message& msg) const {
-        return msg.senderName.empty() ? msg.senderId : msg.senderName;
+        if (!msg.senderName.empty()) return msg.senderName;
+        return msg.platform == "qq_official" ? std::string("用户") : msg.senderId;
     }
     std::string groupCardOf(const Message& msg) const {
         if (msg.extra.is_object()) {
@@ -9269,8 +9275,8 @@ private:
         }
         // QQ 昵称
         if (!msg.senderName.empty()) return msg.senderName;
-        // 最终回退到 QQ 号
-        return msg.senderId;
+        // QQ 官方私聊没有用户昵称；不要把内部虚拟号显示给用户。
+        return msg.platform == "qq_official" ? std::string("用户") : msg.senderId;
     }
     /// 回复中使用的显示名：用可配置前后缀包裹（默认 <>，如 <希亚>）。骰主可改
     /// dice.nick_prefix/nick_suffix（留空=不包裹）。设名片/先攻名等用 displayNameRaw。
