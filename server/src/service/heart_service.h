@@ -296,7 +296,7 @@ private:
             warned401_ = false;
             if (reported == "offline") lastLoginIso_.clear();   // 下次上线取新的 login_time
         } else if (httpStatus == 401) {
-            lastError_ = "access_token 无效（401），请到 heart.dice.zone 重新绑定获取";
+            lastError_ = "骰娘 API Key 无效（401），请到 account.dice.zone 的骰子绑定页面重新生成";
             if (!warned401_) {   // 同因仅告警一次，避免每周期刷屏
                 warned401_ = true;
                 DICE_LOG_WARN("[心跳] {}", lastError_);
