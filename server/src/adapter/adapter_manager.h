@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <functional>
+#include <ctime>
 
 namespace dice {
 
@@ -106,6 +107,7 @@ public:
     void routeMessage(const Message& msg) {
         Message routed = msg;
         normalizeIdentity(routed);
+        cacheOfficialGroupNickname(routed);
         ensureInboundGroup(routed);
         for (auto& handler : messageHandlers_) {
             handler(routed);
@@ -138,6 +140,32 @@ public:
     }
 
 private:
+    static std::string profileTimestamp() {
+        std::time_t now = std::time(nullptr); std::tm local{};
+#if defined(_WIN32)
+        localtime_s(&local, &now);
+#else
+        local = *std::localtime(&now);
+#endif
+        char out[32]{}; std::strftime(out, sizeof(out), "%Y-%m-%dT%H:%M:%SZ", &local);
+        return out;
+    }
+    void cacheOfficialGroupNickname(const Message& msg) {
+        if (msg.platform != "qq_official" || msg.type != MessageType::kGroup || msg.senderId.empty()
+            || msg.senderName.empty() || (msg.extra.is_object() && msg.extra.value("__sender_name_fallback", false))) return;
+        auto* st = db_.getStorage(); if (!st) return;
+        try {
+            auto profiles = st->get_all<PlayerProfileRow>(orm::where(
+                orm::c(&PlayerProfileRow::platform) == std::string("qq_official") and
+                orm::c(&PlayerProfileRow::userId) == msg.senderId), orm::limit(1));
+            if (profiles.empty()) {
+                PlayerProfileRow row; row.platform = "qq_official"; row.userId = msg.senderId;
+                row.nickname = msg.senderName; row.createdAt = profileTimestamp(); st->insert(row);
+            } else if (profiles.front().nickname != msg.senderName) {
+                auto row = profiles.front(); row.nickname = msg.senderName; st->update(row);
+            }
+        } catch (...) {}
+    }
     void ensureInboundGroup(const Message& msg) {
         if (msg.type != MessageType::kGroup || msg.targetId.empty()) return;
         auto* st = db_.getStorage(); if (!st) return;
@@ -172,6 +200,26 @@ private:
             msg.extra["__identity_qualified_sender"] = BindingStore::qualified(Kind::User, publicSender);
             msg.targetId = publicTarget;
             msg.senderId = publicSender;
+            // QQ Official does not provide a private-chat nickname. If this
+            // endpoint resolves to a known public identity (including one
+            // joined by .bind), reuse its group-cached name instead of exposing
+            // an OpenID or reserved virtual QQ number.
+            if (msg.senderName.empty()) {
+                std::string cachedName;
+                if (auto* st = db_.getStorage()) {
+                    try {
+                        auto profiles = st->get_all<PlayerProfileRow>(orm::where(
+                            orm::c(&PlayerProfileRow::platform) == std::string("qq_official") and
+                            orm::c(&PlayerProfileRow::userId) == publicSender), orm::limit(1));
+                        if (!profiles.empty()) cachedName = profiles.front().nickname;
+                    } catch (...) {}
+                }
+                if (!cachedName.empty()) msg.senderName = cachedName;
+                else {
+                    msg.senderName = "用户";
+                    msg.extra["__sender_name_fallback"] = true;
+                }
+            }
             for (auto& at : msg.atList) {
                 if (at == msg.selfId) continue;
                 at = bindings.observeOfficial(db_, botId, at, Kind::User);

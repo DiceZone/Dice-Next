@@ -212,8 +212,8 @@ private:
     void dispatch(const std::string&t,const json&d,const std::string&eventId){
         Message m; m.platform=platform();m.adapterId=id_;m.selfId=loginId_;m.id=d.value("id",eventId);m.content=d.value("content",std::string());m.rawContent=m.content;m.displayContent=m.content;m.timestamp=std::time(nullptr);m.extra={{"event_id",eventId},{"event_type",t},{"official_bot_id",appId_}};
         const auto author=d.value("author",json::object());
-        if(t=="C2C_MESSAGE_CREATE"){m.type=MessageType::kPrivate;m.senderId=author.value("user_openid",std::string());m.senderName=author.value("username",m.senderId);m.targetId=m.senderId;}
-        else if(t=="GROUP_AT_MESSAGE_CREATE"||t=="GROUP_MESSAGE_CREATE"){m.type=MessageType::kGroup;m.senderId=author.value("member_openid",std::string());m.senderName=author.value("username",m.senderId);m.targetId=d.value("group_openid",std::string());m.extra["group_id"]=d.value("group_id",std::string());
+        if(t=="C2C_MESSAGE_CREATE"){m.type=MessageType::kPrivate;m.senderId=author.value("user_openid",std::string());m.senderName=author.value("username",std::string());m.targetId=m.senderId;}
+        else if(t=="GROUP_AT_MESSAGE_CREATE"||t=="GROUP_MESSAGE_CREATE"){m.type=MessageType::kGroup;m.senderId=author.value("member_openid",std::string());m.senderName=author.value("username",std::string());m.targetId=d.value("group_openid",std::string());m.extra["group_id"]=d.value("group_id",std::string());
             // GROUP_AT_MESSAGE_CREATE is delivered only to the bot which was @ed.
             // Its payload is allowed to omit mentions, so the event itself must be
             // treated as an explicit mention; this also lets @ wake a disabled bot.
