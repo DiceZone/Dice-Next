@@ -190,27 +190,29 @@ void HotReloadMonitor::watchLoop() {
             if (actualBytes > 0) {
                 FILE_NOTIFY_INFORMATION* fni =
                     reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer);
+                std::string changedFile;
 
                 do {
                     // Extract filename
                     int nameLen = fni->FileNameLength / sizeof(WCHAR);
                     std::wstring wFilename(fni->FileName, nameLen);
-                    std::string changedFile(wFilename.begin(), wFilename.end());
+                    changedFile.assign(wFilename.begin(), wFilename.end());
 
                     DICE_LOG_DEBUG("HotReloadMonitor: change detected in '{}'", changedFile);
-
-                    // Debounce
-                    std::this_thread::sleep_for(std::chrono::milliseconds(debounceMs_));
-
-                    if (callback_) {
-                        callback_(changedFile);
-                    }
 
                     fni = (fni->NextEntryOffset == 0)
                         ? nullptr
                         : reinterpret_cast<FILE_NOTIFY_INFORMATION*>(
                             reinterpret_cast<BYTE*>(fni) + fni->NextEntryOffset);
                 } while (fni != nullptr);
+
+                // A split-config save changes several files at once. Treat the
+                // whole OS notification batch as one logical configuration
+                // change instead of reloading once for every file.
+                std::this_thread::sleep_for(std::chrono::milliseconds(debounceMs_));
+                if (callback_) {
+                    callback_(changedFile);
+                }
             }
 
             ResetEvent(overlapped.hEvent);

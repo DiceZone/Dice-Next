@@ -58,6 +58,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <ctime>
 #include <thread>
@@ -151,8 +152,10 @@ static std::string replyRuleValidate(const ReplyRule& rule) {
 
 static J adapterToJson(const AdapterRow& a) {
     J cfg = J::parse(a.config, nullptr, false);
+    if (!cfg.is_object()) cfg = J::object();
     const bool official = a.type == static_cast<int>(AdapterType::kQQOfficial);
     const char* typeStr = adapterTypeToString(static_cast<AdapterType>(a.type));
+    const std::string heartApiKey = cfg.value("heartApiKey", std::string());
     return J{
         {"id", std::to_string(a.id)},
         {"name", a.name},
@@ -162,6 +165,8 @@ static J adapterToJson(const AdapterRow& a) {
         {"accessToken", official ? "" : a.accessToken},
         {"appId", official && cfg.is_object() ? cfg.value("appId", std::string()) : std::string()},
         {"qqNumber", official && cfg.is_object() ? cfg.value("qqNumber", std::string()) : std::string()},
+        {"heartApiKeyConfigured", !heartApiKey.empty()},
+        {"heartApiKeyTail", heartApiKey.size() > 4 ? heartApiKey.substr(heartApiKey.size() - 4) : std::string()},
         {"enabled", a.enabled},
         {"status", "disconnected"},
         {"lastActive", nullptr},
@@ -173,7 +178,8 @@ static J adapterToConfigJson(const AdapterRow& a) {
     J extra = J::parse(a.config, nullptr, false); if (!extra.is_object()) extra = J::object();
     J out{{"id", a.id}, {"name", a.name}, {"type", adapterTypeToString(static_cast<AdapterType>(a.type))},
           {"connection_mode", a.connectionMode == 1 ? "reverse_ws" : a.connectionMode == 2 ? "http" : "forward_ws"},
-          {"endpoint", a.endpoint}, {"access_token", a.accessToken}, {"enabled", a.enabled}};
+          {"endpoint", a.endpoint}, {"access_token", a.accessToken}, {"enabled", a.enabled},
+          {"heart_api_key", extra.value("heartApiKey", std::string())}};
     if (a.type == static_cast<int>(AdapterType::kQQOfficial)) {
         out["app_id"] = extra.value("appId", std::string());
         out["app_secret"] = extra.value("appSecret", std::string());
@@ -282,7 +288,7 @@ static J sysInfoJson() {
 // ═══════════════════════════════════════════════════════════════
 
 inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& adapterMgr,
-                              CardDeck& cardDeck, ReplyManager& replyMgr, I18n& i18n,
+                              DiceEngine& engine, CardDeck& cardDeck, ReplyManager& replyMgr, I18n& i18n,
                               JsPluginManager& jsMod, LuaPluginManager& luaMod,
                               CausalRuleManager& causalMgr, CooldownManager& cooldownMgr,
                               CounterStore& counterStore, PersonaManager& personaMgr) {
@@ -1881,23 +1887,27 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 const std::string type = j.value("type", std::string("onebot_v11"));
                 a.type = static_cast<int>(adapterTypeFromString(type));
                 if (a.type == static_cast<int>(AdapterType::kUnknown)) throw std::runtime_error("不支持的适配器类型");
+                const std::string heartApiKey = j.value("heartApiKey", std::string());
                 if (a.type == static_cast<int>(AdapterType::kQQOfficial)) {
                     const std::string appId = j.value("appId", std::string());
                     const std::string appSecret = j.value("appSecret", std::string());
                     if (appId.empty() || appSecret.empty()) throw std::runtime_error("QQ 官方机器人需要 AppID 和 AppSecret");
                     a.connectionMode = 0; a.endpoint.clear(); a.accessToken.clear();
                     a.config = J{{"appId", appId}, {"appSecret", appSecret},
-                                 {"qqNumber", j.value("qqNumber", std::string())}}.dump();
+                                 {"qqNumber", j.value("qqNumber", std::string())},
+                                 {"heartApiKey", heartApiKey}}.dump();
                 } else if (a.type == static_cast<int>(AdapterType::kDiscord)
                            || a.type == static_cast<int>(AdapterType::kKook)) {
                     // Token 存 accessToken 列；无 endpoint / 连接模式概念。
                     a.accessToken = j.value("accessToken", std::string());
                     if (a.accessToken.empty()) throw std::runtime_error("需要 Bot Token");
-                    a.connectionMode = 0; a.endpoint.clear(); a.config = "{}";
+                    a.connectionMode = 0; a.endpoint.clear();
+                    a.config = J{{"heartApiKey", heartApiKey}}.dump();
                 } else {
                     a.endpoint = j.value("endpoint", ""); a.accessToken = j.value("accessToken", "");
                     std::string mode = j.value("connectionMode", "forward_ws");
-                    a.connectionMode = (mode == "reverse_ws") ? 1 : (mode == "http") ? 2 : 0; a.config = "{}";
+                    a.connectionMode = (mode == "reverse_ws") ? 1 : (mode == "http") ? 2 : 0;
+                    a.config = J{{"heartApiKey", heartApiKey}}.dump();
                 }
                 a.id = st->insert(a);
                 persistAdaptersToConfig(st, cfg);
@@ -1921,16 +1931,19 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (req->method() == drogon::Put || req->method() == drogon::Patch) {
                 auto j = J::parse(req->body());
                 auto a = st->get<AdapterRow>(aid);
+                J adapterCfg = J::parse(a.config, nullptr, false);
+                if (!adapterCfg.is_object()) adapterCfg = J::object();
                 if (j.contains("name")) a.name = j["name"];
                 bool credentialsChanged = false;
                 if (a.type == static_cast<int>(AdapterType::kQQOfficial)) {
-                    J cfg = J::parse(a.config, nullptr, false); if (!cfg.is_object()) cfg = J::object();
-                    if (j.contains("appId")) { credentialsChanged = credentialsChanged || cfg.value("appId", std::string()) != j["appId"].get<std::string>(); cfg["appId"] = j["appId"]; }
-                    if (j.contains("appSecret") && j["appSecret"].is_string() && !j["appSecret"].get<std::string>().empty()) { credentialsChanged = credentialsChanged || cfg.value("appSecret", std::string()) != j["appSecret"].get<std::string>(); cfg["appSecret"] = j["appSecret"]; }
-                    if (j.contains("qqNumber") && j["qqNumber"].is_string()) cfg["qqNumber"] = j["qqNumber"];
-                    if (cfg.value("appId", std::string()).empty() || cfg.value("appSecret", std::string()).empty()) throw std::runtime_error("QQ 官方机器人需要 AppID 和 AppSecret");
-                    a.config = cfg.dump();
+                    if (j.contains("appId")) { credentialsChanged = credentialsChanged || adapterCfg.value("appId", std::string()) != j["appId"].get<std::string>(); adapterCfg["appId"] = j["appId"]; }
+                    if (j.contains("appSecret") && j["appSecret"].is_string() && !j["appSecret"].get<std::string>().empty()) { credentialsChanged = credentialsChanged || adapterCfg.value("appSecret", std::string()) != j["appSecret"].get<std::string>(); adapterCfg["appSecret"] = j["appSecret"]; }
+                    if (j.contains("qqNumber") && j["qqNumber"].is_string()) adapterCfg["qqNumber"] = j["qqNumber"];
+                    if (adapterCfg.value("appId", std::string()).empty() || adapterCfg.value("appSecret", std::string()).empty()) throw std::runtime_error("QQ 官方机器人需要 AppID 和 AppSecret");
                 } else { if (j.contains("endpoint")) a.endpoint = j["endpoint"]; if (j.contains("accessToken")) a.accessToken = j["accessToken"]; }
+                if (j.contains("heartApiKey") && j["heartApiKey"].is_string())
+                    adapterCfg["heartApiKey"] = j["heartApiKey"].get<std::string>();
+                a.config = adapterCfg.dump();
                 bool wasEnabled = a.enabled;
                 if (j.contains("enabled")) a.enabled = j["enabled"];
                 if (j.contains("connectionMode")) {
@@ -2163,7 +2176,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // ── 心跳上报（heart.dice.zone）：配置 + 最近状态。token 不回显明文（仅尾 4 位）──
+    // ── 心跳上报（heart.dice.zone）：全局调度配置 + 各适配器最近状态。
+    // API Key 属于适配器，在 /api/adapters 中配置。
     app.registerHandler("/api/system/heartbeat", [&cfg](Req req, CB&& cb) {
         try {
             auto& hs = dice::heart::HeartService::instance();
@@ -2176,10 +2190,6 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     if (u.empty()) u = dice::heart::kOfficialHeartUrl;   // 空串=恢复官方默认
                     cfg.set<std::string>("dice/heart_url", u);
                 }
-                if (j.contains("token") && j["token"].is_string()) {
-                    std::string t = j["token"].get<std::string>();
-                    if (!t.empty()) cfg.set<std::string>("dice/heart_token", t);   // 空串/缺省=不改
-                }
                 if (j.contains("public_show") && j["public_show"].is_boolean())
                     cfg.set<bool>("dice/heart_public_show", j["public_show"].get<bool>());
                 if (j.contains("interval") && j["interval"].is_number()) {
@@ -2190,13 +2200,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
                 cfg.save();
             }
-            std::string tok = cfg.get<std::string>("dice/heart_token", std::string());
             J st = hs.lastState();
             jsonReply(ok(J{
                 {"enabled", cfg.get<bool>("dice/heart_enabled", false)},
                 {"url", hs.url()},
-                {"token_set", !tok.empty()},
-                {"token_tail", tok.size() > 4 ? tok.substr(tok.size() - 4) : std::string()},
+                {"configured_adapters", hs.configuredAdapterCount()},
                 {"public_show", cfg.get<bool>("dice/heart_public_show", true)},
                 {"interval", hs.interval()},
                 {"last_status", st.value("last_status", "unknown")},
@@ -2838,8 +2846,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Put, drogon::Delete});
 
     // ── Dice Roll ─────────────────────────────────────────────
-    static DiceEngine engine(cfg); // static — keeps RNG state
-    app.registerHandler("/api/dice/roll", [](Req req, CB&& cb) {
+    app.registerHandler("/api/dice/roll", [&engine](Req req, CB&& cb) {
         try {
             auto j = J::parse(req->body());
             auto expr = j.value("expression", "1d100");
@@ -3434,6 +3441,101 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             jsonReply(ok(J{{"imagesRemoved", imgRemoved}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Delete});
+
+    // ── Local aggregate statistics ─────────────────────────────
+    app.registerHandler("/api/statistics/overview", [st, &adapterMgr](Req, CB&& cb) {
+        try {
+            long long totalCommands = 0;
+            std::map<std::string, PlayerProfileRow> players;
+            for (const auto& row : st->get_all<PlayerProfileRow>()) {
+                totalCommands += row.cmdCount;
+                auto it = players.find(row.userId);
+                if (it == players.end()) players.emplace(row.userId, row);
+                else {
+                    it->second.cmdCount += row.cmdCount;
+                    if (it->second.nickname.empty() && !row.nickname.empty()) it->second.nickname = row.nickname;
+                    if (row.lastCmdAt > it->second.lastCmdAt) it->second.lastCmdAt = row.lastCmdAt;
+                }
+            }
+
+            std::array<long long, 24> commandHours{};
+            std::array<long long, 24> rollHours{};
+            long long totalRolls = 0;
+            for (const auto& row : st->get_all<UsageHourRow>()) {
+                if (row.hour < 0 || row.hour > 23) continue;
+                commandHours[static_cast<std::size_t>(row.hour)] += row.commandCount;
+                rollHours[static_cast<std::size_t>(row.hour)] += row.rollCount;
+                totalRolls += row.rollCount;
+            }
+
+            std::map<int, std::map<int, long long>> faceCounts;
+            for (const auto& row : st->get_all<DiceFaceStatRow>())
+                if (row.sides >= 2 && row.face >= 1 && row.face <= row.sides)
+                    faceCounts[row.sides][row.face] += row.count;
+
+            J diceFaces = J::array();
+            for (const auto& [sides, faces] : faceCounts) {
+                J faceArray = J::array();
+                long long subtotal = 0;
+                for (const auto& [face, count] : faces) {
+                    faceArray.push_back(J{{"face", face}, {"count", count}});
+                    subtotal += count;
+                }
+                diceFaces.push_back(J{{"sides", sides}, {"total", subtotal}, {"faces", faceArray}});
+            }
+
+            J checkResults{{"crit", 0LL}, {"extreme", 0LL}, {"hard", 0LL},
+                           {"regular", 0LL}, {"fail", 0LL}, {"fumble", 0LL}};
+            for (const auto& row : st->get_all<RollStatRow>()) {
+                checkResults["crit"] = checkResults["crit"].get<long long>() + row.crit;
+                checkResults["extreme"] = checkResults["extreme"].get<long long>() + row.extreme;
+                checkResults["hard"] = checkResults["hard"].get<long long>() + row.hard;
+                checkResults["regular"] = checkResults["regular"].get<long long>() + row.regular;
+                checkResults["fail"] = checkResults["fail"].get<long long>() + row.fail;
+                checkResults["fumble"] = checkResults["fumble"].get<long long>() + row.fumble;
+            }
+
+            std::vector<PlayerProfileRow> ranked;
+            for (const auto& [_, player] : players) if (player.cmdCount > 0) ranked.push_back(player);
+            std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+                return a.cmdCount > b.cmdCount;
+            });
+            J topUsers = J::array();
+            for (std::size_t i = 0; i < ranked.size() && i < 10; ++i)
+                topUsers.push_back(J{{"nickname", ranked[i].nickname}, {"user_id", ranked[i].userId},
+                                     {"command_count", ranked[i].cmdCount}, {"last_command_at", ranked[i].lastCmdAt}});
+
+            auto samples = st->get_all<OnlineSampleRow>(orm::order_by(&OnlineSampleRow::sampledAt).desc(),
+                                                        orm::limit(2016));
+            std::reverse(samples.begin(), samples.end());
+            J onlineHistory = J::array();
+            for (const auto& row : samples)
+                onlineHistory.push_back(J{{"sampled_at", row.sampledAt},
+                                          {"online_count", row.onlineCount},
+                                          {"total_count", row.totalCount}});
+
+            int adapterTotal = 0, adapterOnline = 0;
+            for (const auto& adapter : adapterMgr.allAdapters()) {
+                ++adapterTotal;
+                if (adapter->isConnected()) ++adapterOnline;
+            }
+            J hours = J::array();
+            for (int hour = 0; hour < 24; ++hour)
+                hours.push_back(J{{"hour", hour}, {"commands", commandHours[hour]}, {"rolls", rollHours[hour]}});
+
+            jsonReply(ok(J{
+                {"summary", J{{"total_commands", totalCommands}, {"total_rolls", totalRolls},
+                               {"total_players", ranked.size()}, {"adapter_online", adapterOnline},
+                               {"adapter_total", adapterTotal},
+                               {"uptime_seconds", static_cast<long long>(std::time(nullptr) - utils::getStartupEpoch())}}},
+                {"usage_by_hour", hours},
+                {"dice_faces", diceFaces},
+                {"check_results", checkResults},
+                {"top_users", topUsers},
+                {"online_history", onlineHistory},
+            }), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get});
 
     // ── Players (auto-built profiles) ─────────────────────────
     // GET /api/players — list profiles (信任等级/QQ/昵称/上次指令/总指令数).

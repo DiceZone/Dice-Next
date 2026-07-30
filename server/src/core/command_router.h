@@ -671,6 +671,7 @@ private:
             if (le.size() > 1 && le[0] == 'd' && le.find_first_not_of("0123456789", 1) == std::string::npos) {
                 int face = parseIntOr(le.substr(1), 0);
                 if (face > 0) if (auto rv = rouletteDraw(msg, face)) {
+                    recordDiceSamples(face, {*rv});
                     std::string res = "1D" + std::to_string(face) + "=" + std::to_string(*rv);
                     return i18n_.tr(loc, reason.empty() ? "dice.roll.result" : "dice.roll.result_reason",
                         {{"nick", nick}, {"reason", reason}, {"res", res}});
@@ -688,6 +689,7 @@ private:
             auto result = engine_.roll(expr);
             std::string res;
             if (result.ok()) {
+                recordSimpleDiceResult(expr, result.individualResults);
                 res = result.formattedOutput;  // 原版 Dice! 格式优先
             } else {
                 // Fall back to the OneDice standard engine for richer expressions
@@ -707,6 +709,7 @@ private:
             if (!result.ok()) {
                 return i18n_.tr(loc, "dice.error.roll", {{"error", result.error}});
             }
+            recordSimpleDiceResult(expr, result.individualResults);
             if (i > 0) res << ", \n";
             res << result.formattedOutput;
         }
@@ -1300,6 +1303,7 @@ private:
                             const std::string& rollDetail, int rollValue) {
         SuccessLevel lv = rollSuccessLevel(rollValue, rate, getCocRule(msg));
         recordRollStat(msg, attr, lv);   // accumulate per-skill for .hiy 统计
+        recordDiceSamples(100, {rollValue});
         const std::string nick = displayName(msg);
         return i18n_.tr(loc, reason.empty() ? "dice.check.result" : "dice.check.result_reason",
             {{"nick", nick}, {"attr", attr}, {"reason", reason},
@@ -8025,7 +8029,76 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                 if (didCommand) { r.cmdCount += 1; r.lastCmdAt = nowIso(); }
                 st->update(r);
             }
+            if (didCommand) recordUsageHour(1, 0);
         } catch (...) {}
+    }
+
+    void recordUsageHour(long long commands, long long rolls) {
+        auto* st = db_.getStorage();
+        if (!st || (commands == 0 && rolls == 0)) return;
+        std::time_t t = std::time(nullptr);
+        std::tm lt{};
+#if defined(_WIN32)
+        localtime_s(&lt, &t);
+#else
+        localtime_r(&t, &lt);
+#endif
+        char day[16];
+        std::strftime(day, sizeof(day), "%Y-%m-%d", &lt);
+        try {
+            namespace orm = sqlite_orm;
+            auto rows = st->get_all<UsageHourRow>(orm::where(
+                orm::c(&UsageHourRow::day) == std::string(day)
+                and orm::c(&UsageHourRow::hour) == lt.tm_hour));
+            if (rows.empty()) {
+                UsageHourRow row;
+                row.day = day;
+                row.hour = lt.tm_hour;
+                row.commandCount = commands;
+                row.rollCount = rolls;
+                st->insert(row);
+            } else {
+                auto row = rows.front();
+                row.commandCount += commands;
+                row.rollCount += rolls;
+                st->update(row);
+            }
+        } catch (...) {}
+    }
+
+    void recordDiceSamples(int sides, const std::vector<int>& values) {
+        if (sides < 2 || sides > 1000 || values.empty()) return;
+        auto* st = db_.getStorage();
+        if (!st) return;
+        try {
+            namespace orm = sqlite_orm;
+            for (int value : values) {
+                if (value < 1 || value > sides) continue;
+                auto rows = st->get_all<DiceFaceStatRow>(orm::where(
+                    orm::c(&DiceFaceStatRow::sides) == sides
+                    and orm::c(&DiceFaceStatRow::face) == value));
+                if (rows.empty()) {
+                    DiceFaceStatRow row;
+                    row.sides = sides;
+                    row.face = value;
+                    row.count = 1;
+                    st->insert(row);
+                } else {
+                    auto row = rows.front();
+                    ++row.count;
+                    st->update(row);
+                }
+            }
+            recordUsageHour(0, static_cast<long long>(values.size()));
+        } catch (...) {}
+    }
+
+    void recordSimpleDiceResult(const std::string& expression, const std::vector<int>& values) {
+        std::smatch match;
+        static const std::regex simpleDice(R"(^\s*(\d*)[dD](\d+)\s*$)");
+        if (!std::regex_match(expression, match, simpleDice)) return;
+        int sides = parseIntOr(match[2].str(), 0);
+        recordDiceSamples(sides, values);
     }
 
     // ─── 调度 (#48 定时任务 / #47 不活跃自动退群) ─────────────

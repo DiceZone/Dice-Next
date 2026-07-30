@@ -200,6 +200,28 @@ bool Database::open(const std::string& path) {
                     orm::make_column("fail", &RollStatRow::fail),
                     orm::make_column("fumble", &RollStatRow::fumble)
                 ),
+                orm::make_table("usage_hours",
+                    orm::make_column("id", &UsageHourRow::id,
+                        orm::primary_key().autoincrement()),
+                    orm::make_column("day", &UsageHourRow::day),
+                    orm::make_column("hour", &UsageHourRow::hour),
+                    orm::make_column("command_count", &UsageHourRow::commandCount),
+                    orm::make_column("roll_count", &UsageHourRow::rollCount)
+                ),
+                orm::make_table("dice_face_stats",
+                    orm::make_column("id", &DiceFaceStatRow::id,
+                        orm::primary_key().autoincrement()),
+                    orm::make_column("sides", &DiceFaceStatRow::sides),
+                    orm::make_column("face", &DiceFaceStatRow::face),
+                    orm::make_column("count", &DiceFaceStatRow::count)
+                ),
+                orm::make_table("online_samples",
+                    orm::make_column("id", &OnlineSampleRow::id,
+                        orm::primary_key().autoincrement()),
+                    orm::make_column("sampled_at", &OnlineSampleRow::sampledAt),
+                    orm::make_column("online_count", &OnlineSampleRow::onlineCount),
+                    orm::make_column("total_count", &OnlineSampleRow::totalCount)
+                ),
                 orm::make_table("scheduled_tasks",
                     orm::make_column("id", &ScheduledTaskRow::id,
                         orm::primary_key().autoincrement()),

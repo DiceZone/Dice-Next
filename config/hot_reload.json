@@ -1,0 +1,8 @@
+{
+  "debounce_ms": 500,
+  "enabled": true,
+  "watch_paths": [
+    "./config",
+    "./data"
+  ]
+}

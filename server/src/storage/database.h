@@ -256,6 +256,32 @@ struct RollStatRow {
     int fumble = 0;      // 大失败
 };
 
+/// Hourly aggregate of commands and individual dice samples. This keeps the
+/// statistics page useful without retaining message text.
+struct UsageHourRow {
+    int id = 0;
+    std::string day;     // local date, YYYY-MM-DD
+    int hour = 0;        // local hour, 0-23
+    long long commandCount = 0;
+    long long rollCount = 0;
+};
+
+/// Distribution of raw faces from simple NdM rolls.
+struct DiceFaceStatRow {
+    int id = 0;
+    int sides = 0;
+    int face = 0;
+    long long count = 0;
+};
+
+/// Periodic adapter availability sample for the local statistics page.
+struct OnlineSampleRow {
+    int id = 0;
+    std::string sampledAt; // UTC ISO 8601
+    int onlineCount = 0;
+    int totalCount = 0;
+};
+
 /// 定时任务 (#48): a message pushed to a target group/user on a daily schedule.
 struct ScheduledTaskRow {
     int id = 0;
@@ -530,6 +556,28 @@ private:
             orm::make_column("regular", &RollStatRow::regular),
             orm::make_column("fail", &RollStatRow::fail),
             orm::make_column("fumble", &RollStatRow::fumble)
+        ),
+        orm::make_table("usage_hours",
+            orm::make_column("id", &UsageHourRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("day", &UsageHourRow::day),
+            orm::make_column("hour", &UsageHourRow::hour),
+            orm::make_column("command_count", &UsageHourRow::commandCount),
+            orm::make_column("roll_count", &UsageHourRow::rollCount)
+        ),
+        orm::make_table("dice_face_stats",
+            orm::make_column("id", &DiceFaceStatRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("sides", &DiceFaceStatRow::sides),
+            orm::make_column("face", &DiceFaceStatRow::face),
+            orm::make_column("count", &DiceFaceStatRow::count)
+        ),
+        orm::make_table("online_samples",
+            orm::make_column("id", &OnlineSampleRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("sampled_at", &OnlineSampleRow::sampledAt),
+            orm::make_column("online_count", &OnlineSampleRow::onlineCount),
+            orm::make_column("total_count", &OnlineSampleRow::totalCount)
         ),
         orm::make_table("scheduled_tasks",
             orm::make_column("id", &ScheduledTaskRow::id,
