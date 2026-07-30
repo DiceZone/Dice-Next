@@ -1928,11 +1928,15 @@ static int realMain(int argc, char* argv[]) {
             row.endpoint = a.value("endpoint", std::string());
             row.accessToken = a.value("access_token", a.value("accessToken", std::string()));
             row.enabled = a.value("enabled", false);
-            row.config = row.type == static_cast<int>(dice::AdapterType::kQQOfficial)
-                ? nlohmann::json{{"appId", a.value("app_id", a.value("appId", std::string()))},
-                                 {"appSecret", a.value("app_secret", a.value("appSecret", std::string()))},
-                                 {"qqNumber", a.value("qq_number", a.value("qqNumber", std::string()))}}.dump()
-                : "{}";
+            nlohmann::json extra{
+                {"heartApiKey", a.value("heart_api_key", a.value("heartApiKey", std::string()))},
+            };
+            if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
+                extra["appId"] = a.value("app_id", a.value("appId", std::string()));
+                extra["appSecret"] = a.value("app_secret", a.value("appSecret", std::string()));
+                extra["qqNumber"] = a.value("qq_number", a.value("qqNumber", std::string()));
+            }
+            row.config = extra.dump();
             return row;
         };
         auto configFromRow = [](const dice::AdapterRow& row) {
@@ -1940,7 +1944,8 @@ static int realMain(int argc, char* argv[]) {
             if (!extra.is_object()) extra = nlohmann::json::object();
             nlohmann::json a{{"id", row.id}, {"name", row.name}, {"type", dice::adapterTypeToString(static_cast<dice::AdapterType>(row.type))},
                              {"connection_mode", row.connectionMode == 1 ? "reverse_ws" : row.connectionMode == 2 ? "http" : "forward_ws"},
-                             {"endpoint", row.endpoint}, {"access_token", row.accessToken}, {"enabled", row.enabled}};
+                             {"endpoint", row.endpoint}, {"access_token", row.accessToken}, {"enabled", row.enabled},
+                             {"heart_api_key", extra.value("heartApiKey", std::string())}};
             if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
                 a["app_id"] = extra.value("appId", std::string());
                 a["app_secret"] = extra.value("appSecret", std::string());
@@ -1984,6 +1989,33 @@ static int realMain(int argc, char* argv[]) {
             configMgr.set<nlohmann::json>("adapters", normalized);
             configMgr.save();
             DICE_LOG_INFO("Loaded {} adapter(s) from adapters.json", normalized.size());
+        }
+
+        // Older builds stored one Heart key globally. It can be migrated without
+        // ambiguity only when exactly one enabled adapter exists.
+        const std::string legacyHeartKey = configMgr.get<std::string>("dice/heart_token", std::string());
+        if (!legacyHeartKey.empty()) {
+            auto rows = st->get_all<dice::AdapterRow>();
+            std::vector<dice::AdapterRow*> enabledRows;
+            for (auto& row : rows) if (row.enabled) enabledRows.push_back(&row);
+            if (enabledRows.size() == 1) {
+                auto& row = *enabledRows.front();
+                nlohmann::json extra = nlohmann::json::parse(row.config, nullptr, false);
+                if (!extra.is_object()) extra = nlohmann::json::object();
+                if (extra.value("heartApiKey", std::string()).empty()) {
+                    extra["heartApiKey"] = legacyHeartKey;
+                    row.config = extra.dump();
+                    st->update(row);
+                    configMgr.set<std::string>("dice/heart_token", std::string());
+                    nlohmann::json exported = nlohmann::json::array();
+                    for (const auto& item : st->get_all<dice::AdapterRow>()) exported.push_back(configFromRow(item));
+                    configMgr.set<nlohmann::json>("adapters", exported);
+                    configMgr.save();
+                    DICE_LOG_INFO("Migrated legacy global Heart API Key to adapter '{}'", row.name);
+                }
+            } else {
+                DICE_LOG_WARN("Global Heart API Key cannot be migrated automatically: configure a Key on each adapter");
+            }
         }
 
         auto adapters = st->get_all<dice::AdapterRow>();
@@ -2180,7 +2212,14 @@ static int realMain(int argc, char* argv[]) {
 
     // ── 心跳上报 + 云黑名单服务（heart.dice.zone / cloudban.dice.zone）──
     // 单例 init 注入依赖；本地黑名单 CRUD 经回调转发到 cmdRouter（自带去重）。
-    dice::heart::HeartService::instance().init(&configMgr, &adapterMgr);
+    dice::heart::HeartService::instance().init(&configMgr, &adapterMgr, [st]() {
+        long long total = 0;
+        try {
+            for (const auto& player : st->get_all<dice::PlayerProfileRow>())
+                total += player.cmdCount;
+        } catch (...) {}
+        return total;
+    });
     dice::cloudban::CloudbanService::instance().init(&configMgr,
         [&cmdRouter](int t, int l, const std::string& id) { return cmdRouter.cloudBanHas(t, l, id); },
         [&cmdRouter](int t, int l, const std::string& id, const std::string& r) { cmdRouter.cloudBanAdd(t, l, id, r); },
@@ -2193,7 +2232,7 @@ static int realMain(int argc, char* argv[]) {
 
     // ── Register real REST API endpoints ─────────────────────
     dice::utils::setStartupEpoch();
-    dice::api::registerApiRoutes(db, configMgr, adapterMgr, cardDeck, replyManager, i18n, jsMod, luaMod,
+    dice::api::registerApiRoutes(db, configMgr, adapterMgr, engine, cardDeck, replyManager, i18n, jsMod, luaMod,
                                  causalMgr, cooldownMgr, counterStore, personaMgr);
     DICE_LOG_INFO("REST API routes registered");
 
@@ -3173,6 +3212,35 @@ static int realMain(int argc, char* argv[]) {
     };
     app.getLoop()->runAfter(20.0, autoBackupTick);
     app.getLoop()->runEvery(60.0, autoBackupTick);
+
+    // Persist a lightweight adapter-availability sample every five minutes.
+    // Only aggregate counts are stored; no message or account content is kept.
+    auto onlineSampleTick = [st, &adapterMgr]() {
+        try {
+            dice::OnlineSampleRow sample;
+            sample.sampledAt = dice::heart::nowUtcIso();
+            for (const auto& adapter : adapterMgr.allAdapters()) {
+                ++sample.totalCount;
+                if (adapter->isConnected()) ++sample.onlineCount;
+            }
+            st->insert(sample);
+            const std::time_t cutoff = std::time(nullptr) - 90LL * 24 * 60 * 60;
+            std::tm utc{};
+#if defined(_WIN32)
+            gmtime_s(&utc, &cutoff);
+#else
+            gmtime_r(&cutoff, &utc);
+#endif
+            char cutoffIso[24];
+            std::strftime(cutoffIso, sizeof(cutoffIso), "%Y-%m-%dT%H:%M:%SZ", &utc);
+            st->remove_all<dice::OnlineSampleRow>(sqlite_orm::where(
+                sqlite_orm::c(&dice::OnlineSampleRow::sampledAt) < std::string(cutoffIso)));
+        } catch (const std::exception& e) {
+            DICE_LOG_DEBUG("online statistics sample failed: {}", e.what());
+        }
+    };
+    app.getLoop()->runAfter(10.0, onlineSampleTick);
+    app.getLoop()->runEvery(300.0, onlineSampleTick);
 
     // ── 心跳上报 + 云黑同步：启动后首跳 + 每 60s 驱动（服务内部按各自 interval 自行节流）──
     app.getLoop()->runAfter(15.0, [] { dice::heart::HeartService::instance().tick(); });      // 上线立即报（等 adapter 连上）

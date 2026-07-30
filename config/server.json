@@ -1,0 +1,7 @@
+{
+  "api_key": "96144661-7b1a-4183-947c-37bf40fc520b",
+  "db_path": "./data/dice.db",
+  "host": "0.0.0.0",
+  "log_level": "info",
+  "port": 18088
+}

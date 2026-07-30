@@ -1,0 +1,9 @@
+{
+  "auto_approve_friend": false,
+  "auto_approve_group": false,
+  "friend_keyword": "",
+  "friend_welcome": "",
+  "group_keyword": "",
+  "welcome_min_cooldown": 0,
+  "welcome_min_delay": 0
+}

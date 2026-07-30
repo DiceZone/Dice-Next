@@ -216,10 +216,24 @@ bool ConfigManager::reload() {
 
     bool ok = load();
     if (ok) {
-        // A direct edit to a configuration file has passed validation.  Write
-        // the normalized split layout and update the database recovery
-        // snapshot before notifying runtime listeners.
-        ok = save();
+        // The files on disk are already the source of this reload. Persist only
+        // the validated snapshot; writing the same split files here would make
+        // the file watcher observe our own write and enter a reload/save loop.
+        json snapshot;
+        std::function<void(const json&)> snapshotWriter;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            snapshot = config_;
+            snapshotWriter = snapshotWriter_;
+        }
+        if (snapshotWriter) {
+            try {
+                snapshotWriter(snapshot);
+            } catch (const std::exception& e) {
+                DICE_LOG_ERROR("ConfigManager: failed to persist database snapshot: {}", e.what());
+                ok = false;
+            }
+        }
     }
     if (ok) {
         emitConfigChanged();

@@ -143,7 +143,7 @@ Copy-Item $webDist (Join-Path $stage 'web\dist') -Recurse
 # ── 3. 使用说明（中文，UTF-8 no BOM） ────────────────────────
 $port = 18088 # 默认端口，与 config\server.json 保持一致
 $readme = @"
-DiceNext $ver($build) — Windows $Architecture 盲测版使用说明
+DiceNext $ver($build) — Windows $Architecture 公测版使用说明
 =======================================
 
 【运行】
@@ -177,7 +177,7 @@ QQ 官方机器人 2.0：
   - 同一套数据（同一安装目录）只能运行一个进程，重复启动会自动退出，避免数据冲突。
   - 仅支持 64 位 Windows 10/11。dice-next.exe 是管理器，负责启动 app\dice-next-core.exe；所有依赖与运行库收纳在 lib\，通常无需额外安装。
   - 托管面板可设置系统环境变量 DICENEXT_UPDATE_RESTART=NO：管理器在应用在线升级后只退出，不会自行重启 core，避免与面板的进程守护逻辑冲突。
-  - 这是盲测版，欢迎通过 QQ 群 933145116 反馈问题与建议！
+  - 当前处于公测阶段。建议优先通过 GitHub Issues 反馈问题，也欢迎加入 QQ 群 933145116 交流。
 
 —— DiceZone / Shia
 "@
@@ -192,6 +192,11 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.CompressionLevel]::Optimal,
     $true,                       # 顶层包含 $name 文件夹
     [System.Text.Encoding]::UTF8)
+# Copy-Item 会保留部分 vcpkg DLL 的只读属性；先解除只读再清理，
+# 避免 ZIP 已生成却因临时目录清理失败而把整次打包标记为失败。
+Get-ChildItem $stageRoot -Recurse -Force | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
+    $_.IsReadOnly = $false
+}
 Remove-Item $stageRoot -Recurse -Force
 
 $sizeMB = [math]::Round((Get-Item $zip).Length / 1MB, 1)

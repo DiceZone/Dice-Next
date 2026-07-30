@@ -130,11 +130,24 @@ public:
         while (!u.empty() && u.back() == '/') u.pop_back();
         return u;
     }
-    /// cloudban_token 为空则回落 heart_token（同一 heart 绑定凭证）。
+    /// cloudban_token 为空时使用任一适配器上的账号中心骰娘 API Key。
+    /// heart_token 仅保留用于升级旧配置时的短期兼容。
     std::string token() const {
         if (!cfg_) return "";
         std::string t = cfg_->get<std::string>("dice/cloudban_token", std::string());
         if (t.empty()) t = cfg_->get<std::string>("dice/heart_token", std::string());
+        if (t.empty()) {
+            try {
+                json all = cfg_->getAll();
+                if (all.contains("adapters") && all["adapters"].is_array()) {
+                    for (const auto& adapter : all["adapters"]) {
+                        if (!adapter.is_object()) continue;
+                        t = adapter.value("heart_api_key", adapter.value("heartApiKey", std::string()));
+                        if (!t.empty()) break;
+                    }
+                }
+            } catch (...) {}
+        }
         return t;
     }
     bool share() const { return cfg_ && cfg_->get<bool>("dice/cloudban_share", true); }

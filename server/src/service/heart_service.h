@@ -1,16 +1,7 @@
 #pragma once
-// ─── Dice!Next — heart.dice.zone 心跳上报客户端 ────────────────
-// 协议见 Better-Dice-Control/docs/HEART_API.md：
-//   POST {url}/api/heart，token 放在 JSON body（access_token），非 HTTP 头。
-//   频控：同状态 180s 内重报被忽略（200 rate_limited，不算错误）；
-//   惩罚：60s 内切换 ≥3 次 → 429（响应含惩罚秒数）；24h 被罚 ≥3 次 → 该 IP 永久 403。
-// 客户端策略：
-//   · main.cpp runEvery(60s) 驱动 tick()，内部按 dice/heart_interval 自行节流；
-//   · 状态切换立即报，但加 60s 最小切换间隔防抖（网络抖动时单向收敛，避免触发惩罚）；
-//   · 从未上过线（本进程内没报过 online）就不报 offline——服务端超 600s 无心跳
-//     会自动判离线，冷启动时报 offline 毫无意义还可能凑出切换惩罚；
-//   · 一切出站请求走 curl 分离线程（复用 ai_gateway 的配置文件防注入模式），
-//     绝不阻塞 Drogon 事件循环；仅退出时的 shutdownReport() 同步发送（max-time 5s）。
+// Dice!Next — heart.dice.zone 心跳上报客户端。
+// 每个适配器持有账号中心为该骰娘签发的独立 API Key；同一进程中的多个
+// 适配器分别上报，不能再用一个全局 Key 猜测整套实例代表哪只骰娘。
 
 #include "../common/logger.h"
 #include "../common/version.h"
@@ -18,20 +9,23 @@
 #include "../adapter/adapter_interface.h"
 #include "../adapter/adapter_manager.h"
 #include "../adapter/qq_official_adapter.h"
-#include "ai_gateway.h"   // dice::ai::httpPostJson —— curl 配置文件出站模板
+#include "ai_gateway.h"
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <ctime>
+#include <functional>
+#include <iomanip>
 #include <mutex>
 #include <random>
 #include <sstream>
-#include <iomanip>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace dice::heart {
 
@@ -39,7 +33,6 @@ using json = nlohmann::json;
 
 inline constexpr const char* kOfficialHeartUrl = "https://heart.dice.zone";
 
-/// 当前 UTC 时间 → "YYYY-MM-DDTHH:MM:SSZ"（协议示例的秒级 ISO8601）。
 inline std::string nowUtcIso() {
     std::time_t t = std::time(nullptr);
     std::tm g{};
@@ -57,13 +50,14 @@ class HeartService {
 public:
     static HeartService& instance() { static HeartService s; return s; }
 
-    void init(ConfigManager* cfg, AdapterManager* adapters) {
+    void init(ConfigManager* cfg, AdapterManager* adapters,
+              std::function<long long()> commandCountProvider = {}) {
         cfg_ = cfg;
         adapters_ = adapters;
+        commandCountProvider_ = std::move(commandCountProvider);
         ensureInstanceId();
     }
 
-    // ── 配置读取（每次现读 → 热更即生效）────────────────────
     bool enabled() const { return cfg_ && cfg_->get<bool>("dice/heart_enabled", false); }
     std::string url() const {
         std::string u = cfg_ ? cfg_->get<std::string>("dice/heart_url", std::string(kOfficialHeartUrl))
@@ -72,94 +66,130 @@ public:
         while (!u.empty() && u.back() == '/') u.pop_back();
         return u;
     }
-    std::string token() const { return cfg_ ? cfg_->get<std::string>("dice/heart_token", std::string()) : std::string(); }
     bool publicShow() const { return cfg_ ? cfg_->get<bool>("dice/heart_public_show", true) : true; }
     int interval() const {
         int v = cfg_ ? cfg_->get<int>("dice/heart_interval", 240) : 240;
         if (v < 180) v = 180;
-        if (v > 480) v = 480;   // 服务端 600s 无心跳判离线，上限留巡检余量防在线状态抖动
+        if (v > 480) v = 480;
         return v;
     }
 
-    /// 周期驱动（main.cpp runEvery 60s / runAfter 首跳）。内部自行节流，直接返回极快。
     void tick() {
-        if (!cfg_ || !adapters_) return;
-        std::string tk = token();
-        if (!enabled() || tk.empty()) return;
-        long long now = epoch();
-        std::string desired = anyConnected() ? "online" : "offline";
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (permanentBlocked_) return;
-            if (now < penaltyUntil_) return;
-            // 本进程内从未报过 online → 不报 offline（服务端会自动判离线）。
-            if (lastStatus_ != "online" && desired == "offline") return;
-            bool switching = (desired != lastStatus_);
-            if (switching) {
-                if (now - lastSwitchAt_ < 60) return;   // 切换防抖：最小 60s
-            } else {
-                if (now - lastReportAt_ < interval()) return;   // 同状态按 interval 保活
-            }
-        }
-        if (busy_.exchange(true)) return;   // 上一次请求还在路上 → 跳过本跳
-        std::thread([this, desired]() {
-            doReport(desired, false, 15);
+        if (!cfg_ || !adapters_ || !enabled()) return;
+        auto work = pendingReports(false);
+        if (work.empty() || busy_.exchange(true)) return;
+        std::thread([this, work = std::move(work)]() {
+            for (const auto& item : work) doReport(item.target, item.status, false, 15);
             busy_.store(false);
         }).detach();
     }
 
-    /// WebUI「测试」：立即同步发一次当前状态心跳（在调用方的分离线程里跑）。
-    /// 返回 {HTTP 状态码, 响应体}（0 = curl 失败）。
+    /// WebUI 立即测试所有已配置 Key 的适配器。
     std::pair<int, std::string> testReport() {
-        std::string desired = anyConnected() ? "online" : "offline";
-        // 从未上线过就别报 offline：否则服务端会用遗留 login_time 反复重算并虚增在线时长/会话数
-        if (desired == "offline") {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (lastStatus_ != "online")
-                return {200, std::string("{\"status\":\"skipped\",\"reason\":\"never online\"}")};
+        auto targets = reportTargets();
+        if (targets.empty()) {
+            return {0, "没有适配器配置骰娘 API Key，请在适配器页面填写"};
         }
-        return doReport(desired, true, 15);
+        json results = json::array();
+        int firstError = 0;
+        for (const auto& target : targets) {
+            const std::string status = target.adapter->isConnected() ? "online" : "offline";
+            auto result = doReport(target, status, true, 15);
+            results.push_back({
+                {"adapter_id", target.adapter->id()},
+                {"adapter_name", target.adapter->name()},
+                {"http", result.first},
+                {"body", result.second},
+            });
+            if (result.first != 200 && firstError == 0) firstError = result.first == 0 ? 500 : result.first;
+        }
+        return {firstError == 0 ? 200 : firstError, json{{"results", results}}.dump()};
     }
 
-    /// 进程正常退出时同步报一次 offline（max-time 5s）。app.run() 之后调用。
     void shutdownReport() {
-        if (!cfg_ || !adapters_) return;
-        if (!enabled() || token().empty()) return;
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (permanentBlocked_) return;
-            if (lastStatus_ != "online") return;   // 没上过线就没有可结算的时长
+        if (!cfg_ || !adapters_ || !enabled()) return;
+        for (const auto& target : reportTargets()) {
+            bool wasOnline = false;
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                auto it = states_.find(target.adapter->id());
+                wasOnline = it != states_.end() && it->second.lastStatus == "online";
+            }
+            if (wasOnline) doReport(target, "offline", true, 5);
         }
-        doReport("offline", true, 5);
     }
 
-    /// 供 /api/system/heartbeat 展示的最近状态。
     json lastState() const {
-        std::lock_guard<std::mutex> lk(mu_);
-        return json{
-            {"last_status", lastStatus_},
-            {"last_report_at", lastReportIso_},
-            {"last_error", lastError_},
+        std::lock_guard<std::mutex> lock(mu_);
+        std::string status = "unknown";
+        std::string latestAt;
+        std::vector<std::string> errors;
+        bool anyOnline = false;
+        bool anyOffline = false;
+        for (const auto& [adapterId, state] : states_) {
+            anyOnline = anyOnline || state.lastStatus == "online";
+            anyOffline = anyOffline || state.lastStatus == "offline";
+            if (state.lastReportIso > latestAt) latestAt = state.lastReportIso;
+            if (!state.lastError.empty()) errors.push_back(adapterId + ": " + state.lastError);
+        }
+        if (anyOnline) status = "online";
+        else if (anyOffline) status = "offline";
+        std::string error;
+        for (const auto& item : errors) {
+            if (!error.empty()) error += "\n";
+            error += item;
+        }
+        return {
+            {"last_status", status},
+            {"last_report_at", latestAt},
+            {"last_error", error},
+            {"reported_adapters", states_.size()},
         };
+    }
+
+    std::size_t configuredAdapterCount() const {
+        return configuredKeys().size();
     }
 
 private:
     HeartService() = default;
 
-    static long long epoch() {
-        return (long long)std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-    }
+    struct Target {
+        AdapterPtr adapter;
+        std::string apiKey;
+    };
 
-    bool anyConnected() const {
-        if (!adapters_) return false;
-        for (auto& a : adapters_->allAdapters())
-            if (a && a->isConnected()) return true;
-        return false;
+    struct WorkItem {
+        Target target;
+        std::string status;
+    };
+
+    struct TargetState {
+        std::string lastStatus = "unknown";
+        long long lastReportAt = 0;
+        std::string lastReportIso;
+        long long lastSwitchAt = 0;
+        long long penaltyUntil = 0;
+        bool permanentlyBlocked = false;
+        std::string lastLoginIso;
+        std::string lastError;
+        bool warned401 = false;
+    };
+
+    static long long epoch() {
+        return static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
     }
 
     std::string instanceId() const {
         return cfg_ ? cfg_->get<std::string>("dice/heart_instance_id", std::string()) : std::string();
+    }
+
+    std::string adapterInstanceId(const std::string& adapterId) const {
+        const std::string suffix = "-adapter-" + adapterId;
+        std::string base = instanceId();
+        if (base.size() + suffix.size() > 64) base.resize(64 - suffix.size());
+        return base + suffix;
     }
 
     void ensureInstanceId() {
@@ -175,50 +205,86 @@ private:
         } catch (...) {}
     }
 
-    json adapterEndpoints(std::string& preferredId, std::string& preferredNick,
-                          std::string& aggregateFrame) const {
-        json result = json::array();
-        if (!adapters_) return result;
-        bool choseOneBot = false;
-        for (const auto& adapter : adapters_->allAdapters()) {
-            if (!adapter) continue;
-            const std::string platform = adapter->platform();
-            const std::string nativeId = adapter->getLoginId();
-            std::string accountId = nativeId;
-            std::string displayId;
-            if (platform == "onebot_v11") {
-                displayId = nativeId;
-            } else if (platform == "qq_official") {
-                if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(adapter)) {
-                    accountId = official->appId();
-                    displayId = official->displayQQ();
-                }
+    std::unordered_map<std::string, std::string> configuredKeys() const {
+        std::unordered_map<std::string, std::string> result;
+        if (!cfg_) return result;
+        try {
+            json all = cfg_->getAll();
+            if (!all.contains("adapters") || !all["adapters"].is_array()) return result;
+            for (const auto& item : all["adapters"]) {
+                if (!item.is_object()) continue;
+                std::string id;
+                if (item.contains("id") && item["id"].is_string()) id = item["id"].get<std::string>();
+                else if (item.contains("id") && item["id"].is_number_integer()) id = std::to_string(item["id"].get<int>());
+                const std::string key = item.value("heart_api_key", item.value("heartApiKey", std::string()));
+                if (!id.empty() && !key.empty()) result[id] = key;
             }
-            // 未连接的适配器可能还拿不到平台账号；QQ 官方使用 AppID，
-            // 其余平台等首次连上取得原生 Bot ID 后再纳入心跳端点。
-            if (accountId.empty()) continue;
-            result.push_back(json{
-                {"platform", platform},
-                {"account_id", accountId},
-                {"native_id", nativeId},
-                {"display_id", displayId},
-                {"nickname", adapter->getLoginName()},
-                {"protocol", adapter->version()},
-                {"connected", adapter->isConnected()},
-                {"adapter_id", adapter->id()},
-            });
-            if (adapter->isConnected() && (!choseOneBot || platform == "onebot_v11")) {
-                preferredId = !displayId.empty() ? displayId : accountId;
-                preferredNick = adapter->getLoginName();
-                choseOneBot = platform == "onebot_v11";
-            }
-        }
-        if (result.size() == 1) aggregateFrame = result.front().value("protocol", std::string());
-        else if (!result.empty()) aggregateFrame = "multi-adapter";
+        } catch (...) {}
         return result;
     }
 
-    /// 骰主 QQ：config dice/masters 第一条（兼容裸字符串与 {platform,id} 两种形态）。
+    std::vector<Target> reportTargets() const {
+        std::vector<Target> result;
+        if (!adapters_) return result;
+        const auto keys = configuredKeys();
+        for (const auto& adapter : adapters_->allAdapters()) {
+            if (!adapter) continue;
+            auto it = keys.find(adapter->id());
+            if (it != keys.end()) result.push_back({adapter, it->second});
+        }
+        return result;
+    }
+
+    std::vector<WorkItem> pendingReports(bool bypassThrottle) {
+        std::vector<WorkItem> result;
+        const long long now = epoch();
+        for (const auto& target : reportTargets()) {
+            const std::string id = target.adapter->id();
+            const std::string desired = target.adapter->isConnected() ? "online" : "offline";
+            bool shouldReport = bypassThrottle;
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                auto& state = states_[id];
+                if (state.permanentlyBlocked || now < state.penaltyUntil) continue;
+                if (!bypassThrottle) {
+                    if (state.lastStatus != "online" && desired == "offline") continue;
+                    const bool switching = desired != state.lastStatus;
+                    shouldReport = switching ? (now - state.lastSwitchAt >= 60)
+                                             : (now - state.lastReportAt >= interval());
+                }
+            }
+            if (shouldReport) result.push_back({target, desired});
+        }
+        return result;
+    }
+
+    json endpointFor(const AdapterPtr& adapter, std::string& displayIdentity) const {
+        const std::string platform = adapter->platform();
+        const std::string nativeId = adapter->getLoginId();
+        std::string accountId = nativeId;
+        std::string displayId;
+        if (platform == "onebot_v11") {
+            displayId = nativeId;
+        } else if (platform == "qq_official") {
+            if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(adapter)) {
+                accountId = official->appId();
+                displayId = official->displayQQ();
+            }
+        }
+        displayIdentity = !displayId.empty() ? displayId : accountId;
+        if (accountId.empty()) return json();
+        return {
+            {"platform", platform},
+            {"account_id", accountId},
+            {"native_id", nativeId},
+            {"display_id", displayId},
+            {"nickname", adapter->getLoginName()},
+            {"protocol", adapter->version()},
+            {"connected", adapter->isConnected()},
+            {"adapter_id", adapter->id()},
+        };
+    }
+
     std::string firstMaster() const {
         if (!cfg_) return "";
         try {
@@ -236,103 +302,115 @@ private:
         return "";
     }
 
-    /// 组包并发送一次心跳；返回 {HTTP 状态码, 响应体}。响应处理更新内部状态机。
-    /// @p bypassThrottle 为 true 时（测试/退出）不做节流判断，但仍遵守永久封禁。
-    std::pair<int, std::string> doReport(const std::string& status, bool bypassThrottle, int timeoutSec) {
-        std::string tk = token();
-        if (tk.empty()) return {0, "token 未配置"};
+    std::pair<int, std::string> doReport(
+        const Target& target,
+        const std::string& status,
+        bool bypassThrottle,
+        int timeoutSec
+    ) {
+        const std::string adapterId = target.adapter->id();
         {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (permanentBlocked_) return {0, "已被服务端永久封禁（403），本次运行不再上报"};
-            if (!bypassThrottle && epoch() < penaltyUntil_) return {0, "处于切换惩罚期"};
+            std::lock_guard<std::mutex> lock(mu_);
+            auto& state = states_[adapterId];
+            if (state.permanentlyBlocked) return {0, "该适配器已被服务端永久封禁（403）"};
+            if (!bypassThrottle && epoch() < state.penaltyUntil) return {0, "该适配器处于切换惩罚期"};
         }
 
-        std::string selfId, selfNick, frame;
-        json endpoints = adapterEndpoints(selfId, selfNick, frame);
-        if (selfId.empty() && cfg_) selfId = cfg_->get<std::string>("dice/self_qq", std::string());
+        std::string selfId;
+        json endpoint = endpointFor(target.adapter, selfId);
+        if (endpoint.is_null() || endpoint.empty()) return {0, "适配器尚未取得平台账号 ID"};
+
         std::string bn = std::to_string(buildNumber());
         while (bn.size() < 3) bn = "0" + bn;
-
         json body{
-            {"access_token", tk},
-            {"instance_id", instanceId()},
-            {"adapters", std::move(endpoints)},
+            {"access_token", target.apiKey},
+            {"instance_id", adapterInstanceId(adapterId)},
+            {"adapters", json::array({endpoint})},
             {"status", status},
-            {"dice_info", json{
+            {"dice_info", {
                 {"dice_id", selfId},
-                {"dice_nickname", selfNick},
+                {"dice_nickname", target.adapter->getLoginName()},
                 {"master_id", firstMaster()},
                 {"master_nickname", ""},
             }},
             {"dice_type", "dicenext"},
             {"dice_version", versionString() + "(" + bn + ")"},
-            {"frame", frame.empty() ? std::string("dicenext") : frame},
+            {"frame", target.adapter->version()},
             {"plugin_version", versionString()},
+            {"command_count", commandCountProvider_ ? commandCountProvider_() : 0},
             {"public_show", publicShow()},
         };
         {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (status == "online" && lastLoginIso_.empty()) lastLoginIso_ = nowUtcIso();
-            if (!lastLoginIso_.empty()) body["login_time"] = lastLoginIso_;
+            std::lock_guard<std::mutex> lock(mu_);
+            auto& state = states_[adapterId];
+            if (status == "online" && state.lastLoginIso.empty()) state.lastLoginIso = nowUtcIso();
+            if (!state.lastLoginIso.empty()) body["login_time"] = state.lastLoginIso;
             if (status == "offline") body["offline_time"] = nowUtcIso();
         }
 
         int httpStatus = 0;
-        std::string resp = dice::ai::httpPostJson(url() + "/api/heart", "", body.dump(), timeoutSec, httpStatus);
-        handleResponse(status, httpStatus, resp);
-        return {httpStatus, resp};
+        const std::string response = dice::ai::httpPostJson(
+            url() + "/api/heart", "", body.dump(), timeoutSec, httpStatus);
+        handleResponse(adapterId, target.adapter->name(), status, httpStatus, response);
+        return {httpStatus, response};
     }
 
-    void handleResponse(const std::string& reported, int httpStatus, const std::string& resp) {
-        long long now = epoch();
-        std::lock_guard<std::mutex> lk(mu_);
+    void handleResponse(
+        const std::string& adapterId,
+        const std::string& adapterName,
+        const std::string& reported,
+        int httpStatus,
+        const std::string& response
+    ) {
+        const long long now = epoch();
+        std::lock_guard<std::mutex> lock(mu_);
+        auto& state = states_[adapterId];
         if (httpStatus == 200) {
-            // ok 与 rate_limited（同状态 180s 内重报被忽略）都算正常。
-            if (lastStatus_ != reported) lastSwitchAt_ = now;
-            lastStatus_ = reported;
-            lastReportAt_ = now;
-            lastReportIso_ = nowUtcIso();
-            lastError_.clear();
-            warned401_ = false;
-            if (reported == "offline") lastLoginIso_.clear();   // 下次上线取新的 login_time
+            if (state.lastStatus != reported) state.lastSwitchAt = now;
+            state.lastStatus = reported;
+            state.lastReportAt = now;
+            state.lastReportIso = nowUtcIso();
+            state.lastError.clear();
+            state.warned401 = false;
+            if (reported == "offline") state.lastLoginIso.clear();
         } else if (httpStatus == 401) {
-            lastError_ = "骰娘 API Key 无效（401），请到 account.dice.zone 的骰子绑定页面重新生成";
-            if (!warned401_) {   // 同因仅告警一次，避免每周期刷屏
-                warned401_ = true;
-                DICE_LOG_WARN("[心跳] {}", lastError_);
+            state.lastError = response.find("不匹配") != std::string::npos
+                ? "API Key 不属于该适配器当前登录的骰娘账号"
+                : "骰娘 API Key 无效，请到账号中心重新生成";
+            if (!state.warned401) {
+                state.warned401 = true;
+                DICE_LOG_WARN("[心跳:{}] {}", adapterName, state.lastError);
             }
         } else if (httpStatus == 403) {
-            permanentBlocked_ = true;
-            lastError_ = "本机 IP 已被心跳服务端永久封禁（403），本次运行不再上报";
-            DICE_LOG_WARN("[心跳] {}", lastError_);
+            state.permanentlyBlocked = true;
+            state.lastError = "本机 IP 已被心跳服务端永久封禁（403）";
+            DICE_LOG_WARN("[心跳:{}] {}", adapterName, state.lastError);
         } else if (httpStatus == 429) {
-            long long sec = parsePenaltySeconds(resp);
-            penaltyUntil_ = now + sec;
-            lastError_ = "触发切换惩罚（429），暂停上报 " + std::to_string(sec) + " 秒";
-            DICE_LOG_WARN("[心跳] {}", lastError_);
+            const long long seconds = parsePenaltySeconds(response);
+            state.penaltyUntil = now + seconds;
+            state.lastError = "触发切换惩罚，暂停上报 " + std::to_string(seconds) + " 秒";
+            DICE_LOG_WARN("[心跳:{}] {}", adapterName, state.lastError);
         } else {
-            // 网络失败/其它错误 → 静默，下周期重试（只记状态供 WebUI 展示）。
-            lastError_ = httpStatus == 0 ? "网络请求失败（curl 无响应）"
-                                         : ("HTTP " + std::to_string(httpStatus));
-            DICE_LOG_DEBUG("[心跳] 上报失败：{}（下周期重试）", lastError_);
+            state.lastError = httpStatus == 0 ? "网络请求失败（curl 无响应）"
+                                              : ("HTTP " + std::to_string(httpStatus));
+            DICE_LOG_DEBUG("[心跳:{}] 上报失败：{}", adapterName, state.lastError);
         }
     }
 
-    /// 从 429 响应体里解析惩罚秒数（retry_after / penalty / seconds），拿不到默认 600。
-    /// FastAPI 会把 HTTPException 的 detail 包一层，故顶层与 detail 子对象都查。
-    static long long parsePenaltySeconds(const std::string& resp) {
-        auto pick = [](const json& o) -> long long {
-            for (const char* k : {"retry_after", "penalty", "penalty_seconds", "seconds"})
-                if (o.contains(k) && o[k].is_number()) return (std::max)((long long)o[k].get<double>(), 1LL);
+    static long long parsePenaltySeconds(const std::string& response) {
+        auto pick = [](const json& object) -> long long {
+            for (const char* key : {"retry_after", "penalty", "penalty_seconds", "seconds"})
+                if (object.contains(key) && object[key].is_number())
+                    return (std::max)(static_cast<long long>(object[key].get<double>()), 1LL);
             return 0;
         };
         try {
-            json j = json::parse(resp);
-            long long v = pick(j);
-            if (v) return v;
-            if (j.contains("detail") && j["detail"].is_object()) {
-                v = pick(j["detail"]);
-                if (v) return v;
+            json value = json::parse(response);
+            long long seconds = pick(value);
+            if (seconds) return seconds;
+            if (value.contains("detail") && value["detail"].is_object()) {
+                seconds = pick(value["detail"]);
+                if (seconds) return seconds;
             }
         } catch (...) {}
         return 600;
@@ -340,18 +418,10 @@ private:
 
     ConfigManager* cfg_ = nullptr;
     AdapterManager* adapters_ = nullptr;
-
+    std::function<long long()> commandCountProvider_;
     mutable std::mutex mu_;
-    std::atomic<bool> busy_{false};        // 出站请求进行中（防止分离线程堆积）
-    std::string lastStatus_ = "unknown";   // online / offline / unknown
-    long long lastReportAt_ = 0;           // 上次成功上报（epoch 秒）
-    std::string lastReportIso_;            // 同上，ISO 展示用
-    long long lastSwitchAt_ = 0;           // 上次状态切换成功上报时刻（防抖基准）
-    long long penaltyUntil_ = 0;           // 429 惩罚期截止（epoch 秒）
-    bool permanentBlocked_ = false;        // 403：本进程内不再上报
-    std::string lastLoginIso_;             // 本次在线周期的 login_time
-    std::string lastError_;
-    bool warned401_ = false;
+    std::atomic<bool> busy_{false};
+    std::unordered_map<std::string, TargetState> states_;
 };
 
 }  // namespace dice::heart

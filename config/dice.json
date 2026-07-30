@@ -1,0 +1,20 @@
+{
+  "blacklist_quit_level": "member",
+  "command_prefix": ".",
+  "console_start_hidden": true,
+  "message_format": "traditional",
+  "respond_self": false,
+  "rules": {
+    "coc_critical_range": 1,
+    "coc_enabled": true,
+    "coc_fumble_range": 95,
+    "custom_rules": {},
+    "default_dice_sides": 100,
+    "dnd_advantage": false,
+    "dnd_enabled": true,
+    "fate_enabled": false,
+    "l5r_enabled": false
+  },
+  "self_call": "",
+  "self_name": ""
+}
