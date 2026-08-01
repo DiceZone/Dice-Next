@@ -317,6 +317,7 @@ bool Database::open(const std::string& path) {
                     orm::make_column("id", &GameLogMessageRow::id,
                         orm::primary_key().autoincrement()),
                     orm::make_column("log_id", &GameLogMessageRow::logId),
+                    orm::make_column("message_id", &GameLogMessageRow::messageId),
                     orm::make_column("sender", &GameLogMessageRow::sender),
                     orm::make_column("user_id", &GameLogMessageRow::userId),
                     orm::make_column("content", &GameLogMessageRow::content),

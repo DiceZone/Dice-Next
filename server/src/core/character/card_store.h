@@ -112,6 +112,9 @@ public:
 
     /// Canonicalize an attribute name (synonyms → canonical Chinese name).
     static std::string canonical(const std::string& name);
+    /// Lock-free variant for rule-pack reload internals. The caller must already
+    /// hold rulesLock() exclusively (or run before message handling starts).
+    static std::string canonicalUnlocked(const std::string& name);
 
     /// Register one alias→canonical mapping into the global synonym table.
     /// ⚠️ Startup-only (no locking; canonical() reads concurrently while serving).

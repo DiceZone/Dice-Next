@@ -778,6 +778,15 @@ static int realMain(int argc, char* argv[]) {
         if (reply.empty() && luaMod.ready()) {
             int trust = cmdRouter.jsPrivilegeLevel(m) >= 70 ? 4 : 0;   // master/信任≥4 → trust4
             auto lr = luaMod.dispatch(m.content, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform);
+            // Legacy Lua modules often hard-code `.command` in msg_order or
+            // reply prefixes. Retry only an otherwise-unmatched command using
+            // that legacy spelling after CommandRouter has validated an
+            // owner-configured prefix such as `>`.
+            if (!lr.matched) if (auto body = cmdRouter.commandBody(m.content); body && !body->empty()) {
+                const std::string legacy = "." + *body;
+                if (legacy != m.content)
+                    lr = luaMod.dispatch(legacy, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform);
+            }
             if (lr.matched && !lr.reply.empty()) { reply = lr.reply; replySrc = "plugin"; }
         }
         // C++ 因果规则（优先于普通自定义回复）。
@@ -946,7 +955,7 @@ static int realMain(int argc, char* argv[]) {
         // Multi-bot群: a known dice bot always wins over @-as-argument and JS
         // plugin exceptions.  Otherwise retain the plugin @-argument exception.
         if (cmdRouter.mentionsOtherKnownDiceBot(msg) ||
-            (dice::CommandRouter::isForAnotherBot(msg) && !jsCommandMatches(jsMod, cmdRouter, msg))) return;
+            (cmdRouter.isForAnotherBot(msg) && !jsCommandMatches(jsMod, cmdRouter, msg))) return;
         // Black/white-list: ignore blacklisted users/groups (and non-whitelisted in whitelist mode).
         if (cmdRouter.isBlocked(msg)) return;
         // 群自动化：消息命中「自动踢出/禁言」关键字则执行并跳过后续处理。
@@ -1408,21 +1417,35 @@ static int realMain(int argc, char* argv[]) {
             return;
         }
         if (e.type == ET::kGroupRecall) {
-            auto* cst = db.getChatStorage();
-            if (!cst) return;
             std::string mid;
-            try { mid = e.extra.value("message_id", std::string()); } catch (...) {}
-            if (mid.empty() || e.groupId.empty()) return;
             try {
+                if (e.extra.contains("message_id") && e.extra["message_id"].is_string()) mid = e.extra["message_id"].get<std::string>();
+                else if (e.extra.contains("message_id") && e.extra["message_id"].is_number_integer()) mid = std::to_string(e.extra["message_id"].get<int64_t>());
+            } catch (...) {}
+            if (mid.empty() || e.groupId.empty()) return;
+            int logRemoved = 0;
+            if (auto* cst = db.getChatStorage()) try {
                 namespace orm = sqlite_orm;
                 auto rows = cst->get_all<dice::ChatMsgRow>(orm::where(
                     orm::c(&dice::ChatMsgRow::platform) == e.platform and
                     orm::c(&dice::ChatMsgRow::groupId) == e.groupId and
                     orm::c(&dice::ChatMsgRow::msgId) == mid));
                 for (auto r : rows) { r.recalled = 1; cst->update(r); }
-                if (!rows.empty())
-                    DICE_LOG_INFO("event: 群 {} 消息 {} 已标注撤回（内容保留）", e.groupId, mid);
             } catch (...) {}
+            if (auto* lst = db.getLogStorage()) try {
+                namespace orm = sqlite_orm;
+                const auto logs = lst->get_all<dice::GameLogRow>(orm::where(
+                    orm::c(&dice::GameLogRow::groupId) == e.groupId));
+                for (const auto& log : logs) {
+                    const auto condition = orm::where(
+                        orm::c(&dice::GameLogMessageRow::logId) == log.id and
+                        orm::c(&dice::GameLogMessageRow::messageId) == mid);
+                    const int removed = static_cast<int>(lst->count<dice::GameLogMessageRow>(condition));
+                    if (removed > 0) lst->remove_all<dice::GameLogMessageRow>(condition);
+                    logRemoved += removed;
+                }
+            } catch (...) {}
+            DICE_LOG_INFO("event: 群 {} 消息 {} 已撤回：聊天记录标注，游戏日志移除 {} 条", e.groupId, mid, logRemoved);
             return;
         }
         if (e.type == ET::kGroupHistory) {
@@ -2361,7 +2384,7 @@ static int realMain(int argc, char* argv[]) {
                 }
                 std::string reply;
                 if (!cmdRouter.mentionsOtherKnownDiceBot(msg)
-                    && (!dice::CommandRouter::isForAnotherBot(msg) || jsCommandMatches(jsMod, cmdRouter, msg))
+                    && (!cmdRouter.isForAnotherBot(msg) || jsCommandMatches(jsMod, cmdRouter, msg))
                     && !cmdRouter.isBlocked(msg)) {
                     bool disabled = cmdRouter.isGroupDisabled(msg);
                     bool forcedByAt = dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);

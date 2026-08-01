@@ -3846,7 +3846,7 @@ public:
     /// Anti-chaos gate for multi-bot groups: returns true if the message @s
     /// another bot but NOT this one (then this bot should stay silent).
     /// Mirrors the original DiceFilter's `isOtherCalled && !isCalled`.
-    static bool isForAnotherBot(const Message& msg) {
+    bool isForAnotherBot(const Message& msg) const {
         if (msg.atList.empty()) return false;
         bool atSelf = false, atAll = false, atOther = false;
         for (const auto& id : msg.atList) {
@@ -3896,10 +3896,12 @@ public:
     /// 记录一次群内 .bot 探测（供 detectDiceBot 的时间窗判定）。
     void recordBotProbe(const Message& msg) {
         if (msg.type != MessageType::kGroup || msg.targetId.empty()) return;
-        std::string t = trim(msg.content);
-        std::string cmd = stripPrefix(t);
-        if (cmd == t) return;                              // 无前缀 → 不是命令
-        std::string low = toLower(cmd);
+        // Dice-bot probing is itself a command. It must obey the active prefix
+        // configuration just like normal routing; do not treat legacy `.bot`
+        // as a probe after an owner has removed `.` from the prefix list.
+        auto body = commandBody(msg.content);
+        if (!body) return;
+        std::string low = toLower(*body);
         if (low.rfind("bot", 0) != 0) return;              // 不是 .bot 家族
         if (low.size() > 3 && low[3] != ' ') return;       // 排除 .botxxx（须是 .bot 或 .bot 空格…）
         std::lock_guard<std::mutex> lk(botProbeMu_);
@@ -3981,10 +3983,10 @@ public:
 
     /// True if @p content is a command whose @-mention is a player argument
     /// rather than a bot selector (so the anti-chaos gate must not silence it).
-    static bool consumesAtTarget(const std::string& content) {
-        std::string t = trim(content);
-        if (stripPrefix(t) == t) return false;          // not prefixed → not a command
-        std::string cmd = toLower(trim(stripPrefix(t)));
+    bool consumesAtTarget(const std::string& content) const {
+        auto body = commandBody(content);
+        if (!body) return false;                         // not a configured command prefix
+        std::string cmd = toLower(*body);
         // Commands whose @ targets a player (not a bot selector): card view (.pc),
         // checks (.ra/.rc/.rav/.rcv/.sc) and代骰-capable rolls (.rb/.rp/.ww/.dx/.en
         // and plain .r/.rh/.rs). These consume the @ as a 代骰/检定 target.
@@ -4068,7 +4070,7 @@ public:
         namespace fs = std::filesystem; std::error_code ec; int n = 0;
         derivedRegistry().clear();   // 重载时不累积（alias 由 resetAliases 另清）
         // 先播内置派生（闪避=敏捷/2 等），规则 mod/包可覆盖同名条目。
-        for (auto& [k, v] : builtinDerived()) derivedRegistry()[CharacterCardStore::canonical(k)] = v;
+        for (auto& [k, v] : builtinDerived()) derivedRegistry()[CharacterCardStore::canonicalUnlocked(k)] = v;
         auto attrOf = [](const std::string& tag, const std::string& key) -> std::string {
             for (char q : { '\'', '"' }) {
                 std::string pat = key + "=" + q;
@@ -4294,13 +4296,13 @@ public:
                 if (enabled && j.contains("defaults") && j["defaults"].is_object())
                     for (auto& [nm, val] : j["defaults"].items())
                         if (val.is_number_integer())
-                            defaultsRegistry()[CharacterCardStore::canonical(nm)] = val.get<int>();
+                            defaultsRegistry()[CharacterCardStore::canonicalUnlocked(nm)] = val.get<int>();
                 // 派生关系（"derived":{"闪避":"敏捷/2"}）→ 规则包派生表（独立于
                 // derivedRegistry——后者会被 loadModelTemplates 重建，查询时规则包优先）。
                 if (enabled && j.contains("derived") && j["derived"].is_object())
                     for (auto& [nm, expr] : j["derived"].items())
                         if (expr.is_string() && !expr.get<std::string>().empty())
-                            rulePackDerivedRegistry()[CharacterCardStore::canonical(nm)] = expr.get<std::string>();
+                            rulePackDerivedRegistry()[CharacterCardStore::canonicalUnlocked(nm)] = expr.get<std::string>();
                 // 是「规则包」才进注册表（仅 entries 的纯速查手册不算，但其别名/公式已合并）。
                 bool isPack = j.contains("set") || j.contains("alias")
                            || j.contains("computed") || j.contains("successLevels");
@@ -7965,7 +7967,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                                    : (!msg.rawContent.empty() ? msg.rawContent : msg.content);
             if (!logContent.empty()) {
                 GameLogMessageRow m;
-                m.logId = logId; m.sender = displayName(msg); m.userId = msg.senderId;
+                m.logId = logId; m.messageId = msg.id; m.sender = displayName(msg); m.userId = msg.senderId;
                 m.content = logContent; m.createdAt = nowIso();
                 // 从原始消息提取图片引用；骰主开启「保存图片」则落地到本地。
                 std::string imgs = extractImageRefs(msg.rawContent.empty() ? msg.content : msg.rawContent);
