@@ -113,6 +113,11 @@ public:
     /// The caller can use this to export existing runtime state once.
     bool createdOnLoad() const noexcept { return createdOnLoad_; }
 
+    /// True when startup found only the obsolete default_config.json.  That
+    /// file is deliberately discarded and startup must recover from the
+    /// database snapshot instead of persisting factory defaults over it.
+    bool discardedObsoleteDefaultConfig() const noexcept { return discardedObsoleteDefaultConfig_; }
+
 private:
     std::string configPath_;
     json config_;
@@ -121,6 +126,7 @@ private:
     std::function<void(const json&)> snapshotWriter_;
     bool splitLayout_ = false;
     bool createdOnLoad_ = false;
+    bool discardedObsoleteDefaultConfig_ = false;
 
     std::atomic<int> writing_{0};  // >0 when save() is writing (suppress self-triggered reload)
     // ─── Internal helpers ────────────────────────────────────

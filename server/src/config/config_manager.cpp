@@ -164,6 +164,24 @@ static bool readSplitConfig(const std::string& configPath, json& value, std::str
     return true;
 }
 
+// A short-lived v3 layout stored all configuration in default_config.json.
+// It was never a reliable source of truth: in affected installations it can
+// predate settings already persisted in the database.  Treat it as obsolete
+// only when no functional split configuration is present.
+static bool hasOnlyObsoleteDefaultConfig(const fs::path& dir) {
+    std::error_code ec;
+    const fs::path legacy = dir / "default_config.json";
+    if (!fs::is_regular_file(legacy, ec) || ec) return false;
+
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (ec) return false;
+        if (!entry.is_regular_file(ec) || ec || entry.path().extension() != ".json") continue;
+        const std::string name = entry.path().stem().string();
+        if (name != "default_config" && name != "webui_sessions") return false;
+    }
+    return true;
+}
+
 // ─── Constructor ─────────────────────────────────────────────
 
 ConfigManager::ConfigManager(const std::string& configPath)
@@ -176,6 +194,7 @@ ConfigManager::ConfigManager(const std::string& configPath)
 bool ConfigManager::load() {
     std::lock_guard<std::mutex> lock(mutex_);
     createdOnLoad_ = false;
+    discardedObsoleteDefaultConfig_ = false;
     try {
         if (!fs::exists(configPath_)) {
             std::string error;
@@ -190,6 +209,18 @@ bool ConfigManager::load() {
         }
         if (!fs::is_directory(configPath_)) {
             DICE_LOG_ERROR("ConfigManager: '{}' must be a configuration directory", configPath_);
+            return false;
+        }
+        const fs::path configDir = configDirectory(configPath_);
+        if (hasOnlyObsoleteDefaultConfig(configDir)) {
+            std::error_code ec;
+            fs::remove(configDir / "default_config.json", ec);
+            if (ec) {
+                DICE_LOG_WARN("ConfigManager: obsolete default_config.json was ignored but could not be removed: {}", ec.message());
+            } else {
+                DICE_LOG_WARN("ConfigManager: discarded obsolete default_config.json; recovering split configuration from database snapshot");
+            }
+            discardedObsoleteDefaultConfig_ = true;
             return false;
         }
         json loaded; std::string error;
