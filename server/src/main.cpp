@@ -289,6 +289,7 @@ static int realMain(int argc, char* argv[]) {
 
     dice::ConfigManager configMgr(configPath);
     const bool configLoaded = configMgr.load();
+    const bool obsoleteDefaultConfigDiscarded = configMgr.discardedObsoleteDefaultConfig();
     bool adaptersNeedExport = !configLoaded || configMgr.createdOnLoad();
     const std::string databasePathForRecovery = configLoaded
         ? configMgr.get<std::string>("server/db_path", "./data/dice.db")
@@ -348,6 +349,13 @@ static int realMain(int argc, char* argv[]) {
                 if (!rows.empty() && configMgr.restoreSnapshot(dice::json::parse(rows.front().value)) && configMgr.save()) {
                     adaptersNeedExport = false;
                     DICE_LOG_WARN("Invalid configuration files restored from the last database snapshot");
+                } else if (obsoleteDefaultConfigDiscarded) {
+                    // Never let the historical default_config.json migration
+                    // overwrite a populated database with factory defaults.
+                    // The file was discarded because it is not authoritative;
+                    // without a durable snapshot there is no safe recovery.
+                    DICE_LOG_ERROR("Obsolete default_config.json was discarded, but no valid database configuration snapshot exists; refusing to overwrite current database settings");
+                    return 1;
                 } else {
                     // A pre-snapshot installation still has adapter rows in the
                     // database. Start from safe defaults once, then export those
