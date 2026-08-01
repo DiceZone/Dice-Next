@@ -121,6 +121,7 @@ function Copy-Content($name) {
 }
 Copy-Content 'decks'
 Copy-Content 'rules'
+Copy-Content 'help'      # .help 通用与跑团术语帮助文档。
 Copy-Content 'helpdoc'   # 随包分发的规则速查帮助文档。
 Copy-Content 'card-templates' # 人物卡模板与预设数据。
 Copy-Content 'rulepacks' # 规则包资源（pack.json、规则、帮助文档和插件）。

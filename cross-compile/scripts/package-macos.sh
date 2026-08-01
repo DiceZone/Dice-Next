@@ -53,6 +53,7 @@ copy_content() {
 }
 copy_content decks
 copy_content rules
+copy_content help
 copy_content helpdoc
 copy_content card-templates
 copy_content rulepacks

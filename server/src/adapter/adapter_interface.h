@@ -254,11 +254,11 @@ public:
 
     /// 平台能力声明：上层功能（好友清理/群管按钮/戳一戳/合并转发/群文件等）
     /// 一律按能力位开关，禁止用 platform 字符串猜。缺省全 false，各适配器如实申报。
-    /// keys: friends / kick / ban(禁言) / poke / forward(合并转发) / group_file /
+    /// keys: friends / friend_delete / kick / ban(禁言) / poke / forward(合并转发) / group_file /
     ///       group_card(名片) / member_list / group_leave
     virtual json capabilities() const {
         return {
-            {"friends", false}, {"kick", false}, {"ban", false}, {"poke", false},
+            {"friends", false}, {"friend_delete", false}, {"kick", false}, {"ban", false}, {"poke", false},
             {"forward", false}, {"group_file", false}, {"group_card", false},
             {"member_list", false}, {"group_leave", false},
         };

@@ -84,11 +84,15 @@ static std::map<std::string, std::string>& aliasRegistry() {
 void CharacterCardStore::resetAliases() { aliasRegistry() = builtinAliases(); }
 
 std::string CharacterCardStore::canonical(const std::string& name) {
+    std::shared_lock<std::shared_mutex> lk(rulesLock());
+    return canonicalUnlocked(name);
+}
+
+std::string CharacterCardStore::canonicalUnlocked(const std::string& name) {
     // Lowercase ASCII letters for the synonym lookup (Chinese unaffected).
     std::string key = name;
     std::transform(key.begin(), key.end(), key.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    std::shared_lock<std::shared_mutex> lk(rulesLock());   // 与规则包热重载互斥（读锁）
     const auto& reg = aliasRegistry();
     auto it = reg.find(key);
     return it != reg.end() ? it->second : name;

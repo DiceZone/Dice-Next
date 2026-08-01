@@ -3603,21 +3603,29 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Put, drogon::Delete});
 
-    // ── 各平台好友 uid 列表（适配器好友缓存）。玩家管理页用它判断
-    // 「删除好友」按钮该红字可点还是灰字禁用（非好友的档案多来自群内指令）。──
+    // ── 各平台好友 uid 列表与删除能力。QQ 官方没有删除好友接口；其已
+    // 绑定真实 QQ 的身份仅在 OneBot 好友列表确认后才可从 WebUI 删除。
     app.registerHandler("/api/friends", [&adapterMgr](Req, CB&& cb) {
         try {
-            J out = J::object();
+            J lists = J::object(), deletePlatforms = J::array(), officialRealFriends = J::array();
+            std::set<std::string> oneBotFriends;
             for (auto& a : adapterMgr.allAdapters()) {
                 if (!a->isConnected()) continue;
                 J arr = J::array();
-                for (auto& f : a->getFriendList()) arr.push_back(f);
+                const auto friends = a->getFriendList();
+                for (auto& f : friends) arr.push_back(f);
                 // 同平台多适配器：合并
-                if (out.contains(a->platform()))
-                    for (auto& v : arr) out[a->platform()].push_back(v);
-                else out[a->platform()] = arr;
+                if (lists.contains(a->platform()))
+                    for (auto& v : arr) lists[a->platform()].push_back(v);
+                else lists[a->platform()] = arr;
+                const auto cap = a->capabilities();
+                if (cap.value("friend_delete", false)) deletePlatforms.push_back(a->platform());
+                if (a->platform() == "onebot_v11")
+                    oneBotFriends.insert(friends.begin(), friends.end());
             }
-            jsonReply(ok(out), std::move(cb));
+            for (const auto& id : oneBotFriends) officialRealFriends.push_back(id);
+            jsonReply(ok(J{{"lists", lists}, {"deletePlatforms", deletePlatforms},
+                             {"officialRealFriends", officialRealFriends}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 
@@ -4413,11 +4421,32 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Put, drogon::Get});
 
-    // 玩家管理页「删除好友」。
+    // 玩家管理页「删除好友」。官方 QQ 没有该接口；绑定为真实 QQ 后只允许
+    // 通过已验证好友关系的 OneBot 适配器操作，避免 OpenID 伪绑定越权。
     app.registerHandler("/api/players/{1}/{2}/delete-friend",
         [&adapterMgr](Req, CB&& cb, const std::string& plat, const std::string& uid) {
-        auto a = pickAdapter(adapterMgr, plat);
-        if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
+        auto canDelete = [&](const AdapterPtr& a) {
+            return a && a->isConnected() && a->capabilities().value("friend_delete", false);
+        };
+        AdapterPtr a;
+        if (plat == "qq_official") {
+            if (!identity::BindingStore::isRealQQ(uid)) {
+                jsonReply(fail("QQ Official user is not bound to a real QQ friend"), std::move(cb)); return;
+            }
+            for (auto& candidate : adapterMgr.allAdapters()) {
+                if (!canDelete(candidate) || candidate->platform() != "onebot_v11") continue;
+                const auto list = candidate->getFriendList();
+                if (std::find(list.begin(), list.end(), uid) != list.end()) { a = candidate; break; }
+            }
+            if (!a) { jsonReply(fail("bound real QQ is not a verified OneBot friend"), std::move(cb)); return; }
+        } else {
+            a = pickAdapter(adapterMgr, plat);
+            if (!canDelete(a)) { jsonReply(fail("adapter does not support deleting friends"), std::move(cb)); return; }
+            const auto list = a->getFriendList();
+            if (!list.empty() && std::find(list.begin(), list.end(), uid) == list.end()) {
+                jsonReply(fail("user is not a friend of this adapter"), std::move(cb)); return;
+            }
+        }
         a->deleteFriend(uid);
         jsonReply(ok(J{{"deleted", uid}}), std::move(cb));
     }, {drogon::Post});

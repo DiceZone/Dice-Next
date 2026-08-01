@@ -167,6 +167,7 @@ struct UserSettingRow {
 struct GameLogMessageRow {
     int id = 0;
     int logId = 0;           // → game_logs.id
+    std::string messageId;   // platform source message id; empty for bot/web lines
     std::string sender;      // display name of the speaker (or bot name)
     std::string userId;      // speaker's platform id (bot's selfId for replies)
     std::string content;
@@ -661,10 +662,11 @@ private:
             orm::make_column("created_at", &GameLogRow::createdAt)
         ),
         orm::make_table("game_log_messages",
-            orm::make_column("id", &GameLogMessageRow::id,
-                orm::primary_key().autoincrement()),
-            orm::make_column("log_id", &GameLogMessageRow::logId),
-            orm::make_column("sender", &GameLogMessageRow::sender),
+                    orm::make_column("id", &GameLogMessageRow::id,
+                        orm::primary_key().autoincrement()),
+                    orm::make_column("log_id", &GameLogMessageRow::logId),
+                    orm::make_column("message_id", &GameLogMessageRow::messageId),
+                    orm::make_column("sender", &GameLogMessageRow::sender),
             orm::make_column("user_id", &GameLogMessageRow::userId),
             orm::make_column("content", &GameLogMessageRow::content),
             orm::make_column("created_at", &GameLogMessageRow::createdAt),

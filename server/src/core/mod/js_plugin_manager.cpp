@@ -1616,6 +1616,7 @@ JsPluginManager::Result JsPluginManager::handle(const std::string& platform, con
 
     // 实时在所有已注册 ext 的 cmdMap 里找指令名。
     JSValue cmd = JS_UNDEFINED;
+    std::string matchedWord = word;
     for (auto& e : exts_) {
         // 插件分群启停（地基）：该源文件在本群被禁用 → 跳过其全部指令。
         if (groupGate_ && !groupId.empty() && !e.second.empty()
@@ -1625,6 +1626,16 @@ JsPluginManager::Result JsPluginManager::handle(const std::string& platform, con
             JSValue c = JS_GetPropertyStr(ctx_, cmdMap, word.c_str());
             if (JS_IsObject(c)) { cmd = c; JS_FreeValue(ctx_, cmdMap); break; }
             JS_FreeValue(ctx_, c);
+            // Some legacy plugins register cmd.name as `.foo` rather than the
+            // API's normal `foo`. CommandRouter has already consumed the
+            // configured prefix, so accept the legacy spelling here and map it
+            // to any owner-selected prefix (for example `>foo`).
+            for (const std::string& legacy : {"." + word, "。" + word, "!" + word, "！" + word}) {
+                c = JS_GetPropertyStr(ctx_, cmdMap, legacy.c_str());
+                if (JS_IsObject(c)) { cmd = c; matchedWord = legacy; break; }
+                JS_FreeValue(ctx_, c);
+            }
+            if (JS_IsObject(cmd)) { JS_FreeValue(ctx_, cmdMap); break; }
         }
         JS_FreeValue(ctx_, cmdMap);
     }
@@ -1637,7 +1648,7 @@ JsPluginManager::Result JsPluginManager::handle(const std::string& platform, con
     buildCtxMsg(platform, userId, nickname, groupId, groupCard, isPrivate, cmdLine, privilege, atList, jctx, jmsg);
 
     JSValue jargs = JS_NewObject(ctx_);
-    JS_SetPropertyStr(ctx_, jargs, "command", JS_NewString(ctx_, word.c_str()));
+    JS_SetPropertyStr(ctx_, jargs, "command", JS_NewString(ctx_, matchedWord.c_str()));
     JS_SetPropertyStr(ctx_, jargs, "rawArgs", JS_NewString(ctx_, rest.c_str()));
     JS_SetPropertyStr(ctx_, jargs, "cleanArgs", JS_NewString(ctx_, rest.c_str()));
     JS_SetPropertyStr(ctx_, jargs, "rawText", JS_NewString(ctx_, cmdLine.c_str()));   // 海豹：原始整条命令
