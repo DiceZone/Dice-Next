@@ -40,6 +40,7 @@ public:
     std::string lastError() const override { return lastError_; }
     std::string getLoginId() const override { return loginId_; }
     std::string getLoginName() const override { return loginName_; }
+    std::string clientId() const { return clientId_; }
     std::string getGroupName(const std::string&) const override { return {}; }
     std::vector<std::string> getGroupMemberList(const std::string&) const override { return {}; }
     bool isGroupAdmin(const std::string&, const std::string&) const override { return false; }
@@ -170,6 +171,7 @@ private:
             if (self->stopping_) return;
             self->loginId_ = d.value("id", std::string());
             self->loginName_ = d.value("username", std::string());
+            self->clientId_ = d.value("client_id", std::string());
             self->fetchGatewayUrl();
         });
     }
@@ -367,7 +369,7 @@ private:
         DICE_LOG_ERROR("KOOK '{}': {}", name_, e);
     }
 
-    std::string id_, name_, token_, loginId_, loginName_, sessionId_, lastError_;
+    std::string id_, name_, token_, loginId_, loginName_, clientId_, sessionId_, lastError_;
     Database* db_{identity::BindingStore::instance().database()};
     std::mutex guildMutex_;
     std::unordered_map<std::string, std::string> channelGuild_;   // 频道 id → guild id

@@ -8,6 +8,7 @@
 #include "../config/config_manager.h"
 #include "../adapter/adapter_interface.h"
 #include "../adapter/adapter_manager.h"
+#include "../adapter/kook_adapter.h"
 #include "../adapter/qq_official_adapter.h"
 #include "ai_gateway.h"
 
@@ -263,12 +264,25 @@ private:
         const std::string nativeId = adapter->getLoginId();
         std::string accountId = nativeId;
         std::string displayId;
+        std::string shareUrl;
         if (platform == "onebot_v11") {
             displayId = nativeId;
         } else if (platform == "qq_official") {
             if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(adapter)) {
                 accountId = official->appId();
                 displayId = official->displayQQ();
+                shareUrl = official->shareUrl();
+            }
+        } else if (platform == "discord") {
+            // Discord 官方的 client_id-only 安装链接使用开发者后台的默认安装设置。
+            shareUrl = "https://discord.com/oauth2/authorize?client_id=" + nativeId;
+        } else if (platform == "kook") {
+            if (auto kook = std::dynamic_pointer_cast<KookAdapter>(adapter)) {
+                const std::string clientId = kook->clientId();
+                shareUrl = clientId.empty()
+                    ? "https://www.kookapp.cn/app/bot/" + nativeId
+                    : "https://www.kookapp.cn/app/oauth2/authorize?client_id=" + clientId
+                        + "&id=" + nativeId + "&scope=bot";
             }
         }
         displayIdentity = !displayId.empty() ? displayId : accountId;
@@ -278,6 +292,7 @@ private:
             {"account_id", accountId},
             {"native_id", nativeId},
             {"display_id", displayId},
+            {"share_url", shareUrl},
             {"nickname", adapter->getLoginName()},
             {"protocol", adapter->version()},
             {"connected", adapter->isConnected()},

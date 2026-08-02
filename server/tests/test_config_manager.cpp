@@ -1,5 +1,6 @@
 #include "test_framework.h"
 #include "../src/config/config_manager.h"
+#include "../src/service/web_auth.h"
 
 #include <filesystem>
 #include <fstream>
@@ -62,5 +63,27 @@ TEST(ConfigManager, ObsoleteDefaultConfigIsDiscardedWithoutCreatingDefaults) {
     ASSERT_TRUE(cfg.discardedObsoleteDefaultConfig());
     ASSERT_FALSE(fs::exists(configDir / "default_config.json"));
     ASSERT_FALSE(fs::exists(configDir / "server.json"));
+    fs::remove_all(root, ec);
+}
+
+TEST(WebAuth, TrustedDeviceSessionSurvivesReconfigure) {
+    const fs::path root = temporaryConfigRoot("web_auth");
+    const fs::path sessions = root / "config" / "webui_sessions.json";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+
+    auto& auth = WebAuth::instance();
+    auth.configure("test-password", sessions);
+    const std::string token = auth.issueToken(true);
+    ASSERT_TRUE(fs::exists(sessions));
+    ASSERT_TRUE(auth.validToken(token));
+
+    // configure() represents a server restart: all memory-only sessions are
+    // gone, while the trusted token must be recovered from disk.
+    auth.configure("test-password", sessions);
+    ASSERT_TRUE(auth.validToken(token));
+    auth.revoke(token);
+    ASSERT_FALSE(auth.validToken(token));
+    auth.configure("", {});
     fs::remove_all(root, ec);
 }

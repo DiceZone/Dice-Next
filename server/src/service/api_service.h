@@ -1875,6 +1875,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     if (adapter) {
                         j["loginId"] = adapter->getLoginId();
                         j["loginName"] = adapter->getLoginName();
+                        if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(adapter)) {
+                            j["qqNumber"] = official->displayQQ();
+                            j["shareUrl"] = official->shareUrl();
+                        }
                     }
                     arr.push_back(j);
                 }
