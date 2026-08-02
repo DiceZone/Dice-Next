@@ -2125,13 +2125,22 @@ static int realMain(int argc, char* argv[]) {
                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 try {
                     auto j = nlohmann::json::parse(req->getBody());
-                    std::string pw = j.value("password", "");
-                    if (!dice::WebAuth::instance().hasPassword() || dice::WebAuth::instance().checkPassword(pw)) {
-                        const bool trustDevice = j.value("trust_device", false);
-                        std::string token = dice::WebAuth::instance().issueToken(trustDevice);
-                        auto resp = jResp({{"code", 0}, {"message", "ok"}, {"data", {{"authed", true}}}});
+                        std::string pw = j.value("password", "");
+                        if (!dice::WebAuth::instance().hasPassword() || dice::WebAuth::instance().checkPassword(pw)) {
+                            const bool trustDevice = j.value("trust_device", false);
+                            bool trustedPersisted = true;
+                            std::string token = dice::WebAuth::instance().issueToken(trustDevice, &trustedPersisted);
+                            if (!trustedPersisted) {
+                                cb(jResp({{"code", 1}, {"message", "无法保存可信设备会话，请检查 config 目录的写入权限"}}, drogon::k500InternalServerError));
+                                return;
+                            }
+                            auto resp = jResp({{"code", 0}, {"message", "ok"}, {"data", {{"authed", true}}}});
                         drogon::Cookie ck("dice_session", token);
                         ck.setPath("/"); ck.setHttpOnly(true);
+                        // Explicitly persist the cookie across browser and
+                        // program restarts. Lax is appropriate for a local
+                        // management panel and remains compatible with HTTP.
+                        ck.setSameSite(drogon::Cookie::SameSite::kLax);
                         if (trustDevice) ck.setMaxAge(30 * 24 * 3600);
                         resp->addCookie(ck);
                         cb(resp);
