@@ -16,6 +16,7 @@
 #include "../storage/database.h"
 #include "../config/config_manager.h"
 #include "../common/logger.h"
+#include "../common/utils.h"
 #include "image_host.h"   // 图片占位符替换为稳定图床 URL
 #include "parquet_writer.h"   // 日志导出为 Parquet（zstd）
 
@@ -41,13 +42,17 @@ namespace dice::logsvc {
 namespace orm = sqlite_orm;
 using json = nlohmann::json;
 
-/// "2026-06-16T11:27:38" → "2026/06/16 11:27:38". Pass-through
-/// for anything that doesn't look like our ISO timestamps.
+/// 存储时间均为 UTC ISO（含或不含 Z），此处统一换算到配置时区后显示：
+/// "2026-06-16T11:27:38" → "2026/06/16 19:27:38"（UTC+8）。无法解析时原样返回。
 inline std::string slashTime(const std::string& iso) {
-    if (iso.size() < 19 || iso[4] != '-' || iso[10] != 'T') return iso;
-    std::string s = iso.substr(0, 19);
-    s[4] = '/'; s[7] = '/'; s[10] = ' ';
-    return s;
+    const std::time_t epoch = utils::parseIsoUtcToEpoch(iso);
+    if (epoch == 0) {
+        if (iso.size() < 19 || iso[4] != '-' || iso[10] != 'T') return iso;
+        std::string s = iso.substr(0, 19);
+        s[4] = '/'; s[7] = '/'; s[10] = ' ';
+        return s;
+    }
+    return utils::formatTimeInTimezone(epoch, "%Y/%m/%d %H:%M:%S");
 }
 
 /// Render a log transcript in the portable .txt format. @p cfg lets us swap临时图片
@@ -113,7 +118,7 @@ inline std::string renderHtml(Database& db, int logId) {
           << "</head><body><h2>" << esc(logName) << "</h2>";
         for (auto& m : msgs) {
             h << "<div class=\"msg\"><div class=\"meta\"><span class=\"sender\">" << esc(m.sender)
-              << "</span> &nbsp;" << esc(m.createdAt) << "</div><div class=\"content\">" << esc(m.content) << "</div>";
+              << "</span> &nbsp;" << esc(slashTime(m.createdAt)) << "</div><div class=\"content\">" << esc(m.content) << "</div>";
             if (!m.images.empty()) {
                 try {
                     auto arr = json::parse(m.images);
@@ -201,20 +206,10 @@ inline json renderSealItems(Database& db, int logId, ConfigManager* cfg, const s
     json items = json::array();
     auto* st = db.getLogStorage();
     if (!st) return items;
-    // "2026-06-16T11:27:38"（本地时间）→ unix 秒。
+    // 存储时间统一为 UTC ISO → unix 秒（此前误按本地时间 mktime 解析，
+    // 导致上传日志的时间被时区偏移错位——issue #16）。
     auto toEpoch = [](const std::string& iso) -> long long {
-        if (iso.size() < 19) return 0;
-        std::tm tm{};
-        try {
-            tm.tm_year = std::stoi(iso.substr(0, 4)) - 1900;
-            tm.tm_mon  = std::stoi(iso.substr(5, 2)) - 1;
-            tm.tm_mday = std::stoi(iso.substr(8, 2));
-            tm.tm_hour = std::stoi(iso.substr(11, 2));
-            tm.tm_min  = std::stoi(iso.substr(14, 2));
-            tm.tm_sec  = std::stoi(iso.substr(17, 2));
-            tm.tm_isdst = -1;
-            return (long long)std::mktime(&tm);
-        } catch (...) { return 0; }
+        return (long long)utils::parseIsoUtcToEpoch(iso);
     };
     try {
         auto msgs = st->get_all<GameLogMessageRow>(
@@ -303,18 +298,7 @@ inline std::vector<parquetw::LogRow> renderLogRows(Database& db, int logId, Conf
     auto* st = db.getLogStorage();
     if (!st) return rows;
     auto toEpoch = [](const std::string& iso) -> long long {
-        if (iso.size() < 19) return 0;
-        std::tm tm{};
-        try {
-            tm.tm_year = std::stoi(iso.substr(0, 4)) - 1900;
-            tm.tm_mon  = std::stoi(iso.substr(5, 2)) - 1;
-            tm.tm_mday = std::stoi(iso.substr(8, 2));
-            tm.tm_hour = std::stoi(iso.substr(11, 2));
-            tm.tm_min  = std::stoi(iso.substr(14, 2));
-            tm.tm_sec  = std::stoi(iso.substr(17, 2));
-            tm.tm_isdst = -1;
-            return (long long)std::mktime(&tm);
-        } catch (...) { return 0; }
+        return (long long)utils::parseIsoUtcToEpoch(iso);
     };
     try {
         auto msgs = st->get_all<GameLogMessageRow>(

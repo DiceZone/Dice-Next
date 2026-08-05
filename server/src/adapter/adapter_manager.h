@@ -8,6 +8,7 @@
 #include "../storage/database.h"
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
+#include "../common/utils.h"
 
 #include <map>
 #include <mutex>
@@ -121,7 +122,20 @@ public:
 
     /// Route an incoming non-message event to all event handlers.
     void routeEvent(const BotEvent& ev) {
-        for (auto& handler : eventHandlers_) handler(ev);
+        BotEvent routed = ev;
+        // QQ 官方事件携带的是 OpenID，而消息路径已把群号映射为公共群号。
+        // 这里做同样的归一化，避免事件写出的 left/__removed/inviter 挂在
+        // “OpenID 幽灵群记录”上（WebUI 显示已退群、消息也无法重建该记录）。
+        if (routed.platform == "qq_official" && !routed.groupId.empty()) {
+            const std::string botId = routed.extra.value("official_bot_id", std::string());
+            if (!botId.empty()) {
+                routed.extra["__identity_native_target"] = routed.groupId;
+                const std::string publicId = identity::BindingStore::instance()
+                    .observeOfficial(db_, botId, routed.groupId, identity::Kind::Group);
+                if (!publicId.empty()) routed.groupId = publicId;
+            }
+        }
+        for (auto& handler : eventHandlers_) handler(routed);
     }
 
     /// Register an event handler (called for every notice/request event).
@@ -141,14 +155,7 @@ public:
 
 private:
     static std::string profileTimestamp() {
-        std::time_t now = std::time(nullptr); std::tm local{};
-#if defined(_WIN32)
-        localtime_s(&local, &now);
-#else
-        local = *std::localtime(&now);
-#endif
-        char out[32]{}; std::strftime(out, sizeof(out), "%Y-%m-%dT%H:%M:%SZ", &local);
-        return out;
+        return utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%dT%H:%M:%S");
     }
     void cacheOfficialGroupNickname(const Message& msg) {
         if (msg.platform != "qq_official" || msg.type != MessageType::kGroup || msg.senderId.empty()
@@ -174,15 +181,59 @@ private:
             // Restore a record hidden by a previous WebUI deletion; otherwise a
             // QQ Official group could remain invisible forever because that
             // platform has no separate re-join event in this path.
-            st->remove_all<GroupSettingRow>(orm::where(
-                orm::c(&GroupSettingRow::platform) == msg.platform and
-                orm::c(&GroupSettingRow::groupId) == msg.targetId and
-                orm::c(&GroupSettingRow::key) == std::string("__removed")));
-            auto rows = st->get_all<GroupSettingRow>(orm::where(
-                orm::c(&GroupSettingRow::platform) == msg.platform and
-                orm::c(&GroupSettingRow::groupId) == msg.targetId and
-                orm::c(&GroupSettingRow::key) == std::string("enabled")), orm::limit(1));
-            if (rows.empty()) { GroupSettingRow row; row.platform = msg.platform; row.groupId = msg.targetId; row.key = "enabled"; row.value = "1"; st->insert(row); }
+            if (!msg.adapterId.empty()) {
+                st->remove_all<GroupAccountSettingRow>(orm::where(
+                    orm::c(&GroupAccountSettingRow::adapterId) == msg.adapterId and
+                    orm::c(&GroupAccountSettingRow::groupId) == msg.targetId and
+                    orm::c(&GroupAccountSettingRow::key) == std::string("__removed")));
+                // 兼容旧数据：早期“删除记录”的墓碑在共享表，消息证明骰子仍在
+                // 群时必须一并清掉，否则 WebUI 永远看不到这条群记录。
+                st->remove_all<GroupSettingRow>(orm::where(
+                    orm::c(&GroupSettingRow::platform) == msg.platform and
+                    orm::c(&GroupSettingRow::groupId) == msg.targetId and
+                    orm::c(&GroupSettingRow::key) == std::string("__removed")));
+                st->remove_all<GroupSettingRow>(orm::where(
+                    orm::c(&GroupSettingRow::platform) == msg.platform and
+                    orm::c(&GroupSettingRow::groupId) == msg.targetId and
+                    orm::c(&GroupSettingRow::key) == std::string("left")));
+                st->remove_all<GroupSettingRow>(orm::where(
+                    orm::c(&GroupSettingRow::platform) == msg.platform and
+                    orm::c(&GroupSettingRow::groupId) == msg.targetId and
+                    orm::c(&GroupSettingRow::key) == std::string("leaving")));
+                auto rows = st->get_all<GroupAccountSettingRow>(orm::where(
+                    orm::c(&GroupAccountSettingRow::adapterId) == msg.adapterId and
+                    orm::c(&GroupAccountSettingRow::groupId) == msg.targetId and
+                    orm::c(&GroupAccountSettingRow::key) == std::string("enabled")), orm::limit(1));
+                if (rows.empty()) {
+                    GroupAccountSettingRow row; row.adapterId = msg.adapterId;
+                    row.platform = msg.platform; row.groupId = msg.targetId;
+                    row.endpointId = msg.extra.value("__identity_native_target", msg.targetId);
+                    row.key = "enabled"; row.value = "1"; st->insert(row);
+                }
+                auto setPresence = [&](const std::string& key, const std::string& value) {
+                    auto found = st->get_all<GroupAccountSettingRow>(orm::where(
+                        orm::c(&GroupAccountSettingRow::adapterId) == msg.adapterId and
+                        orm::c(&GroupAccountSettingRow::groupId) == msg.targetId and
+                        orm::c(&GroupAccountSettingRow::key) == key), orm::limit(1));
+                    if (found.empty()) {
+                        GroupAccountSettingRow row; row.adapterId = msg.adapterId; row.platform = msg.platform;
+                        row.groupId = msg.targetId; row.endpointId = msg.extra.value("__identity_native_target", msg.targetId);
+                        row.key = key; row.value = value; st->insert(row);
+                    } else { auto row = found.front(); row.value = value; st->update(row); }
+                };
+                setPresence("left", "0");
+                setPresence("leaving", "0");
+            } else {
+                st->remove_all<GroupSettingRow>(orm::where(
+                    orm::c(&GroupSettingRow::platform) == msg.platform and
+                    orm::c(&GroupSettingRow::groupId) == msg.targetId and
+                    orm::c(&GroupSettingRow::key) == std::string("__removed")));
+                auto rows = st->get_all<GroupSettingRow>(orm::where(
+                    orm::c(&GroupSettingRow::platform) == msg.platform and
+                    orm::c(&GroupSettingRow::groupId) == msg.targetId and
+                    orm::c(&GroupSettingRow::key) == std::string("enabled")), orm::limit(1));
+                if (rows.empty()) { GroupSettingRow row; row.platform = msg.platform; row.groupId = msg.targetId; row.key = "enabled"; row.value = "1"; st->insert(row); }
+            }
         } catch (...) {}
     }
     void normalizeIdentity(Message& msg) {

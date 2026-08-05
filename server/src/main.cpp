@@ -290,6 +290,10 @@ static int realMain(int argc, char* argv[]) {
     dice::ConfigManager configMgr(configPath);
     const bool configLoaded = configMgr.load();
     const bool obsoleteDefaultConfigDiscarded = configMgr.discardedObsoleteDefaultConfig();
+    // 统一时区：server/timezone_minutes（相对 UTC 的分钟偏移，东为正；
+    // 缺省/INT_MIN = 跟随系统本地时区）。所有面向用户的展示/上传时间都走它。
+    dice::utils::setTimezoneOffset(configMgr.get<int>(
+        "server/timezone_minutes", (std::numeric_limits<int>::min)()));
     bool adaptersNeedExport = !configLoaded || configMgr.createdOnLoad();
     const std::string databasePathForRecovery = configLoaded
         ? configMgr.get<std::string>("server/db_path", "./data/dice.db")
@@ -435,6 +439,8 @@ static int realMain(int argc, char* argv[]) {
         // Only watch config directory, NOT data/ (DB writes trigger unnecessary reloads)
         hotReload->start("config", hotReloadDebounce, [&configMgr](const std::string& changedFile) {
             configMgr.reload();  // writing_ guard inside will skip self-saves
+            dice::utils::setTimezoneOffset(configMgr.get<int>(
+                "server/timezone_minutes", (std::numeric_limits<int>::min)()));
         });
 
         DICE_LOG_INFO("Hot reload monitor started (debounce: {}ms, watching . recursively)", hotReloadDebounce);
@@ -1103,7 +1109,7 @@ static int realMain(int argc, char* argv[]) {
                 // 引用开关：骰主关「引用投掷对象发言」后，首段也不引用（但 .log on 等指定引用
                 // 的 quoteOverride 仍生效——那是刻意的定向引用）。
                 bool quote = cmdRouter.quoteReplyEnabled() || !quoteId.empty();
-                auto segs = cmdRouter.segmentReply(reply);
+                auto segs = cmdRouter.segmentReply(reply, msg.platform);
                 bool priv = msg.type == dice::MessageType::kPrivate;
                 // #6 合并转发(聊天记录)：仅群消息、开关开启、且**回复字符数超过阈值**(默认1200，
                 // 应用于所有回复内容)时强制转发。节点也遵守分段设置：有显式节点(.coc/.dnd 每条
@@ -1113,7 +1119,8 @@ static int realMain(int argc, char* argv[]) {
                 if (wantForward) {
                     if (!fwdNodes.empty()) {
                         std::vector<std::string> nodes;
-                        for (auto& n : fwdNodes) for (auto& s : cmdRouter.segmentReply(n)) nodes.push_back(s);
+                        for (auto& n : fwdNodes)
+                            for (auto& s : cmdRouter.segmentReply(n, msg.platform)) nodes.push_back(s);
                         fwdNodes = std::move(nodes);
                     } else {
                         fwdNodes = segs;   // segs 已是 segmentReply(reply)，天然遵守分段设置
@@ -1126,6 +1133,8 @@ static int realMain(int argc, char* argv[]) {
                 auto sendSegs = [&](const auto& a) {
                     if (wantForward && !fwdNodes.empty() && a->sendGroupForwardMsg(msg.targetId, fwdNodes)) return;
                     for (size_t k = 0; k < segs.size(); ++k) {
+                        // 分段之间留几毫秒，避免同一适配器并发发消息导致客户端乱序。
+                        if (k > 0) std::this_thread::sleep_for(std::chrono::milliseconds(30));
                         if (k == 0 && quoteFirst) a->sendReply(replyMsg, segs[0]);
                         // 私聊回复发到 targetId（普通私聊=对方=senderId；自身消息自控时
                         // =对话对方，避免回复发给骰娘自己）。sendReply 亦用 targetId，一致。
@@ -1158,7 +1167,7 @@ static int realMain(int argc, char* argv[]) {
         if (reply.empty() && !disabled && !replyOff && !msg.fromSelf
             && msg.type == dice::MessageType::kGroup && !msg.targetId.empty()
             && (dice::aichat::enabled(configMgr) || dice::ainpc::enabled(configMgr))
-            && cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId)      // 本群 AI 开关
+            && cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId, msg.adapterId)      // 本账号在本群的 AI 开关
             && cmdRouter.aiWhitelistOk(msg.platform, msg.targetId, true)) { // AI 白名单模式
             bool atMe = !msg.selfId.empty()
                 && std::find(msg.atList.begin(), msg.atList.end(), msg.selfId) != msg.atList.end();
@@ -1304,7 +1313,7 @@ static int realMain(int argc, char* argv[]) {
             // 阶段B/C：后台折叠 —— 存完消息后异步更新本群记忆（滚动摘要 + 抽取持久事实，
             // 攒够一批才真正调模型，天然限频）。放后台线程避免阻塞消息处理。默认全关。
             if ((dice::aimemory::shortEnabled(configMgr) || dice::aimemory::longEnabled(configMgr))
-                && cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId)      // 本群关 AI 则不建记忆
+                && cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId, msg.adapterId)      // 本账号在本群关 AI 则不建记忆
                 && cmdRouter.aiWhitelistOk(msg.platform, msg.targetId, true)) { // AI 白名单模式
                 std::string plat = msg.platform, gid = msg.targetId;
                 std::thread([&configMgr, &db, plat, gid]() {
@@ -1531,7 +1540,7 @@ static int realMain(int argc, char* argv[]) {
                 if (ev.value("group_invite_reject_nonfriend", false)) {
                     std::string puller = e.operatorId;
                     if (puller.empty())
-                        puller = cmdRouter.groupSettingValue(e.platform, e.groupId, "inviter");
+                        puller = cmdRouter.groupSettingValue(e.platform, e.groupId, "inviter", e.adapterId);
                     if (!puller.empty() && puller != e.selfId
                         && !cmdRouter.isMasterUser(e.platform, puller)
                         && !cmdRouter.isUserWhitelisted(puller)) {
@@ -1551,22 +1560,22 @@ static int realMain(int argc, char* argv[]) {
                 }
                 // 曾「删除记录」过的群重新加回来 → 清墓碑标记，否则群组管理
                 // 的自动发现会一直跳过它，刷不出这个群。
-                if (cmdRouter.groupSettingValue(e.platform, e.groupId, "__removed") == "1") {
-                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "__removed", "0");
-                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "enabled", "1");
+                if (cmdRouter.groupSettingValue(e.platform, e.groupId, "__removed", e.adapterId) == "1") {
+                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "__removed", "0", e.adapterId);
+                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "enabled", "1", e.adapterId);
                     DICE_LOG_INFO("event: 群 {} 重新加入，已清除移除标记（记录可重建）", e.groupId);
                 }
                 // 曾指令退群的群重新加回来 → 清「已退群/退群中」状态。
-                if (cmdRouter.groupSettingValue(e.platform, e.groupId, "left") == "1" ||
-                    cmdRouter.groupSettingValue(e.platform, e.groupId, "leaving") == "1") {
-                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "left", "0");
-                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "leaving", "0");
+                if (cmdRouter.groupSettingValue(e.platform, e.groupId, "left", e.adapterId) == "1" ||
+                    cmdRouter.groupSettingValue(e.platform, e.groupId, "leaving", e.adapterId) == "1") {
+                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "left", "0", e.adapterId);
+                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "leaving", "0", e.adapterId);
                 }
                 // 直接被拉进群（无邀请事件）时，operator 即邀请人
                 // 已有邀请人记录时不覆盖。
                 if (!e.operatorId.empty() &&
-                    cmdRouter.groupSettingValue(e.platform, e.groupId, "inviter").empty())
-                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "inviter", e.operatorId);
+                    cmdRouter.groupSettingValue(e.platform, e.groupId, "inviter", e.adapterId).empty())
+                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "inviter", e.operatorId, e.adapterId);
                 // 群名关键词自动退群：邀请/入群事件不含群名，入群后靠反查暖缓存，
                 // 延迟数秒按群名判关键词（空白分隔多词，任一命中）→ 提示 + 退群 + 通知骰主。
                 {
@@ -1616,7 +1625,7 @@ static int realMain(int argc, char* argv[]) {
             // "member" (any member triggers退群), leave the group. ("admin" level
             // only triggers for owner-level offenders, which a joiner never is.)
             if (cmdRouter.isUserBlacklisted(e.userId) &&
-                cmdRouter.blacklistQuitLevel(e.platform, e.groupId) == "member") {
+                cmdRouter.blacklistQuitLevel(e.platform, e.groupId, e.adapterId) == "member") {
                 a->sendGroupMessage(e.groupId, i18n.tr(loc, "event.blacklist_quit"));
                 a->leaveGroup(e.groupId);
                 DICE_LOG_INFO("event: leaving group {} — blacklisted user {} joined", e.groupId, e.userId);
@@ -1663,12 +1672,12 @@ static int realMain(int argc, char* argv[]) {
             if (!diceFlag("listen_group_add", true)) return;
             // A member joined → send the group's .welcome text if configured.
             // welcome with delay + cooldown
-            std::string welcome = cmdRouter.groupSettingValue(e.platform, e.groupId, "welcome");
+            std::string welcome = cmdRouter.groupSettingValue(e.platform, e.groupId, "welcome", e.adapterId);
             if (welcome.empty()) return;
             int welcomeDelay = 0;
-            try { auto d = cmdRouter.groupSettingValue(e.platform, e.groupId, "welcome_delay"); if (!d.empty()) welcomeDelay = std::stoi(d); } catch (...) {}
+            try { auto d = cmdRouter.groupSettingValue(e.platform, e.groupId, "welcome_delay", e.adapterId); if (!d.empty()) welcomeDelay = std::stoi(d); } catch (...) {}
             int welcomeCooldown = 0;
-            try { auto c = cmdRouter.groupSettingValue(e.platform, e.groupId, "welcome_cooldown"); if (!c.empty()) welcomeCooldown = std::stoi(c); } catch (...) {}
+            try { auto c = cmdRouter.groupSettingValue(e.platform, e.groupId, "welcome_cooldown", e.adapterId); if (!c.empty()) welcomeCooldown = std::stoi(c); } catch (...) {}
             auto doWelcome = [=](const std::string& uid) {
                 std::string w = welcome;
                 auto rep = [&](const std::string& tok, const std::string& val) {
@@ -1753,7 +1762,7 @@ static int realMain(int argc, char* argv[]) {
         } else if (e.type == ET::kGroupDecrease) {
             // B：骰娘被移出群（或自身退群回执）→ 标记已退群 + 通知骰主。
             if (!e.selfId.empty() && e.userId == e.selfId && !e.groupId.empty()) {
-                cmdRouter.setGroupSettingFor(e.platform, e.groupId, "left", "1");
+                cmdRouter.setGroupSettingFor(e.platform, e.groupId, "left", "1", e.adapterId);
                 std::string who = (!e.operatorId.empty() && e.operatorId != e.selfId)
                     ? ("\xef\xbc\x88\xe6\x93\x8d\xe4\xbd\x9c\xe8\x80\x85 " + userLabel(e.operatorId) + "\xef\xbc\x89") : std::string();
                 cmdRouter.notifyMasters(dice::notice::kImportant,
@@ -1877,7 +1886,7 @@ static int realMain(int argc, char* argv[]) {
                 // 记录群邀请人。
                 // 无论走哪条审批路径（自动/人工）都先记下，邀请人视同群管理（canRoomHost）。
                 if (!e.userId.empty() && !e.groupId.empty())
-                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "inviter", e.userId);
+                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "inviter", e.userId, e.adapterId);
                 // B：通知骰主收到加群邀请（含邀请人），便于人工处理。
                 cmdRouter.notifyMasters(dice::notice::kImportant,
                     "\xe6\x94\xb6\xe5\x88\xb0\xe5\x8a\xa0\xe7\xbe\xa4\xe9\x82\x80\xe8\xaf\xb7\xef\xbc\x9a\xe7\xbe\xa4 " + groupLabel(e.groupId)
@@ -1923,7 +1932,7 @@ static int realMain(int argc, char* argv[]) {
             } else {
                 // sub_type=add：有人申请加入机器人作为管理员的群。
                 // 优先看本群 .group auto pass 设置（all=全过 / 关键字=验证消息含关键字才过）。
-                std::string ap = cmdRouter.groupSettingValue(e.platform, e.groupId, "autoPass");
+                std::string ap = cmdRouter.groupSettingValue(e.platform, e.groupId, "autoPass", e.adapterId);
                 if (!ap.empty()) {
                     if (ap == "all" || (!e.comment.empty() && e.comment.find(ap) != std::string::npos)) {
                         a->setGroupRequest(e.flag, e.subType, true);
@@ -1942,7 +1951,7 @@ static int realMain(int argc, char* argv[]) {
             if (!ev.value("poke_enabled", true)) return;   // 戳一戳回复总开关（默认开）
             // Only react when the BOT itself is poked, in a group.
             if (e.userId != e.selfId || e.groupId.empty()) return;
-            if (cmdRouter.isGroupDisabledFor(e.platform, e.groupId)) return;
+            if (cmdRouter.isGroupDisabledFor(e.platform, e.groupId, e.adapterId)) return;
             a->sendGroupMessage(e.groupId, i18n.tr(loc, "event.poke"));
         }
     });
@@ -2611,12 +2620,13 @@ static int realMain(int argc, char* argv[]) {
                          std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 std::string platform = req->getParameter("platform");
                 std::string group = req->getParameter("group");
+                std::string adapterId = req->getParameter("adapterId");
                 nlohmann::json arr = nlohmann::json::array();
                 for (auto& m : luaMod.mods()) {
                     std::string id = "lua:" + m.name;
                     arr.push_back({{"id", id}, {"name", m.title.empty() ? m.name : m.title},
                                    {"kind", "lua"}, {"enabledGlobal", m.enabled},
-                                   {"enabledInGroup", cmdRouter.isPluginEnabledInGroup(platform, group, id)}});
+                                   {"enabledInGroup", cmdRouter.isPluginEnabledInGroup(platform, group, id, adapterId)}});
                 }
                 for (auto& p : jsMod.listAll()) {
                     std::string file = p.file;
@@ -2626,7 +2636,7 @@ static int realMain(int argc, char* argv[]) {
                     std::string id = "js:" + file;
                     arr.push_back({{"id", id}, {"name", p.name.empty() ? file : p.name},
                                    {"kind", "js"}, {"enabledGlobal", p.enabled},
-                                   {"enabledInGroup", cmdRouter.isPluginEnabledInGroup(platform, group, id)}});
+                                   {"enabledInGroup", cmdRouter.isPluginEnabledInGroup(platform, group, id, adapterId)}});
                 }
                 cb(jResp({{"code", 0}, {"message", "ok"}, {"data", {{"plugins", arr}}}}));
             }, {drogon::Get});
@@ -2639,8 +2649,9 @@ static int realMain(int argc, char* argv[]) {
                     std::string group = b.value("group", std::string());
                     std::string id = b.value("pluginId", std::string());
                     bool enabled = b.value("enabled", true);
+                    std::string adapterId = b.value("adapterId", std::string());
                     if (group.empty() || id.empty()) { cb(jResp({{"code", 1}, {"message", "group/pluginId required"}})); return; }
-                    cmdRouter.setPluginEnabledInGroup(platform, group, id, enabled);
+                    cmdRouter.setPluginEnabledInGroup(platform, group, id, enabled, adapterId);
                     cb(jResp({{"code", 0}, {"message", "ok"}}));
                 } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }
             }, {drogon::Post});
@@ -3105,16 +3116,11 @@ static int realMain(int argc, char* argv[]) {
     // ── 调度循环 (#48 定时任务，含迁移进来的不活跃自动退群)，每 30s 一跳 ──
     app.getLoop()->runEvery(30.0, [&db, &cmdRouter]() {
         auto* st = db.getStorage(); if (!st) return;
-        std::time_t now = std::time(nullptr); std::tm lt{};
-#if defined(_WIN32)
-        localtime_s(&lt, &now);
-#else
-        lt = *std::localtime(&now);
-#endif
-        char hm[8], ymd[16];
-        std::strftime(hm, sizeof(hm), "%H:%M", &lt);
-        std::strftime(ymd, sizeof(ymd), "%Y-%m-%d", &lt);
-        std::string curHM = hm, curYMD = ymd; int wday = lt.tm_wday;   // 0=周日
+        const std::time_t now = std::time(nullptr);
+        const std::tm lt = dice::utils::timezoneTm(now);
+        const std::string curHM = dice::utils::formatTimeInTimezone(now, "%H:%M");
+        const std::string curYMD = dice::utils::formatTimeInTimezone(now, "%Y-%m-%d");
+        const int wday = lt.tm_wday;   // 0=周日
 
         // 定时任务：时刻已过、当天未触发、且在 60 分钟补发窗口内 → 发送。
         // 以前是 cronTime==curHM 的精确分钟匹配：事件循环卡顿/系统睡眠唤醒/DST
@@ -3223,14 +3229,9 @@ static int realMain(int argc, char* argv[]) {
                 const std::string at = configMgr.get<std::string>("backup/auto_daily_time", "04:00");
                 if (at.size() != 5 || at[2] != ':') return;
                 const int dueMin = std::stoi(at.substr(0, 2)) * 60 + std::stoi(at.substr(3, 2));
-                std::tm current{}, previous{};
-#if defined(_WIN32)
-                localtime_s(&current, &now);
-                std::time_t old = static_cast<std::time_t>(last); if (last > 0) localtime_s(&previous, &old);
-#else
-                current = *std::localtime(&now);
-                std::time_t old = static_cast<std::time_t>(last); if (last > 0) previous = *std::localtime(&old);
-#endif
+                const std::tm current = dice::utils::timezoneTm(now);
+                std::tm previous{};
+                if (last > 0) previous = dice::utils::timezoneTm(static_cast<std::time_t>(last));
                 const int currentMin = current.tm_hour * 60 + current.tm_min;
                 due = currentMin >= dueMin && (last <= 0 || current.tm_year != previous.tm_year || current.tm_yday != previous.tm_yday);
             } else {

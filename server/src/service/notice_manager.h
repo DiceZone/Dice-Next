@@ -95,15 +95,9 @@ inline void audit(int level, const std::string& msg, const std::string& op = "",
     try {
         namespace fs = std::filesystem;
         fs::create_directories("data/audit");
-        std::time_t t = std::time(nullptr); std::tm tm{};
-#if defined(_WIN32)
-        localtime_s(&tm, &t);
-#else
-        localtime_r(&t, &tm);
-#endif
-        char date[16], ts[32];
-        std::strftime(date, sizeof date, "%Y-%m-%d", &tm);
-        std::strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tm);
+        std::time_t t = std::time(nullptr);
+        const std::string date = utils::formatTimeInTimezone(t, "%Y-%m-%d");
+        const std::string ts = utils::formatTimeInTimezone(t, "%Y-%m-%d %H:%M:%S");
         json rec = {{"ts", ts}, {"level", level}, {"op", op}, {"msg", msg}, {"origin", origin}};
         std::ofstream f(std::string("data/audit/notice_") + date + ".jsonl", std::ios::app | std::ios::binary);
         f << rec.dump() << "\n";
@@ -235,13 +229,8 @@ inline void notify(ConfigManager& cfg, AdapterManager& adapters, int level, cons
     if (c.contains("webhook") && c["webhook"].is_object()) {
         auto& wh = c["webhook"];
         if (wh.value("enabled", false) && (wh.value("level_mask", (int)kAll) & level)) {
-            std::time_t t = std::time(nullptr); std::tm tm{};
-#if defined(_WIN32)
-            localtime_s(&tm, &t);
-#else
-            localtime_r(&t, &tm);
-#endif
-            char ts[32]; std::strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tm);
+            std::time_t t = std::time(nullptr);
+            const std::string ts = utils::formatTimeInTimezone(t, "%Y-%m-%d %H:%M:%S");
             webhookPostAsync(wh.value("url", std::string()),
                 json{{"ts", ts}, {"level", level}, {"op", op}, {"msg", msg}, {"origin", origin}}.dump());
         }

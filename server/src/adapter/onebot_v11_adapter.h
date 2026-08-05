@@ -217,8 +217,30 @@ public:
     }
 
     std::vector<std::string> getGroupMemberList(const std::string&) const override { return {}; }
-    bool isGroupAdmin(const std::string&, const std::string&) const override { return false; }
-    bool isGroupOwner(const std::string&, const std::string&) const override { return false; }
+    bool isGroupAdmin(const std::string& groupId, const std::string& userId) const override {
+        const std::string role = memberRole(groupId, userId);
+        return role == "admin" || role == "owner";
+    }
+    bool isGroupOwner(const std::string& groupId, const std::string& userId) const override {
+        return memberRole(groupId, userId) == "owner";
+    }
+    /// Ask the platform for ONE member's role when the message did not carry
+    /// `sender.role`.  Rate-limited per group+user so permission checks on
+    /// every command cannot spam the QQ client.
+    void refreshMemberRole(const std::string& groupId, const std::string& userId) override {
+        if (groupId.empty() || userId.empty()) return;
+        {
+            std::lock_guard<std::mutex> lk(dataMutex_);
+            const auto now = std::chrono::steady_clock::now();
+            const std::string key = groupId + "\x1f" + userId;
+            auto it = roleRefreshAt_.find(key);
+            if (it != roleRefreshAt_.end() && now - it->second < std::chrono::seconds(20)) return;
+            roleRefreshAt_[key] = now;
+        }
+        sendOneBotAction("get_group_member_info",
+            {{"group_id", parseId(groupId)}, {"user_id", parseId(userId)}},
+            "role:" + groupId + ":" + userId);
+    }
     void setGroupKick(const std::string& groupId, const std::string& userId) override {
         DICE_LOG_INFO("OneBotV11 '{}': set_group_kick group={} user={}", name_, groupId, userId);
         sendOneBotAction("set_group_kick", {{"group_id", parseId(groupId)}, {"user_id", parseId(userId)}});
@@ -310,7 +332,8 @@ public:
         sendOneBotAction("get_group_member_list", {{"group_id", parseId(groupId)}}, "members:" + groupId);
         if (!loginId_.empty())
             sendOneBotAction("get_group_member_info",
-                {{"group_id", parseId(groupId)}, {"user_id", parseId(loginId_)}}, "role:" + groupId);
+                {{"group_id", parseId(groupId)}, {"user_id", parseId(loginId_)}},
+                "role:" + groupId + ":" + loginId_);
     }
     int getGroupMemberCount(const std::string& groupId) const override {
         std::lock_guard<std::mutex> lk(dataMutex_);
@@ -325,7 +348,8 @@ public:
     void refreshSelfRole(const std::string& groupId) override {
         if (loginId_.empty()) return;
         sendOneBotAction("get_group_member_info",
-            {{"group_id", parseId(groupId)}, {"user_id", parseId(loginId_)}}, "role:" + groupId);
+            {{"group_id", parseId(groupId)}, {"user_id", parseId(loginId_)}},
+            "role:" + groupId + ":" + loginId_);
     }
     json getMembers(const std::string& groupId) const override {
         std::lock_guard<std::mutex> lk(dataMutex_);
@@ -999,9 +1023,19 @@ private:
                     for (auto& m : d)
                         if (jsonField(m, "user_id") == loginId_) { selfRole_[gid] = m.value("role", "member"); break; }
                 } else if (echo.rfind("role:", 0) == 0 && d.is_object()) {
-                    std::string gid = echo.substr(5);
+                    const std::string tail = echo.substr(5);
+                    const std::string role = d.value("role", "member");
                     std::lock_guard<std::mutex> lk(dataMutex_);
-                    selfRole_[gid] = d.value("role", "member");
+                    const auto sep = tail.rfind(':');
+                    if (sep == std::string::npos) {
+                        // legacy format: role:<gid> (bot's own role only)
+                        selfRole_[tail] = role;
+                    } else {
+                        const std::string gid = tail.substr(0, sep);
+                        const std::string uid = tail.substr(sep + 1);
+                        if (uid == loginId_) selfRole_[gid] = role;
+                        if (!gid.empty() && !uid.empty()) memberRoles_[gid + "\x1f" + uid] = role;
+                    }
                 } else if (d.is_object()) {
                     // get_login_info response
                     if (d.contains("user_id")) loginId_ = std::to_string(d["user_id"].get<int64_t>());
@@ -1459,6 +1493,26 @@ private:
     std::vector<std::string> friendList_;             // 好友 uid 列表（flist 同步）
     std::map<std::string, std::string> selfRole_;    // gid -> owner|admin|member
     std::map<std::string, json> memberLists_;        // gid -> members array
+    std::map<std::string, std::string> memberRoles_;  // gid\x1fuid -> owner|admin|member
+    std::map<std::string, std::chrono::steady_clock::time_point> roleRefreshAt_;  // 定向查角色限频
+
+    /// Cached role for one member: targeted lookup first, then the full member
+    /// list (get_group_member_list) if it has already been fetched.
+    std::string memberRole(const std::string& groupId, const std::string& userId) const {
+        std::lock_guard<std::mutex> lk(dataMutex_);
+        if (!groupId.empty() && !userId.empty()) {
+            auto it = memberRoles_.find(groupId + "\x1f" + userId);
+            if (it != memberRoles_.end()) return it->second;
+        }
+        auto lit = memberLists_.find(groupId);
+        if (lit != memberLists_.end() && lit->second.is_array()) {
+            for (const auto& m : lit->second) {
+                if (!m.is_object()) continue;
+                if (jsonField(m, "user_id") == userId) return m.value("role", std::string());
+            }
+        }
+        return {};
+    }
 
     // Pending group-file uploads awaiting a possible base64 fallback. Keyed by the
     // echo of the local-path attempt; if that fails we resend the content as

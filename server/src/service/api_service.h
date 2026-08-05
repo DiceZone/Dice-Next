@@ -4,6 +4,7 @@
 // Provides full CRUD for adapters, replies, dice rules, and system status.
 
 #include "../storage/database.h"
+#include "../storage/group_account_settings.h"
 #include "../config/config_manager.h"
 #include "../core/dice/dice_engine.h"
 #include "../core/dice/dice_expression.h"
@@ -890,17 +891,24 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // 分段发送阈值（dice.reply_segment_len，默认600，夹[100,1000]）。
+    // 分段发送：dice/reply_segment_enabled（总开关，默认开）+
+    // dice/reply_segment_len（阈值，默认600，夹[100,1000]）。
     app.registerHandler("/api/system/reply-segment", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
                 auto j = J::parse(req->body());
-                int v = j.value("len", 600);
-                if (v < 100) v = 100; if (v > 1000) v = 1000;
-                cfg.set<int>("dice/reply_segment_len", v);
+                if (j.contains("enabled")) cfg.set<bool>("dice/reply_segment_enabled", j.value("enabled", true));
+                if (j.contains("len")) {
+                    int v = j.value("len", 600);
+                    if (v < 100) v = 100; if (v > 1000) v = 1000;
+                    cfg.set<int>("dice/reply_segment_len", v);
+                }
                 cfg.save();
             }
-            jsonReply(ok(J{{"len", cfg.get<int>("dice/reply_segment_len", 600)}}), std::move(cb));
+            jsonReply(ok(J{
+                {"enabled", cfg.get<bool>("dice/reply_segment_enabled", true)},
+                {"len", cfg.get<int>("dice/reply_segment_len", 600)}
+            }), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
@@ -1726,6 +1734,35 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         }), std::move(cb));
     }, {drogon::Get});
 
+    // 统一时区：server/timezone_minutes（相对 UTC 的分钟偏移，东为正；
+    // null = 跟随系统本地时区）。日志上传/展示、审计、备份名、定时任务等
+    // 面向用户的时间统一用它。
+    app.registerHandler("/api/system/timezone", [&cfg](Req req, CB&& cb) {
+        try {
+            if (req->method() == drogon::Put) {
+                auto j = J::parse(req->body(), nullptr, false);
+                if (!j.is_object() || !j.contains("offset_minutes")) {
+                    jsonReply(fail("offset_minutes required"), std::move(cb)); return;
+                }
+                int minutes = (std::numeric_limits<int>::min)();
+                if (j["offset_minutes"].is_number()) {
+                    minutes = j["offset_minutes"].get<int>();
+                    if (minutes < -720 || minutes > 840) {
+                        jsonReply(fail("offset must be between -720 and 840 minutes"), std::move(cb)); return;
+                    }
+                } else if (!j["offset_minutes"].is_null()) {
+                    jsonReply(fail("offset_minutes must be a number or null"), std::move(cb)); return;
+                }
+                cfg.set<int>("server/timezone_minutes", minutes);
+                cfg.save();
+                utils::setTimezoneOffset(minutes);
+            }
+            int minutes = cfg.get<int>("server/timezone_minutes", (std::numeric_limits<int>::min)());
+            jsonReply(ok(J{{"offset_minutes",
+                minutes == (std::numeric_limits<int>::min)() ? J(nullptr) : J(minutes)}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Put});
+
     // ── Dashboard ─────────────────────────────────────────────
     // Live host metrics for the dashboard server-info curve (polled frequently).
     app.registerHandler("/api/system/sysinfo", [](Req, CB&& cb) {
@@ -2151,6 +2188,17 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 and orm::c(&GroupSettingRow::key) == key));
         if (rows.empty()) { GroupSettingRow r; r.platform=plat; r.groupId=gid; r.key=key; r.value=val; s->insert(r); }
         else { auto r = rows.front(); r.value = val; s->update(r); }
+    };
+    static auto agsGet = [](decltype(st) s, const std::string& adapterId,
+                            const std::string& plat, const std::string& gid,
+                            const std::string& key) -> std::string {
+        return accountGroupSetting(*s, adapterId, plat, gid, key);
+    };
+    static auto agsSet = [](decltype(st) s, const std::string& adapterId,
+                            const std::string& plat, const std::string& gid,
+                            const std::string& endpointId, const std::string& key,
+                            const std::string& val) {
+        setAccountGroupSetting(*s, adapterId, plat, gid, endpointId, key, val);
     };
 
     // ── 日志站配置：API 地址（可自建）+ 上传协议（seal=海豹V1默认 / legacy=旧多段txt）──
@@ -2751,17 +2799,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         }
         return {};
     };
-    // 当前本地 "HH:MM" / "YYYY-MM-DD"（lastRun 播种用）。
+    // 当前配置时区 "HH:MM" / "YYYY-MM-DD"（lastRun 播种用）。
     static auto schedNow = [](std::string& hm, std::string& ymd) {
-        std::time_t now = std::time(nullptr); std::tm lt{};
-#if defined(_WIN32)
-        localtime_s(&lt, &now);
-#else
-        lt = *std::localtime(&now);
-#endif
-        char a[8], b[16];
-        std::strftime(a, sizeof(a), "%H:%M", &lt); std::strftime(b, sizeof(b), "%Y-%m-%d", &lt);
-        hm = a; ymd = b;
+        const std::time_t now = std::time(nullptr);
+        hm = utils::formatTimeInTimezone(now, "%H:%M");
+        ymd = utils::formatTimeInTimezone(now, "%Y-%m-%d");
     };
     app.registerHandler("/api/schedules", [st, schedToJson](Req req, CB&& cb) {
         try {
@@ -3803,13 +3845,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         for (auto& a : mgr.allAdapters()) {
             if (!a->isConnected()) continue;
             if (a->platform() == plat) {
+                if (!any) any = a;
                 if (account.empty() || a->id() == account) return a;
                 if (plat == "qq_official") {
                     auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(a);
                     if (official && official->appId() == account) return a;
                 }
             }
-            if (!any) any = a;
         }
         return account.empty() ? any : nullptr;
     };
@@ -3859,42 +3901,46 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 jsonReply(ok(J{{"platform",plat},{"groupId",gid}}), std::move(cb));
                 return;
             }
-            // Auto-discover: merge each connected adapter's joined-group list into
-            // group_settings (insert a default-enabled marker for new groups), and
-            // kick off an async refresh so the next load stays current.
+            // Auto-discover each account independently.  The native group cache is
+            // owned by the adapter; only that adapter's rows may be marked left.
             for (auto& a : adapterMgr.allAdapters()) {
                 if (!a->isConnected()) continue;
                 std::string plat = a->platform();
-                for (auto& [gid, gname] : a->getGroupList()) {
-                    // 如果机器人仍在群内，自动清除墓碑标记重新入库
-                    if (gsGet(st, plat, gid, "__removed") == "1") {
-                        gsSet(st, plat, gid, "__removed", "0");
-                        gsSet(st, plat, gid, "left", "0");
-                    }
-                    if (gsGet(st, plat, gid, "enabled").empty()) gsSet(st, plat, gid, "enabled", "1");
-                    if (!gname.empty() && gname != gid) gsSet(st, plat, gid, "name", gname);  // 
-                    if (a->getSelfRole(gid).empty()) a->refreshSelfRole(gid);  // cheap, only if unknown
+                const std::string aid = a->id();
+                std::map<std::string, std::string> publicGroups; // public id -> native endpoint
+                for (auto& [endpoint, gname] : a->getGroupList()) {
+                    std::string gid = endpoint;
+                    if (plat == "onebot_v11")
+                        gid = identity::BindingStore::instance().observeQQ(db, plat, aid, endpoint, identity::Kind::Group);
+                    else if (plat == "discord" || plat == "kook")
+                        gid = identity::BindingStore::instance().observeVirtual(db, plat, aid, endpoint, identity::Kind::Group);
+                    if (gid.empty()) gid = endpoint;
+                    publicGroups[gid] = endpoint;
+                    agsSet(st, aid, plat, gid, endpoint, "__removed", "0");
+                    agsSet(st, aid, plat, gid, endpoint, "left", "0");
+                    if (agsGet(st, aid, plat, gid, "enabled").empty())
+                        agsSet(st, aid, plat, gid, endpoint, "enabled", "1");
+                    if (!gname.empty() && gname != endpoint) gsSet(st, plat, gid, "name", gname);
+                    if (a->getSelfRole(endpoint).empty()) a->refreshSelfRole(endpoint);
                 }
                 a->refreshGroupList();
 
-                // 检查已退群 — 不在适配器群列表中的群自动标记 left
-                auto currentGroups = a->getGroupList();
-                auto allRows = st->get_all<GroupSettingRow>(
-                    orm::where(orm::c(&GroupSettingRow::platform) == plat and
-                               orm::c(&GroupSettingRow::key) == std::string("enabled")));
-                for (auto& r : allRows) {
-                    bool inGroup = false;
-                    for (auto& [cg, _] : currentGroups) { if (cg == r.groupId) { inGroup = true; break; } }
-                    if (!inGroup && gsGet(st, plat, r.groupId, "left") != "1"
-                        && gsGet(st, plat, r.groupId, "__removed") != "1"
-                        && gsGet(st, plat, r.groupId, "leaving") != "1") {
-                        gsSet(st, plat, r.groupId, "left", "1");
-                    }
-                }
+                // An empty cache can mean the asynchronous list has not arrived
+                // yet.  Never archive every group merely because of that race.
+                syncAccountGroupPresence(*st, aid, plat, publicGroups);
             }
             auto rows = st->get_all<GroupSettingRow>();
             std::map<std::string, std::map<std::string, std::string>> groups; // "plat\x1fgid" → kv
             for (auto& r : rows) groups[r.platform + "\x1f" + r.groupId][r.key] = r.value;
+            auto accountRows = st->get_all<GroupAccountSettingRow>();
+            std::map<std::string, std::map<std::string, std::map<std::string, std::string>>> accountGroups;
+            std::map<std::string, std::pair<std::string, std::string>> accountMeta; // gid/aid -> platform, endpoint
+            for (auto& r : accountRows) {
+                accountGroups[r.groupId][r.adapterId][r.key] = r.value;
+                accountMeta[r.groupId + "\x1f" + r.adapterId] = {r.platform, r.endpointId};
+                // Ensure a group with no shared metadata is still represented.
+                groups[r.platform + "\x1f" + r.groupId];
+            }
             // 预载各群语言覆盖（locale_settings scope=group，key "<plat>:<gid>"）。
             std::map<std::string, std::string> groupLocales;
             for (auto& lr : st->get_all<LocaleSettingRow>(
@@ -3935,36 +3981,85 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (kv.count("__removed") && kv["__removed"] == "1") continue;   // 隐藏已移除的群
                 auto sep = pg.find('\x1f');
                 std::string plat = pg.substr(0, sep);
-                std::string name = gid, botRole;
-                int memberCount = 0;
-                if (auto a = pickAdapter(adapterMgr, plat)) {
-                    std::string gn = a->getGroupName(gid);
-                    if (!gn.empty() && gn != gid) name = gn;          // 
-                    botRole = a->getSelfRole(gid);
-                    memberCount = a->getGroupMemberCount(gid);
+                std::string name = (kv.count("name") && !kv["name"].empty()) ? kv["name"] : gid;
+                J accounts = J::array();
+                if (accountGroups.count(gid)) {
+                    for (auto& [aid, akv] : accountGroups[gid]) {
+                        if (akv.count("__removed") && akv["__removed"] == "1") continue;
+                        auto meta = accountMeta[gid + "\x1f" + aid];
+                        const std::string aplat = meta.first.empty() ? plat : meta.first;
+                        const std::string endpoint = meta.second.empty() ? gid : meta.second;
+                        auto value = [&](const std::string& key) -> std::string {
+                            auto it = akv.find(key); if (it != akv.end()) return it->second;
+                            auto old = kv.find(key); return old == kv.end() ? std::string() : old->second;
+                        };
+                        auto a = adapterMgr.getAdapter(aid);
+                        std::string accountName = aid, loginId, botRole;
+                        int memberCount = 0;
+                        bool connected = a && a->isConnected();
+                        if (a) {
+                            accountName = a->name(); loginId = a->getLoginId();
+                            std::string gn = a->getGroupName(endpoint);
+                            if (name == gid && !gn.empty() && gn != endpoint) name = gn;
+                            botRole = a->getSelfRole(endpoint);
+                            memberCount = a->getGroupMemberCount(endpoint);
+                        }
+                        int observers = 0;
+                        try { auto o = J::parse(value("observers")); if (o.is_array()) observers = (int)o.size(); } catch (...) {}
+                        auto glIt = groupLocales.find(aplat + ":" + gid);
+                        accounts.push_back(J{
+                            {"adapterId", aid}, {"adapterName", accountName}, {"loginId", loginId},
+                            {"platform", aplat}, {"endpointId", endpoint}, {"connected", connected},
+                            {"enabled", value("enabled") != "0"}, {"ai_enabled", value("aiEnabled") != "0"},
+                            {"locked", value("locked") == "1"}, {"card", value("card")},
+                            {"activeLog", !value("activeLog").empty()}, {"activeLogId", value("activeLog")},
+                            {"activeLogName", value("activeLogName")}, {"observers", observers},
+                            {"botRole", botRole}, {"memberCount", memberCount}, {"inviter", value("inviter")},
+                            {"locale", value("locale").empty() ? (glIt != groupLocales.end() ? glIt->second : std::string()) : value("locale")},
+                            {"left", value("left") == "1"}, {"welcome", value("welcome")},
+                            {"welcome_delay", value("welcome_delay")}, {"welcome_cooldown", value("welcome_cooldown")}
+                        });
+                    }
                 }
-                if (name == gid && kv.count("name") && !kv["name"].empty()) name = kv["name"];  // 
-                int observers = 0;
-                if (kv.count("observers")) { try { auto o = J::parse(kv["observers"]); if (o.is_array()) observers = (int)o.size(); } catch (...) {} }
-                auto glIt = groupLocales.find(plat + ":" + gid);
+
+                // Compatibility for databases that have not observed an adapter
+                // since upgrading: expose the old shared state as one legacy item.
+                if (accounts.empty()) {
+                    int observers = 0;
+                    if (kv.count("observers")) { try { auto o = J::parse(kv["observers"]); if (o.is_array()) observers = (int)o.size(); } catch (...) {} }
+                    auto glIt = groupLocales.find(plat + ":" + gid);
+                    accounts.push_back(J{{"adapterId", ""}, {"adapterName", ""}, {"loginId", ""},
+                        {"platform", plat}, {"endpointId", gid}, {"connected", false},
+                        {"enabled", !kv.count("enabled") || kv["enabled"] != "0"},
+                        {"ai_enabled", !kv.count("aiEnabled") || kv["aiEnabled"] != "0"},
+                        {"locked", kv.count("locked") && kv["locked"] == "1"}, {"card", kv.count("card") ? kv["card"] : ""},
+                        {"activeLog", kv.count("activeLog") && !kv["activeLog"].empty()},
+                        {"activeLogId", kv.count("activeLog") ? kv["activeLog"] : ""}, {"activeLogName", kv.count("activeLogName") ? kv["activeLogName"] : ""},
+                        {"observers", observers}, {"botRole", ""}, {"memberCount", 0}, {"inviter", kv.count("inviter") ? kv["inviter"] : ""},
+                        {"locale", glIt != groupLocales.end() ? glIt->second : std::string()},
+                        {"left", kv.count("left") && kv["left"] == "1"}, {"welcome", kv.count("welcome") ? kv["welcome"] : ""},
+                        {"welcome_delay", kv.count("welcome_delay") ? kv["welcome_delay"] : ""},
+                        {"welcome_cooldown", kv.count("welcome_cooldown") ? kv["welcome_cooldown"] : ""}});
+                }
+                // Prefer a connected, still-joined account for the card summary.
+                J selected = accounts.front();
+                for (const auto& account : accounts)
+                    if (account.value("connected", false) && !account.value("left", false)) { selected = account; break; }
                 arr.push_back(J{
-                    {"platform", plat}, {"groupId", gid}, {"name", name},
-                    {"enabled", kv.count("enabled") ? kv["enabled"] != "0" : true},
-                    {"ai_enabled", kv.count("aiEnabled") ? kv["aiEnabled"] != "0" : true},   // 本群 AI 开关（缺省=开）
-                    {"locked", kv.count("locked") && kv["locked"] == "1"},
-                    {"card", kv.count("card") ? kv["card"] : ""},
+                    {"platform", selected.value("platform", plat)}, {"groupId", gid}, {"name", name},
+                    {"enabled", selected.value("enabled", true)}, {"ai_enabled", selected.value("ai_enabled", true)},
+                    {"locked", selected.value("locked", false)}, {"card", selected.value("card", std::string())},
                     {"remark", kv.count("remark") ? kv["remark"] : ""},
-                    {"activeLog", kv.count("activeLog") && !kv["activeLog"].empty()},
-                    {"observers", observers}, {"botRole", botRole}, {"memberCount", memberCount},
-                    {"inviter", kv.count("inviter") ? kv["inviter"] : ""},                       // 
-                    {"locale", glIt != groupLocales.end() ? glIt->second : std::string()},       // 
-                    {"left", kv.count("left") && kv["left"] == "1"}                              ,// 已退群
-                    {"welcome", kv.count("welcome") ? kv["welcome"] : ""},
-                    {"welcome_delay", kv.count("welcome_delay") ? kv["welcome_delay"] : ""},
-                    {"welcome_cooldown", kv.count("welcome_cooldown") ? kv["welcome_cooldown"] : ""},
+                    {"activeLog", selected.value("activeLog", false)}, {"observers", selected.value("observers", 0)},
+                    {"botRole", selected.value("botRole", std::string())}, {"memberCount", selected.value("memberCount", 0)},
+                    {"inviter", selected.value("inviter", std::string())}, {"locale", selected.value("locale", std::string())},
+                    {"left", std::all_of(accounts.begin(), accounts.end(), [](const J& x){ return x.value("left", false); })},
+                    {"welcome", selected.value("welcome", std::string())},
+                    {"welcome_delay", selected.value("welcome_delay", std::string())},
+                    {"welcome_cooldown", selected.value("welcome_cooldown", std::string())},
                     {"welcome_min_delay", cfg.get<int>("events/welcome_min_delay", 0)},
                     {"welcome_min_cooldown", cfg.get<int>("events/welcome_min_cooldown", 0)},
-                    {"bindings", groupBindings.count(gid) ? groupBindings[gid] : J::array()}
+                    {"bindings", groupBindings.count(gid) ? groupBindings[gid] : J::array()}, {"accounts", accounts}
                 });
             }
             jsonReply(ok(arr), std::move(cb));
@@ -3975,48 +4070,62 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     app.registerHandler("/api/groups/{1}/{2}",
         [st, &adapterMgr, &cfg](Req req, CB&& cb, const std::string& plat, const std::string& gid) {
         try {
+            J j = J::object();
+            if (!req->body().empty()) j = J::parse(req->body());
+            const std::string adapterId = j.value("adapterId", std::string());
+            const std::string endpointId = j.value("endpointId", gid);
             if (req->method() == drogon::Delete) {
-                // 清空该群所有设定，并打墓碑标记，使其不再被自动发现重新入库
-                // （即使骰子仍在群内）。重新加入管理用 POST /api/groups；机器人
-                // 重新入群时事件层会自动清墓碑。
-                st->remove_all<GroupSettingRow>(
-                    orm::where(orm::c(&GroupSettingRow::platform) == plat
-                        and orm::c(&GroupSettingRow::groupId) == gid));
-                // 群语言覆盖也一并清除（此前残留导致退群重加后仍是旧语言）。
-                st->remove_all<LocaleSettingRow>(
-                    orm::where(orm::c(&LocaleSettingRow::scope) == std::string("group")
-                        and orm::c(&LocaleSettingRow::scopeKey) == plat + ":" + gid));
-                gsSet(st, plat, gid, "__removed", "1");
+                if (!adapterId.empty()) {
+                    st->remove_all<GroupAccountSettingRow>(orm::where(
+                        orm::c(&GroupAccountSettingRow::adapterId) == adapterId and
+                        orm::c(&GroupAccountSettingRow::groupId) == gid));
+                    agsSet(st, adapterId, plat, gid, endpointId, "__removed", "1");
+                } else {
+                    st->remove_all<GroupSettingRow>(orm::where(
+                        orm::c(&GroupSettingRow::platform) == plat and
+                        orm::c(&GroupSettingRow::groupId) == gid));
+                    st->remove_all<GroupAccountSettingRow>(orm::where(
+                        orm::c(&GroupAccountSettingRow::groupId) == gid));
+                    st->remove_all<LocaleSettingRow>(orm::where(
+                        orm::c(&LocaleSettingRow::scope) == std::string("group") and
+                        orm::c(&LocaleSettingRow::scopeKey) == plat + ":" + gid));
+                    gsSet(st, plat, gid, "__removed", "1");
+                }
                 jsonReply(ok(nullptr), std::move(cb));
                 return;
             }
-            auto j = J::parse(req->body());
-            auto a = pickAdapter(adapterMgr, plat);
-            if (j.contains("enabled")) gsSet(st, plat, gid, "enabled", j["enabled"].get<bool>() ? "1" : "0");
-            if (j.contains("ai_enabled")) gsSet(st, plat, gid, "aiEnabled", j["ai_enabled"].get<bool>() ? "1" : "0");  // 
-            if (j.contains("locked"))  gsSet(st, plat, gid, "locked",  j["locked"].get<bool>() ? "1" : "0");
+            auto a = !adapterId.empty() ? adapterMgr.getAdapter(adapterId) : pickAdapter(adapterMgr, plat);
+            auto setAccount = [&](const std::string& key, const std::string& value) {
+                if (!adapterId.empty()) agsSet(st, adapterId, plat, gid, endpointId, key, value);
+                else gsSet(st, plat, gid, key, value);
+            };
+            if (j.contains("enabled")) setAccount("enabled", j["enabled"].get<bool>() ? "1" : "0");
+            if (j.contains("ai_enabled")) setAccount("aiEnabled", j["ai_enabled"].get<bool>() ? "1" : "0");
+            if (j.contains("locked")) setAccount("locked", j["locked"].get<bool>() ? "1" : "0");
             if (j.contains("remark"))  gsSet(st, plat, gid, "remark", j["remark"].get<std::string>());
             if (j.contains("card")) {
                 std::string card = j["card"].get<std::string>();
-                gsSet(st, plat, gid, "card", card);
-                if (a) a->setGroupCard(gid, a->getLoginId(), card);   // bot's own card
+                setAccount("card", card);
+                if (a) a->setGroupCard(endpointId, a->getLoginId(), card);
             }
-            if (j.contains("name") && a) a->setGroupName(gid, j["name"].get<std::string>());
-            if (j.contains("welcome")) gsSet(st, plat, gid, "welcome", j["welcome"].get<std::string>());
+            if (j.contains("name") && a) a->setGroupName(endpointId, j["name"].get<std::string>());
+            if (j.contains("welcome")) setAccount("welcome", j["welcome"].get<std::string>());
             if (j.contains("welcome_delay")) {
                 std::string sv = j["welcome_delay"].get<std::string>();
-                if (sv.empty()) { gsSet(st, plat, gid, "welcome_delay", ""); }
-                else { int val = std::stoi(sv); int mn = cfg.get<int>("events/welcome_min_delay", 0); if (val > 0 && val < mn) val = mn; gsSet(st, plat, gid, "welcome_delay", std::to_string(val)); }
+                if (sv.empty()) { setAccount("welcome_delay", ""); }
+                else { int val = std::stoi(sv); int mn = cfg.get<int>("events/welcome_min_delay", 0); if (val > 0 && val < mn) val = mn; setAccount("welcome_delay", std::to_string(val)); }
             }
             if (j.contains("welcome_cooldown")) {
                 std::string sv = j["welcome_cooldown"].get<std::string>();
-                if (sv.empty()) { gsSet(st, plat, gid, "welcome_cooldown", ""); }
-                else { int val = std::stoi(sv); int mn = cfg.get<int>("events/welcome_min_cooldown", 0); if (val > 0 && val < mn) val = mn; gsSet(st, plat, gid, "welcome_cooldown", std::to_string(val)); }
+                if (sv.empty()) { setAccount("welcome_cooldown", ""); }
+                else { int val = std::stoi(sv); int mn = cfg.get<int>("events/welcome_min_cooldown", 0); if (val > 0 && val < mn) val = mn; setAccount("welcome_cooldown", std::to_string(val)); }
             }
             // 网页端设置本群回复语言（写 locale_settings，Resolver 直读 DB 即时生效；空串=清除覆盖）。
             if (j.contains("locale")) {
                 std::string lc = j["locale"].get<std::string>();
+                if (!adapterId.empty()) { setAccount("locale", lc); }
                 std::string key = plat + ":" + gid;
+                if (!adapterId.empty()) { jsonReply(ok(nullptr), std::move(cb)); return; }
                 st->remove_all<LocaleSettingRow>(
                     orm::where(orm::c(&LocaleSettingRow::scope) == std::string("group")
                         and orm::c(&LocaleSettingRow::scopeKey) == key));
@@ -4035,13 +4144,16 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             auto j = J::parse(req->body());
             std::string action = j.value("action", "");
-            auto a = pickAdapter(adapterMgr, plat);
+            std::string adapterId = j.value("adapterId", std::string());
+            std::string endpointId = j.value("endpointId", gid);
+            auto a = !adapterId.empty() ? adapterMgr.getAdapter(adapterId) : pickAdapter(adapterMgr, plat);
             if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
             if (action == "leave") {
-                a->leaveGroup(gid);
-                gsSet(st, plat, gid, "left", "1");   // 状态=已退群（保留记录时可见）
+                a->leaveGroup(endpointId);
+                if (!adapterId.empty()) agsSet(st, adapterId, plat, gid, endpointId, "left", "1");
+                else gsSet(st, plat, gid, "left", "1");
             }
-            else if (action == "message") a->sendGroupMessage(gid, j.value("text", ""));
+            else if (action == "message") a->sendGroupMessage(endpointId, j.value("text", ""));
             else { jsonReply(fail("unknown action"), std::move(cb)); return; }
             jsonReply(ok(nullptr), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
@@ -4049,12 +4161,15 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // GET /api/groups/{platform}/{groupId}/members — member list + bot's role.
     app.registerHandler("/api/groups/{1}/{2}/members",
-        [&adapterMgr](Req, CB&& cb, const std::string& plat, const std::string& gid) {
+        [&adapterMgr](Req req, CB&& cb, const std::string& plat, const std::string& gid) {
         try {
-            auto a = pickAdapter(adapterMgr, plat);
+            std::string adapterId = req->getParameter("adapterId");
+            std::string endpointId = req->getParameter("endpointId");
+            if (endpointId.empty()) endpointId = gid;
+            auto a = !adapterId.empty() ? adapterMgr.getAdapter(adapterId) : pickAdapter(adapterMgr, plat);
             if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
-            a->refreshMembers(gid);                 // async refresh for next load
-            J members = a->getMembers(gid), out = J::array();
+            a->refreshMembers(endpointId);
+            J members = a->getMembers(endpointId), out = J::array();
             for (auto& m : members) {
                 std::string title = m.value("title", std::string());
                 if (title.empty()) title = m.value("special_title", std::string());
@@ -4066,7 +4181,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"title", title}
                 });
             }
-            jsonReply(ok(J{{"botRole", a->getSelfRole(gid)}, {"members", out}}), std::move(cb));
+            jsonReply(ok(J{{"botRole", a->getSelfRole(endpointId)}, {"members", out}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 
@@ -4228,24 +4343,26 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         [&adapterMgr, &i18n](Req req, CB&& cb, const std::string& plat, const std::string& gid) {
         try {
             auto j = J::parse(req->body());
-            auto a = pickAdapter(adapterMgr, plat);
+            std::string adapterId = j.value("adapterId", std::string());
+            std::string endpointId = j.value("endpointId", gid);
+            auto a = !adapterId.empty() ? adapterMgr.getAdapter(adapterId) : pickAdapter(adapterMgr, plat);
             if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
             std::string action = j.value("action", ""), uid = j.value("userId", "");
             if (uid.empty()) { jsonReply(fail("userId required"), std::move(cb)); return; }
             // 自身权限不足（原版 strSelfPermissionErr）：骰子非管理员时拒绝管理类操作。
             if (action == "ban" || action == "unban" || action == "kick" ||
                 action == "card" || action == "title") {
-                std::string selfRole = a->getSelfRole(gid);
+                std::string selfRole = a->getSelfRole(endpointId);
                 if (selfRole == "member") {
                     jsonReply(fail(i18n.tr(localeFromString("zh-Hans"), "gate.self_perm")), std::move(cb));
                     return;
                 }
             }
-            if (action == "ban")        a->setGroupBan(gid, uid, j.value("duration", 600));
-            else if (action == "unban") a->setGroupBan(gid, uid, 0);
-            else if (action == "kick")  a->setGroupKick(gid, uid);
-            else if (action == "card")  a->setGroupCard(gid, uid, j.value("card", std::string()));
-            else if (action == "title") a->setGroupSpecialTitle(gid, uid, j.value("title", std::string()));
+            if (action == "ban")        a->setGroupBan(endpointId, uid, j.value("duration", 600));
+            else if (action == "unban") a->setGroupBan(endpointId, uid, 0);
+            else if (action == "kick")  a->setGroupKick(endpointId, uid);
+            else if (action == "card")  a->setGroupCard(endpointId, uid, j.value("card", std::string()));
+            else if (action == "title") a->setGroupSpecialTitle(endpointId, uid, j.value("title", std::string()));
             else { jsonReply(fail("unknown action"), std::move(cb)); return; }
             jsonReply(ok(nullptr), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }

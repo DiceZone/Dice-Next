@@ -659,6 +659,20 @@ private:
             std::string df = getUserSetting(msg, "defaultDice");
             if (df.empty()) df = getGroupSetting(msg, "groupDefaultDice");  // 本群规则默认骰
             expr = "d" + (df.empty() ? std::string("100") : df);
+        } else {
+            // 省略面数直接跟 ±修正（.rd-5 / .r-5 / .rd+5 / .r+5）：
+            // 视同「当前默认骰 ± 修正」，与 .rd100-5（=1d100-5）语义一致，
+            // 而不是把 -5 当作负数面数报错。
+            const bool dWithMod = (expr[0] == 'd' || expr[0] == 'D') && expr.size() >= 2
+                && (expr[1] == '+' || expr[1] == '-');
+            const bool bareMod = (expr[0] == '+' || expr[0] == '-') && expr.size() >= 2
+                && std::isdigit(static_cast<unsigned char>(expr[1]));
+            if (dWithMod || bareMod) {
+                std::string df = getUserSetting(msg, "defaultDice");
+                if (df.empty()) df = getGroupSetting(msg, "groupDefaultDice");
+                const std::string def = "d" + (df.empty() ? std::string("100") : df);
+                expr = dWithMod ? (def + expr.substr(1)) : (def + expr);
+            }
         }
 
         const std::string nick = displayName(msg);
@@ -3955,8 +3969,9 @@ public:
     /// Read a group setting by explicit platform+group (for event handlers that
     /// don't have a Message, e.g. the入群 welcome trigger).
     std::string groupSettingValue(const std::string& platform, const std::string& groupId,
-                                  const std::string& key) const {
-        Message m; m.platform = platform; m.targetId = groupId; m.type = MessageType::kGroup;
+                                  const std::string& key, const std::string& adapterId = {}) const {
+        Message m; m.platform = platform; m.targetId = groupId; m.adapterId = adapterId;
+        m.type = MessageType::kGroup;
         return getGroupSetting(m, key);
     }
 
@@ -3964,16 +3979,19 @@ public:
     bool isUserBlacklisted(const std::string& userId) const { return banlistHas(0, 0, userId); }
 
     /// .bot-off / locked check by explicit platform+group (for event handlers).
-    bool isGroupDisabledFor(const std::string& platform, const std::string& groupId) const {
-        Message m; m.platform = platform; m.targetId = groupId; m.type = MessageType::kGroup;
+    bool isGroupDisabledFor(const std::string& platform, const std::string& groupId,
+                            const std::string& adapterId = {}) const {
+        Message m; m.platform = platform; m.targetId = groupId; m.adapterId = adapterId;
+        m.type = MessageType::kGroup;
         return isGroupDisabled(m);
     }
 
     /// Effective blacklist-quit level for a group: per-group group_settings
     /// "blacklistQuitLevel" overrides the global config dice.blacklist_quit_level
     /// (default "member"). One of {"member","admin"}.
-    std::string blacklistQuitLevel(const std::string& platform, const std::string& groupId) const {
-        std::string lvl = groupSettingValue(platform, groupId, "blacklistQuitLevel");
+    std::string blacklistQuitLevel(const std::string& platform, const std::string& groupId,
+                                   const std::string& adapterId = {}) const {
+        std::string lvl = groupSettingValue(platform, groupId, "blacklistQuitLevel", adapterId);
         if (lvl.empty()) {
             try { lvl = cfg_.get<std::string>("dice/blacklist_quit_level", std::string("member")); }
             catch (...) { lvl = "member"; }
@@ -4508,6 +4526,13 @@ private:
         if (!st) return "";
         try {
             namespace orm = sqlite_orm;
+            if (!msg.adapterId.empty()) {
+                auto scoped = st->get_all<GroupAccountSettingRow>(
+                    orm::where(orm::c(&GroupAccountSettingRow::adapterId) == msg.adapterId
+                        and orm::c(&GroupAccountSettingRow::groupId) == msg.targetId
+                        and orm::c(&GroupAccountSettingRow::key) == key));
+                if (!scoped.empty()) return scoped.front().value;
+            }
             auto rows = st->get_all<GroupSettingRow>(
                 orm::where(orm::c(&GroupSettingRow::platform) == msg.platform
                     and orm::c(&GroupSettingRow::groupId) == msg.targetId
@@ -4521,6 +4546,19 @@ private:
         if (!st) return;
         try {
             namespace orm = sqlite_orm;
+            if (!msg.adapterId.empty()) {
+                auto rows = st->get_all<GroupAccountSettingRow>(
+                    orm::where(orm::c(&GroupAccountSettingRow::adapterId) == msg.adapterId
+                        and orm::c(&GroupAccountSettingRow::groupId) == msg.targetId
+                        and orm::c(&GroupAccountSettingRow::key) == key));
+                if (rows.empty()) {
+                    GroupAccountSettingRow r; r.adapterId = msg.adapterId;
+                    r.platform = msg.platform; r.groupId = msg.targetId;
+                    r.endpointId = msg.extra.value("__identity_native_target", msg.targetId);
+                    r.key = key; r.value = value; st->insert(r);
+                } else { auto r = rows.front(); r.value = value; st->update(r); }
+                return;
+            }
             auto rows = st->get_all<GroupSettingRow>(
                 orm::where(orm::c(&GroupSettingRow::platform) == msg.platform
                     and orm::c(&GroupSettingRow::groupId) == msg.targetId
@@ -4541,15 +4579,17 @@ public:
     // ── 插件分群启停（地基；JS/Lua 通用）──────────────────────────
     // 默认：全局启用的插件在所有群生效；某群可单独禁用之。插件 id 形如 "js:<名>"/"lua:<名>"。
     // 存 group_settings 的 "pluginsOff"（\n 分隔的 id 列表）。私聊不 gating。
-    std::vector<std::string> disabledPluginsInGroup(const std::string& platform, const std::string& group) const {
-        Message m; m.platform = platform; m.targetId = group;
+    std::vector<std::string> disabledPluginsInGroup(const std::string& platform, const std::string& group,
+                                                    const std::string& adapterId = {}) const {
+        Message m; m.platform = platform; m.targetId = group; m.adapterId = adapterId;
         std::string raw = getGroupSetting(m, "pluginsOff");
         std::vector<std::string> out; std::string cur;
         for (char c : raw) { if (c == '\n') { if (!cur.empty()) out.push_back(cur); cur.clear(); } else cur += c; }
         if (!cur.empty()) out.push_back(cur);
         return out;
     }
-    bool isPluginEnabledInGroup(const std::string& platform, const std::string& group, const std::string& pluginId) const {
+    bool isPluginEnabledInGroup(const std::string& platform, const std::string& group,
+                                const std::string& pluginId, const std::string& adapterId = {}) const {
         if (group.empty()) return true;   // 私聊不 gating
         // pack-bound 插件（属于某规则包）→ 仅在本群激活了该包对应规则系统时生效。
         // 群的 ruleSystem 存的是「激活规则的名字」；该规则的 setKeys 与本包 setKeys 有交集 = 包已激活。
@@ -4558,7 +4598,7 @@ public:
             for (auto& b : rulePackBundles()) {
                 if (std::find(b.pluginIds.begin(), b.pluginIds.end(), pluginId) == b.pluginIds.end()) continue;
                 if (!b.enabled) return false;
-                std::string active = groupSettingValue(platform, group, "ruleSystem");
+                std::string active = groupSettingValue(platform, group, "ruleSystem", adapterId);
                 if (active.empty()) return false;   // 本群未激活任何规则 → 包插件不生效
                 for (auto& k : b.setKeys) if (k == active) return true;   // 兼容：ruleSystem 直接是 setKey
                 for (auto& rp : rulePacks()) {       // 常规：ruleSystem=规则名 → 查其 setKeys
@@ -4570,7 +4610,7 @@ public:
             }
         }
         // free 插件：默认全局启用，群黑名单可单独禁用。
-        for (auto& d : disabledPluginsInGroup(platform, group)) if (d == pluginId) return false;
+        for (auto& d : disabledPluginsInGroup(platform, group, adapterId)) if (d == pluginId) return false;
         return true;
     }
     // seal.vars ↔ 人物卡桥接（JS 规则插件用无$前缀属性名读写玩家卡 = .st/.ra 同一份卡）。
@@ -4596,15 +4636,16 @@ public:
     }
 
     void setPluginEnabledInGroup(const std::string& platform, const std::string& group,
-                                 const std::string& pluginId, bool enabled) {
+                                 const std::string& pluginId, bool enabled,
+                                 const std::string& adapterId = {}) {
         if (group.empty() || pluginId.empty()) return;
-        auto cur = disabledPluginsInGroup(platform, group);
+        auto cur = disabledPluginsInGroup(platform, group, adapterId);
         bool present = std::find(cur.begin(), cur.end(), pluginId) != cur.end();
         if (enabled && present) cur.erase(std::remove(cur.begin(), cur.end(), pluginId), cur.end());
         else if (!enabled && !present) cur.push_back(pluginId);
         else return;   // 无变化
         std::string joined; for (auto& s : cur) { if (!joined.empty()) joined += '\n'; joined += s; }
-        Message m; m.platform = platform; m.targetId = group;
+        Message m; m.platform = platform; m.targetId = group; m.adapterId = adapterId;
         setGroupSetting(m, "pluginsOff", joined);
     }
 
@@ -4712,7 +4753,7 @@ public:
             std::string onoff = toLower(trim(splitCommand(arg).first));
             if (onoff != "on" && onoff != "off") return i18n_.tr(loc, "plugin.usage");
             bool en = (onoff == "on");
-            for (auto& p : plugins) setPluginEnabledInGroup(msg.platform, msg.targetId, p.id, en);
+            for (auto& p : plugins) setPluginEnabledInGroup(msg.platform, msg.targetId, p.id, en, msg.adapterId);
             return i18n_.tr(loc, en ? "plugin.all_on" : "plugin.all_off",
                             {{"count", std::to_string(plugins.size())}});
         }
@@ -4721,7 +4762,7 @@ public:
             const PluginEntry* found = matchPlugin(plugins, arg);
             if (!found) return i18n_.tr(loc, "plugin.not_found", {{"name", arg}});
             bool en = (sub == "on");
-            setPluginEnabledInGroup(msg.platform, msg.targetId, found->id, en);
+            setPluginEnabledInGroup(msg.platform, msg.targetId, found->id, en, msg.adapterId);
             return i18n_.tr(loc, en ? "plugin.enabled" : "plugin.disabled", {{"name", found->name}});
         }
         return i18n_.tr(loc, "plugin.usage");
@@ -4939,9 +4980,15 @@ private:
     }
     // 消息重载：先做别名归并（原版 TinyList 在 master 判断之前生效），别名号享主号身份。
     bool isMaster(const Message& msg) const {
-        // 同理，官方群中不能把 OpenID 映射后的号码视作骰主身份。
-        // 这保证所有依赖骰主/信任/群管的群内管理操作都会被拒绝。
-        if (msg.platform == "qq_official" && msg.type == MessageType::kGroup) return false;
+        // QQ 官方机器人：OpenID 是平台给出的唯一、不可枚举的账号标识，
+        // 骰主按 OpenID 添加后可直接匹配（群聊/私聊一致）。未命中 OpenID 时，
+        // 群聊不退回“绑定后的公共号”判定——那依赖 .bind 映射，官方群内不可信。
+        if (msg.platform == "qq_official") {
+            const std::string native = msg.extra.value("__identity_native_sender", std::string());
+            if (!native.empty() && isMaster("qq_official", native)) return true;
+            if (msg.type == MessageType::kGroup) return false;
+            return isMaster("qq_official", resolveAlias("qq_official", msg.senderId));
+        }
         return isMaster(msg.platform, resolveAlias(msg.platform, msg.senderId));
     }
 
@@ -4988,7 +5035,15 @@ public:
     /// Write a group_settings value for an ARBITRARY group (boton/botoff <群号>)。
     /// public：main.cpp 事件层也用它记录群邀请人等。
     void setGroupSettingFor(const std::string& platform, const std::string& groupId,
-                            const std::string& key, const std::string& value) {
+                            const std::string& key, const std::string& value,
+                            const std::string& adapterId = {}, const std::string& endpointId = {}) {
+        if (!adapterId.empty()) {
+            Message m; m.platform = platform; m.targetId = groupId; m.adapterId = adapterId;
+            m.type = MessageType::kGroup;
+            if (!endpointId.empty()) m.extra["__identity_native_target"] = endpointId;
+            setGroupSetting(m, key, value);
+            return;
+        }
         auto* st = db_.getStorage(); if (!st) return;
         try {
             namespace orm = sqlite_orm;
@@ -5003,21 +5058,15 @@ public:
     }
     /// Read a group_settings value for an arbitrary group (public：main.cpp AI 分群开关用)。
     std::string getGroupSettingFor(const std::string& platform, const std::string& groupId,
-                                   const std::string& key) const {
-        auto* st = db_.getStorage(); if (!st) return "";
-        try {
-            namespace orm = sqlite_orm;
-            auto rows = st->get_all<GroupSettingRow>(orm::where(
-                orm::c(&GroupSettingRow::platform) == platform and
-                orm::c(&GroupSettingRow::groupId) == groupId and
-                orm::c(&GroupSettingRow::key) == key));
-            if (!rows.empty()) return rows.front().value;
-        } catch (...) {}
-        return "";
+                                   const std::string& key, const std::string& adapterId = {}) const {
+        Message m; m.platform = platform; m.targetId = groupId; m.adapterId = adapterId;
+        m.type = MessageType::kGroup;
+        return getGroupSetting(m, key);
     }
     /// 本群 AI 功能开关（group_settings key "aiEnabled"，缺省=开）。
-    bool aiEnabledForGroup(const std::string& platform, const std::string& groupId) const {
-        return getGroupSettingFor(platform, groupId, "aiEnabled") != "0";
+    bool aiEnabledForGroup(const std::string& platform, const std::string& groupId,
+                           const std::string& adapterId = {}) const {
+        return getGroupSettingFor(platform, groupId, "aiEnabled", adapterId) != "0";
     }
 
     /// AI 白名单模式（dice/ai.whitelist）：开启后仅白名单内的群/私聊可用 AI 对话/NPC，
@@ -5044,7 +5093,7 @@ public:
         if (msg.type != MessageType::kGroup || msg.targetId.empty())
             return i18n_.tr(loc, "ai.group_only");
         std::string a = toLower(trim(args));
-        bool on = aiEnabledForGroup(msg.platform, msg.targetId);
+        bool on = aiEnabledForGroup(msg.platform, msg.targetId, msg.adapterId);
         const bool wlOk = aiWhitelistOk(msg.platform, msg.targetId, true);
         if (a.empty() || a == "status")
             return i18n_.tr(loc, !wlOk ? "ai.not_whitelisted" : on ? "ai.status_on" : "ai.status_off");
@@ -5053,12 +5102,12 @@ public:
             // 白名单模式下非授权群拒绝开启（群管也不行）。
             if (!wlOk) return i18n_.tr(loc, "ai.not_whitelisted");
             if (on) return i18n_.tr(loc, "ai.already_on");
-            setGroupSettingFor(msg.platform, msg.targetId, "aiEnabled", "1");
+            setGroupSettingFor(msg.platform, msg.targetId, "aiEnabled", "1", msg.adapterId);
             return i18n_.tr(loc, "ai.on");
         }
         if (a == "off" || a == "0") {
             if (!on) return i18n_.tr(loc, "ai.already_off");
-            setGroupSettingFor(msg.platform, msg.targetId, "aiEnabled", "0");
+            setGroupSettingFor(msg.platform, msg.targetId, "aiEnabled", "0", msg.adapterId);
             return i18n_.tr(loc, "ai.off");
         }
         return i18n_.tr(loc, on ? "ai.status_on" : "ai.status_off");
@@ -5251,7 +5300,7 @@ private:
         return 0;
     }
     void setCocRule(const Message& msg, int rule) {
-        setGroupSettingFor(msg.platform, msg.targetId, "cocRule", std::to_string(rule));
+        setGroupSettingFor(msg.platform, msg.targetId, "cocRule", std::to_string(rule), msg.adapterId);
     }
     void clearCocRule(const Message& msg) {
         auto* st = db_.getStorage(); if (!st) return;
@@ -5323,7 +5372,7 @@ private:
             for (char c : a) { if (std::isdigit((unsigned char)c)) gid += c; else if (!gid.empty()) break; }
             if (gid.empty()) return std::nullopt;   // 裸 botoff/boton → 交给 .bot（本群开关）
             if (!isMaster(msg)) return i18n_.tr(loc, "gate.not_master");
-            setGroupSettingFor(msg.platform, gid, "enabled", w == "boton" ? "1" : "0");
+            setGroupSettingFor(msg.platform, gid, "enabled", w == "boton" ? "1" : "0", msg.adapterId);
             return i18n_.tr(loc, w == "boton" ? "master.boton" : "master.botoff", {{"group", gid}});
         }
 
@@ -5516,7 +5565,7 @@ private:
                 }
         }
 
-        std::string lvl = blacklistQuitLevel(msg.platform, msg.targetId);
+        std::string lvl = blacklistQuitLevel(msg.platform, msg.targetId, msg.adapterId);
         std::string lvlLabel = i18n_.tr(loc, lvl == "admin" ? "group.quit_admin" : "group.quit_member");
 
         return i18n_.tr(loc, "group.info", {
@@ -5607,14 +5656,14 @@ public:
         if (botRole == "member") return "";                             // 明确是普通成员 → 无管理权，不执行
         std::string text = !msg.rawContent.empty() ? msg.rawContent
                          : (!msg.displayContent.empty() ? msg.displayContent : msg.content);
-        std::string kick = groupSettingValue(msg.platform, msg.targetId, "autoKick");
+        std::string kick = groupSettingValue(msg.platform, msg.targetId, "autoKick", msg.adapterId);
         if (!kick.empty() && text.find(kick) != std::string::npos) {
             a->setGroupKick(msg.targetId, msg.senderId);
             return "kick";
         }
-        std::string mute = groupSettingValue(msg.platform, msg.targetId, "autoMute");
+        std::string mute = groupSettingValue(msg.platform, msg.targetId, "autoMute", msg.adapterId);
         if (!mute.empty() && text.find(mute) != std::string::npos) {
-            int minutes = parseIntOr(groupSettingValue(msg.platform, msg.targetId, "autoMuteMin"), 10);
+            int minutes = parseIntOr(groupSettingValue(msg.platform, msg.targetId, "autoMuteMin", msg.adapterId), 10);
             if (minutes < 1) minutes = 10;
             a->setGroupBan(msg.targetId, msg.senderId, minutes * 60);
             return "mute";
@@ -5794,12 +5843,12 @@ private:
             ? msg.targetId : ("pm_" + msg.senderId);
         auto loadAk = [&]() {
             J j = J::object();
-            try { std::string s = getGroupSettingFor(msg.platform, gid, "akData"); if (!s.empty()) j = J::parse(s); } catch (...) {}
+            try { std::string s = getGroupSettingFor(msg.platform, gid, "akData", msg.adapterId); if (!s.empty()) j = J::parse(s); } catch (...) {}
             if (!j.is_object()) j = J::object();
             if (!j.contains("items") || !j["items"].is_array()) j["items"] = J::array();
             return j;
         };
-        auto saveAk = [&](const J& j) { setGroupSettingFor(msg.platform, gid, "akData", j.dump()); };
+        auto saveAk = [&](const J& j) { setGroupSettingFor(msg.platform, gid, "akData", j.dump(), msg.adapterId); };
         auto listText = [&](const J& j) {
             std::string out; int i = 1;
             for (auto& e : j["items"]) if (e.is_string()) { out += (out.empty() ? "" : "\n") + std::to_string(i++) + ". " + e.get<std::string>(); }
@@ -5860,7 +5909,7 @@ private:
             int pick = engine_.roll("1d" + std::to_string(n)).modifiedTotal;
             std::string got = std::to_string(pick) + ". " + j["items"][pick - 1].get<std::string>();
             std::string all = listText(j);
-            setGroupSettingFor(msg.platform, gid, "akData", "");   // 抽取后清空（原版行为）
+            setGroupSettingFor(msg.platform, gid, "akData", "", msg.adapterId);   // 抽取后清空（原版行为）
             return i18n_.tr(loc, "ak.got", {{"title", titleOf(j)}, {"list", all}, {"get", got}});
         }
         if (act == "show") {
@@ -5868,7 +5917,7 @@ private:
             return i18n_.tr(loc, "ak.show", {{"title", titleOf(j)}, {"list", listText(j).empty() ? i18n_.tr(loc, "ak.empty_list") : listText(j)}});
         }
         if (act == "clr" || act == "clear") {
-            setGroupSettingFor(msg.platform, gid, "akData", "");
+            setGroupSettingFor(msg.platform, gid, "akData", "", msg.adapterId);
             return i18n_.tr(loc, "ak.cleared");
         }
         return i18n_.tr(loc, "ak.usage");
@@ -5912,8 +5961,8 @@ private:
                 for (auto& x : adapters_.allAdapters())
                     if (x->isConnected() && x->platform() == plat) { a = x; break; }
             if (a) a->leaveGroup(gid);
-            setGroupSettingFor(plat, gid, "leaving", "0");
-            setGroupSettingFor(plat, gid, "left", "1");
+            setGroupSettingFor(plat, gid, "leaving", "0", aid);
+            setGroupSettingFor(plat, gid, "left", "1", aid);
             DICE_LOG_INFO(".dismiss：已退出群 {}（记录保留，状态=已退群）", gid);
             // B：指令退群通知骰主。
             dice::notice::notify(cfg_, adapters_, dice::notice::kImportant,
@@ -6018,17 +6067,27 @@ private:
         // QQ 官方机器人当前未提供群成员角色字段。为保持基础群内管理指令可用，
         // 暂时允许官方群内任意用户通过“群管级”门槛（如 .bot on/.bot off）。
         // 待官方 API 提供可信的群角色/权限信息后，必须改为在此校验 owner/admin。
-        // 骰主与信任级校验仍在 isMaster/senderTrust 中单独拒绝官方群 OpenID 映射。
+        // 骰主按 OpenID 匹配（isMaster 已支持）；信任级仍单独拒绝官方群 OpenID 映射。
         if (msg.platform == "qq_official" && msg.type == MessageType::kGroup) return true;
         if (msg.fromSelf) return true;                               // 自控：用骰娘账号自身发指令视同群管理（操控者可信）
         if (isMaster(msg) || senderTrust(msg) >= 4) return true;
         if (msg.type == MessageType::kPrivate) return true;          // 原版：私聊恒真
         std::string role;
-        try { role = msg.extra.value("role", std::string()); } catch (...) {}
-        if (role == "owner" || role == "admin") return true;
+        try { role = toLower(trim(msg.extra.value("role", std::string()))); } catch (...) {}
+        // 标准 OneBot 值 + 其他客户端的常见别名（creator/administrator）。
+        if (role == "owner" || role == "admin" || role == "creator" || role == "administrator") return true;
+        // 部分客户端在群消息里不带 sender.role。先查适配器缓存的成员角色，
+        // 再异步补一次定向角色查询（适配器内限频），下一次操作即可命中。
+        if (msg.type == MessageType::kGroup && !msg.targetId.empty() && !msg.senderId.empty()) {
+            if (auto a = adapters_.getAdapter(msg.adapterId)) {
+                if (a->isGroupOwner(msg.targetId, msg.senderId) || a->isGroupAdmin(msg.targetId, msg.senderId))
+                    return true;
+                a->refreshMemberRole(msg.targetId, msg.senderId);
+            }
+        }
         // 群邀请人视同管理（原版 pGrp->inviter == fromChat.uid）
         if (msg.type == MessageType::kGroup && !msg.targetId.empty() &&
-            groupSettingValue(msg.platform, msg.targetId, "inviter") == msg.senderId) return true;
+            groupSettingValue(msg.platform, msg.targetId, "inviter", msg.adapterId) == msg.senderId) return true;
         return false;
     }
 
@@ -6594,14 +6653,8 @@ private:
                 if (name == "group" || name == "群号")                 return msg.targetId;
                 if (name == "self" || name == "骰娘")                  return resolveSelfCall(msg);
                 if (name == "date" || name == "time" || name == "日期" || name == "时间") {
-                    std::time_t tt = std::time(nullptr); std::tm lt{};
-#if defined(_WIN32)
-                    localtime_s(&lt, &tt);
-#else
-                    lt = *std::localtime(&tt);
-#endif
-                    char b[16]; const char* fmt = (name == "date" || name == "日期") ? "%Y-%m-%d" : "%H:%M:%S";
-                    std::strftime(b, sizeof(b), fmt, &lt); return std::string(b);
+                    const char* fmt = (name == "date" || name == "日期") ? "%Y-%m-%d" : "%H:%M:%S";
+                    return utils::formatTimeInTimezone(std::time(nullptr), fmt);
                 }
                 return std::nullopt;
             };
@@ -7610,20 +7663,8 @@ private:
         if (tok == "strSelfCall") return resolveSelfCall(msg);
         if (tok == "selfId") return msg.selfId;                  // 机器人 QQ 号 (原 {self} 含义)
         if (tok == "group") return msg.targetId;
-        if (tok == "date") { std::time_t t=std::time(nullptr); char b[16]; std::tm lt{};
-#if defined(_WIN32)
-            localtime_s(&lt,&t);
-#else
-            lt=*std::localtime(&t);
-#endif
-            std::strftime(b,sizeof(b),"%Y-%m-%d",&lt); return b; }
-        if (tok == "time") { std::time_t t=std::time(nullptr); char b[16]; std::tm lt{};
-#if defined(_WIN32)
-            localtime_s(&lt,&t);
-#else
-            lt=*std::localtime(&t);
-#endif
-            std::strftime(b,sizeof(b),"%H:%M:%S",&lt); return b; }
+        if (tok == "date") return utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%d");
+        if (tok == "time") return utils::formatTimeInTimezone(std::time(nullptr), "%H:%M:%S");
         if (tok.rfind("roll:", 0) == 0) {
             auto r = engine_.roll(trim(tok.substr(5)));
             return r.ok() ? std::to_string(r.modifiedTotal) : std::string("?");
@@ -8038,24 +8079,18 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     void recordUsageHour(long long commands, long long rolls) {
         auto* st = db_.getStorage();
         if (!st || (commands == 0 && rolls == 0)) return;
-        std::time_t t = std::time(nullptr);
-        std::tm lt{};
-#if defined(_WIN32)
-        localtime_s(&lt, &t);
-#else
-        localtime_r(&t, &lt);
-#endif
-        char day[16];
-        std::strftime(day, sizeof(day), "%Y-%m-%d", &lt);
+        const std::time_t t = std::time(nullptr);
+        const std::string day = utils::formatTimeInTimezone(t, "%Y-%m-%d");
+        const int hour = utils::timezoneTm(t).tm_hour;
         try {
             namespace orm = sqlite_orm;
             auto rows = st->get_all<UsageHourRow>(orm::where(
-                orm::c(&UsageHourRow::day) == std::string(day)
-                and orm::c(&UsageHourRow::hour) == lt.tm_hour));
+                orm::c(&UsageHourRow::day) == day
+                and orm::c(&UsageHourRow::hour) == hour));
             if (rows.empty()) {
                 UsageHourRow row;
                 row.day = day;
-                row.hour = lt.tm_hour;
+                row.hour = hour;
                 row.commandCount = commands;
                 row.rollCount = rolls;
                 st->insert(row);
@@ -8105,13 +8140,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
 
     // ─── 调度 (#48 定时任务 / #47 不活跃自动退群) ─────────────
     static std::string todayYMD() {
-        std::time_t t = std::time(nullptr); std::tm lt{};
-#if defined(_WIN32)
-        localtime_s(&lt, &t);
-#else
-        lt = *std::localtime(&t);
-#endif
-        char b[16]; std::strftime(b, sizeof(b), "%Y-%m-%d", &lt); return b;
+        return utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%d");
     }
     /// Mark a group active "today" (called on each incoming group message).
     void markGroupActive(const std::string& platform, const std::string& gid) {
@@ -9172,7 +9201,18 @@ public:
         return false;
     }
 
-    std::vector<std::string> segmentReply(const std::string& text) const {
+    /// 消息分段总开关（dice/reply_segment_enabled，默认开）。
+    bool replySegmentEnabled() const {
+        return cfg_.get<bool>("dice/reply_segment_enabled", true);
+    }
+
+    /// 把超长回复切成多段。平台参数用于豁免分段：QQ 官方机器人/Discord/KOOK
+    /// 的客户端对连续消息排序不稳定，一律整段发送。
+    std::vector<std::string> segmentReply(const std::string& text,
+                                          const std::string& platform = {}) const {
+        if (!replySegmentEnabled()) return {text};
+        if (platform == "qq_official" || platform == "discord" || platform == "kook")
+            return {text};
         int maxW = cfg_.get<int>("dice/reply_segment_len", 600);
         if (maxW < 100) maxW = 100; if (maxW > 1000) maxW = 1000;
         auto cpLen = [](unsigned char c) -> int {
@@ -9272,16 +9312,9 @@ public:
         rep("{cardw}",   nickWrap(groupCardOf(msg)));
         rep("{pcnamew}", nickWrap(pcNameOf(msg)));
         if (text.find("{date}") != std::string::npos || text.find("{time}") != std::string::npos) {
-            std::time_t tt = std::time(nullptr); std::tm lt{};
-#if defined(_WIN32)
-            localtime_s(&lt, &tt);
-#else
-            lt = *std::localtime(&tt);
-#endif
-            char db[16], tb[16];
-            std::strftime(db, sizeof(db), "%Y-%m-%d", &lt);
-            std::strftime(tb, sizeof(tb), "%H:%M:%S", &lt);
-            rep("{date}", db); rep("{time}", tb);
+            const std::time_t tt = std::time(nullptr);
+            rep("{date}", utils::formatTimeInTimezone(tt, "%Y-%m-%d"));
+            rep("{time}", utils::formatTimeInTimezone(tt, "%H:%M:%S"));
         }
         return text;
     }
@@ -9374,15 +9407,8 @@ private:
         else return std::nullopt;
         const char* fmt = "%Y%m%d";
 
-        std::time_t t = std::time(nullptr) + dayOffset;
-        std::tm lt{};
-#if defined(_WIN32)
-        localtime_s(&lt, &t);
-#else
-        lt = *std::localtime(&t);
-#endif
-        char buf[16];
-        std::strftime(buf, sizeof(buf), fmt, &lt);
+        const std::time_t t = std::time(nullptr) + dayOffset;
+        const std::string buf = utils::formatTimeInTimezone(t, fmt);
         size_t h = std::hash<std::string>{}(msg.senderId + std::string(buf));
         int val = static_cast<int>(h % 100) + 1;   // 1..100
         return i18n_.tr(loc, key, {{"nick", displayName(msg)}, {"res", std::to_string(val)}});

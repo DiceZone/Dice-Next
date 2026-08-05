@@ -227,6 +227,20 @@ struct GroupSettingRow {
     std::string value;
 };
 
+/// Settings that belong to one concrete adapter account in a shared group.
+/// GroupSettingRow remains the shared/public-group layer (for example name and
+/// remark); switches and runtime state live here so two bots in the same group
+/// cannot overwrite each other.
+struct GroupAccountSettingRow {
+    int id = 0;
+    std::string adapterId;   // stable AdapterRow id
+    std::string platform;
+    std::string groupId;     // public/shared group id
+    std::string endpointId;  // native id used by this adapter
+    std::string key;
+    std::string value;
+};
+
 /// Player profile — auto-created the first time a user triggers the bot (even a
 /// single .r). Powers the web 玩家管理 page.
 struct PlayerProfileRow {
@@ -524,6 +538,16 @@ private:
             orm::make_column("group_id", &GroupSettingRow::groupId),
             orm::make_column("key", &GroupSettingRow::key),
             orm::make_column("value", &GroupSettingRow::value)
+        ),
+        orm::make_table("group_account_settings",
+            orm::make_column("id", &GroupAccountSettingRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("adapter_id", &GroupAccountSettingRow::adapterId),
+            orm::make_column("platform", &GroupAccountSettingRow::platform),
+            orm::make_column("group_id", &GroupAccountSettingRow::groupId),
+            orm::make_column("endpoint_id", &GroupAccountSettingRow::endpointId),
+            orm::make_column("key", &GroupAccountSettingRow::key),
+            orm::make_column("value", &GroupAccountSettingRow::value)
         ),
         orm::make_table("i18n_overrides",
             orm::make_column("id", &I18nOverrideRow::id,

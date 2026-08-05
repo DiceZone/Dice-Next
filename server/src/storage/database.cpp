@@ -164,6 +164,16 @@ bool Database::open(const std::string& path) {
                     orm::make_column("key", &GroupSettingRow::key),
                     orm::make_column("value", &GroupSettingRow::value)
                 ),
+                orm::make_table("group_account_settings",
+                    orm::make_column("id", &GroupAccountSettingRow::id,
+                        orm::primary_key().autoincrement()),
+                    orm::make_column("adapter_id", &GroupAccountSettingRow::adapterId),
+                    orm::make_column("platform", &GroupAccountSettingRow::platform),
+                    orm::make_column("group_id", &GroupAccountSettingRow::groupId),
+                    orm::make_column("endpoint_id", &GroupAccountSettingRow::endpointId),
+                    orm::make_column("key", &GroupAccountSettingRow::key),
+                    orm::make_column("value", &GroupAccountSettingRow::value)
+                ),
                 // ── i18n_overrides ──
                 orm::make_table("i18n_overrides",
                     orm::make_column("id", &I18nOverrideRow::id,

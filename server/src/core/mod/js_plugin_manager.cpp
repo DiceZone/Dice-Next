@@ -1,5 +1,6 @@
 #include "core/mod/js_plugin_manager.h"
 #include "common/logger.h"
+#include "common/utils.h"
 
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
@@ -287,14 +288,15 @@ static JSValue jsRegisterTask(JSContext* ctx, JSValueConst, int argc, JSValueCon
         DICE_LOG_WARN("[js] registerTask: unsupported taskType/value '{}' '{}' (only daily HH:MM / cron 'M H * * *')", taskType, value);
         return JS_UNDEFINED;
     }
-    std::time_t now = std::time(nullptr); std::tm lt{};
+    const std::time_t now = std::time(nullptr);
+    std::tm tgt = dice::utils::timezoneTm(now);
+    tgt.tm_hour = hh; tgt.tm_min = mm; tgt.tm_sec = 0;
 #ifdef _WIN32
-    localtime_s(&lt, &now);
+    const std::time_t target = _mkgmtime(&tgt) - dice::utils::effectiveTimezoneOffsetMinutes() * 60;
 #else
-    localtime_r(&now, &lt);
+    const std::time_t target = timegm(&tgt) - dice::utils::effectiveTimezoneOffsetMinutes() * 60;
 #endif
-    std::tm tgt = lt; tgt.tm_hour = hh; tgt.tm_min = mm; tgt.tm_sec = 0;
-    double delay = difftime(std::mktime(&tgt), now);
+    double delay = difftime(target, now);
     if (delay <= 0) delay += 86400.0;   // already passed today → tomorrow
     m->addTimer(JS_DupValue(ctx, argv[3]), delay, 86400.0);   // re-arm every 24h
     DICE_LOG_INFO("[js] registerTask scheduled daily at {:02d}:{:02d}", hh, mm);
