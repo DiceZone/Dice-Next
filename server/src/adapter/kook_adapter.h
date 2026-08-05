@@ -68,6 +68,7 @@ public:
     bool configure(const json& cfg) override {
         name_ = cfg.value("name", std::string("KOOK Bot"));
         token_ = cfg.value("token", std::string());
+        setMessageFormatOverride(parseFormatOverride(cfg.value("message_format", std::string())));
         if (token_.empty()) { lastError_ = "KOOK Bot 需要 Bot Token"; return false; }
         return true;
     }
@@ -108,8 +109,8 @@ public:
 private:
     /// KOOK CardMessage is a documented rich-message type.  Keep oversized
     /// messages in the existing KMarkdown/text path so no reply is truncated.
-    static json outboundPayload(const std::string& target, const std::string& content) {
-        if (!IAdapter::cardMessageMode() || content.size() > 5000)
+    json outboundPayload(const std::string& target, const std::string& content) {
+        if (!effectiveCardMode() || content.size() > 5000)
             return json{{"type", 1}, {"target_id", target}, {"content", content}};
         const json card = json::array({{
             {"type", "card"}, {"theme", "primary"}, {"size", "sm"},

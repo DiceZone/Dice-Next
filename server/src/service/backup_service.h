@@ -118,6 +118,9 @@ inline bool copyTree(const fs::path& from, const fs::path& to, std::string& erro
             it.disable_recursion_pending();
             continue;
         }
+        // 单实例锁文件由进程独占打开（Windows 不共享），既不是用户数据也永远
+        // 复制不了，备份时必须跳过，否则 Windows 上必然报“文件被占用”。
+        if (it->is_regular_file(ec) && it->path().filename() == ".instance.lock") continue;
         const auto rel = fs::relative(it->path(), from, ec);
         if (ec) { error = "解析备份路径失败: " + ec.message(); return false; }
         const auto dest = to / rel;

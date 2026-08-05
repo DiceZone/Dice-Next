@@ -64,6 +64,7 @@ inline int areaOf(const std::string& op) {
 
 struct Window {
     std::string platform, chatId;
+    std::string adapterId;   // 空=全局窗口（所有帐号来源的通知都发）；非空=仅该适配器帐号来源
     bool isGroup = true;
     int mask = kAll;
     std::vector<std::string> events;   // 非空=逐项订阅；空=按 mask 区域订阅（指令/旧数据）
@@ -80,6 +81,7 @@ inline std::vector<Window> windows(ConfigManager& cfg) {
             if (!w.is_object()) continue;
             Window win;
             win.platform = w.value("platform", std::string());
+            win.adapterId = w.value("adapter_id", std::string());
             win.chatId   = w.value("chat_id", std::string());
             win.isGroup  = w.value("is_group", true);
             win.mask     = w.value("level_mask", (int)kAll);
@@ -87,6 +89,23 @@ inline std::vector<Window> windows(ConfigManager& cfg) {
                 for (auto& e : w["events"]) if (e.is_string()) win.events.push_back(e.get<std::string>());
             if (!win.chatId.empty()) v.push_back(std::move(win));
         }
+    return v;
+}
+
+/// 已连接且平台匹配的适配器，按内部适配器编号升序排列（系统级通知的回退顺序）。
+inline std::vector<AdapterPtr> orderedCandidates(AdapterManager& adapters, const std::string& platform) {
+    std::vector<AdapterPtr> v;
+    for (auto& a : adapters.allAdapters()) {
+        if (!a || !a->isConnected()) continue;
+        if (!platform.empty() && a->platform() != platform) continue;
+        v.push_back(a);
+    }
+    std::sort(v.begin(), v.end(), [](const AdapterPtr& x, const AdapterPtr& y) {
+        int xi = 0, yi = 0;
+        try { xi = std::stoi(x->id()); } catch (...) {}
+        try { yi = std::stoi(y->id()); } catch (...) {}
+        return xi < yi;
+    });
     return v;
 }
 
@@ -202,27 +221,47 @@ inline void smtpSendAsync(const json& s, const std::string& subject, const std::
 // origin* 用于排除来源窗口（避免回声）并记入审计「发生地」。
 inline void notify(ConfigManager& cfg, AdapterManager& adapters, int level, const std::string& msg,
                    const std::string& originPlatform = "", const std::string& originChat = "",
-                   const std::string& op = "") {
+                   const std::string& op = "", const std::string& originAdapterId = "") {
     std::string origin = originChat.empty() ? std::string() : (originPlatform + ":" + originChat);
     audit(level, msg, op, origin);
     json c = conf(cfg);
     for (auto& w : windows(cfg)) {
+        // 帐号窗口只收该帐号来源的通知；全局窗口（adapter_id 空）收所有帐号。
+        // 测试通知（op=="test"）不受来源限制，逐窗口验证链路。
+        if (op != "test" && !w.adapterId.empty() && w.adapterId != originAdapterId) continue;
         bool hit = (op == "test")   // 测试通知不受订阅过滤（骰主手动触发验证链路）
             || (!w.events.empty()
                 ? (std::find(w.events.begin(), w.events.end(), op) != w.events.end())
                 : ((w.mask & level) != 0));
         if (!hit) continue;
         if (!originChat.empty() && w.platform == originPlatform && w.chatId == originChat) continue;  // 不回推来源
-        for (auto& a : adapters.allAdapters()) {
-            if (!a || !a->isConnected()) continue;
-            if (!w.platform.empty() && a->platform() != w.platform) continue;
-            Message m;
-            m.platform = a->platform();
-            m.type = w.isGroup ? MessageType::kGroup : MessageType::kPrivate;
-            m.targetId = w.chatId;
-            m.content = msg;
-            a->sendMessage(m);
-            break;   // 该平台发一个已连接适配器即可
+        // 哪里来的就发给谁：帐号来源的通知先由来源适配器发；发送失败（例如
+        // 掉线通知时来源已离线）或系统级通知，则按内部适配器编号顺序依次尝试，
+        // 直到成功发出一次。
+        auto trySend = [&](const AdapterPtr& a) -> bool {
+            if (!a || !a->isConnected()) return false;
+            try {
+                Message m;
+                m.platform = a->platform();
+                m.type = w.isGroup ? MessageType::kGroup : MessageType::kPrivate;
+                m.targetId = w.chatId;
+                m.content = msg;
+                a->sendMessage(m);
+                return true;
+            } catch (...) { return false; }
+        };
+        bool sent = false;
+        if (!originAdapterId.empty()) {
+            auto src = adapters.getAdapter(originAdapterId);
+            if (src && src->isConnected()
+                && (w.platform.empty() || src->platform() == w.platform))
+                sent = trySend(src);
+        }
+        if (!sent) {
+            for (auto& a : orderedCandidates(adapters, w.platform)) {
+                if (sent) break;
+                sent = trySend(a);
+            }
         }
     }
     // 第三方推送（按区域掩码过滤；后台线程，不阻塞调用方）。

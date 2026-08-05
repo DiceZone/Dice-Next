@@ -90,6 +90,16 @@ public:
     /// have no rich-message equivalent simply keep sending traditional text.
     static void setCardMessageMode(bool enabled) noexcept { cardMessageMode_.store(enabled); }
     static bool cardMessageMode() noexcept { return cardMessageMode_.load(); }
+    /// 解析适配器级 message_format：""=跟随全局, "traditional"=传统文本, "card"=卡片。
+    static int parseFormatOverride(const std::string& v) {
+        return v == "card" ? 1 : v == "traditional" ? 0 : -1;
+    }
+    /// 每个适配器可单独覆盖出站消息形式（-1=跟随全局，0=传统文本，1=卡片）。
+    void setMessageFormatOverride(int mode) noexcept { messageFormatOverride_.store(mode); }
+    bool effectiveCardMode() const noexcept {
+        const int v = messageFormatOverride_.load();
+        return v < 0 ? cardMessageMode() : v > 0;
+    }
 
     /// Unique adapter identifier (e.g. "onebot-v11-1")
     virtual std::string id() const = 0;
@@ -282,6 +292,7 @@ public:
 
 private:
     inline static std::atomic_bool cardMessageMode_{false};
+    std::atomic<int> messageFormatOverride_{-1};
 };
 
 using AdapterPtr = std::shared_ptr<IAdapter>;

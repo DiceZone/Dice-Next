@@ -151,7 +151,7 @@ static std::string replyRuleValidate(const ReplyRule& rule) {
     return {};
 }
 
-static J adapterToJson(const AdapterRow& a) {
+static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std::string()) {
     J cfg = J::parse(a.config, nullptr, false);
     if (!cfg.is_object()) cfg = J::object();
     const bool official = a.type == static_cast<int>(AdapterType::kQQOfficial);
@@ -170,7 +170,7 @@ static J adapterToJson(const AdapterRow& a) {
         {"heartApiKeyTail", heartApiKey.size() > 4 ? heartApiKey.substr(heartApiKey.size() - 4) : std::string()},
         {"enabled", a.enabled},
         {"status", "disconnected"},
-        {"lastActive", nullptr},
+        {"lastActive", lastActive.empty() ? J(nullptr) : J(lastActive)},
         {"createdAt", "2026-06-14T00:00:00.000Z"}
     };
 }
@@ -204,23 +204,33 @@ static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
         auto adapter = std::make_shared<QQOfficialAdapter>(std::to_string(a.id));
         adapter->configure({{"name", a.name}, {"appId", cfg.value("appId", std::string())},
                             {"appSecret", cfg.value("appSecret", std::string())},
-                            {"qqNumber", cfg.value("qqNumber", std::string())}});
+                            {"qqNumber", cfg.value("qqNumber", std::string())},
+                            {"message_format", cfg.value("message_format", std::string())}});
         return adapter;
     }
     if (a.type == static_cast<int>(AdapterType::kDiscord)) {
+        J cfg = J::parse(a.config, nullptr, false);
+        if (!cfg.is_object()) cfg = J::object();
         auto adapter = std::make_shared<DiscordAdapter>(std::to_string(a.id));
-        adapter->configure({{"name", a.name}, {"token", a.accessToken}});
+        adapter->configure({{"name", a.name}, {"token", a.accessToken},
+                            {"message_format", cfg.value("message_format", std::string())}});
         return adapter;
     }
     if (a.type == static_cast<int>(AdapterType::kKook)) {
+        J cfg = J::parse(a.config, nullptr, false);
+        if (!cfg.is_object()) cfg = J::object();
         auto adapter = std::make_shared<KookAdapter>(std::to_string(a.id));
-        adapter->configure({{"name", a.name}, {"token", a.accessToken}});
+        adapter->configure({{"name", a.name}, {"token", a.accessToken},
+                            {"message_format", cfg.value("message_format", std::string())}});
         return adapter;
     }
     auto adapter = std::make_shared<OneBotV11Adapter>(std::to_string(a.id));
+    J cfg = J::parse(a.config, nullptr, false);
+    if (!cfg.is_object()) cfg = J::object();
     std::string mode = (a.connectionMode == 1) ? "reverse_ws" : (a.connectionMode == 2) ? "http" : "forward_ws";
     adapter->configure({{"name", a.name}, {"endpoint", a.endpoint},
-                        {"accessToken", a.accessToken}, {"connectionMode", mode}});
+                        {"accessToken", a.accessToken}, {"connectionMode", mode},
+                        {"message_format", cfg.value("message_format", std::string())}});
     return adapter;
 }
 
@@ -1170,32 +1180,91 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // 出站消息表现形式。传统模式始终发送纯文本；卡片模式由各适配器按其
     // 官方能力渲染，无法使用富消息的平台会安全回退为传统文本。
-    app.registerHandler("/api/system/message-format", [&cfg](Req req, CB&& cb) {
+    // 支持全局默认 + 按适配器/帐号单独覆盖（适配器配置 message_format：
+    // 空=跟随全局 / traditional / card）。
+    app.registerHandler("/api/system/message-format", [&cfg, st, &adapterMgr](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
                 auto j = J::parse(req->body());
                 std::string mode = j.value("mode", std::string("traditional"));
                 if (mode != "card") mode = "traditional";
                 cfg.set<std::string>("dice/message_format", mode);
+                if (j.contains("adapters") && j["adapters"].is_array()) {
+                    for (auto& e : j["adapters"]) {
+                        if (!e.is_object()) continue;
+                        const std::string id = e.value("id", std::string());
+                        std::string am = e.value("mode", std::string());
+                        if (am != "card" && am != "traditional") am = "";
+                        int aid = 0; try { aid = std::stoi(id); } catch (...) { continue; }
+                        auto row = st->get_pointer<AdapterRow>(aid);
+                        if (!row) continue;
+                        J cfg2 = J::parse(row->config, nullptr, false);
+                        if (!cfg2.is_object()) cfg2 = J::object();
+                        if (am.empty()) cfg2.erase("message_format");
+                        else cfg2["message_format"] = am;
+                        row->config = cfg2.dump();
+                        st->update(*row);
+                        if (auto a = adapterMgr.getAdapter(id))
+                            a->setMessageFormatOverride(IAdapter::parseFormatOverride(am));
+                    }
+                    persistAdaptersToConfig(st, cfg);
+                }
                 cfg.save();
                 IAdapter::setCardMessageMode(mode == "card");
             }
             const std::string mode = cfg.get<std::string>("dice/message_format", "traditional") == "card"
                 ? "card" : "traditional";
-            jsonReply(ok(J{{"mode", mode}}), std::move(cb));
+            J adapters = J::array();
+            for (auto& r : st->get_all<AdapterRow>()) {
+                J cfg2 = J::parse(r.config, nullptr, false);
+                if (!cfg2.is_object()) cfg2 = J::object();
+                adapters.push_back(J{{"id", std::to_string(r.id)}, {"type", r.type == static_cast<int>(AdapterType::kQQOfficial) ? "qq_official" : r.type == static_cast<int>(AdapterType::kDiscord) ? "discord" : r.type == static_cast<int>(AdapterType::kKook) ? "kook" : "onebot_v11"},
+                                     {"name", r.name},
+                                     {"loginId", [&] { auto a = adapterMgr.getAdapter(std::to_string(r.id)); return a ? a->getLoginId() : std::string(); }()},
+                                     {"loginName", [&] { auto a = adapterMgr.getAdapter(std::to_string(r.id)); return a ? a->getLoginName() : std::string(); }()},
+                                     {"appId", [&] { auto a = adapterMgr.getAdapter(std::to_string(r.id)); if (auto off = std::dynamic_pointer_cast<QQOfficialAdapter>(a)) return off->appId(); return std::string(); }()},
+                                     {"mode", cfg2.value("message_format", std::string())}});
+            }
+            jsonReply(ok(J{{"mode", mode}, {"adapters", adapters}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
     // Masters (bot owners), platform-scoped, stored in config dice.masters.
-    app.registerHandler("/api/masters", [&cfg](Req req, CB&& cb) {
+    app.registerHandler("/api/masters", [&cfg, st](Req req, CB&& cb) {
         try {
             J arr = cfg.get<J>("dice/masters", J::array());
             if (!arr.is_array()) arr = J::array();
+            // 玩家昵称（用于前端显示“昵称(id)”）；QQ 官方机器人的 OpenID 先映射到公共号再查。
+            auto nickOf = [&](const std::string& plat, const std::string& id) -> std::string {
+                std::string uid = id;
+                if (plat == "qq_official") {
+                    try {
+                        auto eps = st->get_all<IdentityEndpointRow>(orm::where(
+                            orm::c(&IdentityEndpointRow::adapterType) == std::string("qq_official") and
+                            orm::c(&IdentityEndpointRow::kind) == std::string("user") and
+                            orm::c(&IdentityEndpointRow::endpointId) == id));
+                        if (!eps.empty()) {
+                            auto ent = st->get<IdentityRow>(eps.front().identityId);
+                            uid = ent.publicId;
+                        }
+                    } catch (...) {}
+                }
+                try {
+                    auto rows = st->get_all<PlayerProfileRow>(orm::where(
+                        orm::c(&PlayerProfileRow::platform) == plat and
+                        orm::c(&PlayerProfileRow::userId) == uid), orm::limit(1));
+                    if (!rows.empty()) return rows.front().nickname;
+                } catch (...) {}
+                return {};
+            };
             // Normalize legacy bare-string entries to {platform:"", id}.
             J norm = J::array();
             for (auto& m : arr) {
-                if (m.is_string()) norm.push_back(J{{"platform", ""}, {"id", m.get<std::string>()}});
-                else if (m.is_object()) norm.push_back(J{{"platform", m.value("platform", "")}, {"id", m.value("id", "")}});
+                std::string plat, id;
+                if (m.is_string()) id = m.get<std::string>();
+                else if (m.is_object()) { plat = m.value("platform", ""); id = m.value("id", ""); }
+                if (id.empty()) continue;
+                norm.push_back(J{{"platform", plat}, {"id", id}, {"nickname", nickOf(plat, id)}});
             }
             if (req->method() == drogon::Post) {
                 auto j = J::parse(req->body(), nullptr, false);
@@ -1230,7 +1299,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         J evs = J::array();
                         if (w.contains("events") && w["events"].is_array())
                             for (auto& e : w["events"]) if (e.is_string() && dice::notice::areaOf(e.get<std::string>())) evs.push_back(e);
-                        wins.push_back(J{{"platform", w.value("platform", std::string())}, {"chat_id", cid},
+                        wins.push_back(J{{"platform", w.value("platform", std::string())},
+                                         {"adapter_id", w.value("adapter_id", std::string())}, {"chat_id", cid},
                                          {"is_group", w.value("is_group", true)}, {"name", w.value("name", std::string())},
                                          {"level_mask", mask}, {"events", evs}});
                     }
@@ -1905,7 +1975,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 auto rows = st->get_all<AdapterRow>();
                 J arr = J::array();
                 for (auto& r : rows) {
-                    auto j = adapterToJson(r);
+                    auto j = adapterToJson(r, adapterMgr.lastActiveAt(std::to_string(r.id)));
                     // Inject live connection status from adapter manager
                     auto adapter = adapterMgr.getAdapter(std::to_string(r.id));
                     j["status"] = adapter ? adapter->connectionStatus() : std::string("disconnected");
@@ -1960,7 +2030,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     adapterMgr.startAdapter(std::to_string(a.id));
                 }
 
-                jsonReply(ok(adapterToJson(a)), std::move(cb));
+                jsonReply(ok(adapterToJson(a, adapterMgr.lastActiveAt(std::to_string(a.id)))), std::move(cb));
             } else { jsonReply(fail("Method not allowed"), std::move(cb)); }
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Post});
@@ -2011,7 +2081,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
 
                 // Inject live connection status into response
-                auto jj = adapterToJson(a);
+                auto jj = adapterToJson(a, adapterMgr.lastActiveAt(std::to_string(a.id)));
                 auto adapter = adapterMgr.getAdapter(std::to_string(a.id));
                 jj["status"] = adapter ? adapter->connectionStatus() : std::string("disconnected");
                 if (adapter) {
@@ -2752,7 +2822,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // ── 定时任务 CRUD (#48) ────────────────────────────────────
     auto schedToJson = [](const ScheduledTaskRow& r) {
-        return J{{"id", r.id}, {"name", r.name}, {"platform", r.platform},
+        return J{{"id", r.id}, {"name", r.name}, {"adapterId", r.adapterId}, {"platform", r.platform},
                  {"targetType", r.targetType}, {"targetId", r.targetId}, {"cronTime", r.cronTime},
                  {"days", r.days}, {"content", r.content}, {"enabled", r.enabled != 0},
                  {"lastRun", r.lastRun},
@@ -2815,6 +2885,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 auto j = J::parse(req->body());
                 ScheduledTaskRow r;
                 r.name = j.value("name", std::string("任务"));
+                r.adapterId = j.value("adapterId", std::string());
                 r.platform = j.value("platform", std::string("onebot_v11"));
                 r.targetType = j.value("targetType", std::string("group"));
                 r.targetId = j.value("targetId", std::string());
@@ -2857,6 +2928,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 const std::string oldType = r.triggerType; const int oldInterval = r.intervalMin;
                 const std::string oldOnce = r.onceDate;
                 if (j.contains("name")) r.name = j["name"].get<std::string>();
+                if (j.contains("adapterId")) r.adapterId = j["adapterId"].get<std::string>();
                 if (j.contains("platform")) r.platform = j["platform"].get<std::string>();
                 if (j.contains("targetType")) r.targetType = j["targetType"].get<std::string>();
                 if (j.contains("targetId")) r.targetId = j["targetId"].get<std::string>();
