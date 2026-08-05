@@ -5138,7 +5138,7 @@ public:
         std::string origin = (msg.type == MessageType::kGroup) ? msg.targetId : msg.senderId;
         dice::notice::notify(cfg_, adapters_, dice::notice::kRoutine,
             "\xe5\xb7\xb2\xe5\xb0\x86 " + name + "(" + target + ") \xe7\x9a\x84\xe4\xbf\xa1\xe4\xbb\xbb\xe7\xad\x89\xe7\xba\xa7\xe8\xae\xbe\xe4\xb8\xba " + std::to_string(nl),
-            msg.platform, origin, "trust");
+            msg.platform, origin, "trust", msg.adapterId);
         return i18n_.tr(loc, "trust.set", {{"user", name}, {"level", std::to_string(nl)}});
     }
 
@@ -5166,20 +5166,21 @@ public:
             setTrust(msg.platform, target, kTrustAdmin);
             dice::notice::notify(cfg_, adapters_, dice::notice::kCritical,
                 "\xe5\xb7\xb2\xe6\xb7\xbb\xe5\x8a\xa0 " + name + "(" + target + ") \xe7\x9a\x84\xe7\xae\xa1\xe7\x90\x86\xe6\x9d\x83\xe9\x99\x90",
-                msg.platform, origin, "admin");
+                msg.platform, origin, "admin", msg.adapterId);
             return i18n_.tr(loc, "admin.added", {{"user", name}});
         }
         if (getTrust(msg.platform, target) < kTrustAdmin) return i18n_.tr(loc, "admin.not_admin");
         setTrust(msg.platform, target, kTrustNormal);
         dice::notice::notify(cfg_, adapters_, dice::notice::kCritical,
             "\xe5\xb7\xb2\xe6\x94\xb6\xe5\x9b\x9e " + name + "(" + target + ") \xe7\x9a\x84\xe7\xae\xa1\xe7\x90\x86\xe6\x9d\x83\xe9\x99\x90",
-            msg.platform, origin, "admin");
+            msg.platform, origin, "admin", msg.adapterId);
         return i18n_.tr(loc, "admin.removed", {{"user", name}});
     }
 
     /// B：便捷推送——把一条通知发给订阅了该级别的骰主通知窗口（供事件层/定时任务调用）。
-    void notifyMasters(int level, const std::string& msg, const std::string& op = "") {
-        dice::notice::notify(cfg_, adapters_, level, msg, "", "", op);
+    void notifyMasters(int level, const std::string& msg, const std::string& op = "",
+                       const std::string& adapterId = "") {
+        dice::notice::notify(cfg_, adapters_, level, msg, "", "", op, adapterId);
     }
 
     /// .link：消息从 (platform,gid) 应转发到的目标群列表（active 链接；with=双向，
@@ -5218,7 +5219,9 @@ public:
         J wins = (nc.contains("windows") && nc["windows"].is_array()) ? nc["windows"] : J::array();
         int idx = -1;
         for (int i = 0; i < (int)wins.size(); ++i)
-            if (wins[i].value("platform", std::string()) == plat && wins[i].value("chat_id", std::string()) == chatId) { idx = i; break; }
+            if (wins[i].value("platform", std::string()) == plat
+                && wins[i].value("chat_id", std::string()) == chatId
+                && wins[i].value("adapter_id", std::string()) == msg.adapterId) { idx = i; break; }
         std::istringstream iss(args); std::string act; iss >> act; act = toLower(act);
         if (act.empty() || act == "status") {
             if (idx < 0) return i18n_.tr(loc, "notice.off_status");
@@ -5237,7 +5240,8 @@ public:
         // 指令按区域订阅 = 勾选该区域全部具体事件（细粒度存储，网页可再逐项调整）。
         J evs = J::array();
         for (auto& op : dice::notice::eventsForMask(mask)) evs.push_back(op);
-        J w = {{"platform", plat}, {"chat_id", chatId}, {"is_group", isGroup}, {"level_mask", mask}, {"events", evs}};
+        J w = {{"platform", plat}, {"adapter_id", msg.adapterId}, {"chat_id", chatId},
+               {"is_group", isGroup}, {"level_mask", mask}, {"events", evs}};
         if (idx >= 0) { if (wins[idx].contains("name")) w["name"] = wins[idx]["name"]; wins[idx] = w; }
         else wins.push_back(w);
         nc["windows"] = wins; cfg_.set<J>("dice/notice", nc); cfg_.save();
@@ -5268,7 +5272,7 @@ public:
             cfg_.set<J>("dice/aliases", na); cfg_.save();
             dice::notice::notify(cfg_, adapters_, dice::notice::kRoutine,
                 "\xe5\xb7\xb2\xe7\xbb\x91\xe5\xae\x9a\xe8\xb4\xa6\xe5\x8f\xb7\xe5\x88\xab\xe5\x90\x8d " + a1 + " -> " + a2,
-                msg.platform, msg.type == MessageType::kGroup ? msg.targetId : msg.senderId, "alias");
+                msg.platform, msg.type == MessageType::kGroup ? msg.targetId : msg.senderId, "alias", msg.adapterId);
             return i18n_.tr(loc, "alias.added", {{"alias", a1}, {"main", a2}});
         }
         if (act == "del") {
@@ -5967,7 +5971,7 @@ private:
             // B：指令退群通知骰主。
             dice::notice::notify(cfg_, adapters_, dice::notice::kImportant,
                 "\xe6\x8c\x87\xe4\xbb\xa4\xe9\x80\x80\xe7\xbe\xa4\xef\xbc\x9a\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe7\xbe\xa4 " + gid,
-                plat, gid, "dismiss");
+                plat, gid, "dismiss", aid);
         });
         return silent ? "" : i18n_.tr(loc, "dismiss.leaving");
     }
@@ -8236,14 +8240,23 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         }
         return platform.empty() ? any : nullptr;
     }
+    /// 定时任务选适配器：优先指定帐号（adapterId），否则退回平台任选。
+    AdapterPtr adapterForTask(const std::string& adapterId, const std::string& platform) const {
+        if (!adapterId.empty()) {
+            auto a = adapters_.getAdapter(adapterId);
+            return (a && a->isConnected()) ? a : nullptr;
+        }
+        return adapterForPlatform(platform);
+    }
     /// Send one scheduled message to a target (定时任务). type: "group"|"private".
     /// 内容走 renderReply：支持 {self}{group}{date}{time}{roll:..}{draw:..}{a|b|c} 等变量/函数。
     /// 返回是否真的发出（false=目标平台无已连接适配器/目标为空）。
-    bool sendScheduled(const std::string& platform, const std::string& type,
+    bool sendScheduled(const std::string& adapterId, const std::string& platform, const std::string& type,
                        const std::string& targetId, const std::string& content) {
-        auto a = adapterForPlatform(platform);
+        auto a = adapterForTask(adapterId, platform);
         if (!a || targetId.empty()) {
-            DICE_LOG_INFO("scheduled send skipped: platform '{}' 无已连接适配器（target {}）", platform, targetId);
+            DICE_LOG_INFO("scheduled send skipped: adapter '{}' platform '{}' 无已连接适配器（target {}）",
+                          adapterId, platform, targetId);
             return false;
         }
         Message lm; lm.platform = a->platform(); lm.targetId = targetId;
@@ -8271,6 +8284,31 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         } catch (...) {}
         return out;
     }
+    /// 指定帐号（adapterId）在跑的群：[(公共群号, 原生端点)]，排除已退群/删除/退群中。
+    /// targetId="*" 且任务指定了具体适配器时的展开来源。
+    std::vector<std::pair<std::string, std::string>> allKnownAccountGroups(const std::string& adapterId) const {
+        std::vector<std::pair<std::string, std::string>> out;
+        auto* st = db_.getStorage(); if (!st || adapterId.empty()) return out;
+        try {
+            namespace orm = sqlite_orm;
+            std::map<std::string, std::string> endpoint;   // 公共群号 → 原生端点
+            for (auto& r : st->get_all<GroupAccountSettingRow>(
+                     orm::where(orm::c(&GroupAccountSettingRow::adapterId) == adapterId))) {
+                if (r.key == "enabled" && r.value == "1") endpoint[r.groupId] = r.endpointId;
+            }
+            auto flag = [&](const std::string& gid, const std::string& key) {
+                auto rows = st->get_all<GroupAccountSettingRow>(orm::where(
+                    orm::c(&GroupAccountSettingRow::adapterId) == adapterId and
+                    orm::c(&GroupAccountSettingRow::groupId) == gid and
+                    orm::c(&GroupAccountSettingRow::key) == key), orm::limit(1));
+                return !rows.empty() && rows.front().value == "1";
+            };
+            for (auto& [gid, ep] : endpoint)
+                if (!flag(gid, "left") && !flag(gid, "__removed") && !flag(gid, "leaving"))
+                    out.emplace_back(gid, ep.empty() ? gid : ep);
+        } catch (...) {}
+        return out;
+    }
 
     /// 执行一条定时任务的动作（含 targetId="*" 的全群展开）。返回实际执行的目标数。
     /// @p force 单目标任务无视因果条件直接执行（网页「立即执行」）；
@@ -8279,26 +8317,37 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         const std::string action = tk.action.empty() ? "send" : tk.action;
         if (tk.targetId == "*" && tk.targetType != "private") {
             int done = 0;
+            if (!tk.adapterId.empty()) {
+                for (auto& [gid, endpoint] : allKnownAccountGroups(tk.adapterId)) {
+                    if (!evalScheduledCondition(tk.condition, tk.platform, "group", gid)) continue;
+                    if (action == "leave") {
+                        if (leaveGroupWith(tk.adapterId, tk.platform, endpoint, tk.content)) ++done;
+                    } else if (sendScheduled(tk.adapterId, tk.platform, "group", endpoint, tk.content)) ++done;
+                }
+                return done;
+            }
             for (auto& [plat, gid] : allKnownGroups()) {
                 if (!tk.platform.empty() && plat != tk.platform) continue;
                 if (!evalScheduledCondition(tk.condition, plat, "group", gid)) continue;
-                if (action == "leave") { if (leaveGroupWith(plat, gid, tk.content)) ++done; }
+                if (action == "leave") { if (leaveGroupWith("", plat, gid, tk.content)) ++done; }
                 else if (groupSettingValue(plat, gid, "enabled") != "0"
-                         && sendScheduled(plat, "group", gid, tk.content)) ++done;
+                         && sendScheduled("", plat, "group", gid, tk.content)) ++done;
             }
             return done;
         }
         if (!force && !evalScheduledCondition(tk.condition, tk.platform, tk.targetType, tk.targetId)) return 0;
-        if (action == "leave") return leaveGroupWith(tk.platform, tk.targetId, tk.content) ? 1 : 0;
-        return sendScheduled(tk.platform, tk.targetType, tk.targetId, tk.content) ? 1 : 0;
+        if (action == "leave") return leaveGroupWith(tk.adapterId, tk.platform, tk.targetId, tk.content) ? 1 : 0;
+        return sendScheduled(tk.adapterId, tk.platform, tk.targetType, tk.targetId, tk.content) ? 1 : 0;
     }
 
     /// Leave a group with the given (already-rendered) reason. For #47.
     /// 返回是否执行（false=目标平台无已连接适配器/群号为空）。
-    bool leaveGroupWith(const std::string& platform, const std::string& gid, const std::string& reason) {
-        auto a = adapterForPlatform(platform);
+    bool leaveGroupWith(const std::string& adapterId, const std::string& platform,
+                        const std::string& gid, const std::string& reason) {
+        auto a = adapterForTask(adapterId, platform);
         if (!a || gid.empty()) {
-            DICE_LOG_INFO("scheduled leave skipped: platform '{}' 无已连接适配器（group {}）", platform, gid);
+            DICE_LOG_INFO("scheduled leave skipped: adapter '{}' platform '{}' 无已连接适配器（group {}）",
+                          adapterId, platform, gid);
             return false;
         }
         Message lm; lm.platform = a->platform(); lm.targetId = gid; lm.type = MessageType::kGroup;
@@ -8308,7 +8357,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         dice::notice::notify(cfg_, adapters_, dice::notice::kImportant,
             "\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe7\xbe\xa4 " + gid
                 + (reason.empty() ? std::string() : ("\xef\xbc\x88" + reason + "\xef\xbc\x89")),
-            platform, gid, "leave");
+            platform, gid, "leave", adapterId);
         return true;
     }
 

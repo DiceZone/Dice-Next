@@ -64,6 +64,7 @@ public:
         accessToken_ = config.value("accessToken", "");
         if (config.contains("connectionMode"))
             mode_ = config["connectionMode"].get<std::string>();
+        setMessageFormatOverride(parseFormatOverride(config.value("message_format", std::string())));
         DICE_LOG_INFO("OneBotV11 '{}': configured endpoint={} mode={}", name_, endpoint_, mode_);
         return true;
     }

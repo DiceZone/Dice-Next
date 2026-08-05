@@ -236,6 +236,7 @@ bool Database::open(const std::string& path) {
                     orm::make_column("id", &ScheduledTaskRow::id,
                         orm::primary_key().autoincrement()),
                     orm::make_column("name", &ScheduledTaskRow::name),
+                    orm::make_column("adapter_id", &ScheduledTaskRow::adapterId),
                     orm::make_column("platform", &ScheduledTaskRow::platform),
                     orm::make_column("target_type", &ScheduledTaskRow::targetType),
                     orm::make_column("target_id", &ScheduledTaskRow::targetId),

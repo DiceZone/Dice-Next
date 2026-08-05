@@ -61,6 +61,7 @@ public:
         appId_ = cfg.value("appId", std::string());
         appSecret_ = cfg.value("appSecret", std::string());
         displayQQ_ = cfg.value("qqNumber", std::string());
+        setMessageFormatOverride(parseFormatOverride(cfg.value("message_format", std::string())));
         if (appId_.empty() || appSecret_.empty()) { lastError_ = "QQ 官方机器人需要 AppID 和 AppSecret"; return false; }
         return true;
     }
@@ -418,7 +419,7 @@ private:
 
         auto client = httpsClient("api.sgroup.qq.com");
         if (!client) { lastError_ = "无法解析 api.sgroup.qq.com"; return; }
-        const bool useCard = IAdapter::cardMessageMode() && !forceTraditional && m.type != MessageType::kChannel;
+        const bool useCard = effectiveCardMode() && !forceTraditional && m.type != MessageType::kChannel;
 
         auto request = drogon::HttpRequest::newHttpRequest();
         request->setMethod(drogon::Post); request->setPath(path);

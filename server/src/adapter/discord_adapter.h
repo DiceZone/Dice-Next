@@ -92,6 +92,7 @@ public:
     bool configure(const json& cfg) override {
         name_ = cfg.value("name", std::string("Discord Bot"));
         token_ = cfg.value("token", std::string());
+        setMessageFormatOverride(parseFormatOverride(cfg.value("message_format", std::string())));
         if (token_.empty()) { lastError_ = "Discord Bot 需要 Bot Token"; return false; }
         return true;
     }
@@ -370,7 +371,7 @@ private:
         // replies as plain text because an embed description is limited to 4096
         // characters and silently truncating dice/log output would be worse.
         json body;
-        if (IAdapter::cardMessageMode() && native.size() <= 4096) {
+        if (effectiveCardMode() && native.size() <= 4096) {
             body = {{"embeds", json::array({{{"description", native}, {"color", 0x5865F2}}})}};
         } else {
             body = {{"content", native}};

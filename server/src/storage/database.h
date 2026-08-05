@@ -301,6 +301,7 @@ struct OnlineSampleRow {
 struct ScheduledTaskRow {
     int id = 0;
     std::string name;        // 任务名（展示用）
+    std::string adapterId;   // 指定适配器帐号（空=按 platform 任选该平台已连接适配器）
     std::string platform;    // 目标平台 (onebot_v11/…)
     std::string targetType;  // "group" | "private"
     std::string targetId;    // 群号 / QQ
@@ -608,6 +609,7 @@ private:
             orm::make_column("id", &ScheduledTaskRow::id,
                 orm::primary_key().autoincrement()),
             orm::make_column("name", &ScheduledTaskRow::name),
+            orm::make_column("adapter_id", &ScheduledTaskRow::adapterId),
             orm::make_column("platform", &ScheduledTaskRow::platform),
             orm::make_column("target_type", &ScheduledTaskRow::targetType),
             orm::make_column("target_id", &ScheduledTaskRow::targetId),

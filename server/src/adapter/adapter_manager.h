@@ -106,6 +106,7 @@ public:
     /// Route an incoming message to all message handlers.
     /// Called by adapters when they receive a message.
     void routeMessage(const Message& msg) {
+        markActive(msg.adapterId);
         Message routed = msg;
         normalizeIdentity(routed);
         cacheOfficialGroupNickname(routed);
@@ -122,6 +123,7 @@ public:
 
     /// Route an incoming non-message event to all event handlers.
     void routeEvent(const BotEvent& ev) {
+        markActive(ev.adapterId);
         BotEvent routed = ev;
         // QQ 官方事件携带的是 OpenID，而消息路径已把群号映射为公共群号。
         // 这里做同样的归一化，避免事件写出的 left/__removed/inviter 挂在
@@ -143,6 +145,13 @@ public:
         eventHandlers_.push_back(std::move(handler));
     }
 
+    /// 该适配器最近一次收到消息/事件的 UTC ISO 时间；从未活跃时返回空串。
+    std::string lastActiveAt(const std::string& adapterId) const {
+        std::lock_guard lock(mutex_);
+        auto it = lastActiveAt_.find(adapterId);
+        return it == lastActiveAt_.end() ? std::string() : it->second;
+    }
+
     /// Broadcast a reply to all connected adapters.
     /// Usually you'd want to reply through the same adapter that received the message.
     void broadcastToAll(const std::string& text) {
@@ -154,6 +163,11 @@ public:
     }
 
 private:
+    void markActive(const std::string& adapterId) {
+        if (adapterId.empty()) return;
+        std::lock_guard lock(mutex_);
+        lastActiveAt_[adapterId] = utils::nowIso8601();
+    }
     static std::string profileTimestamp() {
         return utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%dT%H:%M:%S");
     }
@@ -327,6 +341,7 @@ private:
     std::vector<IAdapter::MessageCallback> messageHandlers_;
     std::vector<IAdapter::EventCallback> eventHandlers_;
     mutable std::mutex mutex_;
+    std::map<std::string, std::string> lastActiveAt_;   // adapterId → UTC ISO（受 mutex_ 保护）
 };
 
 } // namespace dice

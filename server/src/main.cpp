@@ -1531,7 +1531,7 @@ static int realMain(int argc, char* argv[]) {
                     a->leaveGroup(e.groupId);
                     DICE_LOG_INFO("event: leaving blacklisted group {} on join", e.groupId);
                     cmdRouter.notifyMasters(dice::notice::kImportant,
-                        "\xe8\xa2\xab\xe6\x8b\x89\xe5\x85\xa5\xe9\xbb\x91\xe5\x90\x8d\xe5\x8d\x95\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "blacklist_leave");
+                        "\xe8\xa2\xab\xe6\x8b\x89\xe5\x85\xa5\xe9\xbb\x91\xe5\x90\x8d\xe5\x8d\x95\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "blacklist_leave", e.adapterId);
                     return;
                 }
                 // 非好友强拉兜底：人少的群可不经审批直接把 bot 拉进来（无 request 事件），
@@ -1553,7 +1553,7 @@ static int realMain(int argc, char* argv[]) {
                             a->leaveGroup(e.groupId);
                             DICE_LOG_INFO("event: 非好友 {} 强拉入群 {} → 自动退群", puller, e.groupId);
                             cmdRouter.notifyMasters(dice::notice::kImportant,
-                                "\xe8\xa2\xab\xe9\x9d\x9e\xe5\xa5\xbd\xe5\x8f\x8b " + userLabel(puller) + " \xe6\x8b\x89\xe5\x85\xa5\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "nonfriend_leave");
+                                "\xe8\xa2\xab\xe9\x9d\x9e\xe5\xa5\xbd\xe5\x8f\x8b " + userLabel(puller) + " \xe6\x8b\x89\xe5\x85\xa5\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "nonfriend_leave", e.adapterId);
                             return;
                         }
                     }
@@ -1582,9 +1582,9 @@ static int realMain(int argc, char* argv[]) {
                     std::string kws = ev.value("group_name_keyword_leave", std::string());
                     if (!kws.empty()) {
                         auto aw = std::weak_ptr<dice::IAdapter>(a);
-                        std::string gid = e.groupId, plat = e.platform;
+                        std::string gid = e.groupId, plat = e.platform, evAid = e.adapterId;
                         drogon::app().getLoop()->runAfter(5.0,
-                            [aw, gid, plat, kws, loc, &cmdRouter, &i18n]() {
+                            [aw, gid, plat, evAid, kws, loc, &cmdRouter, &i18n]() {
                             auto ad = aw.lock(); if (!ad || !ad->isConnected()) return;
                             std::string gname = ad->getGroupName(gid);
                             if (gname.empty() || gname == gid) {
@@ -1610,7 +1610,7 @@ static int realMain(int argc, char* argv[]) {
                             cmdRouter.notifyMasters(dice::notice::kImportant,
                                 "\xe7\xbe\xa4\xe5\x90\x8d\xe3\x80\x8c" + gname + "\xe3\x80\x8d(" + gid
                                     + ") \xe5\x90\xab\xe5\x85\xb3\xe9\x94\xae\xe8\xaf\x8d\xe3\x80\x8c" + hitKw
-                                    + "\xe3\x80\x8d\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "keyword_leave");
+                                    + "\xe3\x80\x8d\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "keyword_leave", evAid);
                         });
                     }
                 }
@@ -1630,7 +1630,7 @@ static int realMain(int argc, char* argv[]) {
                 a->leaveGroup(e.groupId);
                 DICE_LOG_INFO("event: leaving group {} — blacklisted user {} joined", e.groupId, e.userId);
                 cmdRouter.notifyMasters(dice::notice::kImportant,
-                    "\xe9\xbb\x91\xe5\x90\x8d\xe5\x8d\x95\xe7\x94\xa8\xe6\x88\xb7 " + userLabel(e.userId) + " \xe5\x8a\xa0\xe5\x85\xa5\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "blacklist_leave");
+                    "\xe9\xbb\x91\xe5\x90\x8d\xe5\x8d\x95\xe7\x94\xa8\xe6\x88\xb7 " + userLabel(e.userId) + " \xe5\x8a\xa0\xe5\x85\xa5\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "blacklist_leave", e.adapterId);
                 return;
             }
             // ── 必须加入用户群 —— 挂靠黑名单检查点（入群事件）。
@@ -1766,7 +1766,7 @@ static int realMain(int argc, char* argv[]) {
                 std::string who = (!e.operatorId.empty() && e.operatorId != e.selfId)
                     ? ("\xef\xbc\x88\xe6\x93\x8d\xe4\xbd\x9c\xe8\x80\x85 " + userLabel(e.operatorId) + "\xef\xbc\x89") : std::string();
                 cmdRouter.notifyMasters(dice::notice::kImportant,
-                    "\xe9\xaa\xb0\xe5\xa8\x98\xe5\xb7\xb2\xe7\xa6\xbb\xe5\xbc\x80\xe7\xbe\xa4 " + groupLabel(e.groupId) + who, "group_left");
+                    "\xe9\xaa\xb0\xe5\xa8\x98\xe5\xb7\xb2\xe7\xa6\xbb\xe5\xbc\x80\xe7\xbe\xa4 " + groupLabel(e.groupId) + who, "group_left", e.adapterId);
             }
         } else if (e.type == ET::kPoke) {
             if (!ev.value("poke_enabled", true)) return;   // 戳一戳回复总开关（默认开）
@@ -1826,7 +1826,7 @@ static int realMain(int argc, char* argv[]) {
             if (!diceFlag("listen_friend_add", true)) return;       // 新好友事件开关
             // B：新好友通过通知骰主。
             cmdRouter.notifyMasters(dice::notice::kImportant,
-                "\xe6\x96\xb0\xe5\xa5\xbd\xe5\x8f\x8b\xe5\xb7\xb2\xe6\xb7\xbb\xe5\x8a\xa0\xef\xbc\x9a" + userLabel(e.userId), "friend_add");
+                "\xe6\x96\xb0\xe5\xa5\xbd\xe5\x8f\x8b\xe5\xb7\xb2\xe6\xb7\xbb\xe5\x8a\xa0\xef\xbc\x9a" + userLabel(e.userId), "friend_add", e.adapterId);
             std::string fw = ev.value("friend_welcome", std::string());
             if (fw.empty()) fw = i18n.tr(loc, "event.friend_welcome");
             if (!fw.empty()) a->sendPrivateMessage(e.userId, fw);
@@ -1861,7 +1861,7 @@ static int realMain(int argc, char* argv[]) {
             // B：通知骰主收到好友申请（含附言），便于人工处理。
             cmdRouter.notifyMasters(dice::notice::kImportant,
                 "\xe6\x94\xb6\xe5\x88\xb0\xe5\xa5\xbd\xe5\x8f\x8b\xe7\x94\xb3\xe8\xaf\xb7\xef\xbc\x9a" + userLabel(e.userId)
-                    + (e.comment.empty() ? "" : "\xef\xbc\x88\xe9\x99\x84\xe8\xa8\x80\xef\xbc\x9a" + e.comment + "\xef\xbc\x89"), "friend_req");
+                    + (e.comment.empty() ? "" : "\xef\xbc\x88\xe9\x99\x84\xe8\xa8\x80\xef\xbc\x9a" + e.comment + "\xef\xbc\x89"), "friend_req", e.adapterId);
             // 策略：all=任意通过 / keyword=含关键词才通过(其余留人工) / reject=禁止任何人添加 /
             //       manual=不自动处理。未设 friend_policy 时由旧 auto_approve_friend 派生。
             std::string pol = ev.value("friend_policy", std::string());
@@ -1890,7 +1890,7 @@ static int realMain(int argc, char* argv[]) {
                 // B：通知骰主收到加群邀请（含邀请人），便于人工处理。
                 cmdRouter.notifyMasters(dice::notice::kImportant,
                     "\xe6\x94\xb6\xe5\x88\xb0\xe5\x8a\xa0\xe7\xbe\xa4\xe9\x82\x80\xe8\xaf\xb7\xef\xbc\x9a\xe7\xbe\xa4 " + groupLabel(e.groupId)
-                        + " \xef\xbc\x88\xe9\x82\x80\xe8\xaf\xb7\xe4\xba\xba " + userLabel(e.userId) + "\xef\xbc\x89", "group_invite");
+                        + " \xef\xbc\x88\xe9\x82\x80\xe8\xaf\xb7\xe4\xba\xba " + userLabel(e.userId) + "\xef\xbc\x89", "group_invite", e.adapterId);
                 // 加群邀请（机器人被邀请进群）。注意：邀请事件不含群名称，故「群名含
                 // 非法关键词」无法在此判定 → 归入「进群后自动退群」规则（另行规划）。
                 // 叠加拒绝：黑名单群邀请永远先拒。
@@ -1911,7 +1911,7 @@ static int realMain(int argc, char* argv[]) {
                         a->setGroupRequest(e.flag, e.subType, false, "");
                         DICE_LOG_INFO("event: 非好友 {} 的群邀请自动拒绝 group {}", e.userId, e.groupId);
                         cmdRouter.notifyMasters(dice::notice::kImportant,
-                            "\xe9\x9d\x9e\xe5\xa5\xbd\xe5\x8f\x8b " + userLabel(e.userId) + " \xe9\x82\x80\xe8\xaf\xb7\xe5\x8a\xa0\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe6\x8b\x92\xe7\xbb\x9d", "nonfriend_leave");
+                            "\xe9\x9d\x9e\xe5\xa5\xbd\xe5\x8f\x8b " + userLabel(e.userId) + " \xe9\x82\x80\xe8\xaf\xb7\xe5\x8a\xa0\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe6\x8b\x92\xe7\xbb\x9d", "nonfriend_leave", e.adapterId);
                         return;
                     }
                 }

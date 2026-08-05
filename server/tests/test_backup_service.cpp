@@ -76,6 +76,21 @@ TEST(BackupCopy, SingleFileCopy) {
     fs::remove_all(root, ec);
 }
 
+TEST(BackupCopy, SkipsInstanceLockFile) {
+    const fs::path root = tempRoot("backup_lockfile");
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    const fs::path data = root / "data", stage = root / "stage";
+    writeFile(data / ".instance.lock", "pid");
+    writeFile(data / "keep.txt", "keep");
+
+    std::string error;
+    ASSERT_TRUE(backup::copyTree(data, stage, error, true));
+    ASSERT_TRUE(fs::exists(stage / "keep.txt"));
+    ASSERT_FALSE(fs::exists(stage / ".instance.lock"));
+    fs::remove_all(root, ec);
+}
+
 TEST(BackupLock, SerializesBackupRuns) {
     ASSERT_TRUE(backup::beginBackup());
     ASSERT_FALSE(backup::beginBackup());   // a second concurrent run is rejected
