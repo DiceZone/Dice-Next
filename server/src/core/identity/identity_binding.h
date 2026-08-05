@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -23,8 +24,40 @@ public:
         database_ = &db;
         migrateLegacyVirtualNumbers(db);
         cleanupOrphanVirtualGroupSettings(db);
+        cleanupOfficialEndpointGroupSettings(db);
     }
     Database* database() const { std::lock_guard lock(mu_); return database_; }
+    // 旧版本（QQ 官方适配器早期）群事件用原始 OpenID 写群设置，而消息使用
+    // 公共群号，产生“OpenID 幽灵群记录”（WebUI 常显示已退群，且消息无法
+    // 重建）。启动时清理：platform=qq_official 且 groupId 是某个官方端点
+    // 原始 id 的记录一律删除，公共群号对应的真实记录不受影响。
+    static void cleanupOfficialEndpointGroupSettings(Database& db) {
+        auto* st = db.getStorage(); if (!st) return;
+        try {
+            std::map<std::string, std::string> endpointPublic;   // raw openid → public group id
+            for (const auto& ep : st->get_all<IdentityEndpointRow>()) {
+                if (ep.adapterType != "qq_official" || ep.kind != "group") continue;
+                try {
+                    const auto ent = st->get<IdentityRow>(ep.identityId);
+                    if (ent.kind == "group" && !ep.endpointId.empty())
+                        endpointPublic[ep.endpointId] = ent.publicId;
+                } catch (...) {}
+            }
+            if (endpointPublic.empty()) return;
+            auto isPhantom = [&](const std::string& gid) {
+                auto it = endpointPublic.find(gid);
+                return it != endpointPublic.end() && it->second != gid;
+            };
+            for (const auto& row : st->get_all<GroupAccountSettingRow>(
+                     orm::where(orm::c(&GroupAccountSettingRow::platform) == std::string("qq_official")))) {
+                if (isPhantom(row.groupId)) st->remove<GroupAccountSettingRow>(row.id);
+            }
+            for (const auto& row : st->get_all<GroupSettingRow>(
+                     orm::where(orm::c(&GroupSettingRow::platform) == std::string("qq_official")))) {
+                if (isPhantom(row.groupId)) st->remove<GroupSettingRow>(row.id);
+            }
+        } catch (...) {}
+    }
     static std::string kindName(Kind kind) { return kind == Kind::Group ? "group" : "user"; }
     static std::string prefix(Kind kind) { return kind == Kind::Group ? "QQGroup:" : "QQ:"; }
     static std::string qualified(Kind kind, const std::string& id) { return prefix(kind) + id; }
@@ -194,6 +227,11 @@ private:
                     || std::find(live.begin(), live.end(), row.groupId) != live.end()) continue;
                 st->remove<GroupSettingRow>(row.id);
             }
+            for (const auto& row : st->get_all<GroupAccountSettingRow>()) {
+                if (!isVirtual(row.groupId)
+                    || std::find(live.begin(), live.end(), row.groupId) != live.end()) continue;
+                st->remove<GroupAccountSettingRow>(row.id);
+            }
         } catch (...) {}
     }
     static std::string now() { return std::to_string(static_cast<long long>(std::time(nullptr))); }
@@ -251,6 +289,7 @@ private:
             for (auto s : st->get_all<UserSettingRow>(orm::where(orm::c(&UserSettingRow::userId) == from))) { s.userId = to; st->update(s); }
             for (auto r : st->get_all<RollStatRow>(orm::where(orm::c(&RollStatRow::userId) == from))) { r.userId = to; st->update(r); }
             if (kind == Kind::Group) for (auto g : st->get_all<GroupSettingRow>(orm::where(orm::c(&GroupSettingRow::groupId) == from))) { g.groupId = to; st->update(g); }
+            if (kind == Kind::Group) for (auto g : st->get_all<GroupAccountSettingRow>(orm::where(orm::c(&GroupAccountSettingRow::groupId) == from))) { g.groupId = to; st->update(g); }
             if (auto* cards = db.getCardStorage()) for (auto c : cards->get_all<CharacterCardRow>()) { bool changed=false; if (kind == Kind::User && c.userId == from) { c.userId = to; changed=true; } if (kind == Kind::Group && c.groupId == from) { c.groupId = to; changed=true; } if (changed) cards->update(c); }
             if (auto* chat = db.getChatStorage()) for (auto c : chat->get_all<ChatMsgRow>()) { bool changed=false; if (kind == Kind::User && c.userId == from) { c.userId = to; changed=true; } if (kind == Kind::Group && c.groupId == from) { c.groupId = to; changed=true; } if (changed) chat->update(c); }
             st->remove<IdentityRow>(source.id);
@@ -263,6 +302,7 @@ private:
             for (auto s : st->get_all<UserSettingRow>(orm::where(orm::c(&UserSettingRow::userId) == from))) { s.userId = to; st->update(s); }
             for (auto r : st->get_all<RollStatRow>(orm::where(orm::c(&RollStatRow::userId) == from))) { r.userId = to; st->update(r); }
             if (kind == Kind::Group) for (auto g : st->get_all<GroupSettingRow>(orm::where(orm::c(&GroupSettingRow::groupId) == from))) { g.groupId = to; st->update(g); }
+            if (kind == Kind::Group) for (auto g : st->get_all<GroupAccountSettingRow>(orm::where(orm::c(&GroupAccountSettingRow::groupId) == from))) { g.groupId = to; st->update(g); }
             if (auto* cards = db.getCardStorage()) for (auto c : cards->get_all<CharacterCardRow>()) { bool changed=false; if (kind == Kind::User && c.userId == from) { c.userId=to; changed=true; } if (kind == Kind::Group && c.groupId == from) { c.groupId=to; changed=true; } if (changed) cards->update(c); }
             if (auto* chat = db.getChatStorage()) for (auto c : chat->get_all<ChatMsgRow>()) { bool changed=false; if (kind == Kind::User && c.userId == from) { c.userId=to; changed=true; } if (kind == Kind::Group && c.groupId == from) { c.groupId=to; changed=true; } if (changed) chat->update(c); }
         } catch (...) {}

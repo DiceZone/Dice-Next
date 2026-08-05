@@ -1,5 +1,6 @@
 #include "core/mod/lua_plugin_manager.h"
 #include "common/logger.h"
+#include "common/utils.h"
 
 #include <nlohmann/json.hpp>
 #include <yaml-cpp/yaml.h>
@@ -92,13 +93,7 @@ static void pushConfValue(lua_State* L, const std::string& v) {
     lua_pushlstring(L, v.data(), v.size());
 }
 static std::string todayStr() {
-    std::time_t tt = std::time(nullptr); std::tm lt{};
-#if defined(_WIN32)
-    localtime_s(&lt, &tt);
-#else
-    lt = *std::localtime(&tt);
-#endif
-    char b[16]; std::strftime(b, sizeof b, "%Y%m%d", &lt); return b;
+    return dice::utils::formatTimeInTimezone(std::time(nullptr), "%Y%m%d");
 }
 
 // ── Lua ↔ JSON（人物卡可存嵌套结构：数组/对象）──────────────────

@@ -24,6 +24,29 @@ Locale LocaleResolver::resolve(const Message& msg) const {
         if (auto loc = getOverride("user", platform + ":" + msg.senderId))
             return *loc;
     } else {
+        // Issue #7: a per-adapter-account language override wins over the
+        // shared group override, so two bots in the same group can reply in
+        // different languages from the web panel.
+        if (!msg.adapterId.empty()) {
+            std::optional<Locale> accountLocale;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto* st = db_.getStorage();
+                if (st) {
+                    try {
+                        auto rows = st->get_all<GroupAccountSettingRow>(
+                            orm::where(orm::c(&GroupAccountSettingRow::adapterId) == msg.adapterId
+                                and orm::c(&GroupAccountSettingRow::groupId) == msg.targetId
+                                and orm::c(&GroupAccountSettingRow::key) == std::string("locale")));
+                        if (!rows.empty() && !rows.front().value.empty())
+                            accountLocale = localeFromString(rows.front().value);
+                    } catch (const std::exception& e) {
+                        DICE_LOG_WARN("LocaleResolver: account locale lookup failed: {}", e.what());
+                    }
+                }
+            }
+            if (accountLocale) return *accountLocale;
+        }
         if (auto loc = getOverride("group", platform + ":" + msg.targetId))
             return *loc;
     }

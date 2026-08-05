@@ -9,6 +9,7 @@
 #include <ctime>
 #include <algorithm>
 #include <cctype>
+#include <limits>
 
 namespace dice {
 namespace utils {
@@ -63,6 +64,78 @@ inline std::string timestampToIso8601(std::chrono::system_clock::time_point tp) 
 
 inline std::string nowIso8601() {
     return timestampToIso8601(std::chrono::system_clock::now());
+}
+
+// ─── Timezone-aware time helpers ─────────────────────────────
+// 服务器统一时区（相对 UTC 的固定分钟偏移，东为正）。INT_MIN = 跟随系统
+// 本地时区（默认）。外部协议（心跳/云黑/Discord 等）仍使用 UTC，展示与
+// 上传给用户的日志/审计/备份名等统一走这里。
+
+inline int& timezoneOffsetMinutes() {
+    static int value = (std::numeric_limits<int>::min)();
+    return value;
+}
+inline void setTimezoneOffset(int minutes) { timezoneOffsetMinutes() = minutes; }
+
+/// 系统本地时区相对 UTC 的分钟偏移（含 DST，按当前时刻估算）。
+inline int systemLocalOffsetMinutes() {
+    const std::time_t t = std::time(nullptr);
+    std::tm utc{};
+#ifdef _WIN32
+    gmtime_s(&utc, &t);
+#else
+    gmtime_r(&t, &utc);
+#endif
+    return static_cast<int>((t - std::mktime(&utc)) / 60);
+}
+
+inline int effectiveTimezoneOffsetMinutes() {
+    const int v = timezoneOffsetMinutes();
+    return v == (std::numeric_limits<int>::min)() ? systemLocalOffsetMinutes() : v;
+}
+
+/// epoch → 配置时区下的 broken-down time（固定偏移，不做 DST 换算）。
+inline std::tm timezoneTm(std::time_t t) {
+    const std::time_t shifted = t + static_cast<std::time_t>(effectiveTimezoneOffsetMinutes()) * 60;
+    std::tm out{};
+#ifdef _WIN32
+    gmtime_s(&out, &shifted);
+#else
+    gmtime_r(&shifted, &out);
+#endif
+    return out;
+}
+
+/// 按配置时区格式化一个 epoch。
+inline std::string formatTimeInTimezone(std::time_t t, const char* fmt) {
+    const std::tm tm = timezoneTm(t);
+    char buf[64]{};
+    std::strftime(buf, sizeof(buf), fmt, &tm);
+    return buf;
+}
+
+/// 当前配置时区的墙上时间 ISO（无 Z）。
+inline std::string nowLocalIso() {
+    return formatTimeInTimezone(std::time(nullptr), "%Y-%m-%dT%H:%M:%S");
+}
+
+/// 解析 "YYYY-MM-DDTHH:MM:SS[.mmm][Z]"（按 UTC）→ epoch；失败返回 0。
+inline std::time_t parseIsoUtcToEpoch(const std::string& iso) {
+    if (iso.size() < 19 || iso[4] != '-' || iso[10] != 'T') return 0;
+    std::tm tm{};
+    try {
+        tm.tm_year = std::stoi(iso.substr(0, 4)) - 1900;
+        tm.tm_mon  = std::stoi(iso.substr(5, 2)) - 1;
+        tm.tm_mday = std::stoi(iso.substr(8, 2));
+        tm.tm_hour = std::stoi(iso.substr(11, 2));
+        tm.tm_min  = std::stoi(iso.substr(14, 2));
+        tm.tm_sec  = std::stoi(iso.substr(17, 2));
+    } catch (...) { return 0; }
+#ifdef _WIN32
+    return _mkgmtime(&tm);
+#else
+    return timegm(&tm);
+#endif
 }
 
 // ─── String Utilities ────────────────────────────────────────

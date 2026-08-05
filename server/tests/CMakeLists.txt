@@ -14,6 +14,9 @@ set(TEST_SOURCES
     test_persona_manager.cpp
     test_i18n_persona.cpp
     test_import_v2.cpp
+    test_group_account_scoping.cpp
+    test_backup_service.cpp
+    test_timezone.cpp
 
     # Project source files needed by tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/causal/cooldown_manager.cpp

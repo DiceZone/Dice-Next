@@ -216,6 +216,9 @@ public:
     virtual void refreshSelfRole(const std::string& /*groupId*/) {}
     /// Ask the platform to refresh a group's member list + the bot's role (async).
     virtual void refreshMembers(const std::string& /*groupId*/) {}
+    /// Ask the platform for ONE member's role (owner/admin/member) when a
+    /// message did not carry it. Async; default no-op.
+    virtual void refreshMemberRole(const std::string& /*groupId*/, const std::string& /*userId*/) {}
     /// Cached member list of a group (platform-native objects). Default empty array.
     virtual json getMembers(const std::string& /*groupId*/) const { return json::array(); }
 

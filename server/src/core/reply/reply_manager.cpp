@@ -318,14 +318,8 @@ ReplyPick ReplyManager::pickReply(const std::string& msg, const ReplyCtx& ctx, b
 
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
     static thread_local std::mt19937 probGen(std::random_device{}());
-    // 日计数所属日期（本地时区）；跨天清空整表。
-    char ymd[16]; { std::time_t t = std::time(nullptr); std::tm lt{};
-#if defined(_WIN32)
-        localtime_s(&lt, &t);
-#else
-        lt = *std::localtime(&t);
-#endif
-        std::strftime(ymd, sizeof(ymd), "%Y-%m-%d", &lt); }
+    // 日计数所属日期（配置时区）；跨天清空整表。
+    const std::string ymd = utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%d");
 
     for (auto& r : matches) {
         if (!scopeAllows(r, ctx)) { pick.skipped.push_back({r.id, "scope"}); continue; }

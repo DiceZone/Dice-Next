@@ -5,11 +5,13 @@
 // This avoids overwriting live SQLite files or loaded plugins in place.
 
 #include "../storage/database.h"
+#include "../common/utils.h"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <thread>
 #include <cstdlib>
 #include <cstdio>
 #include <ctime>
@@ -50,15 +52,8 @@ struct Selection {
 };
 
 inline std::string stamp() {
-    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    std::tm tm{};
-#ifdef _WIN32
-    localtime_s(&tm, &now);
-#else
-    localtime_r(&now, &tm);
-#endif
-    char out[32]; std::strftime(out, sizeof(out), "%Y%m%d-%H%M%S", &tm);
-    return out;
+    const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    return utils::formatTimeInTimezone(now, "%Y%m%d-%H%M%S");
 }
 
 inline std::string uniqueStamp() {
@@ -75,13 +70,67 @@ inline std::string quote(const fs::path& path) {
     out += '"'; return out;
 }
 
-inline bool copyTree(const fs::path& from, const fs::path& to, std::string& error) {
+inline bool transientLock(const std::error_code& ec) {
+#ifdef _WIN32
+    // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: the file is momentarily
+    // held by another process (antivirus scan, file preview, another backup).
+    return ec.value() == 32 || ec.value() == 33;
+#else
+    (void)ec;
+    return false;
+#endif
+}
+
+/// Copy one file with a few short retries.  Windows antivirus/indexers and
+/// concurrent readers can hold a file for tens of milliseconds; a single
+/// fs::copy_file would otherwise fail with a spurious sharing violation.
+inline bool copyFileWithRetry(const fs::path& from, const fs::path& to, std::string& error) {
+    std::error_code ec;
+    fs::create_directories(to.parent_path(), ec);
+    if (ec) { error = "无法创建备份目录 " + to.parent_path().string() + ": " + ec.message(); return false; }
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        ec.clear();
+        fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+        if (!ec) return true;
+        if (!transientLock(ec) || attempt == 5) {
+            error = "无法复制 " + from.string() + ": " + ec.message();
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250 * (attempt + 1)));
+    }
+    return false;
+}
+
+/// Recursively copy a directory.  When @p skipBackups is set, the "backups"
+/// store itself is excluded: archives live below data/, and copying them into
+/// the staging area would both duplicate every older backup and race with a
+/// backup archive that is still being written by another thread.
+inline bool copyTree(const fs::path& from, const fs::path& to, std::string& error,
+                     bool skipBackups = false) {
     std::error_code ec;
     if (!fs::exists(from, ec)) return true;
     fs::create_directories(to, ec);
-    if (ec) { error = ec.message(); return false; }
-    fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-    if (ec) { error = ec.message(); return false; }
+    if (ec) { error = "无法创建备份目录 " + to.string() + ": " + ec.message(); return false; }
+    fs::recursive_directory_iterator it(from, ec), end;
+    for (; it != end; it.increment(ec)) {
+        if (ec) { error = "遍历 " + from.string() + " 失败: " + ec.message(); return false; }
+        if (skipBackups && it->is_directory(ec) && it->path().filename() == "backups") {
+            it.disable_recursion_pending();
+            continue;
+        }
+        const auto rel = fs::relative(it->path(), from, ec);
+        if (ec) { error = "解析备份路径失败: " + ec.message(); return false; }
+        const auto dest = to / rel;
+        if (it->is_directory(ec)) {
+            fs::create_directories(dest, ec);
+            if (ec) { error = "无法创建备份目录 " + dest.string() + ": " + ec.message(); return false; }
+        } else if (it->is_regular_file(ec)) {
+            if (!copyFileWithRetry(it->path(), dest, error)) return false;
+        } else if (ec) {
+            error = "读取 " + it->path().string() + " 失败: " + ec.message();
+            return false;
+        }
+    }
     return true;
 }
 
@@ -89,14 +138,17 @@ inline bool copyItem(const fs::path& from, const fs::path& to, std::string& erro
     std::error_code ec;
     if (!fs::exists(from, ec)) return true;
     if (fs::is_directory(from, ec)) return copyTree(from, to, error);
-    fs::create_directories(to.parent_path(), ec);
-    if (ec) { error = ec.message(); return false; }
-    fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
-    if (ec) { error = ec.message(); return false; }
-    return true;
+    return copyFileWithRetry(from, to, error);
 }
 
 inline std::string runCapture(const std::string& command, int& code);
+
+/// Serialize manual and scheduled backups: two concurrent createArchive calls
+/// would race on the same archive store (one may copy an archive the other is
+/// still writing, producing exactly the Windows sharing-violation above).
+inline std::atomic<bool>& backupBusyFlag() { static std::atomic<bool> value{false}; return value; }
+inline bool beginBackup() { bool expected = false; return backupBusyFlag().compare_exchange_strong(expected, true); }
+inline void endBackup() { backupBusyFlag().store(false); }
 
 inline fs::path archiveDirectory(bool automatic = false) {
     // Manual and scheduled backups deliberately share one user-visible store.
@@ -156,6 +208,8 @@ inline bool validateArchiveFile(const fs::path& archive, std::string& error) {
 
 inline bool createArchive(Database& db, const fs::path& configPath, fs::path& archive, std::string& error,
                           const Selection& selection, bool automatic = false) {
+    if (!beginBackup()) { error = "另一个备份正在进行中，请稍后重试"; return false; }
+    struct BackupGuard { ~BackupGuard() { endBackup(); } } backupGuard;
     std::error_code ec;
     fs::path stage = fs::temp_directory_path() / ("dicenext-backup-" + uniqueStamp());
     fs::remove_all(stage, ec); fs::create_directories(stage / "config", ec);
@@ -164,12 +218,7 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
     fs::create_directories(stage / "data", ec);
     if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
     if (selection.complete()) {
-        if (!copyTree("data", stage / "data", error)) { fs::remove_all(stage, ec); return false; }
-        // Backups always live below data/.  Never put that store into an
-        // archive, otherwise each new backup recursively contains all older
-        // backups.
-        fs::remove_all(stage / "data" / "backups", ec);
-        if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
+        if (!copyTree("data", stage / "data", error, true)) { fs::remove_all(stage, ec); return false; }
     } else {
         if (selection.databases && fs::is_directory("data", ec)) {
             for (const auto& entry : fs::directory_iterator("data", ec)) {
