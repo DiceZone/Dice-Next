@@ -1229,11 +1229,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // Masters (bot owners), platform-scoped, stored in config dice.masters.
+    // Masters (bot owners), stored in config dice.masters.
+    // 条目 {platform, adapter_id, id}：adapter_id 为空 = 该平台全部账号；
+    // platform 为空 = 旧版任意平台。dice/master_inherit 控制跨平台绑定身份继承骰主。
     app.registerHandler("/api/masters", [&cfg, st](Req req, CB&& cb) {
         try {
             J arr = cfg.get<J>("dice/masters", J::array());
             if (!arr.is_array()) arr = J::array();
+            const bool masterInherit = cfg.get<bool>("dice/master_inherit", true);
             // 玩家昵称（用于前端显示“昵称(id)”）；QQ 官方机器人的 OpenID 先映射到公共号再查。
             auto nickOf = [&](const std::string& plat, const std::string& id) -> std::string {
                 std::string uid = id;
@@ -1257,27 +1260,40 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 } catch (...) {}
                 return {};
             };
-            // Normalize legacy bare-string entries to {platform:"", id}.
+            // Normalize legacy bare-string entries to {platform:"", adapter_id:"", id}.
             J norm = J::array();
             for (auto& m : arr) {
-                std::string plat, id;
+                std::string plat, adapter, id;
                 if (m.is_string()) id = m.get<std::string>();
-                else if (m.is_object()) { plat = m.value("platform", ""); id = m.value("id", ""); }
+                else if (m.is_object()) { plat = m.value("platform", ""); adapter = m.value("adapter_id", m.value("adapterId", "")); id = m.value("id", ""); }
                 if (id.empty()) continue;
-                norm.push_back(J{{"platform", plat}, {"id", id}, {"nickname", nickOf(plat, id)}});
+                norm.push_back(J{{"platform", plat}, {"adapter_id", adapter}, {"id", id}, {"nickname", nickOf(plat, id)}});
             }
             if (req->method() == drogon::Post) {
                 auto j = J::parse(req->body(), nullptr, false);
                 if (!j.is_object()) { jsonReply(fail("invalid JSON request"), std::move(cb)); return; }
                 std::string plat = j.value("platform", "onebot_v11");
+                std::string adapter = j.value("adapter_id", j.value("adapterId", std::string()));
                 std::string id = j.value("id", "");
-                if (id.empty()) { jsonReply(fail("id required"), std::move(cb)); return; }
-                bool exists = false;
-                for (auto& m : norm) if (m.value("platform", "") == plat && m.value("id", "") == id) exists = true;
-                if (!exists) norm.push_back(J{{"platform", plat}, {"id", id}});
-                cfg.set<J>("dice/masters", norm); cfg.save();
+                const bool hasInherit = j.contains("master_inherit") && j["master_inherit"].is_boolean();
+                if (id.empty() && !hasInherit) { jsonReply(fail("id required"), std::move(cb)); return; }
+                if (!id.empty()) {
+                    // OpenID 按 AppID 独立：官方机器人的骰主必须落到具体账号，不接受平台级。
+                    if (plat == "qq_official" && adapter.empty()) {
+                        jsonReply(fail("QQ 官方机器人的 OpenID 按 AppID 独立，必须指定具体适配器账号"), std::move(cb)); return;
+                    }
+                    bool exists = false;
+                    for (auto& m : norm)
+                        if (m.value("platform", "") == plat && m.value("adapter_id", "") == adapter && m.value("id", "") == id) exists = true;
+                    if (!exists) norm.push_back(J{{"platform", plat}, {"adapter_id", adapter}, {"id", id}});
+                    cfg.set<J>("dice/masters", norm); cfg.save();
+                }
+                // 跨平台骰主继承开关随本接口一并保存。
+                if (hasInherit) {
+                    cfg.set<bool>("dice/master_inherit", j["master_inherit"].get<bool>()); cfg.save();
+                }
             }
-            jsonReply(ok(norm), std::move(cb));
+            jsonReply(ok(J{{"items", norm}, {"master_inherit", masterInherit}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Post});
 
@@ -1372,15 +1388,35 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 
-    app.registerHandler("/api/masters/{1}/{2}", [&cfg](Req, CB&& cb, const std::string& platRaw, const std::string& id) {
+    // 删除骰主：新三段式 /api/masters/{平台}/{适配器账号}/{ID}（"_" = 空）。
+    app.registerHandler("/api/masters/{1}/{2}/{3}", [&cfg](Req, CB&& cb, const std::string& platRaw, const std::string& adapterRaw, const std::string& id) {
         try {
             std::string plat = (platRaw == "_") ? "" : platRaw;   // "_" = legacy empty platform
+            std::string adapter = (adapterRaw == "_") ? "" : adapterRaw;
+            J arr = cfg.get<J>("dice/masters", J::array());
+            J keep = J::array();
+            for (auto& m : arr) {
+                std::string p = m.is_string() ? std::string("") : m.value("platform", "");
+                std::string a = m.is_string() ? std::string("") : m.value("adapter_id", m.value("adapterId", ""));
+                std::string i = m.is_string() ? m.get<std::string>() : m.value("id", "");
+                if (p == plat && a == adapter && i == id) continue;   // drop the matched one
+                keep.push_back(J{{"platform", p}, {"adapter_id", a}, {"id", i}});
+            }
+            cfg.set<J>("dice/masters", keep); cfg.save();
+            jsonReply(ok(keep), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Delete});
+
+    // 兼容旧版二段式删除（adapter 视为空）。
+    app.registerHandler("/api/masters/{1}/{2}", [&cfg](Req, CB&& cb, const std::string& platRaw, const std::string& id) {
+        try {
+            std::string plat = (platRaw == "_") ? "" : platRaw;
             J arr = cfg.get<J>("dice/masters", J::array());
             J keep = J::array();
             for (auto& m : arr) {
                 std::string p = m.is_string() ? std::string("") : m.value("platform", "");
                 std::string i = m.is_string() ? m.get<std::string>() : m.value("id", "");
-                if (p == plat && i == id) continue;   // drop the matched one
+                if (p == plat && i == id) continue;
                 keep.push_back(J{{"platform", p}, {"id", i}});
             }
             cfg.set<J>("dice/masters", keep); cfg.save();
