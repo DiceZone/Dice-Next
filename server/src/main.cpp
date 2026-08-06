@@ -2240,8 +2240,8 @@ static int realMain(int argc, char* argv[]) {
     // 图片发送方式（[img,file=..] 发送期解析要读 dice/image_send 配置）。
     dice::imgsend::init(configMgr);
 
-    // QQ 官方富媒体：本地图片 → 公网 URL 发布器（官方 /files 接口只收公网 url，
-    // file_data 官方「暂未支持」）。generic=图床上传；local=public_base 直链。
+    // QQ 官方富媒体：本地文件现在走官方 upload_prepare 分片直传，不再依赖图床；
+    // 发布器仅作为兼容性注册保留（generic=图床上传；local=public_base 直链）。
     dice::QQOfficialAdapter::setImagePublisher([&configMgr](const std::string& local) -> std::string {
         namespace ih = dice::imghost;
         const std::string m = ih::mode(configMgr);

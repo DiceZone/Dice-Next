@@ -4066,11 +4066,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                             auto old = kv.find(key); return old == kv.end() ? std::string() : old->second;
                         };
                         auto a = adapterMgr.getAdapter(aid);
-                        std::string accountName = aid, loginId, botRole;
+                        std::string accountName = aid, loginId, loginName, appId, botRole;
                         int memberCount = 0;
                         bool connected = a && a->isConnected();
                         if (a) {
-                            accountName = a->name(); loginId = a->getLoginId();
+                            accountName = a->name(); loginId = a->getLoginId(); loginName = a->getLoginName();
+                            if (auto off = std::dynamic_pointer_cast<QQOfficialAdapter>(a)) appId = off->appId();
                             std::string gn = a->getGroupName(endpoint);
                             if (name == gid && !gn.empty() && gn != endpoint) name = gn;
                             botRole = a->getSelfRole(endpoint);
@@ -4081,6 +4082,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         auto glIt = groupLocales.find(aplat + ":" + gid);
                         accounts.push_back(J{
                             {"adapterId", aid}, {"adapterName", accountName}, {"loginId", loginId},
+                            {"loginName", loginName}, {"appId", appId},
                             {"platform", aplat}, {"endpointId", endpoint}, {"connected", connected},
                             {"enabled", value("enabled") != "0"}, {"ai_enabled", value("aiEnabled") != "0"},
                             {"locked", value("locked") == "1"}, {"card", value("card")},
@@ -4455,10 +4457,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (text.empty()) { jsonReply(fail("empty"), std::move(cb)); return; }
                 auto a = pickAdapter(adapterMgr, plat, adapterAccount);
                 if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
-                // QQ Official bindings are keyed by AppID, not necessarily by
-                // the adapter display id.  Let a selected connected adapter
-                // fill in the account when older WebUI data omitted it.
-                if (adapterAccount.empty() && plat == "qq_official") {
+                // QQ Official bindings are keyed by AppID, while the WebUI
+                // sends the adapter's internal id.  Always translate to AppID
+                // so the identity-endpoint lookup can match.
+                if (plat == "qq_official") {
                     if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(a)) adapterAccount = official->appId();
                 }
                 const auto targetId = selectedTransportEndpoint(db, gid, plat, adapterAccount, endpointId,
@@ -4517,7 +4519,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (text.empty()) { jsonReply(fail("empty"), std::move(cb)); return; }
                 auto a = pickAdapter(adapterMgr, plat, adapterAccount);
                 if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
-                if (adapterAccount.empty() && plat == "qq_official") {
+                if (plat == "qq_official") {
                     if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(a)) adapterAccount = official->appId();
                 }
                 const auto targetId = selectedTransportEndpoint(db, uid, plat, adapterAccount, endpointId,
