@@ -4948,9 +4948,12 @@ private:
 
     // ─── Master & cross-target messaging (.send) ─────────────
 
-    /// A bot owner ("Master"), scoped per platform (so the same id on different
-    /// platforms is distinct). Empty platform = legacy entry matching any platform.
-    struct MasterEntry { std::string platform; std::string id; };
+    /// A bot owner ("Master"). Scoped per platform (so the same id on different
+    /// platforms is distinct) and optionally per adapter account — QQ 官方机器人的
+    /// OpenID 是每个 AppID 独立的，同一人在不同官机下的 OpenID 不同，因此骰主
+    /// 需要能精确到「平台+适配器账号+ID」。adapterId 为空 = 该平台全部账号生效；
+    /// platform 为空 = 旧版任意平台条目（保留兼容）。
+    struct MasterEntry { std::string platform; std::string adapterId; std::string id; };
 
     /// Masters from config dice.masters (read per call → hot-reload). Accepts both
     /// new objects {platform,id} and legacy bare-id strings.
@@ -4965,7 +4968,9 @@ private:
                         std::string s = m.get<std::string>();
                         if (!s.empty()) v.push_back({"", s});
                     } else if (m.is_object()) {
-                        MasterEntry e{m.value("platform", std::string()), m.value("id", std::string())};
+                        MasterEntry e{m.value("platform", std::string()),
+                                      m.value("adapter_id", m.value("adapterId", std::string())),
+                                      m.value("id", std::string())};
                         if (!e.id.empty()) v.push_back(e);
                     }
                 }
@@ -4973,23 +4978,62 @@ private:
         } catch (...) {}
         return v;
     }
-    bool isMaster(const std::string& platform, const std::string& id) const {
+    /// 精确到账号：adapterId 非空时，账号级条目与平台级条目都命中；
+    /// adapterId 为空时仅平台级/任意平台条目命中（保留旧调用语义）。
+    bool isMaster(const std::string& platform, const std::string& id,
+                  const std::string& adapterId = std::string()) const {
         for (const auto& m : masters())
-            if (m.id == id && (m.platform.empty() || m.platform == platform)) return true;
+            if (m.id == id && (m.platform.empty() || m.platform == platform) &&
+                (m.adapterId.empty() || m.adapterId == adapterId)) return true;
         return false;
+    }
+    /// 跨平台骰主继承开关（dice/master_inherit，默认开）。
+    bool masterInheritEnabled() const {
+        try { return cfg_.get<bool>("dice/master_inherit", true); } catch (...) { return true; }
+    }
+    /// 该 ID 是否出现在任一平台/任一账号的骰主列表中（用于绑定身份继承）。
+    bool isMasterAnyPlatform(const std::string& id) const {
+        for (const auto& m : masters()) if (m.id == id) return true;
+        return false;
+    }
+    /// 官方 OpenID 已绑定真实 QQ，且该 QQ 在任一平台/账号的骰主列表中 →
+    /// 自动视为当前官机的骰主。绑定流程本身受 .bind/直绑开关约束，
+    /// 未绑定的虚拟号不会触发继承。
+    bool inheritedOfficialMaster(const std::string& openId, const std::string& botId) const {
+        if (openId.empty()) return false;
+        std::string publicId;
+        try {
+            if (botId.empty()) {
+                auto* st = db_.getStorage(); if (!st) return false;
+                auto eps = st->get_all<IdentityEndpointRow>(orm::where(
+                    orm::c(&IdentityEndpointRow::adapterType) == std::string("qq_official") and
+                    orm::c(&IdentityEndpointRow::kind) == std::string("user") and
+                    orm::c(&IdentityEndpointRow::endpointId) == openId), orm::limit(1));
+                if (eps.empty()) return false;
+                publicId = st->get<IdentityRow>(eps.front().identityId).publicId;
+            } else {
+                publicId = identity::BindingStore::instance().publicForOfficial(
+                    db_, botId, openId, identity::Kind::User);
+            }
+        } catch (...) { return false; }
+        if (!identity::BindingStore::isRealQQ(publicId)) return false;
+        return isMasterAnyPlatform(publicId);
     }
     // 消息重载：先做别名归并（原版 TinyList 在 master 判断之前生效），别名号享主号身份。
     bool isMaster(const Message& msg) const {
-        // QQ 官方机器人：OpenID 是平台给出的唯一、不可枚举的账号标识，
-        // 骰主按 OpenID 添加后可直接匹配（群聊/私聊一致）。未命中 OpenID 时，
-        // 群聊不退回“绑定后的公共号”判定——那依赖 .bind 映射，官方群内不可信。
+        // QQ 官方机器人：OpenID 是每个 AppID 独立的账号标识，先按「平台+账号+OpenID」
+        // 精确匹配；再尝试「绑定真实身份跨平台继承」（其他平台是骰主的已绑定用户
+        // 自动成为当前官机骰主）；仍未命中时群聊不退回公共号判定（官方群内不可信），
+        // 私聊退回别名归并。
         if (msg.platform == "qq_official") {
             const std::string native = msg.extra.value("__identity_native_sender", std::string());
-            if (!native.empty() && isMaster("qq_official", native)) return true;
+            const std::string bot = msg.extra.value("official_bot_id", std::string());
+            if (!native.empty() && isMaster("qq_official", native, msg.adapterId)) return true;
+            if (!native.empty() && masterInheritEnabled() && inheritedOfficialMaster(native, bot)) return true;
             if (msg.type == MessageType::kGroup) return false;
-            return isMaster("qq_official", resolveAlias("qq_official", msg.senderId));
+            return isMaster("qq_official", resolveAlias("qq_official", msg.senderId), msg.adapterId);
         }
-        return isMaster(msg.platform, resolveAlias(msg.platform, msg.senderId));
+        return isMaster(msg.platform, resolveAlias(msg.platform, msg.senderId), msg.adapterId);
     }
 
     // ─── Master commands: boton/botoff + black/white lists ───
