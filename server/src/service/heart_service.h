@@ -57,6 +57,7 @@ public:
         adapters_ = adapters;
         commandCountProvider_ = std::move(commandCountProvider);
         ensureInstanceId();
+        loadAutoCredentials();
     }
 
     bool enabled() const { return cfg_ && cfg_->get<bool>("dice/heart_enabled", false); }
@@ -76,10 +77,12 @@ public:
     }
 
     void tick() {
-        if (!cfg_ || !adapters_ || !enabled()) return;
-        auto work = pendingReports(false);
-        if (work.empty() || busy_.exchange(true)) return;
-        std::thread([this, work = std::move(work)]() {
+        if (!cfg_ || !adapters_) return;
+        auto autoWork = pendingAutoReports(false);
+        auto work = enabled() ? pendingReports(false) : std::vector<WorkItem>{};
+        if ((work.empty() && autoWork.empty()) || busy_.exchange(true)) return;
+        std::thread([this, work = std::move(work), autoWork = std::move(autoWork)]() {
+            for (const auto& item : autoWork) doAutoReport(item.target.adapter, item.status, false, 15);
             for (const auto& item : work) doReport(item.target, item.status, false, 15);
             busy_.store(false);
         }).detach();
@@ -108,8 +111,8 @@ public:
     }
 
     void shutdownReport() {
-        if (!cfg_ || !adapters_ || !enabled()) return;
-        for (const auto& target : reportTargets()) {
+        if (!cfg_ || !adapters_) return;
+        if (enabled()) for (const auto& target : reportTargets()) {
             bool wasOnline = false;
             {
                 std::lock_guard<std::mutex> lock(mu_);
@@ -117,6 +120,16 @@ public:
                 wasOnline = it != states_.end() && it->second.lastStatus == "online";
             }
             if (wasOnline) doReport(target, "offline", true, 5);
+        }
+        for (const auto& adapter : adapters_->allAdapters()) {
+            if (!adapter) continue;
+            bool wasOnline = false;
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                auto it = autoStates_.find(adapter->id());
+                wasOnline = it != autoStates_.end() && it->second.lastStatus == "online";
+            }
+            if (wasOnline) doAutoReport(adapter, "offline", true, 5);
         }
     }
 
@@ -177,6 +190,12 @@ private:
         bool warned401 = false;
     };
 
+    struct AutoCredential {
+        std::string registrationSecret;
+        std::string heartbeatKey;
+        json endpoint = json::object();
+    };
+
     static long long epoch() {
         return static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
@@ -187,7 +206,19 @@ private:
     }
 
     std::string adapterInstanceId(const std::string& adapterId) const {
-        const std::string suffix = "-adapter-" + adapterId;
+        std::string suffix = "-adapter-" + adapterId;
+        if (suffix.size() >= 64) {
+            // Keep identifiers deterministic across restarts without trusting platform
+            // adapter IDs to fit the BDC column length.
+            unsigned long long hash = 1469598103934665603ULL;
+            for (const unsigned char ch : adapterId) {
+                hash ^= ch;
+                hash *= 1099511628211ULL;
+            }
+            std::ostringstream encoded;
+            encoded << "-adapter-" << std::hex << std::setw(16) << std::setfill('0') << hash;
+            suffix = encoded.str();
+        }
         std::string base = instanceId();
         if (base.size() + suffix.size() > 64) base.resize(64 - suffix.size());
         return base + suffix;
@@ -202,6 +233,49 @@ private:
             out << std::hex << std::setw(2) << std::setfill('0') << (rd() & 0xff);
         try {
             cfg_->set<std::string>("dice/heart_instance_id", out.str());
+            cfg_->save();
+        } catch (...) {}
+    }
+
+    static std::string randomHex(std::size_t bytes) {
+        std::random_device rd;
+        std::ostringstream out;
+        for (std::size_t i = 0; i < bytes; ++i)
+            out << std::hex << std::setw(2) << std::setfill('0') << (rd() & 0xff);
+        return out.str();
+    }
+
+    void loadAutoCredentials() {
+        if (!cfg_) return;
+        try {
+            json stored = cfg_->get<json>("dice/bdc_auto_credentials", json::object());
+            if (!stored.is_object()) return;
+            std::lock_guard<std::mutex> lock(mu_);
+            for (const auto& [adapterId, value] : stored.items()) {
+                if (!value.is_object()) continue;
+                autoCredentials_[adapterId] = {
+                    value.value("registration_secret", std::string()),
+                    value.value("heartbeat_key", std::string()),
+                    value.value("endpoint", json::object()),
+                };
+            }
+        } catch (...) {}
+    }
+
+    void saveAutoCredentials() {
+        if (!cfg_) return;
+        json stored = json::object();
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            for (const auto& [adapterId, credential] : autoCredentials_)
+                stored[adapterId] = {
+                    {"registration_secret", credential.registrationSecret},
+                    {"heartbeat_key", credential.heartbeatKey},
+                    {"endpoint", credential.endpoint},
+                };
+        }
+        try {
+            cfg_->set<json>("dice/bdc_auto_credentials", stored);
             cfg_->save();
         } catch (...) {}
     }
@@ -232,6 +306,39 @@ private:
             if (!adapter) continue;
             auto it = keys.find(adapter->id());
             if (it != keys.end()) result.push_back({adapter, it->second});
+        }
+        return result;
+    }
+
+
+    std::vector<WorkItem> pendingAutoReports(bool bypassThrottle) {
+        std::vector<WorkItem> result;
+        const long long now = epoch();
+        const auto verifiedKeys = configuredKeys();
+        for (const auto& adapter : adapters_->allAdapters()) {
+            if (!adapter) continue;
+            bool shouldReport = bypassThrottle;
+            std::string desired;
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                auto& state = autoStates_[adapter->id()];
+                if (verifiedKeys.count(adapter->id())) {
+                    // A formally verified API key takes over this adapter. Close the
+                    // isolated record once, then stop all automatic reporting for it.
+                    if (state.lastStatus != "online") continue;
+                    desired = "offline";
+                    shouldReport = true;
+                } else {
+                    // Do not create a record until this adapter has logged in once.
+                    if (adapter->getLoginId().empty() && state.lastStatus == "unknown") continue;
+                    desired = adapter->isConnected() ? "online" : "offline";
+                    if (desired == "offline" && state.lastStatus == "unknown") continue;
+                    if (!bypassThrottle)
+                        shouldReport = state.lastStatus != desired ||
+                            (desired == "online" && now - state.lastReportAt >= interval());
+                }
+            }
+            if (shouldReport) result.push_back({Target{adapter, ""}, desired});
         }
         return result;
     }
@@ -306,11 +413,17 @@ private:
             json all = cfg_->getAll();
             if (all.contains("dice") && all["dice"].contains("masters") && all["dice"]["masters"].is_array()) {
                 for (const auto& m : all["dice"]["masters"]) {
-                    if (m.is_string() && !m.get<std::string>().empty()) return m.get<std::string>();
-                    if (m.is_object()) {
-                        std::string id = m.value("id", std::string());
-                        if (!id.empty()) return id;
+                    std::string platform, id;
+                    if (m.is_string()) { id = m.get<std::string>(); platform.clear(); }
+                    else if (m.is_object()) {
+                        platform = m.value("platform", std::string());
+                        id = m.value("id", std::string());
                     }
+                    if (id.empty()) continue;
+                    // 心跳展示只认 OneBot（真实 QQ 号）骰主：QQ 官方 OpenID、
+                    // Discord/KOOK ID 对展示无意义，且 OpenID 会超服务端 master_id
+                    // 列长导致上报 500。空平台视为旧版 QQ 号条目，兼容老数据。
+                    if (platform.empty() || platform == "onebot_v11") return id;
                 }
             }
         } catch (...) {}
@@ -370,6 +483,102 @@ private:
         return {httpStatus, response};
     }
 
+    std::pair<int, std::string> doAutoReport(
+        const AdapterPtr& adapter,
+        const std::string& status,
+        bool bypassThrottle,
+        int timeoutSec
+    ) {
+        if (!adapter) return {0, "适配器不存在"};
+        const std::string adapterId = adapter->id();
+        std::string identity;
+        json endpoint = endpointFor(adapter, identity);
+
+        AutoCredential credential;
+        bool credentialsChanged = false;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            auto& saved = autoCredentials_[adapterId];
+            if (saved.registrationSecret.empty()) {
+                saved.registrationSecret = randomHex(32);
+                credentialsChanged = true;
+            }
+            if (!endpoint.is_null() && !endpoint.empty() && saved.endpoint != endpoint) {
+                saved.endpoint = endpoint;
+                credentialsChanged = true;
+            }
+            credential = saved;
+        }
+        if (endpoint.is_null() || endpoint.empty()) endpoint = credential.endpoint;
+        if (endpoint.is_null() || endpoint.empty()) return {0, "适配器尚未取得平台账号 ID"};
+        endpoint["connected"] = status == "online";
+        // Persist the continuity secret before registration. If the server accepts the
+        // request but the response is lost, a restart can still reclaim the same record.
+        if (credentialsChanged) saveAutoCredentials();
+        if (credential.heartbeatKey.empty()) {
+            std::string bn = std::to_string(buildNumber());
+            while (bn.size() < 3) bn = "0" + bn;
+            json registration{
+                {"client_adapter_id", adapterInstanceId(adapterId)},
+                {"registration_secret", credential.registrationSecret},
+                {"adapter_name", adapter->name()}, {"endpoint", endpoint},
+                {"dice_type", "dicenext"}, {"dice_version", versionString() + "(" + bn + ")"},
+                {"plugin_version", versionString()}, {"frame", adapter->version()},
+            };
+            int registerStatus = 0;
+            const std::string registerResponse = dice::ai::httpPostJson(
+                std::string(kOfficialHeartUrl) + "/api/unverified/register", "",
+                registration.dump(), timeoutSec, registerStatus);
+            if (registerStatus != 200) {
+                if (!bypassThrottle)
+                    DICE_LOG_WARN("[BDC 自动发现:{}] 注册失败：HTTP {}（{}）", adapter->name(), registerStatus, registerResponse);
+                return {registerStatus, registerResponse};
+            }
+            try {
+                const json parsed = json::parse(registerResponse);
+                credential.heartbeatKey = parsed.value("heartbeat_key", std::string());
+            } catch (...) {}
+            if (credential.heartbeatKey.empty()) return {0, "BDC 注册响应缺少 heartbeat_key"};
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                autoCredentials_[adapterId] = credential;
+            }
+            saveAutoCredentials();
+            DICE_LOG_INFO("[BDC 自动发现:{}] 已取得独立未验证心跳凭据", adapter->name());
+        }
+
+        std::string bn = std::to_string(buildNumber());
+        while (bn.size() < 3) bn = "0" + bn;
+        json body{
+            {"heartbeat_key", credential.heartbeatKey}, {"status", status},
+            {"endpoint", endpoint}, {"adapter_name", adapter->name()},
+            {"dice_type", "dicenext"}, {"dice_version", versionString() + "(" + bn + ")"},
+            {"plugin_version", versionString()}, {"frame", adapter->version()},
+            {"command_count", commandCountProvider_ ? commandCountProvider_() : 0},
+        };
+        int httpStatus = 0;
+        const std::string response = dice::ai::httpPostJson(
+            std::string(kOfficialHeartUrl) + "/api/unverified/heart", "",
+            body.dump(), timeoutSec, httpStatus);
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            auto& state = autoStates_[adapterId];
+            if (httpStatus == 200) {
+                state.lastStatus = status;
+                state.lastReportAt = epoch();
+                state.lastReportIso = nowUtcIso();
+                state.lastError.clear();
+            } else {
+                state.lastError = httpStatus == 0 ? "网络请求失败" : "HTTP " + std::to_string(httpStatus);
+                if (httpStatus == 401) autoCredentials_[adapterId].heartbeatKey.clear();
+            }
+        }
+        if (httpStatus == 401) saveAutoCredentials();
+        else if (httpStatus != 200 && !bypassThrottle)
+            DICE_LOG_WARN("[BDC 自动发现:{}] 心跳失败：HTTP {}（{}）", adapter->name(), httpStatus, response);
+        return {httpStatus, response};
+    }
+
     void handleResponse(
         const std::string& adapterId,
         const std::string& adapterName,
@@ -408,7 +617,7 @@ private:
         } else {
             state.lastError = httpStatus == 0 ? "网络请求失败（curl 无响应）"
                                               : ("HTTP " + std::to_string(httpStatus));
-            DICE_LOG_DEBUG("[心跳:{}] 上报失败：{}", adapterName, state.lastError);
+            DICE_LOG_WARN("[心跳:{}] 上报失败：{}（服务端响应：{}）", adapterName, state.lastError, response);
         }
     }
 
@@ -437,6 +646,8 @@ private:
     mutable std::mutex mu_;
     std::atomic<bool> busy_{false};
     std::unordered_map<std::string, TargetState> states_;
+    std::unordered_map<std::string, TargetState> autoStates_;
+    std::unordered_map<std::string, AutoCredential> autoCredentials_;
 };
 
 }  // namespace dice::heart

@@ -1,5 +1,6 @@
 #include "test_framework.h"
 #include "../src/config/config_manager.h"
+#include "../src/config/scoped_settings.h"
 #include "../src/service/web_auth.h"
 
 #include <filesystem>
@@ -85,5 +86,80 @@ TEST(WebAuth, TrustedDeviceSessionSurvivesReconfigure) {
     auth.revoke(token);
     ASSERT_FALSE(auth.validToken(token));
     auth.configure("", {});
+    fs::remove_all(root, ec);
+}
+TEST(ConfigManager, ScopedSettingsResolveAccountThenAdapterThenGlobal) {
+    json all = {
+        {"events", {
+            {"friend_policy", "manual"},
+            {"poke_enabled", true},
+            {"poke_command", ".jrrp"}
+        }},
+        {"dice", {
+            {"scoped_overrides", {
+                {"adapter", {
+                    {"onebot_v11", {
+                        {"events", {
+                            {"friend_policy", "all"},
+                            {"poke_enabled", false}
+                        }}
+                    }}
+                }},
+                {"account", {
+                    {"12", {
+                        {"events", {
+                            {"friend_policy", "keyword"}
+                        }}
+                    }}
+                }}
+            }}
+        }}
+    };
+
+    const json account = scoped_settings::resolveSection(all, "events", "onebot_v11", "12");
+    ASSERT_EQ(account.value("friend_policy", std::string()), std::string("keyword"));
+    ASSERT_FALSE(account.value("poke_enabled", true));
+    ASSERT_EQ(account.value("poke_command", std::string()), std::string(".jrrp"));
+    ASSERT_EQ(scoped_settings::sourceFor(all, "events", "friend_policy", "onebot_v11", "12"), std::string("account"));
+    ASSERT_EQ(scoped_settings::sourceFor(all, "events", "poke_enabled", "onebot_v11", "12"), std::string("adapter"));
+    ASSERT_EQ(scoped_settings::sourceFor(all, "events", "poke_command", "onebot_v11", "12"), std::string("global"));
+
+    const json otherAccount = scoped_settings::resolveSection(all, "events", "onebot_v11", "13");
+    ASSERT_EQ(otherAccount.value("friend_policy", std::string()), std::string("all"));
+
+    const json otherAdapter = scoped_settings::resolveSection(all, "events", "discord", "99");
+    ASSERT_EQ(otherAdapter.value("friend_policy", std::string()), std::string("manual"));
+    ASSERT_TRUE(otherAdapter.value("poke_enabled", false));
+}
+TEST(ConfigManager, ScopedSettingsPersistAndCanRestoreInheritance) {
+    const fs::path root = temporaryConfigRoot("scoped_settings");
+    const fs::path configDir = root / "config";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+
+    ConfigManager cfg(configDir.string());
+    ASSERT_TRUE(cfg.load());
+    cfg.set<std::string>("events/friend_policy", "manual");
+    ASSERT_TRUE(scoped_settings::setSection(cfg, "adapter", "onebot_v11", "events",
+        json{{"friend_policy", "all"}}));
+    ASSERT_TRUE(scoped_settings::setSection(cfg, "account", "12", "events",
+        json{{"friend_policy", "keyword"}}));
+    ASSERT_TRUE(cfg.save());
+
+    ConfigManager reloaded(configDir.string());
+    ASSERT_TRUE(reloaded.load());
+    ASSERT_EQ(scoped_settings::resolveSection(reloaded.getAll(), "events", "onebot_v11", "12")
+        .value("friend_policy", std::string()), std::string("keyword"));
+
+    ASSERT_TRUE(scoped_settings::setSection(reloaded, "account", "12", "events",
+        json::object(), json::array({"friend_policy"})));
+    ASSERT_EQ(scoped_settings::resolveSection(reloaded.getAll(), "events", "onebot_v11", "12")
+        .value("friend_policy", std::string()), std::string("all"));
+
+    ASSERT_TRUE(scoped_settings::setSection(reloaded, "adapter", "onebot_v11", "events",
+        json::object(), json::array({"friend_policy"})));
+    ASSERT_EQ(scoped_settings::resolveSection(reloaded.getAll(), "events", "onebot_v11", "12")
+        .value("friend_policy", std::string()), std::string("manual"));
+
     fs::remove_all(root, ec);
 }

@@ -17,6 +17,7 @@ set(TEST_SOURCES
     test_group_account_scoping.cpp
     test_backup_service.cpp
     test_timezone.cpp
+    test_dice_expression.cpp
 
     # Project source files needed by tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/causal/cooldown_manager.cpp
@@ -30,6 +31,7 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/i18n/locale_resolver.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_matcher.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/dice/dice_expression.cpp
 )
 
 add_executable(dice-next-tests ${TEST_SOURCES})

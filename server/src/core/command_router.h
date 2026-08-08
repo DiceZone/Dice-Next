@@ -7719,6 +7719,15 @@ private:
         }
         if (tok.rfind("draw:", 0) == 0) {
             std::string name = trim(tok.substr(5));
+            // 与 .draw 指令一致：本群临时牌堆优先，其次文件牌堆。
+            if (msg.type != MessageType::kPrivate) {
+                json td = getTempDecks(msg);
+                if (td.contains(name) && td[name].is_array() && !td[name].empty()) {
+                    std::vector<std::string> items;
+                    for (auto& e : td[name]) if (e.is_string()) items.push_back(e.get<std::string>());
+                    return items.empty() ? std::string("?") : pickChoice(items);
+                }
+            }
             if (!deck_.has(name)) return std::string("?");
             return deck_.drawFromDeck(name).value_or("");
         }
@@ -7733,6 +7742,18 @@ private:
             int n = parseIntOr(tok.substr(1), -1);
             if (n >= 0 && n < (int)groups.size()) return groups[n];
             return "";
+        }
+        // 通用引用（对齐旧版 Dice 语义）：上下文变量未命中后依次尝试
+        // 全局文案（CustomMsg.json 导入的 legacy.* 覆盖）→ 帮助词条 →
+        // 内联骰子算式（{%_1D3} 这类）；都不命中才原样保留。
+        {
+            const std::string legacyKey = "legacy." + tok;
+            if (i18n_.hasOverride(dice::Locale::kZhHans, legacyKey))
+                return expandHelpRefs(i18n_.tr(dice::Locale::kZhHans, legacyKey), msg);
+            if (auto h = helpEntryContent(tok)) return expandHelpRefs(*h, msg);
+            std::string dx = tok;
+            while (!dx.empty() && (dx.front() == '%' || dx.front() == '_')) dx.erase(dx.begin());
+            if (looksDiceExpr(dx)) { auto r = engine_.roll(dx); if (r.ok()) return std::to_string(r.modifiedTotal); }
         }
         return "{" + tok + "}";   // unknown → leave as-is
     }

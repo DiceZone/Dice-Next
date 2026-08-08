@@ -4,6 +4,7 @@
 #include "common/utils.h"
 #include "common/hot_reload.h"
 #include "config/config_manager.h"
+#include "config/scoped_settings.h"
 #include "storage/database.h"
 #include "storage/migration.h"
 #include "storage/legacy_importer.h"
@@ -1349,8 +1350,6 @@ static int realMain(int argc, char* argv[]) {
     adapterMgr.onEvent([&adapterMgr, &configMgr, &i18n, &localeResolver, &cmdRouter, &jsMod, &db, replyFallback](const dice::BotEvent& e) {
         using ET = dice::EventType;
         nlohmann::json cfgAll = configMgr.getAll();
-        nlohmann::json ev = (cfgAll.contains("events") && cfgAll["events"].is_object())
-                                ? cfgAll["events"] : nlohmann::json::object();
         // 全局开关（系统设置页 dice/listen_*）控制各类事件是否响应。
         auto diceFlag = [&](const char* k, bool def) {
             if (cfgAll.contains("dice") && cfgAll["dice"].contains(k) && cfgAll["dice"][k].is_boolean())
@@ -1364,6 +1363,8 @@ static int realMain(int argc, char* argv[]) {
         };
         auto a = adapterMgr.getAdapter(e.adapterId);
         if (!a) return;
+        nlohmann::json ev = dice::scoped_settings::resolveSection(
+            cfgAll, "events", a->platform(), e.adapterId);
 
         // 从适配器成员缓存取用户显示名（群名片 > QQ昵称 > userid）。
         // 解析昵称：群名片 > QQ昵称 > 记录的昵称 > QQ号（用户规范）。类型安全：user_id

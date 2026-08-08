@@ -109,6 +109,7 @@ DiceResult DiceExpression::evaluate(const std::string& input) {
 
         std::string sep;       // 分项: dice expanded, e.g. "(4+2+6)+2"
         std::string combined;  // 各项: per-term subtotals,  e.g. "12+2"
+        std::string evaluatedDisplay;
         int total = 0;
 
         for (size_t i = 0; i < terms.size(); ++i) {
@@ -119,6 +120,8 @@ DiceResult DiceExpression::evaluate(const std::string& input) {
             const bool parenDice = multiTerm || (node->kind == ASTNode::Kind::kBinaryOp);
 
             RenderResult r = renderEval(node, parenDice, results);
+            if (!multiTerm && !neg && !r.displayOverride.empty())
+                evaluatedDisplay = r.displayOverride;
             const int signedVal = neg ? -r.value : r.value;
             total += signedVal;
 
@@ -130,8 +133,8 @@ DiceResult DiceExpression::evaluate(const std::string& input) {
         const std::string totalStr = std::to_string(total);
 
         // FormCompleteString: chain the stages, dropping any that repeat the previous.
-        std::string formatted = display;
-        if (display != sep)        formatted += "=" + sep;
+        std::string formatted = evaluatedDisplay.empty() ? display : evaluatedDisplay;
+        if (formatted != sep)      formatted += "=" + sep;
         if (sep != combined)       formatted += "=" + combined;
         if (combined != totalStr)  formatted += "=" + totalStr;
 
@@ -197,8 +200,10 @@ DiceExpression::RenderResult DiceExpression::renderEval(
         }
 
         case ASTNode::Kind::kDiceRoll: {
-            const int count = evalNode(node->left.get(), results);
-            const int sides = evalNode(node->right.get(), results);
+            const RenderResult countResult = renderEval(node->left.get(), true, results);
+            const RenderResult sidesResult = renderEval(node->right.get(), true, results);
+            const int count = countResult.value;
+            const int sides = sidesResult.value;
             if (count < 0)
                 throw AppException(ApiErrorCode::kDiceInvalidExpression,
                     "dice count cannot be negative: " + std::to_string(count));
@@ -219,7 +224,14 @@ DiceExpression::RenderResult DiceExpression::renderEval(
                 inner += std::to_string(roll);
             }
             out.value = sum;
-            out.sep = (count > 1 && parenDice) ? ("(" + inner + ")") : inner;
+            const bool dynamicDice = node->left->kind != ASTNode::Kind::kNumber
+                                  || node->right->kind != ASTNode::Kind::kNumber;
+            if (dynamicDice) {
+                out.displayOverride = std::to_string(count) + "D" + std::to_string(sides);
+                out.sep = "{" + inner + "}(" + std::to_string(sum) + ")";
+            } else {
+                out.sep = (count > 1 && parenDice) ? ("(" + inner + ")") : inner;
+            }
             return out;
         }
     }
@@ -407,35 +419,38 @@ std::unique_ptr<ASTNode> DiceExpression::parseFactor() {
         return ASTNode::makeUnaryMinus(std::move(operand));
     }
 
+    // Dice operators share one precedence level and therefore fold from left
+    // to right: 10d10d1 is (10d10)d1, never 10d(10d1).
+    auto left = parsePrimary();
+    while (peek().type == TokenType::DICE_OP) {
+        advance();
+
+        // Consume a sign for this operand without recursively consuming a
+        // following dice operator (which would restore right associativity).
+        bool negative = false;
+        while (peek().type == TokenType::PLUS || peek().type == TokenType::MINUS) {
+            if (advance().type == TokenType::MINUS) negative = !negative;
+        }
+        auto right = parsePrimary();
+        if (negative) right = ASTNode::makeUnaryMinus(std::move(right));
+        left = ASTNode::makeDiceRoll(std::move(left), std::move(right));
+    }
+    return left;
+}
+
+std::unique_ptr<ASTNode> DiceExpression::parsePrimary() {
     // Parenthesized expression
     if (peek().type == TokenType::LPAREN) {
         advance();  // '('
         auto expr = parseExpression();
         expect(TokenType::RPAREN);  // ')'
-
-        // Check for dice operator after closing paren: (expr)d...
-        if (peek().type == TokenType::DICE_OP) {
-            advance();  // 'd'
-            auto sides = parseFactor();
-            return ASTNode::makeDiceRoll(std::move(expr), std::move(sides));
-        }
-
         return expr;
     }
 
     // Number literal
     if (peek().type == TokenType::NUMBER) {
         auto tok = advance();
-        auto numberNode = ASTNode::makeNumber(tok.number);
-
-        // Check for dice operator after number: Nd...
-        if (peek().type == TokenType::DICE_OP) {
-            advance();  // 'd'
-            auto sides = parseFactor();
-            return ASTNode::makeDiceRoll(std::move(numberNode), std::move(sides));
-        }
-
-        return numberNode;
+        return ASTNode::makeNumber(tok.number);
     }
 
     // Unexpected token
