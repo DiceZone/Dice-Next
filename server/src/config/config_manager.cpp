@@ -33,6 +33,7 @@ static json makeDefaultConfig() {
             {"blacklist_quit_level", "member"},  // 黑名单退群默认等级: member=任一成员触发 / admin=仅群主级触发
             {"respond_self", false},             // 自响应：用骰娘账号自身消息自控（默认关）
             {"console_start_hidden", true},      // 启动即最小化到托盘（隐藏控制台，退出走托盘）
+            {"scoped_overrides", json::object()}, // #17: adapter/account overrides; account > adapter > global
             {"rules", {
                 {"coc_enabled", true},
                 {"coc_critical_range", 1},
@@ -120,6 +121,10 @@ static bool validateConfig(const json& value, std::string& error) {
     if (value.contains("adapters") && !value["adapters"].is_array()) { error = "adapters 配置必须是数组"; return false; }
     for (const char* section : {"dice", "events", "webui", "i18n", "backup", "hot_reload"}) {
         if (value.contains(section) && !value[section].is_object()) { error = std::string(section) + " 配置必须是对象"; return false; }
+    }
+    if (value.contains("dice") && value["dice"].contains("scoped_overrides")
+        && !value["dice"]["scoped_overrides"].is_object()) {
+        error = "dice.scoped_overrides 配置必须是对象"; return false;
     }
     return true;
 }

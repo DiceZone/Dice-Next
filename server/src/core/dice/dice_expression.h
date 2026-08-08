@@ -108,6 +108,7 @@ private:
     std::unique_ptr<ASTNode> parseExpression();
     std::unique_ptr<ASTNode> parseTerm();
     std::unique_ptr<ASTNode> parseFactor();
+    std::unique_ptr<ASTNode> parsePrimary();
 
     // ─── Evaluator ───────────────────────────────────────────
 
@@ -125,6 +126,7 @@ private:
     struct RenderResult {
         int value = 0;
         std::string sep;
+        std::string displayOverride;
     };
 
     /// Roll + render a subtree. @p parenDice wraps multi-die groups in ().

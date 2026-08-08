@@ -6,6 +6,7 @@
 #include "../storage/database.h"
 #include "../storage/group_account_settings.h"
 #include "../config/config_manager.h"
+#include "../config/scoped_settings.h"
 #include "../core/dice/dice_engine.h"
 #include "../core/dice/dice_expression.h"
 #include "../core/dice/dice_rules.h"
@@ -60,6 +61,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <array>
+#include <tuple>
 #include <cmath>
 #include <ctime>
 #include <thread>
@@ -1494,6 +1496,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             };
 
             J out = J::array();
+            const auto allDefaults = i18n.flatten(loc);
+            std::set<std::string> coveredKeys;
             for (auto& c : cat) {
                 std::string descKey = c.value("descKey", "");
                 J row;
@@ -1509,24 +1513,94 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 row["example"] = c.value("example", "");
                 row["desc"] = descKey.empty() ? "" : i18n.tr(loc, descKey);
                 J replies = J::array();
+                std::set<std::string> replyKeys;
+                auto appendReply = [&](const std::string& key, const std::string& example = std::string()) {
+                    if (!replyKeys.insert(key).second) return;
+                    coveredKeys.insert(key);
+                    std::string def = i18n.getDefault(loc, key);
+                    replies.push_back(J{
+                        {"key", key},
+                        {"default", def},
+                        {"override", ov.count(key) ? J(ov[key]) : J(nullptr)},
+                        {"v2key", legacyv2::v2KeyFor(key)},
+                        {"example", example},
+                        {"vars", deriveVars(def)}
+                    });
+                };
                 if (c.contains("replyKeys") && c["replyKeys"].is_array()) {
                     bool hasRex = c.contains("replyExamples") && c["replyExamples"].is_object();
                     for (auto& rk : c["replyKeys"]) {
                         std::string key = rk.get<std::string>();
-                        std::string def = i18n.getDefault(loc, key);
                         std::string ex = hasRex ? c["replyExamples"].value(key, std::string()) : std::string();
-                        replies.push_back(J{
-                            {"key", key},
-                            {"default", def},
-                            {"override", ov.count(key) ? J(ov[key]) : J(nullptr)},
-                            {"v2key", legacyv2::v2KeyFor(key)},
-                            {"example", ex},
-                            {"vars", deriveVars(def)}
-                        });
+                        appendReply(key, ex);
+                    }
+                }
+                // Large command families (for example .game/.npc/.send) regularly
+                // gain new reply keys. Prefix expansion keeps their WebUI category
+                // complete without requiring every locale key to be duplicated here.
+                if (c.contains("replyPrefixes") && c["replyPrefixes"].is_array()) {
+                    for (auto& rp : c["replyPrefixes"]) {
+                        if (!rp.is_string()) continue;
+                        const std::string prefix = rp.get<std::string>();
+                        for (const auto& [key, _] : allDefaults)
+                            if (key.compare(0, prefix.size(), prefix) == 0) appendReply(key);
                     }
                 }
                 row["replies"] = replies;
                 out.push_back(row);
+            }
+
+            // Keep every editable user-facing string reachable from a normal
+            // category, even when a newly added command has not yet been added to
+            // commands.json. Umbrella namespaces are split one level deeper so
+            // groups such as dice.brp/card.sc/dnd.rdc stay easy to find.
+            std::map<std::string, std::vector<std::pair<std::string, std::string>>> supplemental;
+            for (const auto& [key, def] : allDefaults) {
+                if (coveredKeys.count(key)) continue;
+                const size_t firstDot = key.find('.');
+                const std::string root = key.substr(0, firstDot);
+                if (root == "_meta" || root == "tplvar" || root == "legacy") continue;
+                std::string group = root;
+                if ((root == "dice" || root == "card" || root == "fun" || root == "dnd" || root == "help")
+                    && firstDot != std::string::npos) {
+                    const size_t secondDot = key.find('.', firstDot + 1);
+                    group = key.substr(0, secondDot);
+                }
+                supplemental[group].push_back({key, def});
+            }
+            auto supplementalCategory = [](const std::string& group) -> std::string {
+                const std::string root = group.substr(0, group.find('.'));
+                if (root == "dnd" || root == "setdnd" || root == "init") return "DND";
+                if (root == "setcoc") return "COC";
+                if (group == "dice.brp") return "BRP";
+                if (root == "card" || root == "pc" || root == "npc" || root == "buff") return "人物卡";
+                if (root == "game" || root == "log" || root == "ob" || root == "link") return "跑团";
+                if (root == "me" || root == "send") return "互动";
+                if (root == "fun" || root == "deck" || root == "favor" || root == "ak") return "娱乐";
+                if (root == "rule" || root == "hiy" || root == "setsn" || root == "sn") return "工具";
+                if (root == "help" || root == "helpdoc" || root == "lang" || root == "persona"
+                    || root == "self" || root == "system" || root == "event") return "系统";
+                if (root == "admin" || root == "trust" || root == "notice" || root == "alias"
+                    || root == "authorize" || root == "bot" || root == "dismiss" || root == "gate"
+                    || root == "group" || root == "master" || root == "mod" || root == "plugin"
+                    || root == "reply" || root == "welcome") return "管理";
+                return "通用";
+            };
+            for (const auto& [group, entries] : supplemental) {
+                J replies = J::array();
+                for (const auto& [key, def] : entries) {
+                    replies.push_back(J{
+                        {"key", key}, {"default", def},
+                        {"override", ov.count(key) ? J(ov[key]) : J(nullptr)},
+                        {"v2key", legacyv2::v2KeyFor(key)}, {"example", ""},
+                        {"vars", deriveVars(def)}
+                    });
+                }
+                out.push_back(J{
+                    {"cmd", group}, {"title", group + " · 其他文本"},
+                    {"category", supplementalCategory(group)}, {"sources", J::array()},
+                    {"example", ""}, {"desc", ""}, {"replies", replies}
+                });
             }
             jsonReply(ok(out), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
@@ -1864,8 +1938,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 utils::setTimezoneOffset(minutes);
             }
             int minutes = cfg.get<int>("server/timezone_minutes", (std::numeric_limits<int>::min)());
-            jsonReply(ok(J{{"offset_minutes",
-                minutes == (std::numeric_limits<int>::min)() ? J(nullptr) : J(minutes)}}), std::move(cb));
+            jsonReply(ok(J{
+                {"offset_minutes", minutes == (std::numeric_limits<int>::min)() ? J(nullptr) : J(minutes)},
+                {"effective_offset_minutes", utils::effectiveTimezoneOffsetMinutes()},
+            }), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
@@ -2129,6 +2205,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 adapterMgr.stopAdapter(std::to_string(aid));
                 adapterMgr.unregisterAdapter(std::to_string(aid));
                 st->remove<AdapterRow>(aid);
+                scoped_settings::eraseTarget(cfg, "account", id);
                 persistAdaptersToConfig(st, cfg);
                 jsonReply(ok(nullptr), std::move(cb));
             } else { jsonReply(fail("Method not allowed"), std::move(cb)); }
@@ -2459,15 +2536,60 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // ── 好友/加群邀请 审批策略 ─────────────────────────────────
     app.registerHandler("/api/system/events", [&cfg, st](Req req, CB&& cb) {
         try {
-            if (req->method() == drogon::Get) {
-                J ev = cfg.getAll().value("events", J::object());
-                // 旧配置回退派生，保证前端拿到当前生效的策略值。
+            static const std::set<std::string> kFriend = {"manual", "all", "keyword", "reject"};
+            static const std::set<std::string> kGroup  = {"manual", "all", "whitelist", "ignore", "reject"};
+            static const std::set<std::string> kScopedKeys = {
+                "friend_policy", "friend_keyword", "group_invite_policy",
+                "group_invite_reject_blacklist", "group_invite_reject_nonfriend",
+                "group_name_keyword_leave", "poke", "poke_command", "poke_enabled"
+            };
+            auto platformForAccount = [&](const std::string& id) -> std::string {
+                int aid = 0;
+                try { aid = std::stoi(id); } catch (...) { return {}; }
+                auto row = st->get_pointer<AdapterRow>(aid);
+                if (!row) return {};
+                if (row->type == static_cast<int>(AdapterType::kQQOfficial)) return "qq_official";
+                if (row->type == static_cast<int>(AdapterType::kDiscord)) return "discord";
+                if (row->type == static_cast<int>(AdapterType::kKook)) return "kook";
+                return "onebot_v11";
+            };
+            auto scopeInfo = [&](const J& input) {
+                std::string scope = input.value("scope", std::string("global"));
+                std::string target = input.value("target", std::string());
+                std::string platform = input.value("platform", std::string());
+                if (scope != "adapter" && scope != "account") scope = "global";
+                if (scope == "adapter") platform = target;
+                if (scope == "account") {
+                    const std::string actual = platformForAccount(target);
+                    if (!actual.empty()) platform = actual;
+                }
+                return std::tuple<std::string, std::string, std::string>{scope, target, platform};
+            };
+            auto responseFor = [&](const std::string& scope, const std::string& target,
+                                   const std::string& platform) {
+                const J all = cfg.getAll();
+                J ev;
+                if (scope == "adapter")
+                    ev = scoped_settings::resolveSection(all, "events", platform, "");
+                else if (scope == "account")
+                    ev = scoped_settings::resolveSection(all, "events", platform, target);
+                else
+                    ev = all.value("events", J::object());
+                if (!ev.is_object()) ev = J::object();
+
                 std::string fp = ev.value("friend_policy", std::string());
                 if (fp.empty()) fp = ev.value("auto_approve_friend", false)
                     ? (ev.value("friend_keyword", std::string()).empty() ? "all" : "keyword") : "manual";
                 std::string gp = ev.value("group_invite_policy", std::string());
                 if (gp.empty()) gp = ev.value("auto_approve_group", false) ? "all" : "manual";
-                jsonReply(ok(J{
+
+                J sources = J::object();
+                for (const auto& key : kScopedKeys) {
+                    if (scope == "global") sources[key] = "global";
+                    else sources[key] = scoped_settings::sourceFor(
+                        all, "events", key, platform, scope == "account" ? target : "");
+                }
+                return J{
                     {"friend_policy", fp},
                     {"friend_keyword", ev.value("friend_keyword", std::string())},
                     {"group_invite_policy", gp},
@@ -2476,61 +2598,93 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"group_name_keyword_leave", ev.value("group_name_keyword_leave", std::string())},
                     {"poke", ev.value("poke", std::string())},
                     {"poke_command", ev.value("poke_command", std::string())},
-                    {"poke_enabled", ev.value("poke_enabled", true)},   // 戳一戳回复开关
-                    {"welcome_min_delay", ev.value("welcome_min_delay", 0)},
-                    {"welcome_min_cooldown", ev.value("welcome_min_cooldown", 0)},
-                }), std::move(cb));
+                    {"poke_enabled", ev.value("poke_enabled", true)},
+                    {"welcome_min_delay", all.value("events", J::object()).value("welcome_min_delay", 0)},
+                    {"welcome_min_cooldown", all.value("events", J::object()).value("welcome_min_cooldown", 0)},
+                    {"scope", scope}, {"target", target}, {"platform", platform},
+                    {"overrides", scoped_settings::rawSection(all, scope, target, "events")},
+                    {"sources", sources}
+                };
+            };
+
+            J selector = J::object();
+            if (req->method() == drogon::Get) {
+                selector["scope"] = req->getParameter("scope");
+                selector["target"] = req->getParameter("target");
+                selector["platform"] = req->getParameter("platform");
+                auto [scope, target, platform] = scopeInfo(selector);
+                if (scope != "global" && target.empty()) {
+                    jsonReply(fail("请选择适配器或账号"), std::move(cb)); return;
+                }
+                if (scope == "account" && platform.empty()) {
+                    jsonReply(fail("账号不存在"), std::move(cb)); return;
+                }
+                jsonReply(ok(responseFor(scope, target, platform)), std::move(cb));
             } else {
                 auto j = J::parse(req->body());
-                static const std::set<std::string> kFriend = {"manual", "all", "keyword", "reject"};
-                static const std::set<std::string> kGroup  = {"manual", "all", "whitelist", "ignore", "reject"};
-                if (j.contains("friend_policy")) {
-                    std::string v = j["friend_policy"].get<std::string>();
+                auto [scope, target, platform] = scopeInfo(j);
+                if (scope != "global" && target.empty()) {
+                    jsonReply(fail("请选择适配器或账号"), std::move(cb)); return;
+                }
+                if (scope == "account" && platform.empty()) {
+                    jsonReply(fail("账号不存在"), std::move(cb)); return;
+                }
+                J values = j.contains("values") && j["values"].is_object() ? j["values"] : j;
+                J clear = j.value("clear", J::array());
+
+                if (values.contains("friend_policy")) {
+                    std::string v = values["friend_policy"].get<std::string>();
                     if (!kFriend.count(v)) { jsonReply(fail("无效的好友策略"), std::move(cb)); return; }
-                    cfg.set<std::string>("events/friend_policy", v);
                 }
-                if (j.contains("friend_keyword"))
-                    cfg.set<std::string>("events/friend_keyword", j["friend_keyword"].get<std::string>());
-                if (j.contains("group_invite_policy")) {
-                    std::string v = j["group_invite_policy"].get<std::string>();
+                if (values.contains("group_invite_policy")) {
+                    std::string v = values["group_invite_policy"].get<std::string>();
                     if (!kGroup.count(v)) { jsonReply(fail("无效的群邀请策略"), std::move(cb)); return; }
-                    cfg.set<std::string>("events/group_invite_policy", v);
                 }
-                if (j.contains("group_invite_reject_blacklist"))
-                    cfg.set<bool>("events/group_invite_reject_blacklist", j["group_invite_reject_blacklist"].get<bool>());
-                if (j.contains("group_invite_reject_nonfriend"))
-                    cfg.set<bool>("events/group_invite_reject_nonfriend", j["group_invite_reject_nonfriend"].get<bool>());
-                if (j.contains("group_name_keyword_leave"))
-                    cfg.set<std::string>("events/group_name_keyword_leave", j["group_name_keyword_leave"].get<std::string>());
-                if (j.contains("poke"))         cfg.set<std::string>("events/poke", j["poke"].get<std::string>());
-                if (j.contains("poke_command")) cfg.set<std::string>("events/poke_command", j["poke_command"].get<std::string>());
-                if (j.contains("poke_enabled")) cfg.set<bool>("events/poke_enabled", j["poke_enabled"].get<bool>());   // 
-                if (j.contains("welcome_min_delay") && j["welcome_min_delay"].is_number()) {
-                    int newMin = j["welcome_min_delay"].get<int>();
-                    int oldMin = cfg.get<int>("events/welcome_min_delay", 0);
-                    cfg.set<int>("events/welcome_min_delay", newMin);
-                    if (newMin > oldMin) {
-                        for (auto& row : st->get_all<GroupSettingRow>(
-                            orm::where(orm::c(&GroupSettingRow::key) == std::string("welcome_delay")))) {
-                            int cur = 0; try { cur = std::stoi(row.value); } catch (...) {}
-                            if (cur < newMin) gsSet(st, row.platform, row.groupId, "welcome_delay", std::to_string(newMin));
+
+                if (scope == "global") {
+                    for (const auto& key : kScopedKeys) {
+                        if (!values.contains(key)) continue;
+                        if (values[key].is_boolean()) cfg.set<bool>("events/" + key, values[key].get<bool>());
+                        else if (values[key].is_string()) cfg.set<std::string>("events/" + key, values[key].get<std::string>());
+                    }
+                    if (values.contains("welcome_min_delay") && values["welcome_min_delay"].is_number()) {
+                        int newMin = values["welcome_min_delay"].get<int>();
+                        int oldMin = cfg.get<int>("events/welcome_min_delay", 0);
+                        cfg.set<int>("events/welcome_min_delay", newMin);
+                        if (newMin > oldMin) {
+                            for (auto& row : st->get_all<GroupSettingRow>(
+                                orm::where(orm::c(&GroupSettingRow::key) == std::string("welcome_delay")))) {
+                                int cur = 0; try { cur = std::stoi(row.value); } catch (...) {}
+                                if (cur < newMin) gsSet(st, row.platform, row.groupId, "welcome_delay", std::to_string(newMin));
+                            }
                         }
                     }
-                }
-                if (j.contains("welcome_min_cooldown") && j["welcome_min_cooldown"].is_number()) {
-                    int newMin = j["welcome_min_cooldown"].get<int>();
-                    int oldMin = cfg.get<int>("events/welcome_min_cooldown", 0);
-                    cfg.set<int>("events/welcome_min_cooldown", newMin);
-                    if (newMin > oldMin) {
-                        for (auto& row : st->get_all<GroupSettingRow>(
-                            orm::where(orm::c(&GroupSettingRow::key) == std::string("welcome_cooldown")))) {
-                            int cur = 0; try { cur = std::stoi(row.value); } catch (...) {}
-                            if (cur < newMin) gsSet(st, row.platform, row.groupId, "welcome_cooldown", std::to_string(newMin));
+                    if (values.contains("welcome_min_cooldown") && values["welcome_min_cooldown"].is_number()) {
+                        int newMin = values["welcome_min_cooldown"].get<int>();
+                        int oldMin = cfg.get<int>("events/welcome_min_cooldown", 0);
+                        cfg.set<int>("events/welcome_min_cooldown", newMin);
+                        if (newMin > oldMin) {
+                            for (auto& row : st->get_all<GroupSettingRow>(
+                                orm::where(orm::c(&GroupSettingRow::key) == std::string("welcome_cooldown")))) {
+                                int cur = 0; try { cur = std::stoi(row.value); } catch (...) {}
+                                if (cur < newMin) gsSet(st, row.platform, row.groupId, "welcome_cooldown", std::to_string(newMin));
+                            }
                         }
                     }
+                } else {
+                    J filtered = J::object();
+                    for (const auto& key : kScopedKeys)
+                        if (values.contains(key)) filtered[key] = values[key];
+                    J filteredClear = J::array();
+                    if (clear.is_array()) {
+                        for (const auto& key : clear)
+                            if (key.is_string() && kScopedKeys.count(key.get<std::string>()))
+                                filteredClear.push_back(key);
+                    }
+                    scoped_settings::setSection(cfg, scope, target, "events", filtered, filteredClear);
                 }
                 cfg.save();
-                jsonReply(ok(J{{"saved", true}}), std::move(cb));
+                jsonReply(ok(responseFor(scope, target, platform)), std::move(cb));
             }
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});

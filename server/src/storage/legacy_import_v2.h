@@ -357,10 +357,11 @@ inline int importBlacklist(Database& db, const fs::path& confDir) {
 // 以前只认 match[]（完全匹配）：原版的前缀/包含/正则规则、mode 写法、触发限制
 // 全部被丢弃。Lua/JS/Py 代码型回复无法转成文本规则，跳过并留日志。
 inline int importReplies(ReplyManager& reply, const fs::path& confDir) {
+    // 与旧版源码（DiceMod.cpp custom_reply 段）一致：
+    // CustomMsgReply.json 非空才读取；不存在或为空时回退迁移 CustomReply.json
+    // （完全匹配）与 CustomRegexReply.json（正则），迁移后旧版会写回
+    // CustomMsgReply.json。CustomMsg.json 是独立的全局文案，不参与本判断。
     std::string body = readFile(confDir / "CustomMsgReply.json");
-    // Dice! loaded CustomReply/CustomRegexReply only when the newer rule file
-    // was absent or empty.  Build an equivalent in-memory new-format object so
-    // old installations do not silently lose all of their keyword replies.
     bool hasModernRules = false;
     try { auto modern = json::parse(sanitizeJsonControls(body)); hasModernRules = modern.is_object() && !modern.empty(); } catch (...) {}
     if (!hasModernRules) {
@@ -390,9 +391,28 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir) {
     try {
         json obj = json::parse(body);
         if (!obj.is_object()) return 0;
-        // Dedup against existing rules by first-condition content (idempotent re-import).
+        // 完整规则级去重（条件集合+回复+触发限制都相同才算重复）：既能幂等重导，
+        // 也不会像旧的“只按首条件”那样误杀“同匹配词、不同回复”的规则；
+        // 同时剔除历史 Dice 文件里因旧版 bug 产生的完全重复条目。
+        auto fingerprint = [](const ReplyRule& r) -> std::string {
+            std::string fp;
+            std::vector<std::pair<int, std::string>> conds;
+            conds.reserve(r.conditions.size());
+            for (const auto& c : r.conditions) conds.emplace_back(static_cast<int>(c.type), c.content);
+            std::sort(conds.begin(), conds.end());
+            for (const auto& [t, c] : conds) { fp += std::to_string(t); fp += ':'; fp += c; fp += '\x1f'; }
+            fp += '|';
+            std::vector<std::string> rs = r.results; std::sort(rs.begin(), rs.end());
+            for (const auto& x : rs) { fp += x; fp += '\x1f'; }
+            fp += '|' + std::to_string(r.prob) + '|' + std::to_string(r.cooldownSec)
+                + '|' + std::to_string(r.dayLimit) + '|' + r.scopeMode + '|' + r.scopeIds
+                + '|' + r.scopeUsersMode + '|' + r.scopeUsers + '|' + r.cooldownNotice
+                + '|' + r.dayLimitNotice + '|' + r.logic;
+            return fp;
+        };
         std::set<std::string> existing;
-        for (auto& er : *reply.listRules()) existing.insert(er.matchContent);
+        for (auto& er : *reply.listRules()) existing.insert(fingerprint(er));
+        int skippedDup = 0;
         for (auto& [key, r] : obj.items()) {
             if (!r.is_object()) continue;
             // Lua/JS/Py 代码回复导不进文本规则 → 跳过（保留在原文件里，可手工移植为插件）。
@@ -422,7 +442,7 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir) {
                 }
             }
             if (rule.conditions.empty()) continue;
-            if (existing.count(rule.conditions[0].content)) continue;   // already present
+            if (existing.count(fingerprint(rule))) { ++skippedDup; continue; }   // 完整重复 → 跳过
             // echo Deck = random-pick among answers (the answers ARE the deck);
             // echo Text = the answer template. Either way the answer strings become
             // our results (multi-result = random pick).
@@ -467,8 +487,10 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir) {
                     }
                 }
             }
-            if (reply.addRule(rule) >= 0) { existing.insert(rule.conditions[0].content); ++imported; }
+            if (reply.addRule(rule) >= 0) { existing.insert(fingerprint(rule)); ++imported; }
         }
+        if (skippedDup > 0)
+            DICE_LOG_INFO("importReplies: 跳过 {} 条完全重复的自定义回复（历史重复/重复导入）", skippedDup);
     } catch (...) {}
     if (skippedCode > 0)
         DICE_LOG_INFO("importReplies: {} 条 Lua/JS/Py 代码型回复无法转为文本规则，已跳过", skippedCode);
