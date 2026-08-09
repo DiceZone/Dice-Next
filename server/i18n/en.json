@@ -54,6 +54,8 @@
       "result_reason": "For {reason}, {nick} rolls {attr}: {roll}/{rate} {level}",
       "need_value": "Please provide a target value, e.g. .ra Spot 60",
       "no_card": "Attribute \"{attr}\" not found; set it with .st first, or give a value like .ra {attr} 60",
+      "preview_invalid": "Invalid fixed outcome; use .ra(outcome)rate, for example .ra(1)50",
+      "preview_range": "The fixed D100 outcome must be between 1 and 100",
       "hidden": "{nick} made a hidden check; the result was sent privately."
     },
     "level": {
@@ -202,7 +204,7 @@
       "rdx": "Double-cross .rdx: legacy Dice compatibility alias, identical to .dx. e.g. .rdx 3c8.",
       "r": "Roll .r [expr] [reason]: roll dice. e.g. .r3d6+2 attack; .rh hidden; N#expr repeat.",
       "rh": "Hidden .rh [expr] [reason]: hidden roll / hidden check. The result is DM'd to you; the group only sees \"<name> made a hidden roll\". Hidden checks use .rah / .rch (e.g. .rah Spot 60). House rules (.setcoc) and bonus/penalty dice still apply.",
-      "ra": "Check .ra <skill|attr> [rate] [reason]: COC check. Reads the card if rate omitted. e.g. .ra spot / .ra str60",
+      "ra": "Check .ra <skill|attr> [rate] [reason]: COC check. Reads the card if rate omitted. Use .ra(outcome)rate to preview a specific result level. e.g. .ra spot / .ra str60 / .ra(1)1 / .ra(100)1",
       "rx": "Psychology .rx @investigator [rate]: hidden Psychology roll (for Keepers). Rolls a Psychology check against the @'d investigator; the detailed result with success level is DM'd to you, while the group only sees a non-spoiler receipt. Reads the target card's Psychology if rate omitted, default 10.",
       "rb": "Bonus/penalty .rb/.rp [N] [check]: bonus/penalty dice (keep low/high tens). e.g. .rb spot",
       "sc": "Sanity .sc success/fail [san]: sanity check, auto-deducts SAN and saves to card. e.g. .sc 1/1d6",
