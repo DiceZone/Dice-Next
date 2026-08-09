@@ -17,6 +17,7 @@
 #include "deck/card_deck.h"
 #include "../storage/database.h"
 #include "rules_lock.h"
+#include "check_roll_override.h"
 #include "../service/notice_manager.h"   // B：通知系统（权限变更等推送给骰主）
 
 #include <sqlite_orm/sqlite_orm.h>
@@ -1314,10 +1315,13 @@ private:
     /// Format a check reply given a precomputed roll (so .ra and .rb/.rp share it).
     std::string formatCheck(Locale loc, const Message& msg, const std::string& attr,
                             int rate, const std::string& reason,
-                            const std::string& rollDetail, int rollValue) {
+                            const std::string& rollDetail, int rollValue,
+                            bool recordStats = true) {
         SuccessLevel lv = rollSuccessLevel(rollValue, rate, getCocRule(msg));
-        recordRollStat(msg, attr, lv);   // accumulate per-skill for .hiy 统计
-        recordDiceSamples(100, {rollValue});
+        if (recordStats) {
+            recordRollStat(msg, attr, lv);   // accumulate per-skill for .hiy 统计
+            recordDiceSamples(100, {rollValue});
+        }
         const std::string nick = displayName(msg);
         return i18n_.tr(loc, reason.empty() ? "dice.check.result" : "dice.check.result_reason",
             {{"nick", nick}, {"attr", attr}, {"reason", reason},
@@ -1684,6 +1688,7 @@ private:
                 // 黏着形可——最长指令优先解析为 .rap ass 23；".ra pass 23" 仍是检定 pass。
                 bool attached = !restTok.empty()
                     && (static_cast<unsigned char>(restTok[0]) >= 0x80
+                        || restTok[0] == '('
                         || (glued && std::isalpha(static_cast<unsigned char>(restTok[0]))));
                 if (restTok.empty() || attached) {
                     bpType = static_cast<char>(std::tolower(static_cast<unsigned char>(tok[0])));
@@ -1693,6 +1698,25 @@ private:
                 }
             }
         }
+
+        // Fixed-outcome preview: ".ra(1)1" evaluates the
+        // expression in parentheses as the d100 result, then parses the suffix
+        // exactly like ordinary .ra arguments. This lets users preview custom
+        // critical/fumble wording without waiting for a random roll.
+        std::optional<DiceResult> fixedRoll;
+        auto consumeFixedRoll = [&]() -> std::optional<std::string> {
+            auto parsed = parseCheckRollOverride(s);
+            if (!parsed.present) return std::nullopt;
+            if (!parsed.valid) return i18n_.tr(loc, "dice.check.preview_invalid");
+            auto result = engine_.roll(parsed.expression);
+            if (!result.ok()) return i18n_.tr(loc, "dice.check.preview_invalid");
+            if (result.modifiedTotal < 1 || result.modifiedTotal > 100)
+                return i18n_.tr(loc, "dice.check.preview_range");
+            fixedRoll = std::move(result);
+            s = trim(parsed.rest);
+            return std::nullopt;
+        };
+        if (auto error = consumeFixedRoll()) return *error;
 
         // Difficulty prefix ".ra 困难侦查"/".ra 极难侦查" → reduced threshold.
         int div = 1; std::string diffLabel;
@@ -1704,6 +1728,12 @@ private:
             { s = trim(s.substr(6)); }
         else if (s.rfind("\xe6\x99\xae\xe9\x80\x9a", 0) == 0)   // 普通
             { s = trim(s.substr(6)); }
+
+        // Also accept the difficulty before the fixed result, e.g.
+        // ".ra困难(1)50", while keeping the expression-oriented argument order.
+        if (!fixedRoll) {
+            if (auto error = consumeFixedRoll()) return *error;
+        }
 
         // ".ra <技能> @某人" → check using the @'d player's card (青果/海豹).
         std::string target = atTarget(msg);
@@ -1744,12 +1774,16 @@ private:
         std::string out;
         for (int i = 0; i < multi; ++i) {
             std::string detail; int val;
-            if (bpType) { val = rollBonusPenalty(bp, bpType == 'b', loc, detail); }
+            if (bpType) {
+                val = rollBonusPenalty(bp, bpType == 'b', loc, detail,
+                                       fixedRoll ? fixedRoll->modifiedTotal : 0);
+            }
+            else if (fixedRoll) { val = fixedRoll->modifiedTotal; detail = fixedRoll->formattedOutput; }
             else { auto r = engine_.roll("1d100");
                    if (!r.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", r.error}});
                    val = r.modifiedTotal; detail = r.formattedOutput; }
             if (i) out += "\n";
-            out += formatCheck(loc, msg, label, effRate, reason, detail, val);
+            out += formatCheck(loc, msg, label, effRate, reason, detail, val, !fixedRoll.has_value());
         }
         if (hidden) { sendPrivate(msg, out); return i18n_.tr(loc, "dice.check.hidden", {{"nick", displayName(msg)}}); }
         return out;
@@ -1802,8 +1836,9 @@ private:
     /// Roll a d100 with @p n extra tens dice; bonus keeps the lowest tens,
     /// penalty the highest. Faithful to the original RD bonus/penalty logic.
     /// @p detail receives "base[奖励骰/惩罚骰:e1 e2]" for display.
-    int rollBonusPenalty(int n, bool bonus, Locale loc, std::string& detail) {
-        int base = engine_.roll("1d100").modifiedTotal;   // 1..100
+    int rollBonusPenalty(int n, bool bonus, Locale loc, std::string& detail, int fixedBase = 0) {
+        int base = fixedBase >= 1 && fixedBase <= 100
+            ? fixedBase : engine_.roll("1d100").modifiedTotal;   // 1..100
         int d100 = base;
         std::vector<int> extras;
         for (int i = 0; i < n; ++i) {

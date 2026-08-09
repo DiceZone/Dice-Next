@@ -18,6 +18,7 @@ set(TEST_SOURCES
     test_backup_service.cpp
     test_timezone.cpp
     test_dice_expression.cpp
+    test_check_roll_override.cpp
 
     # Project source files needed by tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/causal/cooldown_manager.cpp
