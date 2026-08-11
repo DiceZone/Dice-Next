@@ -4321,6 +4321,8 @@ public:
     // ─── 规则包注册表（P2：.set 切换 + WebUI 管理）─────────────
     struct RulePack {
         std::string name, fullName, version, file, dir, author;
+        // 非空表示该规则文件由一个 bundle 统一管理，WebUI 不应把它当独立规则重复展示或编辑。
+        std::string ownerBundle, ownerBundleFolder;
         std::vector<std::string> setKeys;
         int diceSides = 0, aliasGroups = 0, computedCount = 0, manualCount = 0;
         bool enabled = true;     // 文件 .json=启用 / .json.disabled=停用
@@ -4349,7 +4351,9 @@ public:
     /// 加载 @p dir 下所有规则包(rules/*.json)：① 填充元数据表(供 .set / WebUI)
     /// ② 合并 alias/computed 到全局表。返回加载的规则包数。统一入口，替代分散的
     /// loadRulePackAliases / loadRulePackComputed（仍保留以兼容，但 main 只调本函数）。
-    static int loadRulePacks(const std::string& dir) {
+    static int loadRulePacks(const std::string& dir,
+                             const std::string& ownerBundle = {},
+                             const std::string& ownerBundleFolder = {}) {
         int n = 0; std::error_code ec;
         if (!std::filesystem::is_directory(dir, ec)) return 0;
         for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
@@ -4403,6 +4407,8 @@ public:
                 p.author = j.value("author", "");
                 p.file = fname;
                 p.dir = dir;
+                p.ownerBundle = ownerBundle;
+                p.ownerBundleFolder = ownerBundleFolder;
                 p.enabled = enabled;
                 p.aliasGroups = ag; p.computedCount = cc;
                 if (j.contains("set") && j["set"].is_object()) {
@@ -4482,6 +4488,7 @@ public:
         std::string name, version, author, description, dir, folder;
         std::vector<std::string> setKeys;     // 激活键（.set <key>）
         std::vector<std::string> pluginIds;   // 本包拥有的插件 id（"js:.."/"lua:.."），按群激活用
+        std::vector<std::string> ruleNames, helpdocFiles, luaNames, jsNames;
         int ruleFiles = 0, cmdCount = 0, helpdocEntries = 0, luaMods = 0, jsPlugins = 0;
         bool enabled = true;
     };
@@ -4514,6 +4521,7 @@ public:
         for (auto& e : fs::directory_iterator("data/rulepacks", ec)) {
             if (ec || !e.is_directory()) continue;
             std::string folder = u8s(e.path().filename());
+            if (folder.rfind("_imp_", 0) == 0 || folder.rfind("_install_", 0) == 0) continue;  // 忽略异常中断留下的事务目录。
             bool enabled = true; std::string base = folder;
             const std::string sfx = ".disabled";
             if (folder.size() > sfx.size() && folder.substr(folder.size() - sfx.size()) == sfx) {
@@ -4537,9 +4545,10 @@ public:
             }
             if (enabled) {   // rules/ 并入全局 rulePacks()
                 size_t before = rulePacks().size();
-                b.ruleFiles = loadRulePacks(u8str(e.path() / "rules"));
+                b.ruleFiles = loadRulePacks(u8str(e.path() / "rules"), b.name, b.folder);
                 for (size_t i = before; i < rulePacks().size(); ++i) {
                     b.cmdCount += (int)rulePacks()[i].customCmds.size() + (int)rulePacks()[i].cmdAlias.size();
+                    b.ruleNames.push_back(rulePacks()[i].fullName.empty() ? rulePacks()[i].name : rulePacks()[i].fullName);
                     if (b.setKeys.empty()) for (auto& k : rulePacks()[i].setKeys) b.setKeys.push_back(k);
                 }
             }
@@ -4549,19 +4558,22 @@ public:
                     std::error_code ie;
                     if (it->is_regular_file(ie) && it->path().extension() == ".json")
                         try { std::ifstream hf(it->path(), std::ios::binary); json hj = json::parse(hf, nullptr, false, true);
-                            if (hj.is_object() && hj.contains("helpdoc") && hj["helpdoc"].is_object()) b.helpdocEntries += (int)hj["helpdoc"].size();
+                            if (hj.is_object() && hj.contains("helpdoc") && hj["helpdoc"].is_object()) {
+                                b.helpdocEntries += (int)hj["helpdoc"].size();
+                                b.helpdocFiles.push_back(u8str(it->path().filename()));
+                            }
                         } catch (...) {}
                 }
             std::error_code de;
             // pluginIds 用于 gating 比对，须与「实际加载的 mod 名/文件名」(path::string()) 同编码 → 不用 u8s。
             if (fs::is_directory(e.path() / "lua", de))
                 for (auto& le : fs::directory_iterator(e.path() / "lua", de)) {
-                    if (le.is_directory()) { ++b.luaMods; b.pluginIds.push_back("lua:" + u8str(le.path().filename())); }
-                    else if (le.path().extension() == ".lua") { ++b.luaMods; b.pluginIds.push_back("lua:" + u8str(le.path().stem())); }
+                    if (le.is_directory()) { auto name = u8str(le.path().filename()); ++b.luaMods; b.luaNames.push_back(name); b.pluginIds.push_back("lua:" + name); }
+                    else if (le.path().extension() == ".lua") { auto name = u8str(le.path().stem()); ++b.luaMods; b.luaNames.push_back(name); b.pluginIds.push_back("lua:" + name); }
                 }
             if (fs::is_directory(e.path() / "js", de))
                 for (auto& je : fs::directory_iterator(e.path() / "js", de))
-                    if (je.path().extension() == ".js") { ++b.jsPlugins; b.pluginIds.push_back("js:" + u8str(je.path().filename())); }
+                    if (je.path().extension() == ".js") { auto name = u8str(je.path().filename()); ++b.jsPlugins; b.jsNames.push_back(name); b.pluginIds.push_back("js:" + name); }
             rulePackBundles().push_back(std::move(b));
             ++n;
         }
@@ -4661,7 +4673,6 @@ public:
     }
     bool isPluginEnabledInGroup(const std::string& platform, const std::string& group,
                                 const std::string& pluginId, const std::string& adapterId = {}) const {
-        if (group.empty()) return true;   // 私聊不 gating
         // pack-bound 插件（属于某规则包）→ 仅在本群激活了该包对应规则系统时生效。
         // 群的 ruleSystem 存的是「激活规则的名字」；该规则的 setKeys 与本包 setKeys 有交集 = 包已激活。
         {
@@ -4669,6 +4680,7 @@ public:
             for (auto& b : rulePackBundles()) {
                 if (std::find(b.pluginIds.begin(), b.pluginIds.end(), pluginId) == b.pluginIds.end()) continue;
                 if (!b.enabled) return false;
+                if (group.empty()) return false;  // bundle 依赖群规则，私聊没有激活上下文，不能越界生效。
                 std::string active = groupSettingValue(platform, group, "ruleSystem", adapterId);
                 if (active.empty()) return false;   // 本群未激活任何规则 → 包插件不生效
                 for (auto& k : b.setKeys) if (k == active) return true;   // 兼容：ruleSystem 直接是 setKey
@@ -4680,9 +4692,29 @@ public:
                 return false;   // 包未在本群激活 → 其插件不生效
             }
         }
+        if (group.empty()) return true;   // 独立插件在私聊保持原行为。
         // free 插件：默认全局启用，群黑名单可单独禁用。
         for (auto& d : disabledPluginsInGroup(platform, group, adapterId)) if (d == pluginId) return false;
         return true;
+    }
+
+    /// 返回插件所属规则包（显示名、目录名）。独立插件返回空。
+    static std::optional<std::pair<std::string, std::string>> pluginOwnerBundle(const std::string& pluginId) {
+        std::shared_lock<std::shared_mutex> lk(rulesLock());
+        for (const auto& b : rulePackBundles())
+            if (std::find(b.pluginIds.begin(), b.pluginIds.end(), pluginId) != b.pluginIds.end())
+                return std::make_pair(b.name, b.folder);
+        return std::nullopt;
+    }
+    /// 返回某个 .set 激活键当前属于哪个规则/规则包，用于导入前拒绝歧义冲突。
+    static std::optional<std::string> ruleSetKeyOwner(const std::string& key) {
+        const std::string wanted = toLower(key);
+        std::shared_lock<std::shared_mutex> lk(rulesLock());
+        for (const auto& b : rulePackBundles())
+            for (const auto& k : b.setKeys) if (toLower(k) == wanted) return b.name;
+        for (const auto& rp : rulePacks())
+            for (const auto& k : rp.setKeys) if (toLower(k) == wanted) return rp.fullName.empty() ? rp.name : rp.fullName;
+        return std::nullopt;
     }
     // seal.vars ↔ 人物卡桥接（JS 规则插件用无$前缀属性名读写玩家卡 = .st/.ra 同一份卡）。
     // 私聊 scope=""，群聊 scope=群号；getAttr/setAttr 内部按规范名(canonical)解析。

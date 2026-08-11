@@ -2567,11 +2567,16 @@ static int realMain(int argc, char* argv[]) {
                 nlohmann::json cmds = nlohmann::json::array();
                 for (auto& c : luaMod.commandsOf(m.name))
                     cmds.push_back({{"trigger", c.trigger}, {"kind", c.kind}});
-                arr.push_back({{"name", m.name}, {"title", m.title}, {"author", m.author},
-                               {"version", m.version}, {"brief", m.brief}, {"enabled", m.enabled},
-                               {"replies", m.replies}, {"scripts", m.scripts}, {"helpTopics", help},
-                               {"commands", cmds},
-                               {"singleFile", m.singleFile}, {"ruleCompat", m.ruleCompat}});
+                nlohmann::json item = {{"name", m.name}, {"title", m.title}, {"author", m.author},
+                                       {"version", m.version}, {"brief", m.brief}, {"enabled", m.enabled},
+                                       {"replies", m.replies}, {"scripts", m.scripts}, {"helpTopics", help},
+                                       {"commands", cmds},
+                                       {"singleFile", m.singleFile}, {"ruleCompat", m.ruleCompat}};
+                if (auto owner = dice::CommandRouter::pluginOwnerBundle("lua:" + m.name)) {
+                    item["ownerBundle"] = owner->first;
+                    item["ownerBundleFolder"] = owner->second;
+                }
+                arr.push_back(std::move(item));
             }
             return arr;
         };
@@ -2684,31 +2689,31 @@ static int realMain(int argc, char* argv[]) {
     // ── 规则包 bundle 管理（data/rulepacks/<包>/）：列表 / 上传zip / 启停 / 删除 ──
     {
         namespace fs = std::filesystem;
+        static std::mutex rulepackTxnMutex;
+        static std::atomic<unsigned long long> rulepackTxnSeq{0};
         auto jResp = [](const nlohmann::json& out) {
             auto resp = drogon::HttpResponse::newHttpResponse();
             resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
             resp->setBody(out.dump());
             return resp;
         };
-        auto reloadPacks = [&luaMod, &jsMod]() {
-            // 同一时间可能有上传、启停、删除三个入口。串行整个事务，防止 A 请求
-            // 扫描目录时 B 请求已删除目录；插件层另有互斥锁，但规则/帮助注册表也需要同序。
-            static std::mutex reloadMutex;
-            std::lock_guard<std::mutex> guard(reloadMutex);
+        auto reloadPacks = [&luaMod, &jsMod]() -> std::string {
             try {
-                dice::CommandRouter::reloadRulePacks({"rules", "data/rules"});   // 重载 rules + bundles(内含 loadRulePackBundles)
-                dice::CommandRouter::loadHelpDocs();                             // 刷新帮助文档（含包内 helpdoc）
-                // 重算规则包附加插件目录并热重载 lua/js（包内插件按群激活 gating）。
+                dice::CommandRouter::reloadRulePacks({"rules", "data/rules"});
+                dice::CommandRouter::loadHelpDocs();
                 std::vector<std::string> luaDirs, jsDirs;
                 dice::CommandRouter::packPluginDirs(luaDirs, jsDirs);
                 luaMod.setExtraDirs(luaDirs); luaMod.reload();
                 jsMod.setExtraDirs(jsDirs);
                 jsMod.reload(jsMod.pluginDir().empty() ? "data/plugins/js" : jsMod.pluginDir());
-                dice::CommandRouter::reloadJsGameSystems(jsMod.gameSystemTemplates());   // JS 规则插件属性模板同步
+                dice::CommandRouter::reloadJsGameSystems(jsMod.gameSystemTemplates());
+                return {};
             } catch (const std::exception& e) {
                 DICE_LOG_ERROR("Rule-pack hot reload failed without stopping service: {}", e.what());
+                return e.what();
             } catch (...) {
                 DICE_LOG_ERROR("Rule-pack hot reload failed without stopping service: unknown error");
+                return "unknown reload error";
             }
         };
         auto bundleList = []() {
@@ -2718,17 +2723,94 @@ static int realMain(int argc, char* argv[]) {
                 arr.push_back({{"name", b.name}, {"folder", b.folder}, {"version", b.version},
                                {"author", b.author}, {"description", b.description}, {"enabled", b.enabled},
                                {"setKeys", b.setKeys}, {"ruleFiles", b.ruleFiles}, {"cmdCount", b.cmdCount},
-                               {"helpdocEntries", b.helpdocEntries}, {"luaMods", b.luaMods}, {"jsPlugins", b.jsPlugins}});
+                               {"helpdocEntries", b.helpdocEntries}, {"luaMods", b.luaMods}, {"jsPlugins", b.jsPlugins},
+                               {"ruleNames", b.ruleNames}, {"helpdocFiles", b.helpdocFiles},
+                               {"luaNames", b.luaNames}, {"jsNames", b.jsNames}});
             return arr;
+        };
+        auto safeFolder = [](const std::string& value) {
+            if (value.empty() || value.size() > 128 || value == "." || value == "..") return false;
+            if (value.back() == '.' || value.back() == ' ') return false;
+            for (unsigned char c : value) {
+                if (c < 0x20 || c == 0x7f || c == '<' || c == '>' || c == ':' || c == '"' ||
+                    c == '/' || c == '\\' || c == '|' || c == '?' || c == '*') return false;
+            }
+            std::string upper = value;
+            std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return (char)std::toupper(c); });
+            const auto dot = upper.find('.'); if (dot != std::string::npos) upper.resize(dot);
+            static const std::unordered_set<std::string> reserved = {
+                "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+                "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+            };
+            return reserved.find(upper) == reserved.end();
+        };
+        auto safeArchiveEntry = [](std::string entry) {
+            if (!entry.empty() && entry.back() == '\r') entry.pop_back();
+            if (entry.empty() || entry.front() == '/' || entry.front() == '\\' || entry.find('\\') != std::string::npos ||
+                entry.find(':') != std::string::npos || entry.find('\0') != std::string::npos) return false;
+            std::istringstream parts(entry); std::string part;
+            while (std::getline(parts, part, '/')) if (part.empty() || part == "." || part == "..") return false;
+            return true;
+        };
+        auto nextTag = []() {
+            const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            return std::to_string(now) + "_" + std::to_string(rulepackTxnSeq.fetch_add(1));
+        };        // 读取 ZIP central directory，在真正解压前限制总展开大小，并校验 central/local 文件名一致。
+        // 这样恶意压缩包无法先把磁盘撑满再被事后检查。
+        auto validateZipBytes = [safeArchiveEntry](const std::string& bytes, std::string& error) {
+            auto u16 = [&](size_t p) -> uint16_t { return (uint16_t)((unsigned char)bytes[p] | ((unsigned char)bytes[p + 1] << 8)); };
+            auto u32 = [&](size_t p) -> uint32_t { return (uint32_t)u16(p) | ((uint32_t)u16(p + 2) << 16); };
+            auto sig = [&](size_t p, uint32_t value) { return p + 4 <= bytes.size() && u32(p) == value; };
+            if (bytes.size() < 22) { error = "不是有效的 ZIP 文件"; return false; }
+            const size_t minEocd = bytes.size() > 65557 ? bytes.size() - 65557 : 0;
+            size_t eocd = bytes.size() - 22; bool found = false;
+            for (;;) { if (sig(eocd, 0x06054b50u)) { found = true; break; } if (eocd == minEocd) break; --eocd; }
+            if (!found || eocd + 22u + u16(eocd + 20) > bytes.size()) { error = "ZIP 目录损坏"; return false; }
+            const uint16_t disk = u16(eocd + 4), centralDisk = u16(eocd + 6);
+            const uint16_t entriesOnDisk = u16(eocd + 8), entryCount = u16(eocd + 10);
+            const uint32_t centralSize = u32(eocd + 12), centralOffset = u32(eocd + 16);
+            if (disk != 0 || centralDisk != 0 || entriesOnDisk != entryCount || entryCount == 0 || entryCount == 0xffffu ||
+                centralSize == 0xffffffffu || centralOffset == 0xffffffffu) { error = "不支持分卷、空包或 ZIP64 规则包"; return false; }
+            if (entryCount > 2048 || (uint64_t)centralOffset + centralSize > bytes.size()) { error = "ZIP 文件数量或目录范围异常"; return false; }
+            size_t pos = centralOffset; uint64_t total = 0; std::unordered_set<std::string> names;
+            for (uint16_t i = 0; i < entryCount; ++i) {
+                if (!sig(pos, 0x02014b50u) || pos + 46 > bytes.size()) { error = "ZIP central directory 损坏"; return false; }
+                const uint16_t flags = u16(pos + 8), method = u16(pos + 10);
+                const uint32_t expanded = u32(pos + 24), localOffset = u32(pos + 42), external = u32(pos + 38);
+                const uint16_t nameLen = u16(pos + 28), extraLen = u16(pos + 30), commentLen = u16(pos + 32);
+                const size_t next = pos + 46u + nameLen + extraLen + commentLen;
+                if (nameLen == 0 || next > bytes.size() || next > (uint64_t)centralOffset + centralSize) { error = "ZIP 文件名或目录项损坏"; return false; }
+                std::string name = bytes.substr(pos + 46, nameLen);
+                if (!safeArchiveEntry(name)) { error = "压缩包包含不安全的文件路径"; return false; }
+                std::string folded = name; std::transform(folded.begin(), folded.end(), folded.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+                if (!names.insert(folded).second) { error = "压缩包包含重复或大小写冲突的文件路径"; return false; }
+                if ((flags & 1u) != 0 || (method != 0 && method != 8)) { error = "规则包不支持加密或特殊压缩算法"; return false; }
+                const unsigned unixMode = (external >> 16) & 0170000u;
+                if (unixMode == 0120000u) { error = "规则包不允许包含符号链接"; return false; }
+                total += expanded;
+                if (total > 128u * 1024u * 1024u) { error = "规则包解压后不能超过 128 MiB"; return false; }
+                if (!sig(localOffset, 0x04034b50u) || localOffset + 30 > bytes.size()) { error = "ZIP local header 损坏"; return false; }
+                const uint16_t localNameLen = u16(localOffset + 26), localExtraLen = u16(localOffset + 28);
+                if ((uint64_t)localOffset + 30u + localNameLen + localExtraLen > bytes.size() ||
+                    bytes.compare(localOffset + 30, localNameLen, name) != 0) { error = "ZIP 文件名索引不一致"; return false; }
+                pos = next;
+            }
+            return true;
         };
         app.registerHandler("/api/rulepacks",
             [jResp, bundleList](const drogon::HttpRequestPtr&, std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 cb(jResp({{"code", 0}, {"message", "ok"}, {"data", {{"bundles", bundleList()}}}}));
             }, {drogon::Get});
         app.registerHandler("/api/rulepacks/upload",
-            [jResp, bundleList, reloadPacks](const drogon::HttpRequestPtr& req,
+            [jResp, bundleList, reloadPacks, safeFolder, validateZipBytes, nextTag, &jsMod, &luaMod](const drogon::HttpRequestPtr& req,
                          std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+                std::lock_guard<std::mutex> transaction(rulepackTxnMutex);
                 namespace fs = std::filesystem;
+                fs::path zipPath, tmpDir, installed;
+                std::error_code ec;
+                auto cleanup = [&]() { if (!zipPath.empty()) fs::remove(zipPath, ec); if (!tmpDir.empty()) fs::remove_all(tmpDir, ec); };
+                auto fail = [&](const std::string& message) { cleanup(); cb(jResp({{"code", 1}, {"message", message}})); };
                 try {
                     auto j = nlohmann::json::parse(req->getBody());
                     std::string filename = j.value("filename", std::string("pack.zip"));
@@ -2736,93 +2818,201 @@ static int realMain(int argc, char* argv[]) {
                     if (auto comma = content.find(",base64,"); comma != std::string::npos) content = content.substr(comma + 8);
                     else if (auto c2 = content.find(','); c2 != std::string::npos && content.rfind("data:", 0) == 0) content = content.substr(c2 + 1);
                     std::string bytes = drogon::utils::base64Decode(content);
-                    if (bytes.empty()) { cb(jResp({{"code", 1}, {"message", "empty/invalid file"}})); return; }
-                    fs::create_directories("data/rulepacks");
-                    std::string tag = std::to_string((long long)std::time(nullptr));
-                    fs::path zipPath = fs::path("data/rulepacks") / ("_imp_" + tag + ".zip");
-                    fs::path tmpDir  = fs::path("data/rulepacks") / ("_imp_" + tag);
-                    { std::ofstream f(zipPath, std::ios::binary); f.write(bytes.data(), (std::streamsize)bytes.size()); }
-                    fs::create_directories(tmpDir);
-                    std::error_code ec;
-#if defined(_WIN32)
-                    std::system(("tar -xf \"" + zipPath.string() + "\" -C \"" + tmpDir.string() + "\"").c_str());
-#else
-                    std::system(("unzip -o -q \"" + zipPath.string() + "\" -d \"" + tmpDir.string() + "\"").c_str());
-#endif
-                    fs::remove(zipPath, ec);
-                    // 定位包根：含 pack.json 的目录（zip 根，或唯一子目录）。
-                    auto isPackDir = [](const fs::path& d) { std::error_code e; return fs::exists(d / "pack.json", e)
-                        || fs::is_directory(d / "rules", e) || fs::is_directory(d / "helpdoc", e); };
-                    fs::path src; std::string packName;
-                    if (isPackDir(tmpDir)) { src = tmpDir; packName = filename;
-                        if (auto dot = packName.rfind('.'); dot != std::string::npos) packName = packName.substr(0, dot);
-                    } else {
+                    constexpr size_t kMaxZipBytes = 32u * 1024u * 1024u;
+                    if (bytes.empty()) { fail("规则包为空或 Base64 无效"); return; }
+                    if (bytes.size() > kMaxZipBytes) { fail("规则包压缩文件不能超过 32 MiB"); return; }
+                    fs::create_directories("data/rulepacks", ec);
+                    if (ec) { fail("无法创建规则包目录：" + ec.message()); return; }
+                    const std::string tag = nextTag();
+                    zipPath = fs::path("data/rulepacks") / ("_imp_" + tag + ".zip");
+                    tmpDir  = fs::path("data/rulepacks") / ("_imp_" + tag);
+                    { std::ofstream f(zipPath, std::ios::binary); if (!f) { fail("无法保存上传文件"); return; }
+                      f.write(bytes.data(), (std::streamsize)bytes.size()); if (!f) { fail("上传文件写入失败"); return; } }
+
+                    std::string zipError;
+                    if (!validateZipBytes(bytes, zipError)) { fail(zipError); return; }
+
+
+                    fs::create_directories(tmpDir, ec);
+                    if (ec || std::system(dice::backup::archiveExtractCommand(zipPath, tmpDir).c_str()) != 0) {
+                        fail("规则包解压失败"); return;
+                    }
+                    fs::remove(zipPath, ec); zipPath.clear();
+
+                    size_t fileCount = 0; uintmax_t totalBytes = 0;
+                    for (fs::recursive_directory_iterator it(tmpDir, fs::directory_options::skip_permission_denied, ec), end;
+                         it != end; it.increment(ec)) {
+                        if (ec) { fail("无法检查解压后的规则包"); return; }
+                        const auto status = it->symlink_status(ec);
+                        if (ec || fs::is_symlink(status)) { fail("规则包不允许包含符号链接"); return; }
+                        if (fs::is_regular_file(status)) {
+                            if (++fileCount > 2048) { fail("规则包文件数量超过 2048 个"); return; }
+                            totalBytes += it->file_size(ec);
+                            if (ec || totalBytes > 128u * 1024u * 1024u) { fail("规则包解压后不能超过 128 MiB"); return; }
+                        }
+                    }
+
+                    auto hasManifest = [](const fs::path& d) { std::error_code e; return fs::is_regular_file(d / "pack.json", e); };
+                    fs::path src;
+                    if (hasManifest(tmpDir)) src = tmpDir;
+                    else {
                         int dirs = 0; fs::path only;
                         for (auto& e : fs::directory_iterator(tmpDir, ec)) if (e.is_directory()) { ++dirs; only = e.path(); }
-                        if (dirs == 1 && isPackDir(only)) { src = only; packName = dnx_u8str(only.filename()); }
+                        if (dirs == 1 && hasManifest(only)) src = only;
                     }
-                    // 优先用 pack.json 里的 name
-                    if (!src.empty()) { try { if (fs::exists(src / "pack.json", ec)) {
-                        std::ifstream pf(src / "pack.json", std::ios::binary); auto pj = nlohmann::json::parse(pf, nullptr, false, true);
-                        if (pj.is_object() && pj.contains("name") && pj["name"].is_string()) packName = pj["name"].get<std::string>();
-                    } } catch (...) {} }
-                    if (src.empty() || packName.empty()) { fs::remove_all(tmpDir, ec);
-                        cb(jResp({{"code", 1}, {"message", "zip 内未找到规则包（需含 pack.json 或 rules/ 或 helpdoc/）"}})); return; }
-                    if (auto p = packName.find_last_of("/\\"); p != std::string::npos) packName = packName.substr(p + 1);
-                    // ⚠️ 必须用同一个 std::string 取 begin/end —— 之前对两个临时 string 分别取
-                    // begin()/end()，迭代器属于不同对象，算出的长度是天文数字→std::length_error
-                    // "string too long"，导致任何规则包上传都失败。
-                    const std::string destPath = "data/rulepacks/" + packName;
-                    fs::path dest = u8path(destPath);
-                    fs::remove_all(dest, ec);
+                    if (src.empty()) { fail("规则包必须在根目录或唯一子目录中包含 pack.json"); return; }
+
+                    nlohmann::json manifest;
+                    try { std::ifstream pf(src / "pack.json", std::ios::binary); manifest = nlohmann::json::parse(pf); }
+                    catch (...) { fail("pack.json 不是有效的 JSON"); return; }
+                    if (!manifest.is_object()) { fail("pack.json 必须是 JSON 对象"); return; }
+                    const std::string displayName = manifest.value("name", std::string());
+                    if (displayName.empty() || displayName.size() > 128) { fail("pack.json 的 name 必须为 1-128 字节"); return; }
+
+                    std::vector<std::string> setKeys, newJsNames, newLuaNames;
+                    auto addSetKeys = [&](const nlohmann::json& values, const std::string& field) {
+                        if (!values.is_array()) throw std::runtime_error(field + " 必须是字符串数组");
+                        for (const auto& value : values) {
+                            if (!value.is_string() || value.get<std::string>().empty()) throw std::runtime_error(field + " 包含空值或非字符串");
+                            const std::string key = value.get<std::string>();
+                            if (key.size() > 64 || key.find_first_of(" \t\r\n") != std::string::npos)
+                                throw std::runtime_error(field + " 的激活键不能超过 64 字节或包含空白");
+                            if (std::none_of(setKeys.begin(), setKeys.end(), [&](const std::string& old) { return dice::utils::toLower(old) == dice::utils::toLower(key); }))
+                                setKeys.push_back(key);
+                        }
+                    };
+                    if (manifest.contains("setKeys")) addSetKeys(manifest["setKeys"], "pack.json.setKeys");
+
+                    size_t supportedFiles = 0;
+                    const fs::path rulesDir = src / "rules";
+                    if (fs::is_directory(rulesDir, ec)) for (const auto& entry : fs::directory_iterator(rulesDir, ec)) {
+                        if (!entry.is_regular_file()) continue;
+                        const std::string file = dnx_u8str(entry.path().filename());
+                        if (!(entry.path().extension() == ".json" || (file.size() > 14 && file.substr(file.size() - 14) == ".json.disabled"))) continue;
+                        ++supportedFiles;
+                        try {
+                            std::ifstream f(entry.path(), std::ios::binary); auto rule = nlohmann::json::parse(f);
+                            if (!rule.is_object()) throw std::runtime_error("not object");
+                            if (rule.contains("set") && rule["set"].is_object() && rule["set"].contains("keys"))
+                                addSetKeys(rule["set"]["keys"], file + ".set.keys");
+                        } catch (const std::exception& e) { fail("规则文件 " + file + " 无效：" + e.what()); return; }
+                    }
+                    const fs::path helpDir = src / "helpdoc";
+                    if (fs::is_directory(helpDir, ec)) for (fs::recursive_directory_iterator it(helpDir, ec), end; it != end; it.increment(ec)) {
+                        if (ec) { fail("无法读取 helpdoc 目录"); return; }
+                        if (!it->is_regular_file() || it->path().extension() != ".json") continue;
+                        ++supportedFiles; const std::string file = dnx_u8str(it->path().filename());
+                        try {
+                            std::ifstream f(it->path(), std::ios::binary); auto doc = nlohmann::json::parse(f);
+                            if (!doc.is_object() || !doc.contains("helpdoc") || !doc["helpdoc"].is_object()) throw std::runtime_error("缺少 helpdoc 对象");
+                        } catch (const std::exception& e) { fail("帮助文件 " + file + " 无效：" + e.what()); return; }
+                    }
+                    const fs::path jsDir = src / "js";
+                    if (fs::is_directory(jsDir, ec)) for (const auto& entry : fs::directory_iterator(jsDir, ec))
+                        if (entry.is_regular_file() && entry.path().extension() == ".js") { ++supportedFiles; newJsNames.push_back(dnx_u8str(entry.path().filename())); }
+                    const fs::path luaDir = src / "lua";
+                    if (fs::is_directory(luaDir, ec)) for (const auto& entry : fs::directory_iterator(luaDir, ec)) {
+                        if (entry.is_directory()) { ++supportedFiles; newLuaNames.push_back(dnx_u8str(entry.path().filename())); }
+                        else if (entry.is_regular_file() && entry.path().extension() == ".lua") { ++supportedFiles; newLuaNames.push_back(dnx_u8str(entry.path().stem())); }
+                    }
+                    if (supportedFiles == 0) { fail("规则包没有可加载的 rules、helpdoc、lua 或 js 内容"); return; }
+                    if (setKeys.empty()) { fail("规则包必须通过 pack.json.setKeys 或 rules/*.json 的 set.keys 声明至少一个激活键"); return; }
+                    for (const auto& key : setKeys) if (auto owner = dice::CommandRouter::ruleSetKeyOwner(key)) {
+                        fail("激活键 .set " + key + " 已被「" + *owner + "」使用"); return;
+                    }
+                    auto sameName = [](const std::string& a, const std::string& b) { return dice::utils::toLower(a) == dice::utils::toLower(b); };
+                    for (const auto& file : newJsNames) {
+                        if (auto owner = dice::CommandRouter::pluginOwnerBundle("js:" + file)) { fail("JS 插件 " + file + " 已属于规则包「" + owner->first + "」"); return; }
+                        for (const auto& plugin : jsMod.listAll()) {
+                            std::string existing = plugin.file; const std::string suffix = ".disabled";
+                            if (existing.size() > suffix.size() && existing.substr(existing.size() - suffix.size()) == suffix) existing.resize(existing.size() - suffix.size());
+                            if (sameName(existing, file)) { fail("JS 插件文件名冲突：" + file); return; }
+                        }
+                    }
+                    for (const auto& name : newLuaNames) {
+                        if (auto owner = dice::CommandRouter::pluginOwnerBundle("lua:" + name)) { fail("Lua 模组 " + name + " 已属于规则包「" + owner->first + "」"); return; }
+                        for (const auto& mod : luaMod.mods()) if (sameName(mod.name, name)) { fail("Lua 模组名称冲突：" + name); return; }
+                    }
+
+                    std::string folder;
+                    if (manifest.contains("id") && manifest["id"].is_string()) folder = manifest["id"].get<std::string>();
+                    else if (src != tmpDir) folder = dnx_u8str(src.filename());
+                    else { folder = dnx_u8str(fs::path(std::u8string(filename.begin(), filename.end())).filename()); const auto dot = folder.rfind('.'); if (dot != std::string::npos) folder.resize(dot); }
+                    if (!safeFolder(folder)) { fail("规则包目录标识无效；可在 pack.json 中设置安全的 id"); return; }
+
+                    fs::path dest = u8path("data/rulepacks/" + folder);
+                    fs::path disabled = u8path("data/rulepacks/" + folder + ".disabled");
+                    if (fs::exists(dest, ec) || fs::exists(disabled, ec)) {
+                        fail("同标识规则包已存在，请先删除旧包再导入（不会自动覆盖）"); return;
+                    }
                     fs::rename(src, dest, ec);
-                    if (ec) { fs::copy(src, dest, fs::copy_options::recursive, ec); }
-                    fs::remove_all(tmpDir, ec);
-                    reloadPacks();
+                    if (ec) {
+                        ec.clear(); fs::path staging = u8path("data/rulepacks/_install_" + tag);
+                        fs::copy(src, staging, fs::copy_options::recursive, ec);
+                        if (ec) { fs::remove_all(staging, ec); fail("安装规则包失败：" + ec.message()); return; }
+                        fs::rename(staging, dest, ec);
+                        if (ec) { fs::remove_all(staging, ec); fail("安装规则包失败：" + ec.message()); return; }
+                    }
+                    installed = dest; cleanup();
+                    if (const std::string reloadError = reloadPacks(); !reloadError.empty()) {
+                        fs::remove_all(installed, ec); (void)reloadPacks();
+                        cb(jResp({{"code", 1}, {"message", "规则包加载失败，安装已回滚：" + reloadError}})); return;
+                    }
                     cb(jResp({{"code", 0}, {"message", "ok"}, {"data", {{"bundles", bundleList()}}}}));
-                } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }
+                } catch (const std::exception& e) { fail(e.what()); }
             }, {drogon::Post});
         app.registerHandler("/api/rulepacks/toggle",
-            [jResp, bundleList, reloadPacks](const drogon::HttpRequestPtr& req,
+            [jResp, bundleList, reloadPacks, safeFolder](const drogon::HttpRequestPtr& req,
                          std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+                std::lock_guard<std::mutex> transaction(rulepackTxnMutex);
                 namespace fs = std::filesystem;
                 try {
                     auto j = nlohmann::json::parse(req->getBody());
-                    std::string folder = j.value("folder", std::string());
-                    bool enable = j.value("enabled", true);
-                    if (folder.empty() || folder.find("..") != std::string::npos
-                        || folder.find('/') != std::string::npos || folder.find('\\') != std::string::npos) {
-                        cb(jResp({{"code", 1}, {"message", "bad folder"}})); return; }
-                    std::string base = folder; const std::string sfx = ".disabled";
-                    if (base.size() > sfx.size() && base.substr(base.size() - sfx.size()) == sfx) base = base.substr(0, base.size() - sfx.size());
-                    std::error_code ec;
-                    auto u8p = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };  // 按 UTF-8 构造，避开 Windows narrow 误解中文
-                    fs::path on = u8p("data/rulepacks/" + base), off = u8p("data/rulepacks/" + base + ".disabled");
-                    fs::path from = enable ? off : on, to = enable ? on : off;
-                    if (fs::exists(from, ec)) fs::rename(from, to, ec);
-                    reloadPacks();
+                    std::string folder = j.value("folder", std::string()); bool enable = j.value("enabled", true);
+                    const std::string sfx = ".disabled"; std::string base = folder;
+                    if (base.size() > sfx.size() && base.substr(base.size() - sfx.size()) == sfx) base.resize(base.size() - sfx.size());
+                    if (!safeFolder(base)) { cb(jResp({{"code", 1}, {"message", "规则包目录标识无效"}})); return; }
+                    fs::path on = u8path("data/rulepacks/" + base), off = u8path("data/rulepacks/" + base + sfx);
+                    fs::path from = enable ? off : on, to = enable ? on : off; std::error_code ec;
+                    if (!fs::is_directory(from, ec)) { cb(jResp({{"code", 1}, {"message", "规则包不存在或状态已改变"}})); return; }
+                    if (fs::exists(to, ec)) { cb(jResp({{"code", 1}, {"message", "目标状态目录已存在，未执行覆盖"}})); return; }
+                    fs::rename(from, to, ec);
+                    if (ec) { cb(jResp({{"code", 1}, {"message", "切换失败：" + ec.message()}})); return; }
+                    if (const std::string reloadError = reloadPacks(); !reloadError.empty()) {
+                        ec.clear(); fs::rename(to, from, ec); (void)reloadPacks();
+                        cb(jResp({{"code", 1}, {"message", "热重载失败，状态已回滚：" + reloadError}})); return;
+                    }
                     cb(jResp({{"code", 0}, {"message", "ok"}, {"data", {{"bundles", bundleList()}}}}));
                 } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }
             }, {drogon::Post});
         app.registerHandler("/api/rulepacks/delete",
-            [jResp, bundleList, reloadPacks](const drogon::HttpRequestPtr& req,
+            [jResp, bundleList, reloadPacks, safeFolder, nextTag](const drogon::HttpRequestPtr& req,
                          std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+                std::lock_guard<std::mutex> transaction(rulepackTxnMutex);
                 namespace fs = std::filesystem;
                 try {
                     auto j = nlohmann::json::parse(req->getBody());
                     std::string folder = j.value("folder", std::string());
-                    if (folder.empty() || folder.find("..") != std::string::npos
-                        || folder.find('/') != std::string::npos || folder.find('\\') != std::string::npos) {
-                        cb(jResp({{"code", 1}, {"message", "bad folder"}})); return; }
-                    std::error_code ec;
-                    auto u8p = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };
-                    fs::remove_all(u8p("data/rulepacks/" + folder), ec);
-                    reloadPacks();
+                    std::string base = folder; const std::string sfx = ".disabled";
+                    if (base.size() > sfx.size() && base.substr(base.size() - sfx.size()) == sfx) base.resize(base.size() - sfx.size());
+                    if (!safeFolder(base) || (folder != base && folder != base + sfx)) {
+                        cb(jResp({{"code", 1}, {"message", "规则包目录标识无效"}})); return;
+                    }
+                    fs::path target = u8path("data/rulepacks/" + folder); std::error_code ec;
+                    if (!fs::is_directory(target, ec)) { cb(jResp({{"code", 1}, {"message", "规则包不存在"}})); return; }
+                    fs::path trash = u8path("data/.rulepack-trash-" + nextTag());
+                    fs::rename(target, trash, ec);
+                    if (ec) { cb(jResp({{"code", 1}, {"message", "无法暂存待删除规则包：" + ec.message()}})); return; }
+                    if (const std::string reloadError = reloadPacks(); !reloadError.empty()) {
+                        ec.clear(); fs::rename(trash, target, ec); (void)reloadPacks();
+                        cb(jResp({{"code", 1}, {"message", "热重载失败，删除已回滚：" + reloadError}})); return;
+                    }
+                    fs::remove_all(trash, ec);
+                    if (ec) DICE_LOG_WARN("Rule-pack trash cleanup failed: {}", ec.message());
                     cb(jResp({{"code", 0}, {"message", "ok"}, {"data", {{"bundles", bundleList()}}}}));
                 } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }
             }, {drogon::Post});
     }
-
     // ── Deck file upload + hot reload ─────────────────────────
     app.registerHandler("/api/decks/upload",
         [&cardDeck](const drogon::HttpRequestPtr& req,
