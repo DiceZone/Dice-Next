@@ -23,10 +23,10 @@
     "crit": " [クリティカル]",
     "fumble": " [ファンブル]",
     "roll": {
-      "result": "{nick} のロール: {res}",
-      "result_reason": "{nick} の{reason}ロール: {res}",
-      "multi": "{nick} の {turn} 回ロール: {res}",
-      "multi_reason": "{nick} の{reason}を {turn} 回ロール: {res}",
+      "result": "**{nick}** のロール: `{res}`",
+      "result_reason": "**{nick}** の **{reason}** ロール: `{res}`",
+      "multi": "**{nick}** の **{turn}** 回ロール: {res}",
+      "multi_reason": "**{nick}** の **{reason}** を **{turn}** 回ロール: {res}",
       "too_many": "ロールは最大 {max} 回までです（{n} 回が指定されました）。",
       "hidden": "{nick} が暗ロールを行いました。結果は個別に送られました。"
     },

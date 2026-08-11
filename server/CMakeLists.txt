@@ -58,6 +58,7 @@ set(SOURCES
     src/main.cpp
     src/common/version.cpp
     src/common/logger.cpp
+    src/common/markdown.cpp
     src/common/hot_reload.cpp
     src/config/config_manager.cpp
     src/storage/database.cpp

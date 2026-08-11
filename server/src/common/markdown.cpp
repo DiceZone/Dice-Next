@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <sstream>
+#include <string_view>
 #include <vector>
 
 namespace dice::markdown {
@@ -11,6 +12,78 @@ namespace {
 bool isBoundary(char c) {
     const unsigned char u = static_cast<unsigned char>(c);
     return std::isspace(u) || std::ispunct(u);
+}
+
+std::string placeholder(size_t index) {
+    return std::string(1, '\x1d') + std::to_string(index) + '\x1e';
+}
+
+bool protectedOneBotCode(const std::string& text, size_t pos) {
+    return text.compare(pos, 4, "[CQ:") == 0 ||
+           text.compare(pos, 5, "[img,") == 0 ||
+           text.compare(pos, 8, "[图片:") == 0 ||
+           text.compare(pos, 5, "[图:") == 0;
+}
+
+// Protect content that must survive the Markdown downgrade byte-for-byte:
+// OneBot protocol codes, escaped punctuation and inline-code contents.
+std::string protectInline(const std::string& input, std::vector<std::string>& protectedText) {
+    static constexpr std::string_view kEscapable = R"(\`*_{}[]()#+-.!>|~)";
+    std::string out;
+    out.reserve(input.size());
+    for (size_t i = 0; i < input.size();) {
+        if (input[i] == '[' && protectedOneBotCode(input, i)) {
+            const size_t end = input.find(']', i + 1);
+            if (end != std::string::npos) {
+                protectedText.push_back(input.substr(i, end - i + 1));
+                out += placeholder(protectedText.size() - 1);
+                i = end + 1;
+                continue;
+            }
+        }
+        if (input[i] == '\\' && i + 1 < input.size() &&
+            kEscapable.find(input[i + 1]) != std::string_view::npos) {
+            protectedText.emplace_back(1, input[i + 1]);
+            out += placeholder(protectedText.size() - 1);
+            i += 2;
+            continue;
+        }
+        if (input[i] == '`') {
+            size_t ticks = 1;
+            while (i + ticks < input.size() && input[i + ticks] == '`') ++ticks;
+            const std::string delimiter(ticks, '`');
+            const size_t close = input.find(delimiter, i + ticks);
+            if (close != std::string::npos) {
+                protectedText.push_back(input.substr(i + ticks, close - i - ticks));
+                out += placeholder(protectedText.size() - 1);
+                i = close + ticks;
+                continue;
+            }
+        }
+        out += input[i++];
+    }
+    return out;
+}
+
+void restoreInline(std::string& text, const std::vector<std::string>& protectedText) {
+    for (size_t i = 0; i < protectedText.size(); ++i) {
+        const std::string token = placeholder(i);
+        size_t pos = 0;
+        while ((pos = text.find(token, pos)) != std::string::npos) {
+            text.replace(pos, token.size(), protectedText[i]);
+            pos += protectedText[i].size();
+        }
+    }
+}
+
+bool fenceAt(const std::string& line, char& marker, size_t& count) {
+    size_t pos = 0;
+    while (pos < line.size() && pos < 3 && line[pos] == ' ') ++pos;
+    if (pos >= line.size() || (line[pos] != '`' && line[pos] != '~')) return false;
+    marker = line[pos];
+    count = 0;
+    while (pos + count < line.size() && line[pos + count] == marker) ++count;
+    return count >= 3;
 }
 
 void stripPairs(std::string& text, const std::string& marker) {
@@ -79,7 +152,6 @@ std::string stripLinks(const std::string& input) {
 std::string stripLinePrefix(const std::string& line) {
     size_t pos = 0;
     while (pos < line.size() && pos < 3 && line[pos] == ' ') ++pos;
-    if (line.compare(pos, 3, "```") == 0 || line.compare(pos, 3, "~~~") == 0) return {};
     if (pos < line.size() && line[pos] == '#') {
         size_t end = pos;
         while (end < line.size() && line[end] == '#') ++end;
@@ -125,8 +197,33 @@ std::string toPlainText(const std::string& markdownText) {
     std::istringstream lines(markdownText);
     std::vector<std::string> plainLines;
     std::string line;
+    bool inFence = false;
+    char fenceMarker = 0;
+    size_t fenceLength = 0;
     while (std::getline(lines, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        char marker = 0;
+        size_t markerCount = 0;
+        if (fenceAt(line, marker, markerCount)) {
+            if (!inFence) {
+                inFence = true;
+                fenceMarker = marker;
+                fenceLength = markerCount;
+                continue;
+            }
+            if (marker == fenceMarker && markerCount >= fenceLength) {
+                inFence = false;
+                continue;
+            }
+        }
+        if (inFence) {
+            plainLines.push_back(line);
+            continue;
+        }
+
+        std::vector<std::string> protectedText;
+        line = protectInline(line, protectedText);
         line = stripLinePrefix(line);
         line = stripLinks(line);
         stripPairs(line, "**");
@@ -137,16 +234,8 @@ std::string toPlainText(const std::string& markdownText) {
         stripSingleEmphasis(line, '*');
         stripSingleEmphasis(line, '_');
 
-        std::string unescaped;
-        unescaped.reserve(line.size());
-        static const std::string escapable = R"(\`*_{}[]()#+-.!>|~)";
-        for (size_t i = 0; i < line.size(); ++i) {
-            if (line[i] == '\\' && i + 1 < line.size() && escapable.find(line[i + 1]) != std::string::npos)
-                unescaped += line[++i];
-            else
-                unescaped += line[i];
-        }
-        plainLines.push_back(std::move(unescaped));
+        restoreInline(line, protectedText);
+        plainLines.push_back(std::move(line));
     }
 
     while (!plainLines.empty() && plainLines.front().empty()) plainLines.erase(plainLines.begin());

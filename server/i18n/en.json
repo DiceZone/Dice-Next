@@ -22,10 +22,10 @@
     "crit": " [Critical Success]",
     "fumble": " [Fumble]",
     "roll": {
-      "result": "{nick} rolled: {res}",
-      "result_reason": "{nick} rolled for {reason}: {res}",
-      "multi": "{nick} rolled {turn} times: {res}",
-      "multi_reason": "{nick} rolled {turn} times for {reason}: {res}",
+      "result": "**{nick}** rolled: `{res}`",
+      "result_reason": "**{nick}** rolled for **{reason}**: `{res}`",
+      "multi": "**{nick}** rolled **{turn}** times: {res}",
+      "multi_reason": "**{nick}** rolled **{turn}** times for **{reason}**: {res}",
       "too_many": "You can roll at most {max} times (you asked for {n}).",
       "hidden": "{nick} made a hidden roll; the result was sent privately."
     },

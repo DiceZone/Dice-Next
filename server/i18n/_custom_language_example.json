@@ -11,8 +11,8 @@
   },
   "dice": {
     "roll": {
-      "result": "{nick}의 주사위: {res}",
-      "result_reason": "{nick}의 {reason} 주사위: {res}"
+      "result": "**{nick}**의 주사위: `{res}`",
+      "result_reason": "**{nick}**의 **{reason}** 주사위: `{res}`"
     }
   }
 }

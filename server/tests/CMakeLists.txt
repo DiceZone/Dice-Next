@@ -19,6 +19,7 @@ set(TEST_SOURCES
     test_timezone.cpp
     test_dice_expression.cpp
     test_check_roll_override.cpp
+    test_markdown.cpp
 
     # Project source files needed by tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/causal/cooldown_manager.cpp
@@ -29,6 +30,7 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/storage/database.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/config/config_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/logger.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/markdown.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/i18n/locale_resolver.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_matcher.cpp
