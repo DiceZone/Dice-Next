@@ -28,10 +28,10 @@
     "crit": " 【暴擊】",
     "fumble": " 【大失敗】",
     "roll": {
-      "result": "{nick}擲骰：{res}",
-      "result_reason": "{nick}擲骰 {reason}：{res}",
-      "multi": "{nick}擲骰{turn}次：{res}",
-      "multi_reason": "{nick}擲骰{turn}次 {reason}：{res}",
+      "result": "**{nick}** 擲骰：`{res}`",
+      "result_reason": "**{nick}** 擲骰 **{reason}**：`{res}`",
+      "multi": "**{nick}** 擲骰 **{turn}** 次：{res}",
+      "multi_reason": "**{nick}** 擲骰 **{turn}** 次 **{reason}**：{res}",
       "too_many": "最多只能擲骰 {max} 次（你輸入了 {n} 次）",
       "hidden": "{nick} 投了一次暗骰，結果已私聊告知。"
     },

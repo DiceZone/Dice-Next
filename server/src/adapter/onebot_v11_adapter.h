@@ -13,6 +13,7 @@
 
 #include "adapter_interface.h"
 #include "../common/logger.h"
+#include "../common/markdown.h"
 #include "../service/image_send.h"   // 发送期图片码解析
 #include "self_echo_filter.h"        // 自回声去重 + 跨骰防环护栏
 
@@ -121,7 +122,10 @@ public:
 
     // 跨骰：出站预处理——跨骰护栏（开头是指令→插零宽空格）+ 登记自回声去重。
     std::string prepOutgoing(const std::string& target, const std::string& text) {
-        std::string out = guardCrossBot(text);
+        // Markdown is the platform-neutral outbound format. OneBot v11 has no
+        // Markdown message type, so only its adapter copy is downgraded. CQ and
+        // image codes are protected by the converter and parsed afterwards.
+        std::string out = guardCrossBot(markdown::toPlainText(text));
         SelfEchoFilter::instance().mark(platform() + ":" + target, normalizeEcho(out));
         return out;
     }
@@ -393,9 +397,10 @@ public:
         std::string uin = loginId_.empty() ? std::string("10000") : loginId_;
         json messages = json::array();
         for (const auto& n : nodes) {
+            const std::string plain = prepOutgoing(groupId, n);
             messages.push_back({
                 {"type", "node"},
-                {"data", {{"name", botName}, {"uin", uin}, {"content", buildSegments(n)}}}
+                {"data", {{"name", botName}, {"uin", uin}, {"content", buildSegments(plain)}}}
             });
         }
         sendOneBotAction("send_group_forward_msg",
