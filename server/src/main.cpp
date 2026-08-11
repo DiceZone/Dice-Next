@@ -538,6 +538,12 @@ static int realMain(int argc, char* argv[]) {
         [&cmdRouter](const std::string& p, const std::string& u, const std::string& g, const std::string& a, std::string& out) {
             return cmdRouter.jsCardGetStr(p, u, g, a, out);
         });
+    // seal.favor 与内置 .favor 共用玩家档案存储及成长规则。
+    jsMod.setFavorBridge(
+        [&cmdRouter](const std::string& p, const std::string& u) { return cmdRouter.pluginFavorGet(p, u); },
+        [&cmdRouter](const std::string& p, const std::string& u, int v) { return cmdRouter.pluginFavorSet(p, u, v); },
+        [&cmdRouter](const std::string& p, const std::string& u, int d) { return cmdRouter.pluginFavorAdd(p, u, d); },
+        [&cmdRouter](const std::string& p, const std::string& u) { return cmdRouter.pluginFavorGrow(p, u); });
     // 群名片解析器 —— JS 规则包读 msg.sender.card / ctx.player.name（显示名）。
     jsMod.setCardNameResolver([&adapterMgr](const std::string& platform, const std::string& groupId,
                                             const std::string& userId) -> std::string {
@@ -627,6 +633,12 @@ static int realMain(int argc, char* argv[]) {
     luaMod.setBotId(configMgr.get<std::string>("dice/self_qq", std::string()));   // getDiceQQ()
     jsMod.setSelfInfo(configMgr.get<std::string>("dice/self_qq", std::string()),
                       configMgr.get<std::string>("dice/self_name", std::string()));   // ctx.endPoint.userId/nickname
+    // Lua getFavor/setFavor/addFavor/growFavor 直达内置好感度系统。
+    luaMod.setFavorBridge(
+        [&cmdRouter](const std::string& p, const std::string& u) { return cmdRouter.pluginFavorGet(p, u); },
+        [&cmdRouter](const std::string& p, const std::string& u, int v) { return cmdRouter.pluginFavorSet(p, u, v); },
+        [&cmdRouter](const std::string& p, const std::string& u, int d) { return cmdRouter.pluginFavorAdd(p, u, d); },
+        [&cmdRouter](const std::string& p, const std::string& u) { return cmdRouter.pluginFavorGrow(p, u); });
     // Lua 插件可锁定人物卡，.st 的读写会遵守锁定状态。
     luaMod.setCardLock([&cardStore](const std::string& uid, const std::string& scope,
                                     const std::string& key, bool on) {
@@ -1976,6 +1988,7 @@ static int realMain(int argc, char* argv[]) {
                 extra["appId"] = a.value("app_id", a.value("appId", std::string()));
                 extra["appSecret"] = a.value("app_secret", a.value("appSecret", std::string()));
                 extra["qqNumber"] = a.value("qq_number", a.value("qqNumber", std::string()));
+                extra["forceVerifyImageResource"] = a.value("force_verify_image_resource", a.value("forceVerifyImageResource", false));
             }
             row.config = extra.dump();
             return row;
@@ -1991,6 +2004,7 @@ static int realMain(int argc, char* argv[]) {
                 a["app_id"] = extra.value("appId", std::string());
                 a["app_secret"] = extra.value("appSecret", std::string());
                 a["qq_number"] = extra.value("qqNumber", std::string());
+                a["force_verify_image_resource"] = extra.value("forceVerifyImageResource", false);
             }
             return a;
         };
@@ -2269,6 +2283,15 @@ static int realMain(int argc, char* argv[]) {
                 total += player.cmdCount;
         } catch (...) {}
         return total;
+    }, [st](const std::string& qq) {
+        namespace orm = sqlite_orm;
+        try {
+            auto rows = st->get_all<dice::PlayerProfileRow>(orm::where(
+                orm::c(&dice::PlayerProfileRow::platform) == std::string("onebot_v11") and
+                orm::c(&dice::PlayerProfileRow::userId) == qq), orm::limit(1));
+            if (!rows.empty()) return rows.front().nickname;
+        } catch (...) {}
+        return std::string();
     });
     dice::cloudban::CloudbanService::instance().init(&configMgr,
         [&cmdRouter](int t, int l, const std::string& id) { return cmdRouter.cloudBanHas(t, l, id); },

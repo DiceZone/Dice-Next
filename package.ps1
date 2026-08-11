@@ -32,6 +32,7 @@ function Resolve-ProjectInput([string]$envName, [string]$projectName, [string]$l
 $webRoot  = Resolve-ProjectInput 'DICENEXT_WEB_ROOT' 'Dice-Next-WebUI' 'web'
 $docsRoot = Resolve-ProjectInput 'DICENEXT_DOC_ROOT' 'Dice-Next-Doc' 'docs'
 $webDist  = if ($webRoot) { Join-Path $webRoot 'dist' } else { $null }
+$defaultData = Join-Path $server 'resources\default-data'
 
 function Fail($m) { Write-Host "[X] $m" -ForegroundColor Red; exit 1 }
 
@@ -39,6 +40,16 @@ if (-not (Test-Path $exe))     { Fail "未找到 $exe，请先编译后端 (cmak
 if (-not (Test-Path $launcher)){ Fail "未找到 $launcher，请先重新编译 Windows 管理器" }
 if (-not $webRoot -or -not (Test-Path $webDist)) { Fail "未找到前端 dist，请先在 Dice-Next-WebUI 构建，或设置 DICENEXT_WEB_ROOT" }
 if (-not $docsRoot) { Fail "未找到文档项目，请设置 DICENEXT_DOC_ROOT 或放在同级 Dice-Next-Doc" }
+foreach ($requiredDir in 'decks','helpdoc','plugins\js') {
+    if (-not (Test-Path (Join-Path $defaultData $requiredDir))) {
+        Fail "默认发行资源不完整：缺少 server\resources\default-data\$requiredDir"
+    }
+}
+foreach ($demo in 'seal_demo.js','checkin.js','cfg_deck_demo.js') {
+    if (-not (Test-Path (Join-Path $defaultData "plugins\js\$demo"))) {
+        Fail "默认发行资源不完整：缺少示例插件 $demo"
+    }
+}
 
 # 版本实现文件必须不晚于 exe；成功链接后，构建号会回写到计数器。
 $versionSource = Join-Path $server "$buildDir\generated\version_build.cpp"
@@ -108,30 +119,19 @@ foreach ($d in 'vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll') {
     }
 }
 
-# ── 2. i18n / 内容数据(data/) / 前端 ─────────────────────────
+# ── 2. i18n / 内建内容资源 / 前端 ────────────────────────────
 # 不再打包配置文件 — 首次运行会自动生成，避免升级覆盖用户自定义内容
 Copy-Item (Join-Path $server 'i18n') (Join-Path $stage 'i18n') -Recurse   # i18n 仍是程序资源，留根
-# 规则、牌堆和插件资源统一放在 data/ 下；保留旧目录回退以支持已有安装。
+# 默认发行资源必须来自受 Git 跟踪的 resources/default-data，绝不能从
+# server/data 读取；后者是本地运行数据，既会被 .gitignore 排除，也可能
+# 把开发机上的用户牌堆或插件误带进发行包。
+Copy-Item (Join-Path $defaultData 'decks') (Join-Path $stage 'decks') -Recurse
 $dataStage = Join-Path $stage 'data'
 New-Item -ItemType Directory -Force -Path $dataStage | Out-Null
-function Copy-Content($name) {
-    $srcData = Join-Path $server "data\$name"; $srcRoot = Join-Path $server $name
-    $src = if (Test-Path $srcData) { $srcData } elseif (Test-Path $srcRoot) { $srcRoot } else { $null }
-    if ($src) { Copy-Item $src (Join-Path $dataStage $name) -Recurse }
-}
-Copy-Content 'decks'
-Copy-Content 'rules'
-Copy-Content 'help'      # .help 通用与跑团术语帮助文档。
-Copy-Content 'helpdoc'   # 随包分发的规则速查帮助文档。
-Copy-Content 'card-templates' # 人物卡模板与预设数据。
-Copy-Content 'rulepacks' # 规则包资源（pack.json、规则、帮助文档和插件）。
-# 只随包分发我们自带的示例 JS 插件，不分发第三方插件。
-New-Item -ItemType Directory -Force -Path (Join-Path $dataStage 'plugins\js') | Out-Null
-foreach ($demo in 'seal_demo.js','checkin.js','cfg_deck_demo.js') {
-    $s1 = Join-Path $server "data\plugins\js\$demo"; $s2 = Join-Path $server "plugins\js\$demo"
-    $src = if (Test-Path $s1) { $s1 } elseif (Test-Path $s2) { $s2 } else { $null }
-    if ($src) { Copy-Item $src (Join-Path $dataStage "plugins\js\$demo") }
-}
+Copy-Item (Join-Path $defaultData 'helpdoc') (Join-Path $dataStage 'helpdoc') -Recurse
+Copy-Item (Join-Path $defaultData 'plugins') (Join-Path $dataStage 'plugins') -Recurse
+# 人物卡模板是随程序更新的内建资源；放在根目录，避免与 data 下的用户模板混淆。
+Copy-Item (Join-Path $server 'card-templates') (Join-Path $stage 'card-templates') -Recurse
 # 开发计划页 / 指令表页 需要读取 docs 下的文件
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'docs') | Out-Null
 foreach ($docFile in 'roadmap.md','commands.json') {

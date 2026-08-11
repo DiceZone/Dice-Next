@@ -551,6 +551,45 @@ static void ctxIds(JSContext* ctx, JSValueConst ctxObj, std::string& plat, std::
     JSValue group  = JS_GetPropertyStr(ctx, ctxObj, "group");  gid = getStrProp(ctx, group, "groupId"); JS_FreeValue(ctx, group);
     JSValue ep = JS_GetPropertyStr(ctx, ctxObj, "endPoint");   plat = getStrProp(ctx, ep, "platform"); JS_FreeValue(ctx, ep);
 }
+
+// seal.favor：直接调用内置好感度系统。ctx 决定平台，userId 省略时为 ctx.player.userId。
+static bool favorIds(JSContext* ctx, JSValueConst ctxObj, int argc, JSValueConst* argv,
+                     int userArg, std::string& platform, std::string& uid) {
+    std::string gid;
+    ctxIds(ctx, ctxObj, platform, uid, gid);
+    if (argc > userArg && !JS_IsUndefined(argv[userArg]) && !JS_IsNull(argv[userArg]))
+        uid = toStr(ctx, argv[userArg]);
+    return !platform.empty() && !uid.empty();
+}
+static JSValue jsFavorGet(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    auto* m = mgrOf(ctx); std::string platform, uid;
+    if (!m || !m->hasFavorBridge() || argc < 1 || !favorIds(ctx, argv[0], argc, argv, 1, platform, uid))
+        return JS_NULL;
+    return JS_NewInt32(ctx, m->favorGet(platform, uid));
+}
+static JSValue jsFavorSet(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    auto* m = mgrOf(ctx); std::string platform, uid; int32_t value = 0;
+    if (!m || !m->hasFavorBridge() || argc < 2 || JS_ToInt32(ctx, &value, argv[1]) < 0
+        || !favorIds(ctx, argv[0], argc, argv, 2, platform, uid)) return JS_NULL;
+    return JS_NewInt32(ctx, m->favorSet(platform, uid, value));
+}
+static JSValue jsFavorAdd(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    auto* m = mgrOf(ctx); std::string platform, uid; int32_t delta = 0;
+    if (!m || !m->hasFavorBridge() || argc < 2 || JS_ToInt32(ctx, &delta, argv[1]) < 0
+        || !favorIds(ctx, argv[0], argc, argv, 2, platform, uid)) return JS_NULL;
+    return JS_NewInt32(ctx, m->favorAdd(platform, uid, delta));
+}
+static JSValue jsFavorGrow(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    auto* m = mgrOf(ctx); std::string platform, uid;
+    if (!m || !m->hasFavorBridge() || argc < 1 || !favorIds(ctx, argv[0], argc, argv, 1, platform, uid))
+        return JS_NULL;
+    const auto [delta, value] = m->favorGrow(platform, uid);
+    JSValue out = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, out, "success", JS_NewBool(ctx, delta >= 0));
+    JS_SetPropertyStr(ctx, out, "delta", JS_NewInt32(ctx, delta >= 0 ? delta : 0));
+    JS_SetPropertyStr(ctx, out, "value", JS_NewInt32(ctx, value));
+    return out;
+}
 // 「无 $ 前缀」= 人物卡属性（海豹语义）；有 $ = 个人/群/全局/临时变量（走 KV）。
 static bool isCardAttrName(const std::string& name) { return !name.empty() && name[0] != '$'; }
 
@@ -1013,6 +1052,12 @@ void JsPluginManager::installGlobals() {
     JS_SetPropertyStr(ctx_, vars, "computedGet", JS_NewCFunction(ctx_, jsVarStrGet, "computedGet", 2));
     JS_SetPropertyStr(ctx_, vars, "computedSet", JS_NewCFunction(ctx_, jsVarStrSet, "computedSet", 3));
     JS_SetPropertyStr(ctx_, seal, "vars", vars);
+    JSValue favor = JS_NewObject(ctx_);
+    JS_SetPropertyStr(ctx_, favor, "get",  JS_NewCFunction(ctx_, jsFavorGet,  "get",  2));
+    JS_SetPropertyStr(ctx_, favor, "set",  JS_NewCFunction(ctx_, jsFavorSet,  "set",  3));
+    JS_SetPropertyStr(ctx_, favor, "add",  JS_NewCFunction(ctx_, jsFavorAdd,  "add",  3));
+    JS_SetPropertyStr(ctx_, favor, "grow", JS_NewCFunction(ctx_, jsFavorGrow, "grow", 2));
+    JS_SetPropertyStr(ctx_, seal, "favor", favor);
     JSValue deck = JS_NewObject(ctx_);
     JS_SetPropertyStr(ctx_, deck, "draw",   JS_NewCFunction(ctx_, jsDeckDraw, "draw", 3));
     JS_SetPropertyStr(ctx_, deck, "reload", JS_NewCFunction(ctx_, jsNoop, "reload", 0));

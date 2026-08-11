@@ -143,6 +143,25 @@ public:
     bool playerCardLocked(const std::string& uid, const std::string& selector, bool byName,
                           const std::string& key) const;
 
+    // 好感度桥接：与内置 .favor 共用存储。未显式传 platform 时，使用当前消息平台。
+    using FavorGetFn = std::function<int(const std::string& platform, const std::string& uid)>;
+    using FavorSetFn = std::function<int(const std::string& platform, const std::string& uid, int value)>;
+    using FavorGrowFn = std::function<std::pair<int, int>(const std::string& platform, const std::string& uid)>;
+    void setFavorBridge(FavorGetFn get, FavorSetFn set, FavorSetFn add, FavorGrowFn grow) {
+        favorGet_ = std::move(get); favorSet_ = std::move(set);
+        favorAdd_ = std::move(add); favorGrow_ = std::move(grow);
+    }
+    std::string favorPlatform(const std::string& explicitPlatform) const {
+        return explicitPlatform.empty() ? activePlatform_ : explicitPlatform;
+    }
+    bool hasFavorBridge() const { return favorGet_ && favorSet_ && favorAdd_ && favorGrow_; }
+    int favorGet(const std::string& platform, const std::string& uid) const { return favorGet_ ? favorGet_(platform, uid) : 0; }
+    int favorSet(const std::string& platform, const std::string& uid, int value) const { return favorSet_ ? favorSet_(platform, uid, value) : 0; }
+    int favorAdd(const std::string& platform, const std::string& uid, int delta) const { return favorAdd_ ? favorAdd_(platform, uid, delta) : 0; }
+    std::pair<int, int> favorGrow(const std::string& platform, const std::string& uid) const {
+        return favorGrow_ ? favorGrow_(platform, uid) : std::make_pair(-1, 0);
+    }
+
     // 卡片锁定桥接（原版 CharaCard::lock/unlock）：作用在「真人物卡」（.st 那套）上，
     // 由 main.cpp 注入。key="w" 锁写 / "r" 锁读；on=true 加锁。返回是否发生变化。
     using CardLockFn = std::function<bool(const std::string& uid, const std::string& scope,
@@ -188,6 +207,10 @@ public:
     PlayerCardWriteFn playerCardWrite_;
     PlayerCardLockFn playerCardLock_;
     PlayerCardLockedFn playerCardLocked_;
+    FavorGetFn favorGet_;
+    FavorSetFn favorSet_, favorAdd_;
+    FavorGrowFn favorGrow_;
+    std::string activePlatform_;  // 仅在 Lua echo/msg_order 调用栈内设置
     RollFn      roller_;      // 掷骰引擎桥（pc:rollDice）
     ExtraFn     askExtra_;    // 平台扩展查询（askExtra）
 

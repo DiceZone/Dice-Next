@@ -66,6 +66,7 @@
 #include <ctime>
 #include <thread>
 #include <chrono>
+#include <cstdint>
 
 namespace dice::api {
 
@@ -168,6 +169,7 @@ static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std:
         {"accessToken", official ? "" : a.accessToken},
         {"appId", official && cfg.is_object() ? cfg.value("appId", std::string()) : std::string()},
         {"qqNumber", official && cfg.is_object() ? cfg.value("qqNumber", std::string()) : std::string()},
+        {"forceVerifyImageResource", official && cfg.is_object() ? cfg.value("forceVerifyImageResource", false) : false},
         {"heartApiKeyConfigured", !heartApiKey.empty()},
         {"heartApiKeyTail", heartApiKey.size() > 4 ? heartApiKey.substr(heartApiKey.size() - 4) : std::string()},
         {"enabled", a.enabled},
@@ -187,6 +189,7 @@ static J adapterToConfigJson(const AdapterRow& a) {
         out["app_id"] = extra.value("appId", std::string());
         out["app_secret"] = extra.value("appSecret", std::string());
         out["qq_number"] = extra.value("qqNumber", std::string());
+        out["force_verify_image_resource"] = extra.value("forceVerifyImageResource", false);
     }
     return out;
 }
@@ -207,6 +210,7 @@ static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
         adapter->configure({{"name", a.name}, {"appId", cfg.value("appId", std::string())},
                             {"appSecret", cfg.value("appSecret", std::string())},
                             {"qqNumber", cfg.value("qqNumber", std::string())},
+                            {"forceVerifyImageResource", cfg.value("forceVerifyImageResource", false)},
                             {"message_format", cfg.value("message_format", std::string())}});
         return adapter;
     }
@@ -2118,6 +2122,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     a.connectionMode = 0; a.endpoint.clear(); a.accessToken.clear();
                     a.config = J{{"appId", appId}, {"appSecret", appSecret},
                                  {"qqNumber", j.value("qqNumber", std::string())},
+                                 {"forceVerifyImageResource", j.value("forceVerifyImageResource", false)},
                                  {"heartApiKey", heartApiKey}}.dump();
                 } else if (a.type == static_cast<int>(AdapterType::kDiscord)
                            || a.type == static_cast<int>(AdapterType::kKook)) {
@@ -2162,6 +2167,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     if (j.contains("appId")) { credentialsChanged = credentialsChanged || adapterCfg.value("appId", std::string()) != j["appId"].get<std::string>(); adapterCfg["appId"] = j["appId"]; }
                     if (j.contains("appSecret") && j["appSecret"].is_string() && !j["appSecret"].get<std::string>().empty()) { credentialsChanged = credentialsChanged || adapterCfg.value("appSecret", std::string()) != j["appSecret"].get<std::string>(); adapterCfg["appSecret"] = j["appSecret"]; }
                     if (j.contains("qqNumber") && j["qqNumber"].is_string()) adapterCfg["qqNumber"] = j["qqNumber"];
+                    if (j.contains("forceVerifyImageResource") && j["forceVerifyImageResource"].is_boolean()) {
+                        credentialsChanged = credentialsChanged || adapterCfg.value("forceVerifyImageResource", false) != j["forceVerifyImageResource"].get<bool>();
+                        adapterCfg["forceVerifyImageResource"] = j["forceVerifyImageResource"];
+                    }
                     if (adapterCfg.value("appId", std::string()).empty() || adapterCfg.value("appSecret", std::string()).empty()) throw std::runtime_error("QQ 官方机器人需要 AppID 和 AppSecret");
                 } else { if (j.contains("endpoint")) a.endpoint = j["endpoint"]; if (j.contains("accessToken")) a.accessToken = j["accessToken"]; }
                 if (j.contains("heartApiKey") && j["heartApiKey"].is_string())
@@ -2427,6 +2436,25 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
                 if (j.contains("public_show") && j["public_show"].is_boolean())
                     cfg.set<bool>("dice/heart_public_show", j["public_show"].get<bool>());
+                auto trimmed = [](std::string value) {
+                    const auto first = value.find_first_not_of(" \t\r\n");
+                    if (first == std::string::npos) return std::string();
+                    const auto last = value.find_last_not_of(" \t\r\n");
+                    return value.substr(first, last - first + 1);
+                };
+                if (j.contains("master_qq")) {
+                    if (!j["master_qq"].is_string()) throw std::runtime_error("骰主 QQ 必须是文本");
+                    std::string qq = trimmed(j["master_qq"].get<std::string>());
+                    if (qq.size() > 20 || (!qq.empty() && !std::all_of(qq.begin(), qq.end(), [](char ch) { return ch >= '0' && ch <= '9'; })))
+                        throw std::runtime_error("骰主 QQ 只能包含数字且不能超过 20 位");
+                    cfg.set<std::string>("dice/heart_master_qq", qq);
+                }
+                if (j.contains("master_nickname")) {
+                    if (!j["master_nickname"].is_string()) throw std::runtime_error("骰主昵称必须是文本");
+                    std::string nickname = trimmed(j["master_nickname"].get<std::string>());
+                    if (nickname.size() > 128) throw std::runtime_error("骰主昵称不能超过 128 字节");
+                    cfg.set<std::string>("dice/heart_master_nickname", nickname);
+                }
                 if (j.contains("interval") && j["interval"].is_number()) {
                     int v = j["interval"].get<int>();
                     if (v < 180) v = 180;
@@ -2436,11 +2464,17 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 cfg.save();
             }
             J st = hs.lastState();
+            J master = hs.masterIdentityState();
             jsonReply(ok(J{
                 {"enabled", cfg.get<bool>("dice/heart_enabled", false)},
                 {"url", hs.url()},
                 {"configured_adapters", hs.configuredAdapterCount()},
                 {"public_show", cfg.get<bool>("dice/heart_public_show", true)},
+                {"master_qq", cfg.get<std::string>("dice/heart_master_qq", std::string())},
+                {"master_nickname", cfg.get<std::string>("dice/heart_master_nickname", std::string())},
+                {"effective_master_qq", master.value("master_id", std::string())},
+                {"effective_master_nickname", master.value("master_nickname", std::string())},
+                {"master_source", master.value("source", std::string("none"))},
                 {"interval", hs.interval()},
                 {"last_status", st.value("last_status", "unknown")},
                 {"last_report_at", st.value("last_report_at", "")},
@@ -3321,17 +3355,53 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             std::string gid = req->getParameter("groupId");
             auto rows = lst->get_all<GameLogRow>();
+            struct LogUsage {
+                int count = 0;
+                std::string lastAt;
+                std::uint64_t databaseBytes = 0;
+                std::uint64_t imageBytes = 0;
+            };
+            std::unordered_map<int, LogUsage> usage;
+
+            // SQLite 无法精确拆分出单行占用页数；这里按该日志实际保存的字段字节数
+            // 统计数据库内容，并与本地缓存图片的真实文件大小相加。这样既不会把
+            // 整个 logs.db 的空闲页重复分摊，也能准确反映图片带来的主要磁盘占用。
+            for (const auto& message : lst->get_all<GameLogMessageRow>(
+                     orm::order_by(&GameLogMessageRow::id).asc())) {
+                auto& item = usage[message.logId];
+                ++item.count;
+                item.lastAt = message.createdAt;
+                item.databaseBytes += sizeof(message.id) + sizeof(message.logId)
+                    + message.messageId.size() + message.sender.size() + message.userId.size()
+                    + message.content.size() + message.createdAt.size() + message.images.size();
+            }
+            namespace fs = std::filesystem;
+            std::error_code imageEc;
+            for (const char* dir : {"data/logs/images", "../data/logs/images"}) {
+                imageEc.clear();
+                if (!fs::is_directory(dir, imageEc)) continue;
+                for (const auto& entry : fs::directory_iterator(dir, imageEc)) {
+                    if (!entry.is_regular_file(imageEc)) continue;
+                    const std::string filename = dnx_u8str(entry.path().filename());
+                    if (filename.rfind("log", 0) != 0) continue;
+                    const auto underscore = filename.find('_', 3);
+                    if (underscore == std::string::npos || underscore == 3) continue;
+                    int logId = 0;
+                    try { logId = std::stoi(filename.substr(3, underscore - 3)); }
+                    catch (...) { continue; }
+                    const auto bytes = entry.file_size(imageEc);
+                    if (!imageEc) usage[logId].imageBytes += static_cast<std::uint64_t>(bytes);
+                    imageEc.clear();
+                }
+                break;
+            }
             J arr = J::array();
             for (auto& r : rows) {
                 if (!gid.empty() && r.groupId != gid) continue;
-                int cnt = (int)lst->count<GameLogMessageRow>(
-                    orm::where(orm::c(&GameLogMessageRow::logId) == r.id));
-                // Last-record time = newest message's timestamp.
-                std::string lastAt;
-                auto last = lst->get_all<GameLogMessageRow>(
-                    orm::where(orm::c(&GameLogMessageRow::logId) == r.id),
-                    orm::order_by(&GameLogMessageRow::id).desc(), orm::limit(1));
-                if (!last.empty()) lastAt = last.front().createdAt;
+                auto& size = usage[r.id];
+                size.databaseBytes += sizeof(r.id) + sizeof(r.status) + r.groupId.size()
+                    + r.gmId.size() + r.name.size() + r.players.size()
+                    + r.customRules.size() + r.createdAt.size();
                 std::string gameCode, gameName;
                 try {
                     auto meta = J::parse(r.customRules, nullptr, false);
@@ -3341,13 +3411,15 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"id", r.id}, {"groupId", r.groupId}, {"gmId", r.gmId},
                     {"name", r.name.empty() ? ("log" + std::to_string(r.id)) : r.name},
                     {"status", r.status}, {"createdAt", r.createdAt},
-                    {"lastAt", lastAt}, {"count", cnt}, {"gameCode", gameCode}, {"gameName", gameName}
+                    {"lastAt", size.lastAt}, {"count", size.count},
+                    {"storageBytes", size.databaseBytes + size.imageBytes},
+                    {"imageBytes", size.imageBytes},
+                    {"gameCode", gameCode}, {"gameName", gameName}
                 });
             }
             jsonReply(ok(arr), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
-
     // 跨群团务会话：进行中的会话从索引读取，已结团的会话从日志元数据恢复。
     app.registerHandler("/api/game-sessions", [&luaMod, lst](Req, CB&& cb) {
         try {
@@ -3727,9 +3799,35 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // DELETE /api/logs/{id} — remove a log, its messages, AND its cached local images
     // （落地的图片命名为 log<id>_<时间>_<序>.<ext>，按前缀清理；不污染其它日志的图片）。
     app.registerHandler("/api/logs/{1}",
-        [lst](Req, CB&& cb, const std::string& idStr0) {
+        [st, lst](Req, CB&& cb, const std::string& idStr0) {
         try {
             int id = std::stoi(idStr0);
+            try { (void)lst->get<GameLogRow>(id); }
+            catch (...) { jsonReply(fail("not found"), std::move(cb)); return; }
+
+            // WebUI 可以删除正在记录的日志；同步清掉各帐号及旧共享层中的激活引用，
+            // 避免后续消息继续写入已经不存在的日志。
+            const std::string idText = std::to_string(id);
+            for (auto row : st->get_all<GroupAccountSettingRow>(orm::where(
+                     orm::c(&GroupAccountSettingRow::key) == std::string("activeLog") and
+                     orm::c(&GroupAccountSettingRow::value) == idText))) {
+                auto names = st->get_all<GroupAccountSettingRow>(orm::where(
+                    orm::c(&GroupAccountSettingRow::adapterId) == row.adapterId and
+                    orm::c(&GroupAccountSettingRow::groupId) == row.groupId and
+                    orm::c(&GroupAccountSettingRow::key) == std::string("activeLogName")));
+                for (auto name : names) { name.value.clear(); st->update(name); }
+                row.value.clear(); st->update(row);
+            }
+            for (auto row : st->get_all<GroupSettingRow>(orm::where(
+                     orm::c(&GroupSettingRow::key) == std::string("activeLog") and
+                     orm::c(&GroupSettingRow::value) == idText))) {
+                auto names = st->get_all<GroupSettingRow>(orm::where(
+                    orm::c(&GroupSettingRow::platform) == row.platform and
+                    orm::c(&GroupSettingRow::groupId) == row.groupId and
+                    orm::c(&GroupSettingRow::key) == std::string("activeLogName")));
+                for (auto name : names) { name.value.clear(); st->update(name); }
+                row.value.clear(); st->update(row);
+            }
             lst->remove_all<GameLogMessageRow>(orm::where(orm::c(&GameLogMessageRow::logId) == id));
             lst->remove_all<GameLogRow>(orm::where(orm::c(&GameLogRow::id) == id));
             // 同步删掉本群保存到本地的日志图片缓存（开启「保存日志图片」时才有）。
@@ -4632,6 +4730,57 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
+    // QQ 官方机器人 2.0 群管理：禁言、用户入群审批与自动审批策略。
+    // OpenID 是适配器账号级标识，必须使用当前群详情所选账号的 endpointId。
+    app.registerHandler("/api/groups/{1}/{2}/qq-official-admin",
+        [&adapterMgr](Req req, CB&& cb, const std::string& plat, const std::string& gid) {
+        try {
+            const J posted = req->method() == drogon::Get ? J::object() : J::parse(req->body(), nullptr, false);
+            if (req->method() != drogon::Get && !posted.is_object()) {
+                jsonReply(fail("invalid JSON request"), std::move(cb)); return;
+            }
+            const std::string adapterId = req->method() == drogon::Get
+                ? req->getParameter("adapterId") : posted.value("adapterId", std::string());
+            auto a = !adapterId.empty() ? adapterMgr.getAdapter(adapterId) : pickAdapter(adapterMgr, plat);
+            if (!a || a->platform() != "qq_official") {
+                jsonReply(fail("QQ Official adapter required"), std::move(cb)); return;
+            }
+            const std::string endpointId = req->method() == drogon::Get
+                ? req->getParameter("endpointId") : posted.value("endpointId", gid);
+            J params = posted;
+            params["groupId"] = endpointId.empty() ? gid : endpointId;
+            std::string action;
+            if (req->method() == drogon::Get) {
+                const std::string section = req->getParameter("section");
+                if (section == "mute") action = "qq_get_mute";
+                else if (section == "requests") action = "qq_join_requests";
+                else if (section == "strategies") action = "qq_list_join_strategies";
+                else { jsonReply(fail("unknown section"), std::move(cb)); return; }
+                const std::string cursor = req->getParameter("cursor");
+                if (!cursor.empty()) params["cursor"] = cursor;
+                const std::string limit = req->getParameter("limit");
+                if (!limit.empty()) { try { params["limit"] = (std::min)(100, (std::max)(1, std::stoi(limit))); } catch (...) {} }
+            } else {
+                const std::string op = posted.value("action", std::string());
+                if (op == "setMute") action = "qq_set_mute";
+                else if (op == "approveJoin") action = "qq_approve_join";
+                else if (op == "createStrategy") action = "qq_create_join_strategy";
+                else if (op == "updateStrategy") action = "qq_update_join_strategy";
+                else if (op == "deleteStrategy") action = "qq_delete_join_strategy";
+                else if (op == "executeStrategy") action = "qq_execute_join_strategy";
+                else if (op == "updateWhitelist") action = "qq_update_join_whitelist";
+                else { jsonReply(fail("unknown action"), std::move(cb)); return; }
+            }
+            a->invokeActionAsync(action, params, [cb = std::move(cb)](J result) mutable {
+                if (!result.is_object()) { jsonReply(fail("QQ Official action returned no result"), std::move(cb)); return; }
+                if (!result.value("ok", false)) {
+                    jsonReply(fail(result.value("message", std::string("QQ Official action failed"))), std::move(cb));
+                    return;
+                }
+                jsonReply(ok(result.value("data", J::object())), std::move(cb));
+            });
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Post});
     // GET/POST /api/groups/{platform}/{groupId}/messages — simulated chat window.
     app.registerHandler("/api/groups/{1}/{2}/messages",
         [&adapterMgr, &db](Req req, CB&& cb, const std::string& plat, const std::string& gid) {

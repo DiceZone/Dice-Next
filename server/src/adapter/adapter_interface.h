@@ -238,6 +238,12 @@ public:
     virtual json invokeAction(const std::string& /*action*/, const json& /*params*/,
                               int /*timeoutMs*/ = 8000) { return json(); }
 
+    /// 异步平台操作。HTTP 型适配器可覆盖此接口，避免在 Web 事件循环中阻塞等待。
+    using ActionCallback = std::function<void(json)>;
+    virtual void invokeActionAsync(const std::string& action, const json& params, ActionCallback cb) {
+        cb(invokeAction(action, params));
+    }
+
     /// Send a plain text message to a group/user from the web admin. Default no-op.
     virtual void sendGroupMessage(const std::string& /*groupId*/, const std::string& /*text*/) {}
 

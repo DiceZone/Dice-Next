@@ -12,6 +12,7 @@ DOCS_ROOT="${DICENEXT_DOC_ROOT:-$PROJECT_ROOT/../Dice-Next-Doc}"
 [[ -d "$WEB_ROOT" ]] || WEB_ROOT="$PROJECT_ROOT/web"
 [[ -d "$DOCS_ROOT" ]] || DOCS_ROOT="$PROJECT_ROOT/docs"
 WEB_DIST="$WEB_ROOT/dist"
+DEFAULT_DATA="$SERVER_DIR/resources/default-data"
 RELEASE_DIR="$PROJECT_ROOT/release"
 SERVER_BIN="$SERVER_DIR/build/dice-next-server"
 VERSION_SOURCE="$SERVER_DIR/build/generated/version_build.cpp"
@@ -20,6 +21,12 @@ TRIPLET="arm64-osx"
 [[ -f "$SERVER_BIN" ]] || { echo "Missing $SERVER_BIN" >&2; exit 1; }
 [[ -d "$WEB_DIST" ]] || { echo "Missing $WEB_DIST; build Dice-Next-WebUI first or set DICENEXT_WEB_ROOT" >&2; exit 1; }
 [[ -d "$DOCS_ROOT" ]] || { echo "Missing documentation project; set DICENEXT_DOC_ROOT" >&2; exit 1; }
+for required in decks helpdoc plugins/js; do
+    [[ -d "$DEFAULT_DATA/$required" ]] || { echo "Missing bundled resource: server/resources/default-data/$required" >&2; exit 1; }
+done
+for demo in seal_demo.js checkin.js cfg_deck_demo.js; do
+    [[ -f "$DEFAULT_DATA/plugins/js/$demo" ]] || { echo "Missing bundled example plugin: $demo" >&2; exit 1; }
+done
 [[ -f "$VERSION_SOURCE" ]] || { echo "Missing $VERSION_SOURCE" >&2; exit 1; }
 [[ "$SERVER_BIN" -nt "$VERSION_SOURCE" ]] || { echo "Server binary is older than generated build number" >&2; exit 1; }
 
@@ -40,30 +47,15 @@ mkdir -p "$STAGING_DIR" "$RELEASE_DIR"
 install -m 0755 "$SERVER_BIN" "$STAGING_DIR/dice-next-server"
 cp -a "$SERVER_DIR/i18n" "$STAGING_DIR/i18n"
 
+# Bundled defaults come only from the tracked resources tree. Never package
+# server/data: it is ignored runtime state and may contain private user data.
+cp -a "$DEFAULT_DATA/decks" "$STAGING_DIR/decks"
 DATA_STAGE="$STAGING_DIR/data"
 mkdir -p "$DATA_STAGE"
-copy_content() {
-    local name=$1 source="$SERVER_DIR/data/$1"
-    [[ -d "$source" ]] || source="$SERVER_DIR/$name"
-    # Optional bundled resources are not present in every source checkout.
-    # Their absence must not make a complete package fail under `set -e`.
-    if [[ -d "$source" ]]; then
-        cp -a "$source" "$DATA_STAGE/$name"
-    fi
-}
-copy_content decks
-copy_content rules
-copy_content help
-copy_content helpdoc
-copy_content card-templates
-copy_content rulepacks
-mkdir -p "$DATA_STAGE/plugins/js"
-for demo in seal_demo.js checkin.js cfg_deck_demo.js; do
-    source="$SERVER_DIR/data/plugins/js/$demo"
-    [[ -f "$source" ]] || source="$SERVER_DIR/plugins/js/$demo"
-    [[ -f "$source" ]] && cp -a "$source" "$DATA_STAGE/plugins/js/$demo"
-done
-
+cp -a "$DEFAULT_DATA/helpdoc" "$DATA_STAGE/helpdoc"
+cp -a "$DEFAULT_DATA/plugins" "$DATA_STAGE/plugins"
+# Built-in card templates live outside data so user overrides remain separate.
+cp -a "$SERVER_DIR/card-templates" "$STAGING_DIR/card-templates"
 mkdir -p "$STAGING_DIR/docs" "$STAGING_DIR/web"
 for doc in roadmap.md commands.json; do
     [[ -f "$DOCS_ROOT/$doc" ]] && cp -a "$DOCS_ROOT/$doc" "$STAGING_DIR/docs/$doc"

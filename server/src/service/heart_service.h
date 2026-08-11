@@ -52,10 +52,12 @@ public:
     static HeartService& instance() { static HeartService s; return s; }
 
     void init(ConfigManager* cfg, AdapterManager* adapters,
-              std::function<long long()> commandCountProvider = {}) {
+              std::function<long long()> commandCountProvider = {},
+              std::function<std::string(const std::string&)> masterNicknameProvider = {}) {
         cfg_ = cfg;
         adapters_ = adapters;
         commandCountProvider_ = std::move(commandCountProvider);
+        masterNicknameProvider_ = std::move(masterNicknameProvider);
         ensureInstanceId();
         loadAutoCredentials();
     }
@@ -163,6 +165,12 @@ public:
 
     std::size_t configuredAdapterCount() const {
         return configuredKeys().size();
+    }
+
+    json masterIdentityState() const {
+        const auto master = masterIdentity();
+        return {{"master_id", master.id}, {"master_nickname", master.nickname},
+                {"source", master.manual ? "manual" : (master.id.empty() ? "none" : "onebot")}};
     }
 
 private:
@@ -407,8 +415,18 @@ private:
         };
     }
 
-    std::string firstMaster() const {
-        if (!cfg_) return "";
+    struct MasterIdentity {
+        std::string id;
+        std::string nickname;
+        bool manual = false;
+    };
+
+    MasterIdentity masterIdentity() const {
+        if (!cfg_) return {};
+        const std::string manualId = cfg_->get<std::string>("dice/heart_master_qq", std::string());
+        const std::string manualNickname = cfg_->get<std::string>("dice/heart_master_nickname", std::string());
+        if (!manualId.empty() || !manualNickname.empty())
+            return {manualId, manualNickname, true};
         try {
             json all = cfg_->getAll();
             if (all.contains("dice") && all["dice"].contains("masters") && all["dice"]["masters"].is_array()) {
@@ -423,11 +441,15 @@ private:
                     // 心跳展示只认 OneBot（真实 QQ 号）骰主：QQ 官方 OpenID、
                     // Discord/KOOK ID 对展示无意义，且 OpenID 会超服务端 master_id
                     // 列长导致上报 500。空平台视为旧版 QQ 号条目，兼容老数据。
-                    if (platform.empty() || platform == "onebot_v11") return id;
+                    if (platform.empty() || platform == "onebot_v11") {
+                        std::string nickname;
+                        if (masterNicknameProvider_) nickname = masterNicknameProvider_(id);
+                        return {id, nickname, false};
+                    }
                 }
             }
         } catch (...) {}
-        return "";
+        return {};
     }
 
     std::pair<int, std::string> doReport(
@@ -450,6 +472,7 @@ private:
 
         std::string bn = std::to_string(buildNumber());
         while (bn.size() < 3) bn = "0" + bn;
+        const auto master = masterIdentity();
         json body{
             {"access_token", target.apiKey},
             {"instance_id", adapterInstanceId(adapterId)},
@@ -458,8 +481,8 @@ private:
             {"dice_info", {
                 {"dice_id", selfId},
                 {"dice_nickname", target.adapter->getLoginName()},
-                {"master_id", firstMaster()},
-                {"master_nickname", ""},
+                {"master_id", master.id},
+                {"master_nickname", master.nickname},
             }},
             {"dice_type", "dicenext"},
             {"dice_version", versionString() + "(" + bn + ")"},
@@ -643,6 +666,7 @@ private:
     ConfigManager* cfg_ = nullptr;
     AdapterManager* adapters_ = nullptr;
     std::function<long long()> commandCountProvider_;
+    std::function<std::string(const std::string&)> masterNicknameProvider_;
     mutable std::mutex mu_;
     std::atomic<bool> busy_{false};
     std::unordered_map<std::string, TargetState> states_;
