@@ -1506,7 +1506,6 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
             J out = J::array();
             const auto allDefaults = i18n.flatten(loc);
-            std::set<std::string> coveredKeys;
             for (auto& c : cat) {
                 std::string descKey = c.value("descKey", "");
                 J row;
@@ -1520,12 +1519,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 row["category"] = c.value("category", "通用");
                 row["sources"] = c.value("sources", J::array());
                 row["example"] = c.value("example", "");
-                row["desc"] = descKey.empty() ? "" : i18n.tr(loc, descKey);
+                std::string desc;
+                if (c.contains("desc")) {
+                    if (c["desc"].is_object())
+                        desc = c["desc"].value(lang, c["desc"].value("zh-Hans", std::string()));
+                    else if (c["desc"].is_string()) desc = c["desc"].get<std::string>();
+                }
+                if (desc.empty() && !descKey.empty()) desc = i18n.tr(loc, descKey);
+                row["desc"] = desc;
                 J replies = J::array();
                 std::set<std::string> replyKeys;
                 auto appendReply = [&](const std::string& key, const std::string& example = std::string()) {
                     if (!replyKeys.insert(key).second) return;
-                    coveredKeys.insert(key);
                     std::string def = i18n.getDefault(loc, key);
                     replies.push_back(J{
                         {"key", key},
@@ -1557,59 +1562,6 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
                 row["replies"] = replies;
                 out.push_back(row);
-            }
-
-            // Keep every editable user-facing string reachable from a normal
-            // category, even when a newly added command has not yet been added to
-            // commands.json. Umbrella namespaces are split one level deeper so
-            // groups such as dice.brp/card.sc/dnd.rdc stay easy to find.
-            std::map<std::string, std::vector<std::pair<std::string, std::string>>> supplemental;
-            for (const auto& [key, def] : allDefaults) {
-                if (coveredKeys.count(key)) continue;
-                const size_t firstDot = key.find('.');
-                const std::string root = key.substr(0, firstDot);
-                if (root == "_meta" || root == "tplvar" || root == "legacy") continue;
-                std::string group = root;
-                if ((root == "dice" || root == "card" || root == "fun" || root == "dnd" || root == "help")
-                    && firstDot != std::string::npos) {
-                    const size_t secondDot = key.find('.', firstDot + 1);
-                    group = key.substr(0, secondDot);
-                }
-                supplemental[group].push_back({key, def});
-            }
-            auto supplementalCategory = [](const std::string& group) -> std::string {
-                const std::string root = group.substr(0, group.find('.'));
-                if (root == "dnd" || root == "setdnd" || root == "init") return "DND";
-                if (root == "setcoc") return "COC";
-                if (group == "dice.brp") return "BRP";
-                if (root == "card" || root == "pc" || root == "npc" || root == "buff") return "人物卡";
-                if (root == "game" || root == "log" || root == "ob" || root == "link") return "跑团";
-                if (root == "me" || root == "send") return "互动";
-                if (root == "fun" || root == "deck" || root == "favor" || root == "ak") return "娱乐";
-                if (root == "rule" || root == "hiy" || root == "setsn" || root == "sn") return "工具";
-                if (root == "help" || root == "helpdoc" || root == "lang" || root == "persona"
-                    || root == "self" || root == "system" || root == "event") return "系统";
-                if (root == "admin" || root == "trust" || root == "notice" || root == "alias"
-                    || root == "authorize" || root == "bot" || root == "dismiss" || root == "gate"
-                    || root == "group" || root == "master" || root == "mod" || root == "plugin"
-                    || root == "reply" || root == "welcome") return "管理";
-                return "通用";
-            };
-            for (const auto& [group, entries] : supplemental) {
-                J replies = J::array();
-                for (const auto& [key, def] : entries) {
-                    replies.push_back(J{
-                        {"key", key}, {"default", def},
-                        {"override", ov.count(key) ? J(ov[key]) : J(nullptr)},
-                        {"v2key", legacyv2::v2KeyFor(key)}, {"example", ""},
-                        {"vars", deriveVars(def)}
-                    });
-                }
-                out.push_back(J{
-                    {"cmd", group}, {"title", group + " · 其他文本"},
-                    {"category", supplementalCategory(group)}, {"sources", J::array()},
-                    {"example", ""}, {"desc", ""}, {"replies", replies}
-                });
             }
             jsonReply(ok(out), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
@@ -1794,12 +1746,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Delete});
 
     app.registerHandler("/api/backup/config", [&cfg](Req, CB&& cb) {
+        const backup::Selection selection = backup::Selection::fromJson(
+            cfg.get<J>("backup/auto_selection", J::object()));
         jsonReply(ok(J{{"enabled", cfg.get<bool>("backup/auto_enabled", false)},
                        {"schedule", cfg.get<std::string>("backup/auto_schedule", "interval")},
                        {"intervalHours", cfg.get<int>("backup/auto_interval_hours", 24)},
                        {"dailyTime", cfg.get<std::string>("backup/auto_daily_time", "04:00")},
                        {"keepDays", cfg.get<int>("backup/auto_keep_days", 7)},
-                       {"selection", cfg.get<J>("backup/auto_selection", J::object())},
+                       {"selection", selection.toJson()},
                        {"lastAutoAt", cfg.get<long long>("backup/auto_last_at", 0)}}), std::move(cb));
     }, {drogon::Get});
     app.registerHandler("/api/backup/config", [&cfg](Req req, CB&& cb) {
