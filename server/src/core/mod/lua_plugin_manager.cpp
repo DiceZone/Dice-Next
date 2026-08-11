@@ -266,6 +266,46 @@ static int l_setPlayerCardAttr(lua_State* L) {
     return 0;
 }
 
+// 好感度公开接口。platform 省略时继承当前 msg_order / echo 的消息平台。
+static bool luaFavorTarget(lua_State* L, LuaPluginManager* m, int platformArg,
+                           std::string& platform, std::string& uid) {
+    uid = argStr(L, 1);
+    platform = (lua_gettop(L) >= platformArg && !lua_isnoneornil(L, platformArg))
+        ? argStr(L, platformArg) : std::string();
+    platform = m ? m->favorPlatform(platform) : std::string();
+    return m && m->hasFavorBridge() && !platform.empty() && !uid.empty();
+}
+static int l_getFavor(lua_State* L) {
+    auto* m = mgrOf(L); std::string platform, uid;
+    if (!luaFavorTarget(L, m, 2, platform, uid)) { lua_pushnil(L); return 1; }
+    lua_pushinteger(L, m->favorGet(platform, uid)); return 1;
+}
+static int l_setFavor(lua_State* L) {
+    if (lua_gettop(L) < 2 || !lua_isnumber(L, 2)) { lua_pushnil(L); return 1; }
+    auto* m = mgrOf(L); std::string platform, uid;
+    if (!luaFavorTarget(L, m, 3, platform, uid)) { lua_pushnil(L); return 1; }
+    const int value = static_cast<int>(lua_tointeger(L, 2));
+    lua_pushinteger(L, m->favorSet(platform, uid, value)); return 1;
+}
+static int l_addFavor(lua_State* L) {
+    if (lua_gettop(L) < 2 || !lua_isnumber(L, 2)) { lua_pushnil(L); return 1; }
+    auto* m = mgrOf(L); std::string platform, uid;
+    if (!luaFavorTarget(L, m, 3, platform, uid)) { lua_pushnil(L); return 1; }
+    const int delta = static_cast<int>(lua_tointeger(L, 2));
+    lua_pushinteger(L, m->favorAdd(platform, uid, delta)); return 1;
+}
+static int l_growFavor(lua_State* L) {
+    auto* m = mgrOf(L); std::string platform, uid;
+    if (!luaFavorTarget(L, m, 2, platform, uid)) {
+        lua_pushboolean(L, 0); lua_pushinteger(L, 0); lua_pushinteger(L, 0); return 3;
+    }
+    const auto [delta, value] = m->favorGrow(platform, uid);
+    lua_pushboolean(L, delta >= 0 ? 1 : 0);
+    lua_pushinteger(L, delta >= 0 ? delta : 0);
+    lua_pushinteger(L, value);
+    return 3;
+}
+
 // 原版 CharaCard::lock/unlock 移植：锁写在「真人物卡」（CharacterCardStore，.st 用的那套）
 // 上，经 main.cpp 注入的 cardLock 桥接生效。lockPlayerCard(uid, gid, key) /
 // unlockPlayerCard(uid, gid, key)，key = "w"(锁写：.st set/del/clr 拒) / "r"(锁读：.st show 拒)。
@@ -676,6 +716,8 @@ void LuaPluginManager::registerGlobals() {
         {"eventMsg", l_eventMsg},
         {"getPlayerCard", l_getPlayerCard}, {"getPlayerCardAttr", l_getPlayerCardAttr},
         {"setPlayerCardAttr", l_setPlayerCardAttr},
+        {"getFavor", l_getFavor}, {"setFavor", l_setFavor},
+        {"addFavor", l_addFavor}, {"growFavor", l_growFavor},
         {"lockPlayerCard", l_lockPlayerCard}, {"unlockPlayerCard", l_unlockPlayerCard},
         {"isPlayerCardLocked", l_isPlayerCardLocked},
         {"askExtra", l_askExtra},                                  // 平台扩展查询（原版 DD::getExtra）
@@ -1795,7 +1837,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
 
     std::map<std::string, std::string> base = {
         {"uid", uid}, {"user", uid}, {"gid", gid}, {"grp", gid},
-        {"nick", nick}, {"card", groupCard}, {"pc", nick}, {"self", selfName_},
+        {"platform", platform}, {"nick", nick}, {"card", groupCard}, {"pc", nick}, {"self", selfName_},
         {"fromMsg", text}, {"fromUser", uid}, {"fromGroup", gid},
     };
     for (auto& rule : replyRules_) {
@@ -1836,7 +1878,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         auto setf = [&](const char* k, const std::string& v) {
             lua_pushlstring(state_, v.data(), v.size()); lua_setfield(state_, -2, k);
         };
-        setf("uid", uid); setf("gid", gid); setf("nick", nick); setf("card", groupCard);
+        setf("uid", uid); setf("gid", gid); setf("platform", platform); setf("nick", nick); setf("card", groupCard);
         setf("fromMsg", text); setf("fromUser", uid); setf("fromGroup", gid); setf("fromQQ", uid); setf("suffix", suffix);
         // Context 化（原版 msg userdata 语义）：挂方法 echo/format/get/inc + 动态字段
         // char/game/user/grp/at/pc…，并把 uid/gid 转为整数（原版类型）。失败则降级为纯表。
@@ -1852,6 +1894,8 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         // 运行 echo：函数 ref 或 {lua="name"} 脚本。
         loadingModDir_ = rule.modDir;
         int sbase = lua_gettop(state_);
+        const std::string previousPlatform = activePlatform_;
+        activePlatform_ = platform;
         bool callOk;
         if (!rule.echoScript.empty()) {
             std::string erel = rule.echoScript; for (auto& c : erel) if (c == '.') c = '/';   // 点分命名空间→子目录
@@ -1862,6 +1906,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
             lua_getglobal(state_, "msg");   // 作参数传入（msg_order 函数读 msg 参数；msg_reply echo 忽略多余参数）
             callOk = (lua_pcall(state_, 1, LUA_MULTRET, 0) == LUA_OK);
         }
+        activePlatform_ = previousPlatform;
         loadingModDir_.clear();
         if (!callOk) {
             DICE_LOG_ERROR("[lua] reply '{}' echo error: {}", rule.name, argStr(state_, -1));

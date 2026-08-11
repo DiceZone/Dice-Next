@@ -58,6 +58,7 @@
 #include <set>
 #include <fstream>
 #include <filesystem>
+#include <limits>
 #include <yaml-cpp/yaml.h>   // 解析 seal.gameSystem.newTemplateByYaml 的 YAML 模板
 
 namespace dice {
@@ -102,8 +103,9 @@ public:
     }
 
     // 本条消息回复的「类别」（供 AI 润色/翻译按覆盖范围过滤）。取值：
-    //   roll(掷骰/检定) / deck(牌堆抽取) / fun(娱乐:jrrp/ti/li/name/favor/sleep) / ""(其它)。
-    // 自定义回复(custom)/插件(plugin) 由 main.cpp 按来源另行分类。thread_local：handleMessage
+    //   roll(掷骰/检定) / deck(牌堆抽取) / fun(娱乐:jrrp/ti/li/name/favor/sleep) /
+    //   plugin(规则包自定义指令) / ""(其它)。普通自定义回复(custom) 与 JS/Lua 插件(plugin)
+    // 由 main.cpp 按来源另行分类。thread_local：handleMessage
     // 与调用方（main.cpp 出站前）在同一线程，无竞态。
     inline static thread_local std::string s_replyCat;
     const std::string& lastReplyCategory() const { return s_replyCat; }
@@ -127,6 +129,7 @@ public:
             text == "\xe5\xa5\xbd\xe6\x84\x9f\xe6\x8e\x92\xe8\xa1\x8c" ||          // 好感排行
             text == "\xe7\xbe\xa4\xe5\x86\x85\xe5\xa5\xbd\xe6\x84\x9f\xe6\x8e\x92\xe8\xa1\x8c") { // 群内好感排行
             if (isGroupLocked(msg) || (isGroupDisabled(msg))) return "";
+            s_replyCat = "fun";
             return handleFavor(forcedLocale.value_or(resolver_.resolve(msg)), msg, text);
         }
 
@@ -151,6 +154,7 @@ public:
             std::string after = trim(text.substr(summon.size()));
             if (after.empty()) {
                 if (isGroupLocked(msg) || isGroupDisabled(msg)) return "";
+                s_replyCat = "fun";
                 return i18n_.tr(forcedLocale.value_or(resolver_.resolve(msg)),
                                 "fun.summon_empty", {{"nick", displayName(msg)}});
             }
@@ -215,7 +219,10 @@ public:
                 if (auto it = rp->customCmds.find(w); it != rp->customCmds.end()) tmpl = &it->second;
                 else { std::string wl = toLower(w); for (auto& [k, v] : rp->customCmds) if (toLower(k) == wl) { tmpl = &v; break; } }
                 if (tmpl) {
-                    if (auto outp = renderCustomCmd(*tmpl, msg, rest)) return *outp;
+                    if (auto outp = renderCustomCmd(*tmpl, msg, rest)) {
+                        s_replyCat = "plugin";
+                        return *outp;
+                    }
                     return i18n_.tr(loc, "fun.rulecmd.fail", {{"cmd", w}});
                 }
             }
@@ -277,9 +284,9 @@ public:
         if (auto r = RM(PX(tryHandleCheck(loc, pmsg, cmd)))) return *r;  // .ra / .rc 检定
         if (auto r = RM(PX(tryHandleBP(loc, pmsg, cmd))))    return *r;  // .rb / .rp 奖励/惩罚骰
         if (auto r = tryHandlePersona(loc, msg, cmd))    return *r;  // .rpmode 人格切换
-        if (auto r = RM(tryHandleDnd(loc, pmsg, cmd)))  return *r;  // .ss/.cast/.longrest/.ds (DND，@可代操作)
+        if (auto r = tryHandleDnd(loc, pmsg, cmd))  return *r;  // .ss/.cast/.longrest/.ds (仅实际死亡豁免掷骰进入 roll)
         if (auto r = tryHandleGame(loc, msg, cmd))  return *r;  // .game 团务（须在 .ga 类之前独立匹配）
-        if (auto r = tryHandleGen(loc, msg, cmd))   return *r;  // .coc / .dnd 生成
+        if (auto r = tryHandleGen(loc, msg, cmd))   return *r;  // .coc / .dnd 车卡生成（不润色）
         if (auto r = tryHandleMaster(loc, msg, cmd))return *r;  // boton/botoff/blackqq/whitegroup… (须在 .bot 前)
         if (auto r = tryHandleBot(loc, msg, cmd))   return *r;  // .bot / .bot on/off (+账号定向)
         if (auto r = tryHandleSelfText(loc, msg, cmd)) return *r;  // .strSelfName/.strSelfCall (须在 .st 前)
@@ -2328,6 +2335,8 @@ private:
         int hp = cards_.getAttr(user, group, "hp").value_or(-1);
         if (hp != 0) return i18n_.tr(loc, "dnd.ds.need_zero", {{"nick", nick}});
 
+        // 只有真正掷出死亡豁免时才进入 roll；stat/手动调整等状态操作不润色。
+        s_replyCat = "roll";
         int bonus = 0;
         if (!a.empty() && (a[0] == '+' || a[0] == '-')) {
             auto r = engine_.roll("0" + a);   // "+1d4" → "0+1d4"
@@ -3426,6 +3435,33 @@ private:
 
     // ─── .help / .helpdoc 文档系统 ───────────────────────────
 public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_service 聚合
+    // 插件好感度桥接：JS/Lua 与内置 .favor 共用 player_profiles.favor，
+    // 不允许插件侧再生成一份独立存储。platform 必填，以免多适配器同 ID 串数据。
+    int pluginFavorGet(const std::string& platform, const std::string& uid) const {
+        if (platform.empty() || uid.empty()) return 0;
+        return getFavor(platform, uid);
+    }
+    int pluginFavorSet(const std::string& platform, const std::string& uid, int value) {
+        if (platform.empty() || uid.empty()) return 0;
+        setFavorValue(platform, uid, value);
+        return value;
+    }
+    int pluginFavorAdd(const std::string& platform, const std::string& uid, int delta) {
+        if (platform.empty() || uid.empty()) return 0;
+        const long long next = static_cast<long long>(getFavor(platform, uid)) + delta;
+        const int value = static_cast<int>(std::clamp(next,
+            static_cast<long long>((std::numeric_limits<int>::min)()),
+            static_cast<long long>((std::numeric_limits<int>::max)())));
+        setFavorValue(platform, uid, value);
+        return value;
+    }
+    // first = 本次增长值（-1 表示概率判定未成长），second = 当前好感度。
+    std::pair<int, int> pluginFavorGrow(const std::string& platform, const std::string& uid) {
+        if (platform.empty() || uid.empty()) return {-1, 0};
+        const int delta = favorGrow(platform, uid);
+        return {delta, getFavor(platform, uid)};
+    }
+
     /// Commands handled since process start (non-empty reply = a command). Read
     /// by the dashboard / .system stats. Same counter as s_cmdCount.
     static long commandCount() { return s_cmdCount.load(std::memory_order_relaxed); }
@@ -6107,6 +6143,7 @@ private:
                 detail += "\n" + std::to_string(no) + ". " + ename + " " + one;
             }
             saveInit(msg, list);
+            s_replyCat = "roll";
             return i18n_.tr(loc, "init.rolled_multi", {{"base", base}, {"count", std::to_string(cnt)}, {"detail", detail}});
         }
 
@@ -6118,6 +6155,7 @@ private:
         for (auto& e : list) if (e.value("name", "") == name) { e["val"] = total; found = true; break; }
         if (!found) list.push_back({{"name", name}, {"val", total}});
         saveInit(msg, list);
+        s_replyCat = "roll";
         std::string detail = "1D20=" + std::to_string(roll) + (adj > 0 ? "+" + std::to_string(adj) : adj < 0 ? std::to_string(adj) : "");
         return i18n_.tr(loc, "init.rolled", {{"name", name}, {"roll", detail}, {"total", std::to_string(total)}});
     }

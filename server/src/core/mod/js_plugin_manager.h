@@ -204,6 +204,23 @@ public:
     }
     bool hasCardBridge() const { return (bool)cardGet_; }
 
+    // seal.favor：与内置 .favor 共用 player_profiles.favor。
+    // grow 返回 {本次增长值(-1=未成长), 当前值}。
+    using FavorGetFn = std::function<int(const std::string& platform, const std::string& userId)>;
+    using FavorSetFn = std::function<int(const std::string& platform, const std::string& userId, int value)>;
+    using FavorGrowFn = std::function<std::pair<int, int>(const std::string& platform, const std::string& userId)>;
+    void setFavorBridge(FavorGetFn get, FavorSetFn set, FavorSetFn add, FavorGrowFn grow) {
+        favorGet_ = std::move(get); favorSet_ = std::move(set);
+        favorAdd_ = std::move(add); favorGrow_ = std::move(grow);
+    }
+    bool hasFavorBridge() const { return favorGet_ && favorSet_ && favorAdd_ && favorGrow_; }
+    int favorGet(const std::string& p, const std::string& u) const { return favorGet_ ? favorGet_(p, u) : 0; }
+    int favorSet(const std::string& p, const std::string& u, int v) const { return favorSet_ ? favorSet_(p, u, v) : 0; }
+    int favorAdd(const std::string& p, const std::string& u, int v) const { return favorAdd_ ? favorAdd_(p, u, v) : 0; }
+    std::pair<int, int> favorGrow(const std::string& p, const std::string& u) const {
+        return favorGrow_ ? favorGrow_(p, u) : std::make_pair(-1, 0);
+    }
+
     // 除主目录外，额外扫描的 js 插件目录（规则包 data/rulepacks/<包>/js/）。reload 时一并加载。
     void setExtraDirs(std::vector<std::string> dirs) { extraDirs_ = std::move(dirs); }
 
@@ -268,6 +285,9 @@ private:
     CardGetFn cardGet_;       // seal.vars ↔ 人物卡桥接
     CardSetFn cardSet_;
     CardGetStrFn cardGetStr_; // 关联/表达式属性读取
+    FavorGetFn favorGet_;
+    FavorSetFn favorSet_, favorAdd_;
+    FavorGrowFn favorGrow_;
     CardNameFn cardNameResolver_;   // 群名片/显示名解析
     LogStateFn logStateResolver_;   // 群日志状态/当前名称
     std::vector<std::string> extraDirs_;   // 规则包附加 js 目录

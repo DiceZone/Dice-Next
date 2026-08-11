@@ -1148,7 +1148,7 @@ private:
 
     /// Parse one bracket body into a OneBot segment, or null if not a known code.
     /// Supports the platform-neutral image code ([img,file=..],), CQ codes
-    /// ([CQ:image,file=..]/[CQ:at,qq=..]/[CQ:face,id=..]) and compatible image
+    /// ([CQ:image,file=..]/[CQ:at,qq=..]/[CQ:face,id=..]/[CQ:music,...]) and compatible image
     /// codes ([图片:..]/[图:..]).
     static json parseCode(const std::string& inner) {
         // 平台中立图片码：[img,file=<本地路径或URL>]
@@ -1192,6 +1192,12 @@ private:
                 if (!kv["qq"].empty()) return json{{"type", "at"}, {"data", json{{"qq", kv["qq"]}}}};
             } else if (type == "face") {
                 if (!kv["id"].empty()) return json{{"type", "face"}, {"data", json{{"id", kv["id"]}}}};
+            } else if (type == "music") {
+                // Lua 点歌插件通常直接返回 CQ 音乐码。OneBot 数组消息必须把它
+                // 转成 music segment；否则整段 CQ 文本会作为普通文本显示。
+                json data = json::object();
+                for (const auto& [key, value] : kv) data[key] = value;
+                return json{{"type", "music"}, {"data", std::move(data)}};
             }
             return json(nullptr);
         }
@@ -1205,7 +1211,7 @@ private:
         return json(nullptr);
     }
 
-    /// Build a OneBot message array from text that may embed image/at/face codes
+    /// Build a OneBot message array from text that may embed image/at/face/music codes
     /// (CQ codes or compatible placeholders). Plain runs become text segments; unknown
     /// bracket codes are kept as literal text.
     static json buildSegments(const std::string& text) {
