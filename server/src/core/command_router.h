@@ -18,6 +18,7 @@
 #include "../storage/database.h"
 #include "rules_lock.h"
 #include "check_roll_override.h"
+#include "master_delivery.h"
 #include "../service/notice_manager.h"   // B：通知系统（权限变更等推送给骰主）
 
 #include <sqlite_orm/sqlite_orm.h>
@@ -5081,6 +5082,44 @@ private:
         } catch (...) {}
         return v;
     }
+    /// Resolve a configured delivery endpoint to the public identity created by
+    /// .bind.  Ambiguous/unbound endpoints deliberately stay distinct: equal
+    /// numbers on unrelated platforms must never be collapsed by guesswork.
+    std::string canonicalMasterId(const MasterEntry& master) const {
+        using identity::BindingStore;
+        if ((master.platform.empty() || master.platform == "onebot_v11") &&
+            BindingStore::isRealQQ(master.id)) return master.id;
+        if (master.platform.empty()) return {};
+        auto* st = db_.getStorage(); if (!st) return {};
+        try {
+            auto endpoints = st->get_all<IdentityEndpointRow>(orm::where(
+                orm::c(&IdentityEndpointRow::adapterType) == master.platform and
+                orm::c(&IdentityEndpointRow::kind) == std::string("user") and
+                orm::c(&IdentityEndpointRow::endpointId) == master.id));
+            std::set<std::string> publicIds;
+            for (const auto& endpoint : endpoints) {
+                auto identity = st->get<IdentityRow>(endpoint.identityId);
+                if (BindingStore::isRealQQ(identity.publicId)) publicIds.insert(identity.publicId);
+            }
+            if (publicIds.size() == 1) return *publicIds.begin();
+        } catch (...) {}
+        return {};
+    }
+    AdapterPtr connectedMasterAdapter(const master_delivery::Recipient& recipient) const {
+        if (!recipient.adapterId.empty()) {
+            auto adapter = adapters_.getAdapter(recipient.adapterId);
+            if (adapter && adapter->isConnected() &&
+                (recipient.platform.empty() || adapter->platform() == recipient.platform)) return adapter;
+        }
+        if (!recipient.platform.empty()) {
+            for (auto& adapter : adapters_.allAdapters())
+                if (adapter->isConnected() && adapter->platform() == recipient.platform) return adapter;
+        } else if (!recipient.canonicalId.empty()) {
+            for (auto& adapter : adapters_.allAdapters())
+                if (adapter->isConnected() && adapter->platform() == "onebot_v11") return adapter;
+        }
+        return {};
+    }
     /// 精确到账号：adapterId 非空时，账号级条目与平台级条目都命中；
     /// adapterId 为空时仅平台级/任意平台条目命中（保留旧调用语义）。
     bool isMaster(const std::string& platform, const std::string& id,
@@ -5634,19 +5673,32 @@ private:
             : i18n_.tr(loc, "send.from_group",
                   {{"group", msg.targetId}, {"user", displayName(msg)}, {"uid", msg.senderId}});
         std::string full = header + "\n" + body;
-        for (const auto& m : ms) {
-            // Deliver to each master via an adapter of their platform (fallback: origin/any).
+        std::vector<master_delivery::Recipient> recipients;
+        recipients.reserve(ms.size());
+        for (const auto& master : ms)
+            recipients.push_back({master.platform, master.adapterId, master.id, canonicalMasterId(master)});
+        for (const auto& group : master_delivery::groupRecipients(recipients)) {
+            // One bound person may have both real QQ and OpenID master entries.
+            // Pick one live route (OneBot first, QQ Official fallback) and stop.
+            const master_delivery::Recipient* selected = nullptr;
             AdapterPtr a;
-            if (!m.platform.empty())
-                for (auto& x : adapters_.allAdapters())
-                    if (x->isConnected() && x->platform() == m.platform) { a = x; break; }
+            for (int priority = 0; priority <= 2 && !a; ++priority) {
+                for (const auto& recipient : group) {
+                    if (master_delivery::transportPriority(recipient) != priority) continue;
+                    if (auto candidate = connectedMasterAdapter(recipient)) {
+                        selected = &recipient; a = std::move(candidate); break;
+                    }
+                }
+            }
+            // Preserve the old best-effort fallback for an unscoped/offline entry.
+            if (!selected) selected = &group.front();
             if (!a) a = adapters_.getAdapter(msg.adapterId);
             if (!a) for (auto& x : adapters_.allAdapters()) if (x->isConnected()) { a = x; break; }
             if (!a) continue;
             Message pm;
             pm.platform = a->platform();
             pm.type = MessageType::kPrivate;
-            pm.targetId = m.id;
+            pm.targetId = selected->id;
             pm.content = full;
             a->sendMessage(pm);
         }
