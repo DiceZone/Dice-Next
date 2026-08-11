@@ -351,13 +351,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             std::string lang = "js";
             if (fn.size() > 4 && fn.substr(fn.size() - 4) == ".lua") lang = "lua";
             else if (fn.size() > 3 && fn.substr(fn.size() - 3) == ".py") lang = "python";
-            arr.push_back(J{{"name", p.name}, {"author", p.author}, {"version", p.version},
-                           {"file", p.file}, {"description", p.desc}, {"lang", lang},
-                           {"homepage", p.homepage}, {"updateUrl", p.updateUrl}, {"license", p.license},
-                           {"commandList", p.commandList},
-                           {"superseded", p.superseded}, {"supersededBy", p.supersededBy},
-                           {"ruleCompat", p.ruleCompat}, {"inMod", p.inMod},
-                           {"commands", p.commands}, {"enabled", p.enabled}, {"configs", cfgs}});
+            J item = J{{"name", p.name}, {"author", p.author}, {"version", p.version},
+                       {"file", p.file}, {"description", p.desc}, {"lang", lang},
+                       {"homepage", p.homepage}, {"updateUrl", p.updateUrl}, {"license", p.license},
+                       {"commandList", p.commandList},
+                       {"superseded", p.superseded}, {"supersededBy", p.supersededBy},
+                       {"ruleCompat", p.ruleCompat}, {"inMod", p.inMod},
+                       {"commands", p.commands}, {"enabled", p.enabled}, {"configs", cfgs}};
+            if (auto owner = CommandRouter::pluginOwnerBundle("js:" + fn)) {
+                item["ownerBundle"] = owner->first;
+                item["ownerBundleFolder"] = owner->second;
+            }
+            arr.push_back(std::move(item));
         }
         return arr;
     };
@@ -2736,6 +2741,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                  {"manualCount", p.manualCount}, {"enabled", p.enabled},
                  {"customCmds", custom}, {"cmdAlias", alias}, {"disableCmds", disable},
                  {"helpCount", (int)p.helpEntries.size()},
+                 {"ownerBundle", p.ownerBundle}, {"ownerBundleFolder", p.ownerBundleFolder},
                  {"builtin", CommandRouter::isBuiltinRulePack(p.file)}};   // 内置(coc7/dnd)不可删
     };
     app.registerHandler("/api/rules", [rulePackToJson](Req, CB&& cb) {
