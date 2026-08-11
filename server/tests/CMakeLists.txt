@@ -15,6 +15,7 @@ set(TEST_SOURCES
     test_i18n_persona.cpp
     test_import_v2.cpp
     test_group_account_scoping.cpp
+    test_master_delivery.cpp
     test_backup_service.cpp
     test_timezone.cpp
     test_dice_expression.cpp
