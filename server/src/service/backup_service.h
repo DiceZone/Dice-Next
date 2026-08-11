@@ -22,31 +22,90 @@ namespace dice::backup {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-// Selection mirrors the useful separation in mature dice-bot backup systems:
-// core state is always explicit, while bulky/user-managed resources can be
-// opted in independently.  All categories are enabled by default for a full
-// portable backup.
+// Each switch maps to one concrete kind of data.  In particular, transcript
+// logs, process logs, transcript images, uploaded assets and chat-media caches
+// must never be bundled under the same vague "logs/media" switch.
 struct Selection {
     bool config = true;
-    bool databases = true;
-    bool logs = true;
-    bool resources = true;
-    bool plugins = true;
-    bool media = true;
+    bool coreDatabase = true;
+    bool characterCards = true;
+    bool chatHistory = true;
+    bool gameLogs = true;
+    bool runtimeLogs = false;
+    bool auditLogs = false;
+    bool decks = true;
+    bool rules = true;
+    bool help = true;
+    bool cardTemplates = true;
+    bool jsPlugins = true;
+    bool luaMods = true;
+    bool uploadedAssets = false;
+    bool resourceImages = false;
+    bool gameLogImages = false;
+    bool chatMedia = false;
 
-    bool complete() const { return config && databases && logs && resources && plugins && media; }
-    json toJson() const { return {{"config", config}, {"databases", databases}, {"logs", logs},
-                                  {"resources", resources}, {"plugins", plugins}, {"media", media},
-                                  {"all", complete()}}; }
+    static Selection full() {
+        Selection value;
+        value.runtimeLogs = value.auditLogs = value.uploadedAssets = value.resourceImages =
+            value.gameLogImages = value.chatMedia = true;
+        return value;
+    }
+
+    bool complete() const {
+        return config && coreDatabase && characterCards && chatHistory && gameLogs && runtimeLogs && auditLogs &&
+            decks && rules && help && cardTemplates && jsPlugins && luaMods && uploadedAssets &&
+            resourceImages && gameLogImages && chatMedia;
+    }
+    json toJson() const {
+        return {{"config", config}, {"coreDatabase", coreDatabase}, {"characterCards", characterCards},
+                {"chatHistory", chatHistory}, {"gameLogs", gameLogs}, {"runtimeLogs", runtimeLogs},
+                {"auditLogs", auditLogs},
+                {"decks", decks}, {"rules", rules}, {"help", help}, {"cardTemplates", cardTemplates},
+                {"jsPlugins", jsPlugins}, {"luaMods", luaMods}, {"uploadedAssets", uploadedAssets},
+                {"resourceImages", resourceImages}, {"gameLogImages", gameLogImages},
+                {"chatMedia", chatMedia}, {"all", complete()}};
+    }
     static Selection fromJson(const json& value) {
         Selection result;
         if (!value.is_object()) return result;
+
+        // Version-2 settings used six broad switches.  Expand them first so
+        // scheduled backups and old manifests keep their original meaning;
+        // any new fine-grained key below then takes precedence.
+        if (value.contains("databases") || value.contains("logs") || value.contains("resources") ||
+            value.contains("plugins") || value.contains("media")) {
+            const bool databases = value.value("databases", true);
+            const bool logs = value.value("logs", true);
+            const bool resources = value.value("resources", true);
+            const bool plugins = value.value("plugins", true);
+            const bool media = value.value("media", true);
+            result.coreDatabase = databases;
+            result.characterCards = databases;
+            result.chatHistory = databases;
+            result.gameLogs = databases || logs; // logs.db was included by both old categories
+            result.runtimeLogs = logs;
+            result.auditLogs = logs;
+            result.decks = result.rules = result.help = result.cardTemplates = resources;
+            result.jsPlugins = result.luaMods = plugins;
+            result.uploadedAssets = result.resourceImages = result.gameLogImages = result.chatMedia = media;
+        }
         result.config = value.value("config", result.config);
-        result.databases = value.value("databases", result.databases);
-        result.logs = value.value("logs", result.logs);
-        result.resources = value.value("resources", result.resources);
-        result.plugins = value.value("plugins", result.plugins);
-        result.media = value.value("media", result.media);
+        result.coreDatabase = value.value("coreDatabase", result.coreDatabase);
+        result.characterCards = value.value("characterCards", result.characterCards);
+        result.chatHistory = value.value("chatHistory", result.chatHistory);
+        result.gameLogs = value.value("gameLogs", result.gameLogs);
+        result.runtimeLogs = value.value("runtimeLogs", result.runtimeLogs);
+        result.auditLogs = value.value("auditLogs", result.auditLogs);
+        result.decks = value.value("decks", result.decks);
+        result.rules = value.value("rules", result.rules);
+        result.help = value.value("help", result.help);
+        result.cardTemplates = value.value("cardTemplates", result.cardTemplates);
+        result.jsPlugins = value.value("jsPlugins", result.jsPlugins);
+        result.luaMods = value.value("luaMods", result.luaMods);
+        result.uploadedAssets = value.value("uploadedAssets", result.uploadedAssets);
+        result.resourceImages = value.value("resourceImages", result.resourceImages);
+        result.gameLogImages = value.value("gameLogImages", result.gameLogImages);
+        result.chatMedia = value.value("chatMedia", result.chatMedia);
         return result;
     }
 };
@@ -144,6 +203,23 @@ inline bool copyItem(const fs::path& from, const fs::path& to, std::string& erro
     return copyFileWithRetry(from, to, error);
 }
 
+/// Copy only regular files directly inside a directory.  Used to separate the
+/// exported transcript files in data/logs/ from its app/ and images/ children.
+template <class Predicate>
+inline bool copyFlatFiles(const fs::path& from, const fs::path& to, std::string& error, Predicate include) {
+    std::error_code ec;
+    if (!fs::is_directory(from, ec)) return true;
+    for (const auto& entry : fs::directory_iterator(from, ec)) {
+        if (ec) { error = "遍历 " + from.string() + " 失败: " + ec.message(); return false; }
+        if (!entry.is_regular_file(ec)) {
+            if (ec) { error = "读取 " + entry.path().string() + " 失败: " + ec.message(); return false; }
+            continue;
+        }
+        if (include(entry.path()) && !copyItem(entry.path(), to / entry.path().filename(), error)) return false;
+    }
+    return true;
+}
+
 inline std::string runCapture(const std::string& command, int& code);
 
 /// Serialize manual and scheduled backups: two concurrent createArchive calls
@@ -223,31 +299,50 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
     if (selection.complete()) {
         if (!copyTree("data", stage / "data", error, true)) { fs::remove_all(stage, ec); return false; }
     } else {
-        if (selection.databases && fs::is_directory("data", ec)) {
-            for (const auto& entry : fs::directory_iterator("data", ec)) {
-                if (ec) break;
-                if (entry.is_regular_file(ec) && entry.path().extension() == ".db" &&
-                    !copyItem(entry.path(), stage / "data" / entry.path().filename(), error)) {
-                    fs::remove_all(stage, ec); return false;
-                }
+        auto copy = [&](const fs::path& item) {
+            return copyItem(item, stage / item, error);
+        };
+        if (selection.coreDatabase && !copyFlatFiles("data", stage / "data", error, [](const fs::path& path) {
+                if (path.extension() != ".db") return false;
+                const std::string name = path.filename().string();
+                return name != "cards.db" && name != "chat.db" && name != "logs.db" &&
+                    name != "plugins.db" && name != "lua_mod.db";
+            })) { fs::remove_all(stage, ec); return false; }
+        if (selection.characterCards && !copy("data/cards.db")) { fs::remove_all(stage, ec); return false; }
+        if (selection.chatHistory && !copy("data/chat.db")) { fs::remove_all(stage, ec); return false; }
+        if (selection.gameLogs) {
+            if (!copy("data/logs.db") || !copyFlatFiles("data/logs", stage / "data/logs", error,
+                    [](const fs::path& path) { return path.filename().string().rfind("crash_", 0) != 0; })) {
+                fs::remove_all(stage, ec); return false;
             }
         }
-        if (selection.logs) {
-            for (const auto& item : {fs::path("data/logs"), fs::path("data/audit"), fs::path("data/logs.db")})
-                if (!copyItem(item, stage / item, error)) { fs::remove_all(stage, ec); return false; }
+        if (selection.runtimeLogs) {
+            if (!copy("data/logs/app") ||
+                !copyFlatFiles("data/logs", stage / "data/logs", error,
+                    [](const fs::path& path) { return path.filename().string().rfind("crash_", 0) == 0; })) {
+                fs::remove_all(stage, ec); return false;
+            }
         }
-        if (selection.resources) {
-            for (const auto& item : {fs::path("data/decks"), fs::path("data/rules"), fs::path("data/rulepacks"),
-                                     fs::path("data/help"), fs::path("data/helpdoc"), fs::path("data/card-templates")})
-                if (!copyItem(item, stage / item, error)) { fs::remove_all(stage, ec); return false; }
+        if (selection.auditLogs && !copy("data/audit")) { fs::remove_all(stage, ec); return false; }
+        if (selection.decks && !copy("data/decks")) { fs::remove_all(stage, ec); return false; }
+        if (selection.rules && (!copy("data/rules") || !copy("data/rulepacks"))) { fs::remove_all(stage, ec); return false; }
+        if (selection.help && (!copy("data/help") || !copy("data/helpdoc"))) { fs::remove_all(stage, ec); return false; }
+        if (selection.cardTemplates && !copy("data/card-templates")) { fs::remove_all(stage, ec); return false; }
+        if (selection.jsPlugins) {
+            for (const auto& item : {fs::path("data/plugins"), fs::path("data/plugins.db"),
+                                     fs::path("data/js_kv.json"), fs::path("data/js_kv.json.bak")})
+                if (!copy(item)) { fs::remove_all(stage, ec); return false; }
         }
-        if (selection.plugins) {
-            for (const auto& item : {fs::path("data/plugins"), fs::path("data/mod")})
-                if (!copyItem(item, stage / item, error)) { fs::remove_all(stage, ec); return false; }
+        if (selection.luaMods) {
+            for (const auto& item : {fs::path("data/plugin"), fs::path("data/mod"), fs::path("data/lua_mod.db"),
+                                     fs::path("data/self_data")})
+                if (!copy(item)) { fs::remove_all(stage, ec); return false; }
         }
-        if (selection.media) {
-            for (const auto& item : {fs::path("data/images"), fs::path("data/chat_images"), fs::path("data/logs/images")})
-                if (!copyItem(item, stage / item, error)) { fs::remove_all(stage, ec); return false; }
+        if (selection.uploadedAssets && !copy("data/assets")) { fs::remove_all(stage, ec); return false; }
+        if (selection.resourceImages && !copy("data/images")) { fs::remove_all(stage, ec); return false; }
+        if (selection.gameLogImages && !copy("data/logs/images")) { fs::remove_all(stage, ec); return false; }
+        if (selection.chatMedia && (!copy("data/chat/images") || !copy("data/chat_images"))) {
+            fs::remove_all(stage, ec); return false;
         }
     }
     if (selection.config && fs::exists(configPath, ec)) {
@@ -255,7 +350,7 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
             ? configPath : (configPath.parent_path().empty() ? fs::path("config") : configPath.parent_path());
         if (!copyTree(configDir, stage / "config", error)) { fs::remove_all(stage, ec); return false; }
     }
-    json manifest{{"format", "dice-next-backup"}, {"version", 2}, {"created_at", stamp()}, {"automatic", automatic},
+    json manifest{{"format", "dice-next-backup"}, {"version", 3}, {"created_at", stamp()}, {"automatic", automatic},
                   {"selection", selection.toJson()}, {"includes", json::array({"data", "config"})}};
     { std::ofstream f(stage / "manifest.json", std::ios::binary); f << manifest.dump(2); }
     fs::path backupDir = archiveDirectory(automatic); fs::create_directories(backupDir, ec);
@@ -273,7 +368,7 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
 
 inline bool createArchive(Database& db, const fs::path& configPath, fs::path& archive, std::string& error,
                           bool automatic = false) {
-    return createArchive(db, configPath, archive, error, Selection{}, automatic);
+    return createArchive(db, configPath, archive, error, Selection::full(), automatic);
 }
 
 inline std::string runCapture(const std::string& command, int& code) {
@@ -379,7 +474,7 @@ inline bool stageRestoreArchive(const fs::path& archive, std::string& error) {
     try {
         std::ifstream f(stage / "manifest.json"); json manifest; f >> manifest;
         const int version = manifest.value("version", 0);
-        if (manifest.value("format", std::string()) != "dice-next-backup" || (version != 1 && version != 2))
+        if (manifest.value("format", std::string()) != "dice-next-backup" || (version != 1 && version != 2 && version != 3))
             throw std::runtime_error("format");
     } catch (...) { error = "备份清单格式不受支持"; fs::remove_all(stage, ec); return false; }
     return true;

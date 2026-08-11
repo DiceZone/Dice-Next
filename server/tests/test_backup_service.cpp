@@ -31,6 +31,53 @@ void writeFile(const fs::path& p, const std::string& content) {
 
 }  // namespace
 
+TEST(BackupSelection, DefaultsKeepImportantDataButSkipBulkyMedia) {
+    const backup::Selection selection;
+    ASSERT_TRUE(selection.config);
+    ASSERT_TRUE(selection.coreDatabase);
+    ASSERT_TRUE(selection.characterCards);
+    ASSERT_TRUE(selection.chatHistory);
+    ASSERT_TRUE(selection.gameLogs);
+    ASSERT_FALSE(selection.runtimeLogs);
+    ASSERT_FALSE(selection.auditLogs);
+    ASSERT_FALSE(selection.uploadedAssets);
+    ASSERT_FALSE(selection.resourceImages);
+    ASSERT_FALSE(selection.gameLogImages);
+    ASSERT_FALSE(selection.chatMedia);
+    ASSERT_FALSE(selection.complete());
+    ASSERT_TRUE(backup::Selection::full().complete());
+}
+
+TEST(BackupSelection, ExpandsLegacyBroadCategories) {
+    const auto selection = backup::Selection::fromJson({
+        {"config", true}, {"databases", true}, {"logs", false},
+        {"resources", false}, {"plugins", true}, {"media", false},
+    });
+    ASSERT_TRUE(selection.coreDatabase);
+    ASSERT_TRUE(selection.characterCards);
+    ASSERT_TRUE(selection.chatHistory);
+    ASSERT_TRUE(selection.gameLogs);       // old databases copied every *.db, including logs.db
+    ASSERT_FALSE(selection.runtimeLogs);
+    ASSERT_FALSE(selection.auditLogs);
+    ASSERT_FALSE(selection.decks);
+    ASSERT_TRUE(selection.jsPlugins);
+    ASSERT_TRUE(selection.luaMods);
+    ASSERT_FALSE(selection.gameLogImages);
+    ASSERT_FALSE(selection.chatMedia);
+}
+
+TEST(BackupSelection, FineGrainedKeysOverrideLegacyValues) {
+    const auto selection = backup::Selection::fromJson({
+        {"databases", true}, {"logs", true}, {"media", true},
+        {"gameLogs", false}, {"runtimeLogs", false}, {"auditLogs", false}, {"gameLogImages", false},
+    });
+    ASSERT_FALSE(selection.gameLogs);
+    ASSERT_FALSE(selection.runtimeLogs);
+    ASSERT_FALSE(selection.auditLogs);
+    ASSERT_FALSE(selection.gameLogImages);
+    ASSERT_TRUE(selection.chatMedia);
+}
+
 TEST(BackupCopy, FullTreeSkipsBackupsStore) {
     const fs::path root = tempRoot("backup_skip");
     std::error_code ec;
@@ -73,6 +120,28 @@ TEST(BackupCopy, SingleFileCopy) {
     std::string error;
     ASSERT_TRUE(backup::copyItem(src, dst, error));
     ASSERT_TRUE(fs::exists(dst));
+    fs::remove_all(root, ec);
+}
+
+TEST(BackupCopy, FlatFileFilterSeparatesTranscriptAndCrashLogs) {
+    const fs::path root = tempRoot("backup_log_filter");
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    const fs::path logs = root / "logs";
+    writeFile(logs / "q_123_campaign.txt", "transcript");
+    writeFile(logs / "crash_20260101.txt", "crash");
+    writeFile(logs / "app" / "dice.log", "runtime");
+
+    std::string error;
+    ASSERT_TRUE(backup::copyFlatFiles(logs, root / "transcripts", error,
+        [](const fs::path& path) { return path.filename().string().rfind("crash_", 0) != 0; }));
+    ASSERT_TRUE(backup::copyFlatFiles(logs, root / "runtime", error,
+        [](const fs::path& path) { return path.filename().string().rfind("crash_", 0) == 0; }));
+    ASSERT_TRUE(fs::exists(root / "transcripts" / "q_123_campaign.txt"));
+    ASSERT_FALSE(fs::exists(root / "transcripts" / "crash_20260101.txt"));
+    ASSERT_TRUE(fs::exists(root / "runtime" / "crash_20260101.txt"));
+    ASSERT_FALSE(fs::exists(root / "runtime" / "q_123_campaign.txt"));
+    ASSERT_FALSE(fs::exists(root / "transcripts" / "app"));
     fs::remove_all(root, ec);
 }
 
