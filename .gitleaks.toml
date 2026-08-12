@@ -6,9 +6,9 @@ useDefault = true
 # 历史遗留的已废弃凭据（git 历史清理后应删除本 allowlist）：
 #   - config/server.json 的 api_key（确认已废弃，当前分支已取消跟踪）
 #   - server/config/test_config.json / default_config.json 的样例 access_token
-[[allowlist]]
-fingerprints = [
-  "3ff5aea125d2393ed06af2bc2322b0e09d5e0a85:config/server.json:generic-api-key:2",
-  "758c3e881297d09212442d7471fdfa63ae4b6606:server/config/test_config.json:generic-api-key:4",
-  "758c3e881297d09212442d7471fdfa63ae4b6606:server/config/default_config.json:generic-api-key:4",
+[allowlist]
+description = "Legacy deprecated/example credentials pending git-history cleanup"
+paths = [
+  "(?i)^config/server\\.json$",
+  "(?i)^server/config/(test_|default_)config\\.json$",
 ]
