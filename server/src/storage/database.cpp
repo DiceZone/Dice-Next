@@ -191,6 +191,7 @@ bool Database::open(const std::string& path) {
                     orm::make_column("nickname", &PlayerProfileRow::nickname),
                     orm::make_column("trust_level", &PlayerProfileRow::trustLevel),
                     orm::make_column("cmd_count", &PlayerProfileRow::cmdCount),
+                    orm::make_column("group_cmd_count", &PlayerProfileRow::groupCmdCount, orm::default_value(0)),
                     orm::make_column("favor", &PlayerProfileRow::favor),
                     orm::make_column("last_cmd_at", &PlayerProfileRow::lastCmdAt),
                     orm::make_column("created_at", &PlayerProfileRow::createdAt)

@@ -23,6 +23,7 @@ set(TEST_SOURCES
     test_markdown.cpp
     test_heart_debounce.cpp
     test_command_prefix_policy.cpp
+    test_friend_approval_policy.cpp
 
     # Project source files needed by tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/causal/cooldown_manager.cpp
