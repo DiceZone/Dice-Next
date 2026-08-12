@@ -2529,7 +2529,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // ── 好友/加群邀请 审批策略 ─────────────────────────────────
     app.registerHandler("/api/system/events", [&cfg, st](Req req, CB&& cb) {
         try {
-            static const std::set<std::string> kFriend = {"manual", "all", "keyword", "reject"};
+            static const std::set<std::string> kFriend = {"manual", "all", "keyword", "group_used", "reject"};
             static const std::set<std::string> kGroup  = {"manual", "all", "whitelist", "ignore", "reject"};
             static const std::set<std::string> kScopedKeys = {
                 "friend_policy", "friend_keyword", "group_invite_policy",
@@ -3919,6 +3919,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (it == merged.end()) merged.emplace(r.userId, r);
                 else {
                     it->second.cmdCount += r.cmdCount;
+                    it->second.groupCmdCount += r.groupCmdCount;
                     it->second.favor += r.favor;
                     it->second.trustLevel = (std::max)(it->second.trustLevel, r.trustLevel);
                     if (it->second.nickname.empty() && !r.nickname.empty()) it->second.nickname = r.nickname;
@@ -3937,7 +3938,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 arr.push_back(J{
                     {"platform", r.platform}, {"userId", r.userId},
                     {"nickname", r.nickname}, {"trustLevel", r.trustLevel},
-                    {"cmdCount", r.cmdCount}, {"favor", r.favor}, {"lastCmdAt", r.lastCmdAt},
+                    {"cmdCount", r.cmdCount}, {"groupCmdCount", r.groupCmdCount},
+                    {"favor", r.favor}, {"lastCmdAt", r.lastCmdAt},
                     {"createdAt", r.createdAt}, {"virtualId", virtualId}, {"bindings", bindings}
                 });
             }

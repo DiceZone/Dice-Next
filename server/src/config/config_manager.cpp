@@ -47,6 +47,7 @@ static json makeDefaultConfig() {
             }}
         }},
         {"events", {
+            {"friend_policy", "manual"},     // 好友申请策略：manual/all/keyword/group_used/reject
             {"auto_approve_friend", false},   // 加好友请求自动同意
             {"friend_keyword", ""},           // 仅当验证信息含此关键词才同意（空=不限）
             {"auto_approve_group", false},     // 加群/邀请请求自动同意

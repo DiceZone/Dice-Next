@@ -8260,7 +8260,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     // total commands handled since this process started (non-empty reply = a command).
     static inline std::atomic<long> s_cmdCount{0};
 
-    void recordPlayerActivity(const Message& msg, bool didCommand) {
+    void recordPlayerActivity(const Message& msg, bool didCommand, bool countGroupHistory = true) {
         if (didCommand) s_cmdCount.fetch_add(1, std::memory_order_relaxed);
         if (msg.senderId.empty()) return;
         auto* st = db_.getStorage();
@@ -8278,6 +8278,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                 r.nickname = fallbackName ? std::string() : msg.senderName;
                 r.trustLevel = 0;
                 r.cmdCount = didCommand ? 1 : 0;
+                r.groupCmdCount = didCommand && countGroupHistory && msg.type == MessageType::kGroup ? 1 : 0;
                 r.lastCmdAt = didCommand ? nowIso() : "";
                 r.createdAt = nowIso();
                 st->insert(r);
@@ -8286,11 +8287,30 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                 const bool fallbackName = msg.extra.is_object()
                     && msg.extra.value("__sender_name_fallback", false);
                 if (!fallbackName && !msg.senderName.empty()) r.nickname = msg.senderName;
-                if (didCommand) { r.cmdCount += 1; r.lastCmdAt = nowIso(); }
+                if (didCommand) {
+                    r.cmdCount += 1;
+                    if (countGroupHistory && msg.type == MessageType::kGroup) r.groupCmdCount += 1;
+                    r.lastCmdAt = nowIso();
+                }
                 st->update(r);
             }
             if (didCommand) recordUsageHour(1, 0);
         } catch (...) {}
+    }
+
+    /// Whether this platform user has successfully triggered at least one command
+    /// in any group. Private commands and ordinary/custom-reply chat do not count.
+    bool hasGroupCommandHistory(const std::string& platform, const std::string& userId) const {
+        if (platform.empty() || userId.empty()) return false;
+        auto* st = db_.getStorage();
+        if (!st) return false;
+        try {
+            namespace orm = sqlite_orm;
+            return st->count<PlayerProfileRow>(orm::where(
+                orm::c(&PlayerProfileRow::platform) == platform
+                and orm::c(&PlayerProfileRow::userId) == userId
+                and orm::c(&PlayerProfileRow::groupCmdCount) > 0)) > 0;
+        } catch (...) { return false; }
     }
 
     void recordUsageHour(long long commands, long long rolls) {
