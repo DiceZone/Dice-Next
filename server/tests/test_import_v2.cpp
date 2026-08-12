@@ -741,8 +741,23 @@ TEST(BackupRestore, PartialArchiveOverlaysOnlySelectedContent) {
         Database db;
         ASSERT_TRUE(db.open("data/dice.db"));
         backup::Selection selection{};
-        selection.config = false; selection.databases = false; selection.logs = false;
-        selection.resources = false; selection.plugins = true; selection.media = false;
+        selection.config = false;
+        selection.coreDatabase = false;
+        selection.characterCards = false;
+        selection.chatHistory = false;
+        selection.gameLogs = false;
+        selection.runtimeLogs = false;
+        selection.auditLogs = false;
+        selection.decks = false;
+        selection.rules = false;
+        selection.help = false;
+        selection.cardTemplates = false;
+        selection.jsPlugins = true;
+        selection.luaMods = false;
+        selection.uploadedAssets = false;
+        selection.resourceImages = false;
+        selection.gameLogImages = false;
+        selection.chatMedia = false;
         ASSERT_TRUE(backup::createArchive(db, "config", archive, error, selection));
         db.close();
     }
