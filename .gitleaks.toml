@@ -3,12 +3,3 @@ title = "Dice!Next gitleaks config"
 [extend]
 useDefault = true
 
-# 历史遗留的已废弃凭据（git 历史清理后应删除本 allowlist）：
-#   - config/server.json 的 api_key（确认已废弃，当前分支已取消跟踪）
-#   - server/config/test_config.json / default_config.json 的样例 access_token
-[allowlist]
-description = "Legacy deprecated/example credentials pending git-history cleanup"
-paths = [
-  "(?i)^config/server\\.json$",
-  "(?i)^server/config/(test_|default_)config\\.json$",
-]
