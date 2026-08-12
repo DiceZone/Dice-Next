@@ -96,6 +96,7 @@ jobs:
           set -euo pipefail
           # 用系统工具从源码构建 vcpkg，避免下载预编译二进制（vcpkg-glibc 偶发网络失败）
           export VCPKG_FORCE_SYSTEM_BINARIES=1
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
           if [ ! -d "$VCPKG_ROOT/.git" ]; then git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"; fi
           git -C "$VCPKG_ROOT" fetch --depth=1 origin "$VCPKG_BASELINE"
           git -C "$VCPKG_ROOT" checkout --detach "$VCPKG_BASELINE"
@@ -175,6 +176,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:GITHUB_WORKSPACE 'vcpkg-cache'
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           $vcpkg = Join-Path $env:GITHUB_WORKSPACE 'vcpkg'
           if (-not (Test-Path (Join-Path $vcpkg '.git'))) { git clone https://github.com/microsoft/vcpkg.git $vcpkg }
           git -C $vcpkg fetch --depth 1 origin $env:VCPKG_BASELINE
@@ -182,6 +184,13 @@ jobs:
           git -C $vcpkg checkout --detach $env:VCPKG_BASELINE
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg baseline checkout failed' }
           $env:VCPKG_FORCE_SYSTEM_BINARIES = '1'   # 从源码构建，避免下载预编译二进制
+          # Windows bootstrap 总要下载 vcpkg.exe：用带重试的下载预取，避免偶发网络失败
+          $vcpkgExe = Join-Path $vcpkg 'vcpkg.exe'
+          if (-not (Test-Path $vcpkgExe)) {
+            try {
+              Invoke-WebRequest -Uri 'https://github.com/microsoft/vcpkg-tool/releases/latest/download/vcpkg.exe' -OutFile $vcpkgExe -Retry 5 -RetryDelaySec 5 -ErrorAction Stop
+            } catch { Write-Host "pre-download vcpkg.exe failed, falling back to bootstrap download" }
+          }
           & (Join-Path $vcpkg 'bootstrap-vcpkg.bat')
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
           & (Join-Path $vcpkg 'vcpkg.exe') install --x-manifest-root=server --x-install-root="$vcpkg/installed" --triplet=${{ matrix.triplet }}
@@ -250,6 +259,7 @@ jobs:
           set -euo pipefail
           # 用系统工具从源码构建 vcpkg，避免下载预编译二进制（vcpkg-glibc 偶发网络失败）
           export VCPKG_FORCE_SYSTEM_BINARIES=1
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
           if [ ! -d "$VCPKG_ROOT/.git" ]; then git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"; fi
           git -C "$VCPKG_ROOT" fetch --depth=1 origin "$VCPKG_BASELINE"
           git -C "$VCPKG_ROOT" checkout --detach "$VCPKG_BASELINE"
