@@ -18,8 +18,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  webui:
+    name: WebUI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: DiceZone/Dice-Next-WebUI
+          path: web
+          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build WebUI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webui-dist
+          path: web/dist
+          if-no-files-found: error
   linux:
     name: Linux (${{ matrix.arch }})
+    needs: webui
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -42,26 +67,15 @@ jobs:
           repository: DiceZone/onedice-cpp-lib
           path: onedice-cpp-lib
           token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
-      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          repository: DiceZone/Dice-Next-WebUI
-          path: web
-          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+          name: webui-dist
+          path: web/dist
       - uses: actions/checkout@v4
         with:
           repository: DiceZone/Dice-Next-Doc
           path: docs
           token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: Build WebUI
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
       - name: Install build tools
         run: |
           sudo apt-get update
@@ -69,14 +83,19 @@ jobs:
       - name: Restore vcpkg cache
         uses: actions/cache@v4
         with:
-          path: vcpkg
+          path: |
+            vcpkg
+            vcpkg-cache
           key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ env.VCPKG_BASELINE }}-${{ hashFiles('main/server/vcpkg.json') }}
       - name: Build server
         working-directory: main
         env:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
         run: |
           set -euo pipefail
+          # 用系统工具从源码构建 vcpkg，避免下载预编译二进制（vcpkg-glibc 偶发网络失败）
+          export VCPKG_FORCE_SYSTEM_BINARIES=1
           if [ ! -d "$VCPKG_ROOT/.git" ]; then git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"; fi
           git -C "$VCPKG_ROOT" fetch --depth=1 origin "$VCPKG_BASELINE"
           git -C "$VCPKG_ROOT" checkout --detach "$VCPKG_BASELINE"
@@ -110,6 +129,7 @@ jobs:
 
   windows:
     name: Windows (${{ matrix.arch }})
+    needs: webui
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -132,43 +152,36 @@ jobs:
           repository: DiceZone/onedice-cpp-lib
           path: onedice-cpp-lib
           token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
-      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          repository: DiceZone/Dice-Next-WebUI
-          path: web
-          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+          name: webui-dist
+          path: web/dist
       - uses: actions/checkout@v4
         with:
           repository: DiceZone/Dice-Next-Doc
           path: docs
           token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: Build WebUI
-        shell: pwsh
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
+
       - name: Restore vcpkg cache
         uses: actions/cache@v4
         with:
-          path: vcpkg
+          path: |
+            vcpkg
+            vcpkg-cache
           key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ env.VCPKG_BASELINE }}-${{ hashFiles('main/server/vcpkg.json') }}
       - name: Build server
         shell: pwsh
         working-directory: main
         run: |
           $ErrorActionPreference = 'Stop'
+          $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:GITHUB_WORKSPACE 'vcpkg-cache'
           $vcpkg = Join-Path $env:GITHUB_WORKSPACE 'vcpkg'
           if (-not (Test-Path (Join-Path $vcpkg '.git'))) { git clone https://github.com/microsoft/vcpkg.git $vcpkg }
           git -C $vcpkg fetch --depth 1 origin $env:VCPKG_BASELINE
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg baseline fetch failed' }
           git -C $vcpkg checkout --detach $env:VCPKG_BASELINE
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg baseline checkout failed' }
+          $env:VCPKG_FORCE_SYSTEM_BINARIES = '1'   # 从源码构建，避免下载预编译二进制
           & (Join-Path $vcpkg 'bootstrap-vcpkg.bat')
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
           & (Join-Path $vcpkg 'vcpkg.exe') install --x-manifest-root=server --x-install-root="$vcpkg/installed" --triplet=${{ matrix.triplet }}
@@ -201,6 +214,7 @@ jobs:
 
   macos-arm64:
     name: macOS (arm64)
+    needs: webui
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -211,37 +225,31 @@ jobs:
           repository: DiceZone/onedice-cpp-lib
           path: onedice-cpp-lib
           token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
-      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          repository: DiceZone/Dice-Next-WebUI
-          path: web
-          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+          name: webui-dist
+          path: web/dist
       - uses: actions/checkout@v4
         with:
           repository: DiceZone/Dice-Next-Doc
           path: docs
           token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: Build WebUI
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
       - name: Restore vcpkg cache
         uses: actions/cache@v4
         with:
-          path: vcpkg
+          path: |
+            vcpkg
+            vcpkg-cache
           key: vcpkg-${{ runner.os }}-arm64-osx-static-${{ env.VCPKG_BASELINE }}-${{ hashFiles('main/server/vcpkg.json') }}
       - name: Build server
         working-directory: main
         env:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
         run: |
           set -euo pipefail
+          # 用系统工具从源码构建 vcpkg，避免下载预编译二进制（vcpkg-glibc 偶发网络失败）
+          export VCPKG_FORCE_SYSTEM_BINARIES=1
           if [ ! -d "$VCPKG_ROOT/.git" ]; then git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"; fi
           git -C "$VCPKG_ROOT" fetch --depth=1 origin "$VCPKG_BASELINE"
           git -C "$VCPKG_ROOT" checkout --detach "$VCPKG_BASELINE"
