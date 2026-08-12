@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // ─── Dice!Next v3.0.0 — Command Router ───────────────────────
 // Routes incoming messages to dice engine, reply system, etc.
 // Faithfully implements original Dice! command set (.r .coc .dnd etc.)
@@ -1983,7 +1983,7 @@ private:
         return result;
     }
 
-    std::optional<std::string> handlePersonaList(Locale loc, const Message& msg) {
+    std::optional<std::string> handlePersonaList(Locale loc, const Message& /*msg*/) {
         auto templates = personaMgr_->listTemplates();
         if (templates.empty()) {
             return i18n_.tr(loc, "persona.no_personas");
@@ -1998,7 +1998,7 @@ private:
         return i18n_.tr(loc, "persona.list", {{"list", list}});
     }
 
-    std::optional<std::string> handlePersonaInfo(Locale loc, const Message& msg,
+    std::optional<std::string> handlePersonaInfo(Locale loc, const Message& /*msg*/,
                                                   const std::string& name) {
         if (name.empty()) return i18n_.tr(loc, "persona.name_empty");
         auto tmpl = personaMgr_->getTemplateByName(name);
@@ -2027,7 +2027,7 @@ private:
         return i18n_.tr(loc, "persona.off");
     }
 
-    std::optional<std::string> handlePersonaCreate(Locale loc, const Message& msg,
+    std::optional<std::string> handlePersonaCreate(Locale loc, const Message& /*msg*/,
                                                     const std::string& name) {
         if (name.empty()) return i18n_.tr(loc, "persona.name_empty");
         // Check for duplicate
@@ -2038,7 +2038,7 @@ private:
         return i18n_.tr(loc, "persona.created", {{"name", name}});
     }
 
-    std::optional<std::string> handlePersonaCopy(Locale loc, const Message& msg,
+    std::optional<std::string> handlePersonaCopy(Locale loc, const Message& /*msg*/,
                                                   const std::string& args) {
         // Parse "src dst"
         size_t spacePos = args.find(' ');
@@ -2055,7 +2055,7 @@ private:
         return i18n_.tr(loc, "persona.copied", {{"src", srcName}, {"dst", dstName}});
     }
 
-    std::optional<std::string> handlePersonaDel(Locale loc, const Message& msg,
+    std::optional<std::string> handlePersonaDel(Locale loc, const Message& /*msg*/,
                                                  const std::string& name) {
         if (name.empty()) return i18n_.tr(loc, "persona.name_empty");
         auto tmpl = personaMgr_->getTemplateByName(name);
@@ -4767,7 +4767,7 @@ public:
             });
         }
         if (sub == "stats") {
-            long uptime = static_cast<long>(std::time(nullptr)) - utils::getStartupEpoch();
+            long long uptime = static_cast<long long>(std::time(nullptr)) - utils::getStartupEpoch();
             if (uptime < 0) uptime = 0;
             // 好友：累加各连接适配器（-1 = 未同步）；全为 -1 → 未知
             int friends = -1;
@@ -4793,10 +4793,10 @@ public:
         return i18n_.tr(loc, "system.usage");
     }
     /// 把秒数格式化为「Xd Yh Zm Ws」（去掉为 0 的高位）。
-    static std::string fmtDuration(long sec) {
-        long d = sec / 86400; sec %= 86400;
-        long h = sec / 3600;  sec %= 3600;
-        long m = sec / 60;    long s = sec % 60;
+    static std::string fmtDuration(long long sec) {
+        long long d = sec / 86400; sec %= 86400;
+        long long h = sec / 3600;  sec %= 3600;
+        long long m = sec / 60;    long long s = sec % 60;
         std::string out;
         if (d > 0) out += std::to_string(d) + "d ";
         if (d > 0 || h > 0) out += std::to_string(h) + "h ";
@@ -7782,7 +7782,7 @@ private:
             if (nm.empty()) { try { nm = st->get<GameLogRow>(active).name; } catch (...) {} }
             if (nm.empty()) nm = "log" + std::to_string(active);
             return i18n_.tr(loc, "log.status", {{"id", std::to_string(active)}, {"name", nm}, {"count", std::to_string(cnt)}});
-        } catch (const std::exception& e) {
+        } catch (const std::exception&) {
             return i18n_.tr(loc, "log.usage");
         }
     }

@@ -1,4 +1,4 @@
-﻿#include "common/logger.h"
+#include "common/logger.h"
 #include "common/types.h"
 #include "common/errors.h"
 #include "common/utils.h"
@@ -183,7 +183,7 @@ void printBanner() {
 }
 
 void printStartupInfo(const dice::ConfigManager& configMgr,
-                      const dice::Database& db,
+                      const dice::Database& /*db*/,
                       const dice::HotReloadMonitor* hotReload) {
     auto config = configMgr.getAll();
 
@@ -439,7 +439,7 @@ static int realMain(int argc, char* argv[]) {
     if (hotReloadEnabled) {
         hotReload = new dice::HotReloadMonitor();
         // Only watch config directory, NOT data/ (DB writes trigger unnecessary reloads)
-        hotReload->start("config", hotReloadDebounce, [&configMgr](const std::string& changedFile) {
+        hotReload->start("config", hotReloadDebounce, [&configMgr](const std::string&) {
             configMgr.reload();  // writing_ guard inside will skip self-saves
             dice::utils::setTimezoneOffset(configMgr.get<int>(
                 "server/timezone_minutes", (std::numeric_limits<int>::min)()));
@@ -1162,8 +1162,8 @@ static int realMain(int argc, char* argv[]) {
                 if (auto a = adapterMgr.getAdapter(msg.adapterId)) {
                     if (a->isConnected()) sendSegs(a);
                 } else {
-                    for (auto& a : adapterMgr.allAdapters())   // 回退：来源不明时发首个已连接
-                        if (a->isConnected()) { sendSegs(a); break; }
+                    for (auto& ad : adapterMgr.allAdapters())   // 回退：来源不明时发首个已连接
+                        if (ad->isConnected()) { sendSegs(ad); break; }
                 }
             }
             // Send the broadcast as its own plain message to the triggering group,
@@ -1728,7 +1728,7 @@ static int realMain(int argc, char* argv[]) {
                     if (welcomeCooldown > 0) {
                         auto it = lastW.find(key);
                         if (it != lastW.end()) {
-                            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second).count();
+                            double elapsed = static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(now - it->second).count());
                             if (elapsed < welcomeCooldown) cdRemain = welcomeCooldown - elapsed;
                         }
                     }
@@ -1756,7 +1756,7 @@ static int realMain(int argc, char* argv[]) {
                     if (welcomeCooldown > 0) {
                         auto it = lastW.find(key);
                         if (it != lastW.end()) {
-                            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second).count();
+                            double elapsed = static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(now - it->second).count());
                             if (elapsed < welcomeCooldown)
                                 delay = (std::max)(delay, static_cast<double>(welcomeCooldown - elapsed));
                         }
@@ -2109,7 +2109,7 @@ static int realMain(int argc, char* argv[]) {
 
     auto& app = drogon::app();
     app.setLogLevel(trantor::Logger::kWarn);
-    app.addListener(host, port);
+    app.addListener(host, static_cast<uint16_t>(port));
     app.setThreadNum(4);
     // 上传体积上限：规则包(含 lua/js mod)、牌堆、图片都走 base64 塞进 JSON body，
     // drogon 默认 client_max_body_size 仅 1MB，稍大的规则包就会被拒（报 "string too long"）。
@@ -3259,7 +3259,11 @@ static int realMain(int argc, char* argv[]) {
     {
         auto parseIsoUtc = [](const std::string& s) -> int64_t {
             std::tm tm{}; int y, mo, d, h, mi, se;
+#if defined(_WIN32)
+            if (sscanf_s(s.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6) return 0;
+#else
             if (std::sscanf(s.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6) return 0;
+#endif
             tm.tm_year = y - 1900; tm.tm_mon = mo - 1; tm.tm_mday = d;
             tm.tm_hour = h; tm.tm_min = mi; tm.tm_sec = se;
 #if defined(_WIN32)
@@ -3313,13 +3317,13 @@ static int realMain(int argc, char* argv[]) {
                 days = all["dice"]["inactive_group_line"].get<int>();
         }
         if (days > 0) {
-            if (auto* st = db.getStorage()) {
+            if (auto* storage = db.getStorage()) {
                 const std::string sysName = "\xe4\xb8\x8d\xe6\xb4\xbb\xe8\xb7\x83\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe7\xbe\xa4";   // 不活跃自动退群
                 bool exists = false;
-                for (auto& tk : st->get_all<dice::ScheduledTaskRow>())
+                for (auto& tk : storage->get_all<dice::ScheduledTaskRow>())
                     if (tk.name == sysName) {
                         auto up = tk; up.condition = "inactive>=" + std::to_string(days); up.enabled = 1;
-                        st->update(up); exists = true; break;
+                        storage->update(up); exists = true; break;
                     }
                 if (!exists) {
                     dice::ScheduledTaskRow tk;
@@ -3327,7 +3331,7 @@ static int realMain(int argc, char* argv[]) {
                     tk.cronTime = "04:00"; tk.action = "leave";
                     tk.condition = "inactive>=" + std::to_string(days);
                     tk.content = ""; tk.enabled = 1;
-                    st->insert(tk);
+                    storage->insert(tk);
                 }
                 configMgr.set<int>("dice/inactive_group_line", 0);
                 configMgr.save();

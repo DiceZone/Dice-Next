@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // ─── Dice!Next v3.0.0 — Real API Service ─────────────────────
 // Direct Drogon handler implementations backed by Database + ConfigManager.
 // Provides full CRUD for adapters, replies, dice rules, and system status.
@@ -1828,7 +1828,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             out << content;
             out.close();
             // Reload decks
-            int deckCount = cardDeck.loadDir("data/decks");
+            cardDeck.loadDir("data/decks");
             jsonReply(ok(J{{"filename", filename}, {"total_decks", cardDeck.deckCount()}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
@@ -1927,7 +1927,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             int adapters = (int)st->count<AdapterRow>();
             int rules    = (int)st->count<ReplyRuleRow>();
-            int decks    = (int)st->count<DeckRow>();
+
             int sessions = (int)lst->count<GameLogRow>();
             int connectedCount = 0;
             for (auto& a : adapterMgr.allAdapters())
@@ -2016,7 +2016,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 {"system", sysInfoJson()},
                 {"recent_logs", readRecentLogs()}
             }), std::move(cb));
-        } catch (const std::exception& e) {
+        } catch (const std::exception&) {
             // Fallback: return stats without logs if log parsing fails
             jsonReply(ok(J{
                 {"uptime_seconds", static_cast<int>(std::time(nullptr) - utils::getStartupEpoch())},
@@ -3649,7 +3649,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 for (char& c : s) if (c=='/'||c=='\\'||c==':'||c=='*'||c=='?'||c=='"'||c=='<'||c=='>'||c=='|'||(unsigned char)c<0x20) c='_';
                 return s;
             };
-            std::string baseName = "q_" + safe(log.groupId) + "_" + safe(logName) + "." + ext;
+            std::string downloadName = "q_" + safe(log.groupId) + "_" + safe(logName) + "." + ext;
             auto pct = [](const std::string& s) {
                 static const char* hex = "0123456789ABCDEF"; std::string o;
                 for (unsigned char c : s) {
@@ -3659,9 +3659,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 return o;
             };
             std::string ascii;
-            for (char c : baseName) ascii += ((unsigned char)c>=0x20 && (unsigned char)c<0x80 && c!='"' && c!='\\') ? c : '_';
+            for (char c : downloadName) ascii += ((unsigned char)c>=0x20 && (unsigned char)c<0x80 && c!='"' && c!='\\') ? c : '_';
             resp->addHeader("Content-Disposition",
-                "attachment; filename=\"" + ascii + "\"; filename*=UTF-8''" + pct(baseName));
+                "attachment; filename=\"" + ascii + "\"; filename*=UTF-8''" + pct(downloadName));
             resp->setBody(body);
             cb(resp);
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }

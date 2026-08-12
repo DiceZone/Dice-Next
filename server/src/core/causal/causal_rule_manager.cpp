@@ -151,7 +151,7 @@ CausalRule CausalRule::fromJSON(const json& j) {
             a.type = CausalRuleManager::actionTypeFromStr(aj.value("type", std::string("reply")));
             if (a.type == CausalActionType::Reply) {
                 if (aj.contains("replies") && aj["replies"].is_array()) {
-                    for (auto& r : aj["replies"]) if (r.is_string()) a.replies.push_back(r.get<std::string>());
+                    for (auto& rp : aj["replies"]) if (rp.is_string()) a.replies.push_back(rp.get<std::string>());
                 }
             } else if (a.type == CausalActionType::CounterAdd || a.type == CausalActionType::CounterSet) {
                 a.counterName = aj.value("counterName", aj.value("counter_name", std::string()));
@@ -652,6 +652,8 @@ std::string CausalRuleManager::executeActions(const CausalRule& rule,
                                                const std::string& nick,
                                                std::vector<CounterChange>& changes,
                                                bool dryRun) {
+    (void)msg;
+    (void)nick;
     std::string reply;
     // Collect counter values for {counter:name} resolution
     std::map<std::string, std::string> counterCtx;

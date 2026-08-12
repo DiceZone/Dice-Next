@@ -196,7 +196,12 @@ void HotReloadMonitor::watchLoop() {
                     // Extract filename
                     int nameLen = fni->FileNameLength / sizeof(WCHAR);
                     std::wstring wFilename(fni->FileName, nameLen);
+#if defined(_WIN32)
+                    int wlen = WideCharToMultiByte(CP_UTF8, 0, wFilename.c_str(), (int)wFilename.size(), nullptr, 0, nullptr, nullptr);
+                    if (wlen > 0) { std::string tmp(wlen, '\0'); WideCharToMultiByte(CP_UTF8, 0, wFilename.c_str(), (int)wFilename.size(), tmp.data(), wlen, nullptr, nullptr); changedFile = tmp; }
+#else
                     changedFile.assign(wFilename.begin(), wFilename.end());
+#endif
 
                     DICE_LOG_DEBUG("HotReloadMonitor: change detected in '{}'", changedFile);
 

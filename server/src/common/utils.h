@@ -57,7 +57,13 @@ inline std::string timestampToIso8601(std::chrono::system_clock::time_point tp) 
         tp.time_since_epoch()) % 1000;
 
     std::ostringstream oss;
-    oss << std::put_time(std::gmtime(&time_t_val), "%Y-%m-%dT%H:%M:%S");
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &time_t_val);
+#else
+    gmtime_r(&time_t_val, &tm);
+#endif
+    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%S");
     oss << '.' << std::setfill('0') << std::setw(3) << millis.count() << 'Z';
     return oss.str();
 }
@@ -222,7 +228,7 @@ inline bool pathExists(const std::string& path);
 inline std::chrono::system_clock::time_point g_startupTime = std::chrono::system_clock::now();
 
 inline void setStartupEpoch() { g_startupTime = std::chrono::system_clock::now(); }
-inline long getStartupEpoch() {
+inline long long getStartupEpoch() {
     return std::chrono::duration_cast<std::chrono::seconds>(
         g_startupTime.time_since_epoch()).count();
 }

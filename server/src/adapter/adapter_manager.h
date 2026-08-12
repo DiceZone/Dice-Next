@@ -154,7 +154,7 @@ public:
 
     /// Broadcast a reply to all connected adapters.
     /// Usually you'd want to reply through the same adapter that received the message.
-    void broadcastToAll(const std::string& text) {
+    void broadcastToAll(const std::string& /*text*/) {
         for (auto& [id, a] : adapters_) {
             if (a->isConnected()) {
                 // broadcast is adapter-specific

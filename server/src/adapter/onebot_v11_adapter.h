@@ -490,7 +490,7 @@ private:
         revLoop_ = std::make_shared<trantor::EventLoopThread>();
         revLoop_->run();
         tcpServer_ = std::make_shared<trantor::TcpServer>(revLoop_->getLoop(),
-            trantor::InetAddress(port), "revws-" + id_);
+            trantor::InetAddress(static_cast<uint16_t>(port)), "revws-" + id_);
         tcpServer_->setRecvMessageCallback([self](const trantor::TcpConnectionPtr& conn, trantor::MsgBuffer* buf) {
             self->onRevWsData(conn, buf);
         });
@@ -684,7 +684,7 @@ private:
         std::lock_guard lk(revConnMutex_);
         if (!revConn_ || !revConn_->connected()) return;
         std::string frame;
-        frame += (char)0x81; // FIN + Text opcode
+        frame += '\x81'; // FIN + Text opcode
         if (text.size() < 126) { frame += (char)text.size(); }
         else if (text.size() < 65536) { frame += (char)126; frame += (char)(text.size()>>8); frame += (char)(text.size()&0xFF); }
         else { frame += (char)127; for(int i=7;i>=0;i--) frame += (char)(text.size()>>(8*i)); }
