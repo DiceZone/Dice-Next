@@ -19,6 +19,7 @@
 #include "rules_lock.h"
 #include "check_roll_override.h"
 #include "master_delivery.h"
+#include "command_prefix_policy.h"
 #include "../service/notice_manager.h"   // B：通知系统（权限变更等推送给骰主）
 
 #include <sqlite_orm/sqlite_orm.h>
@@ -164,6 +165,7 @@ public:
 
         // Match against the configured command prefixes (hot-reloadable, multi).
         std::string matchedPrefix;
+        std::optional<std::string> forcedCommandBody;
         if (summoned) {
             matchedPrefix = summon;
         } else {
@@ -172,15 +174,22 @@ public:
             }
         }
         if (matchedPrefix.empty()) {
-            // Not a command — the caller checks custom replies for this message.
-            return "";
+            // Keep the two familiar emergency prefixes for bot control and
+            // dismiss even if an owner removes them from the configured list.
+            forcedCommandBody = forcedSafetyCommandBody(text);
+            if (!forcedCommandBody) {
+                // Not a command — the caller checks custom replies for this message.
+                return "";
+            }
         }
 
         // Resolve which language to reply in for this message.
         // The Playground/test endpoint can force a locale to preview each language.
         Locale loc = forcedLocale.value_or(resolver_.resolve(msg));
 
-        std::string cmd = trim(text.substr(matchedPrefix.size()));
+        std::string cmd = forcedCommandBody
+            ? *forcedCommandBody
+            : trim(text.substr(matchedPrefix.size()));
         if (cmd.empty()) return "";
 
         // .dismiss is an operational escape hatch: it must remain available
@@ -3856,27 +3865,10 @@ private:
     ///   .bot5080  /  .bot on 5080  → only the bot whose id ends with 5080 responds.
     std::optional<std::string> tryHandleBot(Locale loc, const Message& msg,
                                             const std::string& cmd) {
-        if (toLower(cmd).rfind("bot", 0) != 0) return std::nullopt;
-        std::string rest = trim(cmd.substr(3));
-
-        // Exact match only: the bot responds to ".bot", ".bot on/off" and an
-        // optional account suffix (".bot5080" / ".bot on 5080"). Any other token
-        // (e.g. ".bot sdsadas") is NOT a bot command → stay out of the way.
-        std::string target, action;
-        std::istringstream iss(rest);
-        std::string tok;
-        while (iss >> tok) {
-            std::string tl = toLower(tok);
-            if (tl == "on" || tl == "off") {
-                if (!action.empty()) return std::nullopt;   // duplicate action → reject
-                action = tl;
-            } else if (isAllDigits(tok)) {
-                if (!target.empty()) return std::nullopt;    // duplicate target → reject
-                target = tok;
-            } else {
-                return std::nullopt;                          // garbage token → not a .bot command
-            }
-        }
+        const auto parsed = parseBotControlCommand(cmd);
+        if (!parsed) return std::nullopt;
+        const std::string& target = parsed->target;
+        const std::string& action = parsed->action;
 
         // Account targeting: a target id was given but it isn't this bot → stay silent.
         if (!target.empty() && !idMatchesSelf(target, msg.selfId)) {
@@ -3982,9 +3974,8 @@ public:
     /// 记录一次群内 .bot 探测（供 detectDiceBot 的时间窗判定）。
     void recordBotProbe(const Message& msg) {
         if (msg.type != MessageType::kGroup || msg.targetId.empty()) return;
-        // Dice-bot probing is itself a command. It must obey the active prefix
-        // configuration just like normal routing; do not treat legacy `.bot`
-        // as a probe after an owner has removed `.` from the prefix list.
+        // `.bot` and `。bot` deliberately remain valid probes even when the
+        // corresponding familiar prefix has been removed from configuration.
         auto body = commandBody(msg.content);
         if (!body) return;
         std::string low = toLower(*body);
@@ -4593,13 +4584,13 @@ public:
         return 0;
     }
 
-    /// If `text` starts with a configured command prefix, return the text after it
-    /// (trimmed); otherwise nullopt. Used to feed the JS plugin subsystem.
+    /// Return the body after a configured prefix, or after the forced `.` / `。`
+    /// safety prefix for bot controls and dismiss. Used by plugins and routing gates.
     std::optional<std::string> commandBody(const std::string& text) const {
         std::string t = trim(text);
         for (const auto& p : commandPrefixes())
             if (!p.empty() && t.rfind(p, 0) == 0) return trim(t.substr(p.size()));
-        return std::nullopt;
+        return forcedSafetyCommandBody(t);
     }
 
 private:
