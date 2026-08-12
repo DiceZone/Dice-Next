@@ -7915,6 +7915,13 @@ private:
             if (all.contains("dice") && all["dice"].contains("api_enabled")) return all["dice"]["api_enabled"].get<bool>();
         } catch (...) {} return false;
     }
+    // T8（兼容海豹）：JS fetch 严格模式开关。默认 false = 裸 fetch（仅保留 shell 字符安全）；
+    // true = 恢复 api_enabled + SSRF/白名单拦截。
+    bool jsFetchStrictEnabled() const {
+        try { json all = cfg_.getAll();
+            if (all.contains("dice") && all["dice"].contains("js_fetch_strict")) return all["dice"]["js_fetch_strict"].get<bool>();
+        } catch (...) {} return false;
+    }
     int apiTimeout() const {
         try { json all = cfg_.getAll();
             if (all.contains("dice") && all["dice"].contains("api_timeout")) { int t = all["dice"]["api_timeout"].get<int>(); if (t > 0 && t <= 30) return t; }
@@ -8046,9 +8053,16 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     /// values can't inject. Returns the response body; @p status carries the HTTP
     /// code back (0 = blocked/failed). @p headerLines = "\n"-joined "K: V".
     std::string jsHttpFetch(const std::string& method, const std::string& url,
-                            const std::string& headerLines, const std::string& body, int& status) {
+                            const std::string& headerLines, const std::string& body, int& status,
+                            bool openMode = false) {
         status = 0;
-        if (!apiEnabled() || !isApiUrlAllowed(url)) return "";
+        // T8: openMode（JS fetch）默认放行对齐海豹裸 fetch，仅保留 shell 字符安全；
+        // strict 开启或非 openMode（Lua http 等）时维持 api_enabled + SSRF/白名单拦截。
+        if (openMode && !jsFetchStrictEnabled()) {
+            for (unsigned char c : url) if (c <= 0x20 || c == '"' || c == '`' || c == '$' || c == '\\') return "";
+        } else {
+            if (!apiEnabled() || !isApiUrlAllowed(url)) return "";
+        }
         namespace fs = std::filesystem;
         auto esc = [](const std::string& s) {            // escape for curl config "..." values
             std::string o; o.reserve(s.size() + 8);
@@ -8166,11 +8180,17 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         }
         return s;
     }
+    /// curl -K 配置文件值转义（与 jsHttpFetch 的 esc 一致）：防配置注入。
+    static std::string curlCfgEscape(const std::string& s) {
+        std::string o; o.reserve(s.size() + 8);
+        for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; }
+        return o;
+    }
     // 用 curl 把 url 下到 outPath（-K 配置文件传参，防 shell 注入）。返回是否成功。
     static bool curlDownload(const std::string& url, const std::string& outPath) {
         std::string cfgPath = outPath + ".curlcfg";
         { std::ofstream cf(cfgPath, std::ios::binary);
-          cf << "url = \"" << url << "\"\noutput = \"" << outPath << "\"\n"
+          cf << "url = \"" << curlCfgEscape(url) << "\"\noutput = \"" << curlCfgEscape(outPath) << "\"\n"
              << "--max-time 8\n--connect-timeout 4\n--silent\n--fail\n--location\n"; }
         std::string cmd = "curl -K \"" + cfgPath + "\"";
         int rc = std::system(cmd.c_str());
@@ -8195,6 +8215,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
             }
             std::string fname = "log" + std::to_string(logId) + "_" + std::to_string(nowEpoch()) + "_" + std::to_string(n++) + "." + ext;
             std::string path = "data/logs/images/" + fname;
+            if (!isHostSafe(u)) { out.push_back(u); continue; }   // SSRF 黑名单：内网/环回/控制字符一律不下载
             if (!curlDownload(u, path)) { out.push_back(u); continue; }   // 下载失败→保留临时 url
             // generic 图床：立即上传拿稳定 url（趁 QQ 链接还活着）；失败退回本地文件名。
             if (imghost::mode(cfg_) == "generic") {

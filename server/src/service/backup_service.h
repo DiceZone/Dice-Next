@@ -471,6 +471,22 @@ inline bool stageRestoreArchive(const fs::path& archive, std::string& error) {
     if (std::system(archiveExtractCommand(archive, stage).c_str()) != 0) {
         error = "无法解压备份文件"; fs::remove_all(stage, ec); return false;
     }
+    // M4: 解压后二次校验——落盘真实路径必须位于暂存目录内（防 zip-slip 绕过字符串校验）。
+    {
+        std::error_code ec2;
+        const fs::path stageReal = fs::canonical(stage, ec2);
+        if (ec2) { error = "无法解析暂存目录"; fs::remove_all(stage, ec); return false; }
+        std::string stagePrefix = stageReal.string();
+        if (!stagePrefix.empty() && stagePrefix.back() != '/') stagePrefix += '/';
+        for (auto& entry : fs::recursive_directory_iterator(stage, ec2)) {
+            if (ec2) { error = "读取解压内容失败"; fs::remove_all(stage, ec); return false; }
+            if (!entry.is_regular_file(ec2)) continue;
+            const fs::path real = fs::canonical(entry.path(), ec2);
+            if (ec2 || real.string().rfind(stagePrefix, 0) != 0) {
+                error = "备份解压路径越界"; fs::remove_all(stage, ec); return false;
+            }
+        }
+    }
     try {
         std::ifstream f(stage / "manifest.json"); json manifest; f >> manifest;
         const int version = manifest.value("version", 0);

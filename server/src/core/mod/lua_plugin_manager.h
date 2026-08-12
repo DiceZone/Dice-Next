@@ -73,6 +73,9 @@ public:
         int replies = 0;        // reply/*.lua 数（目录）或 msg_order 条目数（单文件）
         int scripts = 0;        // script/*.lua 数
         std::map<std::string, std::string> helpdoc;   // descriptor.json helpdoc{主题:文本}
+        std::vector<std::string> permissions;   // descriptor 声明的能力（空=未声明）
+        std::vector<std::string> risks;         // 静态预检命中的高危标签（仅告警不硬拦）
+        bool permissionDeclared = false;
     };
     std::vector<LuaMod> mods() const;
 
@@ -97,13 +100,20 @@ public:
     //          支持一包多 mod、json+目录成对、单层包装目录。
     // bytes=文件原始字节。成功返回 true；err 写失败原因；imported 写导入的 mod 名。不做 reload。
     bool importUpload(const std::string& filename, const std::string& bytes,
-                      std::string* err = nullptr, std::vector<std::string>* imported = nullptr);
+                      std::string* err = nullptr, std::vector<std::string>* imported = nullptr,
+                      bool dryRun = false,
+                      std::vector<std::string>* permissions = nullptr,
+                      std::vector<std::string>* risks = nullptr);
+
+    /// cpath 可选收窄开关（默认 false = 与 Dice! 一致；true = 仅插件/内置目录）。
+    static void setCpathStrict(bool v) { s_cpathStrict = v; }
 
     // 注入：drawDeck(牌堆名) → 抽牌结果（main.cpp 接牌堆引擎）。
     using DeckDrawFn = std::function<std::string(const std::string&)>;
     void setDeckDraw(DeckDrawFn f) { deckDraw_ = std::move(f); }
 
     // 配置存取（供 C 函数与外部用）。scope 形如 "u:<uid>" / "g:<gid>"。
+    static bool s_cpathStrict;
     std::string confGet(const std::string& scope, const std::string& key) const;
     bool        confHas(const std::string& scope, const std::string& key) const;
     void        confSet(const std::string& scope, const std::string& key, const std::string& val);

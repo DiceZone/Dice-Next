@@ -42,6 +42,7 @@
 #include "cloudban_service.h" // 云黑名单同步（cloudban.dice.zone）
 #include "backup_service.h"
 #include "../storage/legacy_import_v2.h"
+#include "plugin_verify.h"
 #include "../core/causal/causal_rule_manager.h"
 #include "../core/causal/cooldown_manager.h"
 #include "../core/causal/counter_store.h"
@@ -437,7 +438,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Post});
 
     // Body: { filename: "foo.js", content: "<js source>" }. Writes the file then reloads.
-    app.registerHandler("/api/plugins/js/upload", [&jsMod](Req req, CB&& cb) {
+    app.registerHandler("/api/plugins/js/upload", [&cfg, &jsMod](Req req, CB&& cb) {
         try {
             auto j = J::parse(req->body());
             std::string fname = baseName(j.value("filename", std::string()));
@@ -446,6 +447,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 jsonReply(fail("filename must end with .js"), std::move(cb)); return;
             }
             if (content.empty()) { jsonReply(fail("empty content"), std::move(cb)); return; }
+            std::string verr;
+            if (!dice::pluginverify::verify(cfg.get<std::string>("dice/plugin_verify_key", ""),
+                                            content, j.value("signature", std::string()), verr)) {
+                jsonReply(fail(verr), std::move(cb)); return;
+            }
             std::string dir = jsMod.pluginDir().empty() ? "data/plugins/js" : jsMod.pluginDir();
             std::error_code ec; std::filesystem::create_directories(dir, ec);
             { std::ofstream f(std::filesystem::path(dir) / fname, std::ios::binary); f << content; }
@@ -1835,7 +1841,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // Upload a mod file (Lua/json/zip). 归位语义统一走 LuaPluginManager::importUpload
     //（旧实现把 zip 原样落盘不解压，产生既加载不了也删不掉的孤儿文件）。
-    app.registerHandler("/api/mods/upload", [&luaMod](Req req, CB&& cb) {
+    app.registerHandler("/api/mods/upload", [&cfg, &luaMod](Req req, CB&& cb) {
         try {
             auto j = J::parse(req->body());
             std::string filename = j.value("filename", "");
@@ -1850,12 +1856,52 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (comma != std::string::npos) content = content.substr(comma + 1);
                 bytes = drogon::utils::base64Decode(content);
             } else bytes = content;
-            std::string err; std::vector<std::string> names;
-            if (!luaMod.importUpload(filename, bytes, &err, &names)) { jsonReply(fail(err), std::move(cb)); return; }
+            const bool dryRun = j.value("dry_run", false);
+            std::string err; std::vector<std::string> names, perms, risks;
+            if (!dryRun) {
+                // 真正安装时才校验签名；预检只展示权限/风险，避免"未签名"阻断检查。
+                std::string verr;
+                if (!dice::pluginverify::verify(cfg.get<std::string>("dice/plugin_verify_key", ""),
+                                                bytes, j.value("signature", std::string()), verr)) {
+                    jsonReply(fail(verr), std::move(cb)); return;
+                }
+            }
+            if (!luaMod.importUpload(filename, bytes, &err, &names, dryRun, &perms, &risks)) { jsonReply(fail(err), std::move(cb)); return; }
+            if (dryRun) {
+                jsonReply(ok(J{{"dry_run", true}, {"permissions", perms}, {"risks", risks}}), std::move(cb));
+                return;
+            }
             luaMod.reload();
-            jsonReply(ok(J{{"filename", filename}, {"imported", names}}), std::move(cb));
+            jsonReply(ok(J{{"filename", filename}, {"imported", names}, {"permissions", perms}, {"risks", risks}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
+
+    // 可选插件签名公钥（PEM）。空 = 不校验。签名工具 tools/sign-plugin.py。
+    app.registerHandler("/api/system/plugin-verify", [&cfg](Req req, CB&& cb) {
+        try {
+            if (req->method() == drogon::Put) {
+                auto j = J::parse(req->body());
+                std::string key = j.value("public_key", std::string());
+                cfg.set<std::string>("dice/plugin_verify_key", key);
+                cfg.save();
+            }
+            jsonReply(ok(J{{"enabled", !cfg.get<std::string>("dice/plugin_verify_key", "").empty()},
+                           {"public_key", cfg.get<std::string>("dice/plugin_verify_key", "")}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Put});
+
+
+    // T8: JS 插件网络访问——默认放行（对齐海豹裸 fetch）；strict=true 恢复 api_enabled+白名单拦截。
+    app.registerHandler("/api/system/js-fetch", [&cfg](Req req, CB&& cb) {
+        try {
+            if (req->method() == drogon::Put) {
+                auto j = J::parse(req->body());
+                cfg.set<bool>("dice/js_fetch_strict", j.value("strict", false));
+                cfg.save();
+            }
+            jsonReply(ok(J{{"strict", cfg.get<bool>("dice/js_fetch_strict", false)}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Put});
 
     // Development roadmap (rendered as a progress page in the web admin).
     app.registerHandler("/api/roadmap", [](Req, CB&& cb) {

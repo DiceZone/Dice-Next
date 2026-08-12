@@ -27,6 +27,13 @@ namespace dice {
 
 // 路径 → UTF-8 窄串：Windows 上 path::string() 走 ANSI 代码页，文件名含 GBK 无映射
 // 字符（emoji 等）会抛 system_error（Server 2012/2016 启动崩溃根因）。u8string 永不抛。
+// ── Lua 安全工具前置声明（实现见文件后部）──
+static std::string luaAuditTs();
+static void luaAudit(const std::string&, const std::string&, const std::string&);
+static std::vector<std::string> scanLuaRisks(const std::filesystem::path&);
+static std::vector<std::string> scanLuaRisksText(const std::string&);
+static std::string luaAuditMod(LuaPluginManager*);
+
 static inline std::string dnx_u8str(const std::filesystem::path& p) {
     auto u = p.u8string();
     return std::string(u.begin(), u.end());
@@ -527,11 +534,21 @@ static int l_drawDeck(lua_State* L) {
     std::string r = (m && m->deckDraw_) ? m->deckDraw_(name) : std::string();
     lua_pushstring(L, r.c_str()); return 1;
 }
+
+// 当前加载中的 mod 名（供审计）。
+static std::string luaAuditMod(LuaPluginManager* m) {
+    return m ? dnx_u8str(std::filesystem::path(m->loadingModDir_).filename()) : std::string("?");
+}
+// __dnx_audit(action, detail)：bootstrap 包装 io/os/package 后回调审计。
+static int l_audit(lua_State* L) {
+    luaAudit(luaAuditMod(mgrOf(L)), argStr(L, 1), argStr(L, 2));
+    return 0;
+}
 // sendMsg(text, groupId, userId)：插件主动发消息（经注入的 sender 路由适配器）。
 static int l_sendMsg(lua_State* L) {
     auto* m = mgrOf(L);
     std::string text = argStr(L, 1), gid = argStr(L, 2), uid = argStr(L, 3);
-    if (m && m->sender_ && !text.empty()) m->sender_(text, gid, uid);
+    if (m && m->sender_ && !text.empty()) { luaAudit(luaAuditMod(m), "sendMsg", "gid=" + gid + " uid=" + uid + " len=" + std::to_string(text.size())); m->sender_(text, gid, uid); }
     return 0;
 }
 // eventMsg(text|table, gid, uid)：把 text 当作消息跑完整回复管线（原版 virtualCall）。
@@ -640,7 +657,7 @@ static int l_yamlDump(lua_State* L) {
 static int l_httpGet(lua_State* L) {
     auto* m = mgrOf(L); std::string url = argStr(L, 1);
     int status = 0; std::string body;
-    if (m && m->httpFetch_) body = m->httpFetch_("GET", url, "", "", status);
+    if (m && m->httpFetch_) { luaAudit(luaAuditMod(m), "httpGet", url); body = m->httpFetch_("GET", url, "", "", status); }
     lua_pushboolean(L, status >= 200 && status < 300);
     lua_pushlstring(L, body.data(), body.size());
     return 2;
@@ -661,7 +678,7 @@ static int l_httpPost(lua_State* L) {
         }
     } else if (lua_isstring(L, 3)) headers = argStr(L, 3);
     int status = 0; std::string body;
-    if (m && m->httpFetch_) body = m->httpFetch_("POST", url, headers, content, status);
+    if (m && m->httpFetch_) { luaAudit(luaAuditMod(m), "httpPost", url); body = m->httpFetch_("POST", url, headers, content, status); }
     lua_pushboolean(L, status >= 200 && status < 300);
     lua_pushlstring(L, body.data(), body.size());
     return 2;
@@ -698,6 +715,69 @@ static int l_loadLua(lua_State* L) {
     return 1;   // 脚本的返回值留在栈顶
 }
 
+
+// ─── Lua 安全：审计日志 + 静态风险预检 ─────────────────────────
+static std::string luaAuditTs() {
+    std::time_t t = std::time(nullptr); std::tm g{};
+#if defined(_WIN32)
+    gmtime_s(&g, &t);
+#else
+    gmtime_r(&t, &g);
+#endif
+    char b[24]; std::strftime(b, sizeof(b), "%Y-%m-%dT%H:%M:%SZ", &g); return b;
+}
+// 插件行为审计：data/audit/lua_audit.jsonl（检测而非预防）。
+static void luaAudit(const std::string& mod, const std::string& action, const std::string& detail) {
+    std::error_code ec;
+    std::filesystem::create_directories("data/audit", ec);
+    std::ofstream f("data/audit/lua_audit.jsonl", std::ios::app | std::ios::binary);
+    if (!f) return;
+    nlohmann::json j{{"ts", luaAuditTs()}, {"mod", mod}, {"action", action}, {"detail", detail}};
+    f << j.dump() << '\n';
+}
+
+// 单文件 .lua 源码风险扫描（同 scanLuaRisks 的模式）。
+static std::vector<std::string> scanLuaRisksText(const std::string& s) {
+    std::vector<std::string> out;
+    auto add = [&out](const std::string& tag) {
+        if (std::find(out.begin(), out.end(), tag) == out.end()) out.push_back(tag);
+    };
+    const auto has = [&s](const std::string& p) { return s.find(p) != std::string::npos; };
+    if (has("os.execute")) add("shell:os.execute");
+    if (has("io.popen"))  add("shell:io.popen");
+    if (has("package.loadlib")) add("native:package.loadlib");
+    if (has("io.open"))   add("file:io.open");
+    if (has("os.remove")) add("file:os.remove");
+    if (has("os.rename")) add("file:os.rename");
+    if (has("debug."))    add("debug");
+    if (has("loadstring") || s.find("load(") != std::string::npos) add("dynamic:load");
+    return out;
+}
+// 扫描目录下 .lua 源码命中的高危模式（仅告警，不硬拦——避免误杀正常 Dice! mod）。
+static std::vector<std::string> scanLuaRisks(const std::filesystem::path& root) {
+    std::vector<std::string> out;
+    auto add = [&out](const std::string& tag) {
+        if (std::find(out.begin(), out.end(), tag) == out.end()) out.push_back(tag);
+    };
+    std::error_code ec;
+    if (!std::filesystem::is_directory(root, ec)) return out;
+    for (auto& e : std::filesystem::recursive_directory_iterator(root, ec)) {
+        if (ec) break;
+        if (!e.is_regular_file(ec) || e.path().extension() != ".lua") continue;
+        std::ifstream f(e.path(), std::ios::binary);
+        std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        const auto has = [&s](const std::string& p) { return s.find(p) != std::string::npos; };
+        if (has("os.execute")) add("shell:os.execute");
+        if (has("io.popen"))  add("shell:io.popen");
+        if (has("package.loadlib")) add("native:package.loadlib");
+        if (has("io.open"))   add("file:io.open");
+        if (has("os.remove")) add("file:os.remove");
+        if (has("os.rename")) add("file:os.rename");
+        if (has("debug."))    add("debug");
+        if (has("loadstring") || s.find("load(") != std::string::npos) add("dynamic:load");
+    }
+    return out;
+}
 // ─── LuaPluginManager ────────────────────────────────────────
 LuaPluginManager::~LuaPluginManager() {
     freeRuntime();
@@ -725,10 +805,13 @@ void LuaPluginManager::registerGlobals() {
         {"__dnx_roll", l_rollExpr},                                // pc:rollDice 引擎桥
         {"__dnx_fmt", l_formatTpl},                                // msg:format 模板桥
         {"__dnx_conf", l_confRaw},                                 // 通用配置读写（GameTable 等）
+        {"__dnx_audit", l_audit},                                // Lua 安全审计回调
         {nullptr, nullptr},
     };
     for (const luaL_Reg* f = fns; f->name; ++f) lua_register(state_, f->name, f->func);
 }
+
+bool LuaPluginManager::s_cpathStrict = false;   // cpath 收窄开关（兼容优先默认关）
 
 bool LuaPluginManager::init() {
     std::lock_guard<std::recursive_mutex> lk(mutex_);
@@ -964,9 +1047,34 @@ do
 end
 )lua";
     if (luaL_dostring(state_, kBootstrap) != LUA_OK) {
-        DICE_LOG_ERROR("[lua] bootstrap failed: {}", argStr(state_, -1));
-        lua_pop(state_, 1);
+        DICE_LOG_WARN("[lua] bootstrap error: {}", argStr(state_, -1));
     }
+    // ── 审计包装：io.open/io.popen/os.execute/package.loadlib 等记录到审计日志 ──
+    static const char* kAuditWrap = R"lua(
+if __dnx_audit then
+  do
+    local function wrap(t, k, act)
+      local orig = t[k]
+      if type(orig) == 'function' then
+        t[k] = function(...)
+          __dnx_audit(act, table.concat({...}, ' '))
+          return orig(...)
+        end
+      end
+    end
+    wrap(io, 'open', 'io.open')
+    wrap(io, 'popen', 'io.popen')
+    wrap(os, 'execute', 'os.execute')
+    wrap(os, 'remove', 'os.remove')
+    wrap(os, 'rename', 'os.rename')
+    wrap(package, 'loadlib', 'package.loadlib')
+  end
+end
+)lua";
+    if (luaL_dostring(state_, kAuditWrap) != LUA_OK) {
+        DICE_LOG_WARN("[lua] audit wrap error: {}", argStr(state_, -1));
+    }
+
     DICE_LOG_INFO("[lua] runtime initialized");
     return true;
 }
@@ -1211,6 +1319,10 @@ static void parseModDescriptor(const fs::path& descPath, LuaPluginManager::LuaMo
         m.author = j.value("author", "");
         m.version = j.value("ver", j.value("version", ""));
         m.brief = j.value("brief", "");
+        if (j.contains("permissions") && j["permissions"].is_array()) {
+            for (auto& p : j["permissions"]) if (p.is_string()) m.permissions.push_back(p.get<std::string>());
+            m.permissionDeclared = true;
+        }
         if (j.contains("helpdoc") && j["helpdoc"].is_object())
             for (auto it = j["helpdoc"].begin(); it != j["helpdoc"].end(); ++it)
                 if (it.value().is_string()) m.helpdoc[it.key()] = it.value().get<std::string>();
@@ -1249,6 +1361,18 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
         lua_pushlstring(state_, np.data(), np.size());
         lua_setfield(state_, -2, "path");
         lua_pop(state_, 1);
+
+        // cpath：默认与 Dice! 一致（不覆盖，兼容依赖原生库的 mod）；
+        // dice/lua_cpath_strict=true 时收窄到插件/内置目录，阻断 loadlib 加载系统 .dll。
+        if (s_cpathStrict) {
+            std::string cpaths = fwd(fs::path(dir) / "?.dll") + ";" + fwd(base / "plugin" / "?.dll") + ";";
+            fs::path luaDir = fs::current_path() / "lua";
+            if (fs::is_directory(luaDir, ec)) cpaths += fwd(luaDir / "?.dll") + ";";
+            lua_getglobal(state_, "package");
+            lua_pushlstring(state_, cpaths.data(), cpaths.size());
+            lua_setfield(state_, -2, "cpath");
+            lua_pop(state_, 1);
+        }
     }
 
     // 统计 mod 目录的 reply/script/model + 触发加载，收尾 push。
@@ -1657,7 +1781,9 @@ bool LuaPluginManager::deleteMod(const std::string& name) {
 }
 
 bool LuaPluginManager::importUpload(const std::string& filename, const std::string& bytes,
-                                    std::string* err, std::vector<std::string>* imported) {
+                                    std::string* err, std::vector<std::string>* imported,
+                                    bool dryRun, std::vector<std::string>* permissions,
+                                    std::vector<std::string>* risks) {
     std::lock_guard<std::recursive_mutex> lk(mutex_);
     auto fail = [&](const std::string& e) { if (err) *err = e; return false; };
     if (bytes.empty()) return fail("empty/invalid file");
@@ -1683,6 +1809,12 @@ bool LuaPluginManager::importUpload(const std::string& filename, const std::stri
 
     // 单文件 .lua → data/plugin（msg_order 插件，原版目录语义）。
     if (endsWith(lb, ".lua")) {
+        if (dryRun) {
+            if (permissions && permissions->empty()) *permissions = {"all"};   // 旧插件默认请求全部
+            if (risks) *risks = scanLuaRisksText(bytes);
+            if (imported) imported->push_back(base.substr(0, base.size() - 4));
+            return true;
+        }
         fs::create_directories(pluginRoot, ec); ec.clear();
         if (!writeFile(pluginRoot / u8(base), bytes)) return fail("write failed: " + base);
         if (imported) imported->push_back(base.substr(0, base.size() - 4));
@@ -1690,6 +1822,18 @@ bool LuaPluginManager::importUpload(const std::string& filename, const std::stri
     }
     // 单文件 .json → data/mod（描述档/查询类 mod，原版正式登记形态）。
     if (endsWith(lb, ".json")) {
+        if (dryRun) {
+            if (permissions) {
+                try {
+                    auto jj = nlohmann::json::parse(bytes);
+                    if (jj.contains("permissions") && jj["permissions"].is_array())
+                        for (auto& pp : jj["permissions"]) if (pp.is_string()) permissions->push_back(pp.get<std::string>());
+                } catch (...) {}
+                if (permissions->empty()) *permissions = {"all"};
+            }
+            if (imported) imported->push_back(base.substr(0, base.size() - 5));
+            return true;
+        }
         if (!writeFile(modRoot / u8(base), bytes)) return fail("write failed: " + base);
         if (imported) imported->push_back(base.substr(0, base.size() - 5));
         return true;
@@ -1707,6 +1851,26 @@ bool LuaPluginManager::importUpload(const std::string& filename, const std::stri
     std::string cmd = "unzip -o -q \"" + zipPath.string() + "\" -d \"" + tmpDir.string() + "\"";
 #endif
     std::system(cmd.c_str());
+    if (dryRun) {
+        // 只解析：权限声明 + 风险扫描，不落盘。
+        if (permissions) {
+            for (auto& e : fs::recursive_directory_iterator(tmpDir, ec)) {
+                if (ec) break;
+                if (!e.is_regular_file(ec)) continue;
+                const std::string fn = dnx_u8str(e.path().filename());
+                if (fn == "descriptor.json" || endsWith(lower(fn), ".json")) {
+                    LuaMod tmp; tmp.name = "?";
+                    parseModDescriptor(e.path(), tmp);
+                    if (tmp.permissionDeclared) { *permissions = tmp.permissions; break; }
+                }
+            }
+            if (permissions->empty()) *permissions = {"all"};
+        }
+        if (risks) *risks = scanLuaRisks(tmpDir);
+        fs::remove_all(tmpDir, ec);
+        if (imported) imported->push_back(base);
+        return true;
+    }
     fs::remove(zipPath, ec); ec.clear();
 
     auto safeEntries = [](const fs::path& d) {

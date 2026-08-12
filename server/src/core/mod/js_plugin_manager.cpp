@@ -9,7 +9,12 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <regex>
+#include <openssl/evp.h>
 #include <ctime>
+#include <mutex>
+#include <drogon/WebSocketClient.h>
+#include <drogon/HttpRequest.h>
 
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -24,6 +29,8 @@ static inline std::string dnx_u8str(const std::filesystem::path& p) {
 }
 
 // ─── helpers ─────────────────────────────────────────────────
+static std::string b64decode(const std::string& in);   // 定义见 base64 段
+static std::string varKeyOf(JSContext*, JSValueConst, const std::string&);   // 定义见 jsFormat 段
 static JsPluginManager* mgrOf(JSContext* ctx) {
     return static_cast<JsPluginManager*>(JS_GetContextOpaque(ctx));
 }
@@ -486,6 +493,156 @@ static JSValue jsReplyPerson(JSContext* ctx, JSValueConst, int argc, JSValueCons
     return JS_UNDEFINED;
 }
 
+
+// ─── G3: seal.base64ToImage(b64) → "file://<temp>/<md5>"（对齐海豹 js_api.go）───
+static JSValue jsBase64ToImage(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    std::string b64 = argc > 0 ? toStr(ctx, argv[0]) : "";
+    if (auto p = b64.find(";base64,"); p != std::string::npos && b64.rfind("data:", 0) == 0) b64 = b64.substr(p + 8);
+    const std::string raw = b64decode(b64);
+    if (raw.empty()) return JS_NewString(ctx, "");
+    unsigned char md[16] = {0}; unsigned int mdLen = 0;
+    EVP_Digest(reinterpret_cast<const unsigned char*>(raw.data()), raw.size(), md, &mdLen, EVP_md5(), nullptr);
+    static const char* hex = "0123456789abcdef";
+    std::string name; for (unsigned int i = 0; i < mdLen; ++i) { name += hex[md[i] >> 4]; name += hex[md[i] & 0xF]; }
+    std::error_code ec;
+    const fs::path dir = fs::temp_directory_path(ec);
+    if (ec) return JS_NewString(ctx, "");
+    const fs::path path = dir / name;
+    { std::ofstream f(path, std::ios::binary); f.write(raw.data(), static_cast<std::streamsize>(raw.size())); }
+    return JS_NewString(ctx, ("file://" + dnx_u8str(path)).c_str());
+}
+
+// ─── G5: seal.applyPlayerGroupCardByTemplate(ctx, tmpl)（对齐海豹 dice_jsvm.go）───
+// 模板求值（{变量}/{表达式} 替换，与 seal.format 同款）→ 设置群名片 → 返回文本。
+static std::string formatTemplateStr(JSContext* ctx, JSValueConst ctxObj, const std::string& s) {
+    auto* m = mgrOf(ctx);
+    std::string out; size_t i = 0;
+    while (i < s.size()) {
+        if (s[i] == '{') {
+            size_t end = s.find('}', i);
+            if (end != std::string::npos) {
+                std::string inner = s.substr(i + 1, end - i - 1);
+                if (inner.rfind("$t", 0) == 0) out += s.substr(i, end - i + 1);   // 临时变量：原样保留
+                else if (!inner.empty() && inner[0] == '$') out += (m ? m->kvGet(varKeyOf(ctx, ctxObj, inner)) : "");
+                else if (m) out += m->evalDice(inner);
+                else out += inner;
+                i = end + 1; continue;
+            }
+        }
+        out += s[i++];
+    }
+    return out;
+}
+static JSValue jsApplyPlayerGroupCardByTemplate(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    auto* m = mgrOf(ctx);
+    if (!m || argc < 1) return JS_NewString(ctx, "");
+    std::string tmpl;
+    if (argc >= 2 && JS_IsString(argv[1])) tmpl = toStr(ctx, argv[1]);
+    if (tmpl.empty() || tmpl == "undefined") {   // 海豹：无模板时用 player.autoSetNameTemplate
+        JSValue p = JS_GetPropertyStr(ctx, argv[0], "player");
+        if (JS_IsObject(p)) tmpl = getStrProp(ctx, p, "autoSetNameTemplate");
+        JS_FreeValue(ctx, p);
+    }
+    if (tmpl.empty() || tmpl == "undefined") return JS_NewString(ctx, "");
+    const std::string text = formatTemplateStr(ctx, argv[0], tmpl);
+    m->groupAdmin(ctxStr(ctx, argv[0], "endPoint", "platform"), "card",
+                  ctxStr(ctx, argv[0], "group", "groupId"),
+                  ctxStr(ctx, argv[0], "player", "userId"), 0, text);
+    return JS_NewString(ctx, text.c_str());
+}
+
+// ─── G1: CommonJS require（对齐海豹 goja_nodejs/require 的按名解析）───
+// 解析 <pluginDir>/<name>.js、<name>/index.js、<name>/<name>.js，包装执行并缓存 exports。
+static JSValue jsRequire(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    auto* m = mgrOf(ctx);
+    if (!m || argc < 1) return JS_NewString(ctx, "");
+    const std::string name = toStr(ctx, argv[0]);
+    if (name.empty()) return JS_ThrowTypeError(ctx, "require: empty module name");
+    std::string dir = m->pluginDir(); if (dir.empty()) dir = "data/plugins/js";
+    std::error_code ec;
+    fs::path resolved;
+    for (const auto& c : { fs::path(dir) / (name + ".js"), fs::path(dir) / name / "index.js",
+                           fs::path(dir) / name / (name + ".js") })
+        if (fs::is_regular_file(c, ec)) { resolved = c; break; }
+    if (resolved.empty()) return JS_ThrowTypeError(ctx, "Cannot find module '%s'", name.c_str());
+    JSValue g = JS_GetGlobalObject(ctx);
+    JSValue cache = JS_GetPropertyStr(ctx, g, "__requireCache");
+    if (!JS_IsObject(cache)) { cache = JS_NewObject(ctx); JS_SetPropertyStr(ctx, g, "__requireCache", JS_DupValue(ctx, cache)); }
+    const std::string key = dnx_u8str(resolved);
+    JSValue cached = JS_GetPropertyStr(ctx, cache, key.c_str());
+    if (!JS_IsUndefined(cached)) { JS_FreeValue(ctx, g); JS_FreeValue(ctx, cache); return cached; }
+    JS_FreeValue(ctx, cached);
+    std::string src;
+    { std::ifstream f(resolved, std::ios::binary); src.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()); }
+    const std::string wrapped = "(function(module,exports,require,__dirname){\n" + src + "\n})";
+    JSValue fn = JS_Eval(ctx, wrapped.c_str(), wrapped.size(), ("<require:" + name + ">").c_str(), JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(fn)) { JS_FreeValue(ctx, g); JS_FreeValue(ctx, cache); return JS_EXCEPTION; }
+    JSValue moduleObj = JS_NewObject(ctx);
+    JSValue exportsObj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, moduleObj, "exports", JS_DupValue(ctx, exportsObj));
+    JSValue requireFn = JS_GetPropertyStr(ctx, g, "require");
+    JSValue dirnameV = JS_NewString(ctx, dnx_u8str(resolved.parent_path()).c_str());
+    JSValue args[4] = { moduleObj, exportsObj, requireFn, dirnameV };
+    JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, 4, args);
+    JS_FreeValue(ctx, fn); JS_FreeValue(ctx, exportsObj); JS_FreeValue(ctx, dirnameV); JS_FreeValue(ctx, requireFn);
+    if (JS_IsException(ret)) { JS_FreeValue(ctx, moduleObj); JS_FreeValue(ctx, g); JS_FreeValue(ctx, cache); return JS_EXCEPTION; }
+    JS_FreeValue(ctx, ret);
+    JSValue moduleExports = JS_GetPropertyStr(ctx, moduleObj, "exports");
+    JS_SetPropertyStr(ctx, cache, key.c_str(), JS_DupValue(ctx, moduleExports));
+    JS_FreeValue(ctx, moduleObj);
+    JS_FreeValue(ctx, g); JS_FreeValue(ctx, cache);
+    return moduleExports;
+}
+// ─── G4: .ts → JS（优先 esbuild 子进程；不可用时回退简易类型剥离）───
+static std::string jsTsToJs(const std::string& src, const std::string& file) {
+    // 1) esbuild（对齐海豹 esbuild Transform）：需 esbuild 在 PATH 或 data/esbuild/。
+    {
+        std::error_code ec;
+        const std::string tag = std::to_string((long long)std::time(nullptr)) + "_" + std::to_string((long long)(uintptr_t)&src);
+        const fs::path tmpDir = fs::temp_directory_path(ec);
+        const fs::path tmpTs = tmpDir / ("dn_ts_" + tag + ".ts");
+        const fs::path tmpJs = tmpDir / ("dn_ts_" + tag + ".js");
+        if (!ec) {
+            { std::ofstream f(tmpTs, std::ios::binary); f << src; }
+            std::string cmd = "esbuild \"" + tmpTs.string() + "\" --loader=ts --format=cjs --outfile=\"" + tmpJs.string() + "\"";
+#if defined(_WIN32)
+            cmd += " >nul 2>&1";
+#else
+            cmd += " >/dev/null 2>&1";
+#endif
+            std::system(cmd.c_str());
+            std::string out;
+            if (fs::is_regular_file(tmpJs, ec)) {
+                std::ifstream f(tmpJs, std::ios::binary);
+                out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            }
+            fs::remove(tmpTs, ec); fs::remove(tmpJs, ec);
+            if (!out.empty()) return out;
+        }
+        DICE_LOG_WARN("[js] {}: esbuild 不可用，使用简易 TS 剥离（复杂类型语法可能失败）", file);
+    }
+    // 2) 简易剥离：常见 TS 语法（interface/type/enum 块、import type、as、参数/返回/变量注解、非空断言）。
+    std::string out;
+    std::istringstream ss(src); std::string line;
+    bool inBlock = false;
+    auto stripLine = [](std::string s) {
+        s = std::regex_replace(s, std::regex(R"(\s+as\s+[A-Za-z_$][\w.$\[\]<>]*(?=\s*[,;)}\]]))"), "");
+        s = std::regex_replace(s, std::regex(R"(\b(let|const|var)\s+([A-Za-z_$][\w$]*)\s*:\s*[^=;]+(?==))"), " $1 $2");
+        s = std::regex_replace(s, std::regex(R"(\)\s*:\s*[A-Za-z_$][\w.<>\[\],|&{}() ]*(?=\s*\{))"), ")");
+        s = std::regex_replace(s, std::regex(R"(\(\s*([A-Za-z_$][\w$]*)\s*:\s*[^,)]+)"), "($1");
+        s = std::regex_replace(s, std::regex(R"(\b([A-Za-z_$][\w$]*)\s*!\s*(?=[.,;)\]}]))"), " $1");
+        return s;
+    };
+    while (std::getline(ss, line)) {
+        std::string t = line; size_t b = t.find_first_not_of(" \t"); if (b != std::string::npos) t = t.substr(b);
+        if (inBlock) { if (t == "}") inBlock = false; continue; }
+        if (t.rfind("interface ", 0) == 0 || t.rfind("type ", 0) == 0 || t.rfind("enum ", 0) == 0) { inBlock = true; continue; }
+        if (t.rfind("import type", 0) == 0) continue;
+        if (t.rfind("export type", 0) == 0) continue;
+        out += stripLine(line); out += '\n';
+    }
+    return out;
+}
 // ─── base64 (atob / btoa) ────────────────────────────────────
 static const char* kB64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static std::string b64encode(const std::string& in) {
@@ -826,6 +983,117 @@ static JSValue jsGetEndPoints(JSContext* ctx, JSValueConst, int, JSValueConst*) 
 }
 
 // ─── JsPluginManager ─────────────────────────────────────────
+
+// ─── G2: WebSocket（drogon 客户端；事件回调经 scheduler 投递到 drogon loop）───
+static std::mutex sWsMutex;
+static std::map<int64_t, drogon::WebSocketClientPtr> sWsConns;
+
+void JsPluginManager::wsConnect(JSContext* ctx, JSValue obj, const std::string& url) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (!ctx_) return;
+    const int64_t id = ++wsSeq_;
+    wsObjs_[id] = JS_DupValue(ctx, obj);
+    JS_SetPropertyStr(ctx, obj, "__wsId", JS_NewInt64(ctx, id));
+    JS_SetPropertyStr(ctx, obj, "readyState", JS_NewInt32(ctx, 0));
+    if (!scheduler_) return;
+    scheduler_(0.0, [this, id, url] {
+        try {
+            auto client = drogon::WebSocketClient::newWebSocketClient(url);
+            client->setMessageHandler([this, id](std::string&& msg, const drogon::WebSocketClientPtr&, const drogon::WebSocketMessageType&) {
+                wsFire(id, "message", msg);
+            });
+            client->setConnectionClosedHandler([this, id](const drogon::WebSocketClientPtr&) {
+                wsFire(id, "close", "");
+            });
+            auto req = drogon::HttpRequest::newHttpRequest();
+            req->setPath("/");
+            client->connectToServer(req, [this, id](drogon::ReqResult r, const drogon::HttpResponsePtr&, const drogon::WebSocketClientPtr&) {
+                if (r == drogon::ReqResult::Ok) wsFire(id, "open", "");
+                else wsFire(id, "error", "connect failed");
+            });
+            { std::lock_guard<std::mutex> lk2(sWsMutex); sWsConns[id] = client; }
+        } catch (const std::exception& e) { wsFire(id, "error", e.what()); }
+    });
+}
+
+void JsPluginManager::wsFire(int64_t id, const char* evt, const std::string& data) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (!ctx_) return;
+    auto it = wsObjs_.find(id);
+    if (it == wsObjs_.end()) return;
+    JS_UpdateStackTop(rt_);
+    JSValue obj = it->second;
+    const std::string ev = evt;
+    if (ev == "open") JS_SetPropertyStr(ctx_, obj, "readyState", JS_NewInt32(ctx_, 1));
+    else if (ev == "close" || ev == "error") JS_SetPropertyStr(ctx_, obj, "readyState", JS_NewInt32(ctx_, 3));
+    JSValue cb = JS_GetPropertyStr(ctx_, obj, ("on" + ev).c_str());
+    if (JS_IsFunction(ctx_, cb)) {
+        JSValue arg = JS_UNDEFINED;
+        if (ev == "message") { arg = JS_NewObject(ctx_); JS_SetPropertyStr(ctx_, arg, "data", JS_NewString(ctx_, data.c_str())); }
+        JSValue r = JS_Call(ctx_, cb, obj, JS_IsUndefined(arg) ? 0 : 1, &arg);
+        if (JS_IsException(r)) { JSValue e = JS_GetException(ctx_); DICE_LOG_ERROR("[js] ws {} error: {}", ev, toStr(ctx_, e)); JS_FreeValue(ctx_, e); }
+        JS_FreeValue(ctx_, r);
+        if (!JS_IsUndefined(arg)) JS_FreeValue(ctx_, arg);
+    }
+    JS_FreeValue(ctx_, cb);
+    if (ev == "close") { JS_FreeValue(ctx_, it->second); wsObjs_.erase(it); { std::lock_guard<std::mutex> lk2(sWsMutex); sWsConns.erase(id); } }
+}
+
+void JsPluginManager::wsSend(int64_t id, const std::string& data) {
+    if (!scheduler_) return;
+    scheduler_(0.0, [this, id, data] {
+        std::lock_guard<std::mutex> lk(sWsMutex);
+        auto it = sWsConns.find(id); if (it == sWsConns.end()) return;
+        if (auto conn = it->second->getConnection()) conn->send(data);
+    });
+}
+
+void JsPluginManager::wsClose(int64_t id) {
+    if (!scheduler_) return;
+    scheduler_(0.0, [this, id] {
+        std::lock_guard<std::mutex> lk(sWsMutex);
+        auto it = sWsConns.find(id); if (it == sWsConns.end()) return;
+        if (auto conn = it->second->getConnection()) conn->shutdown();
+    });
+}
+
+void JsPluginManager::wsCleanup() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (auto& [id, obj] : wsObjs_) if (ctx_) JS_FreeValue(ctx_, obj);
+    wsObjs_.clear();
+    { std::lock_guard<std::mutex> lk2(sWsMutex); for (auto& [id, c] : sWsConns) if (c) c->stop(); sWsConns.clear(); }
+}
+
+// JS 绑定：new WebSocket(url)；实例方法 send/close。
+static JSValue jsWsSendFn(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    auto* m = mgrOf(ctx); if (!m) return JS_UNDEFINED;
+    JSValue p = JS_GetPropertyStr(ctx, this_val, "__wsId");
+    int64_t id = 0; if (JS_IsNumber(p)) JS_ToInt64(ctx, &id, p);
+    JS_FreeValue(ctx, p);
+    m->wsSend(id, argc > 0 ? toStr(ctx, argv[0]) : "");
+    return JS_UNDEFINED;
+}
+static JSValue jsWsCloseFn(JSContext* ctx, JSValueConst this_val, int, JSValueConst*) {
+    auto* m = mgrOf(ctx); if (!m) return JS_UNDEFINED;
+    JSValue p = JS_GetPropertyStr(ctx, this_val, "__wsId");
+    int64_t id = 0; if (JS_IsNumber(p)) JS_ToInt64(ctx, &id, p);
+    JS_FreeValue(ctx, p);
+    m->wsClose(id);
+    return JS_UNDEFINED;
+}
+static JSValue jsWebSocketCtor(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    auto* m = mgrOf(ctx);
+    if (!m || argc < 1) return JS_ThrowTypeError(ctx, "WebSocket: url required");
+    std::string url = toStr(ctx, argv[0]);
+    if (url.rfind("ws://", 0) != 0 && url.rfind("wss://", 0) != 0)
+        return JS_ThrowTypeError(ctx, "WebSocket: url must start with ws:// or wss://");
+    JS_SetPropertyStr(ctx, this_val, "url", JS_NewString(ctx, url.c_str()));
+    JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, this_val, "send", JS_NewCFunction(ctx, jsWsSendFn, "send", 1));
+    JS_SetPropertyStr(ctx, this_val, "close", JS_NewCFunction(ctx, jsWsCloseFn, "close", 0));
+    m->wsConnect(ctx, this_val, url);
+    return JS_DupValue(ctx, this_val);
+}
 JsPluginManager::~JsPluginManager() { freeRuntime(); }
 
 void JsPluginManager::freeRuntime() {
@@ -834,6 +1102,7 @@ void JsPluginManager::freeRuntime() {
         exts_.clear();
         for (auto& [id, t] : timers_) JS_FreeValue(ctx_, t.cb);   // drop pending timers
         timers_.clear();
+        wsCleanup();   // G2: 关闭 WebSocket 连接并释放 JS 对象引用
         JS_FreeContext(ctx_); ctx_ = nullptr;
     }
     if (rt_) { JS_FreeRuntime(rt_); rt_ = nullptr; }
@@ -1004,6 +1273,8 @@ void JsPluginManager::installGlobals() {
     JS_SetPropertyStr(ctx_, g, "clearTimeout",  JS_NewCFunction(ctx_, jsClearTimer, "clearTimeout", 1));
     JS_SetPropertyStr(ctx_, g, "clearInterval", JS_NewCFunction(ctx_, jsClearTimer, "clearInterval", 1));
     JS_SetPropertyStr(ctx_, g, "btoa", JS_NewCFunction(ctx_, jsBtoa, "btoa", 1));
+    JS_SetPropertyStr(ctx_, g, "require", JS_NewCFunction(ctx_, jsRequire, "require", 1));   // G1: CommonJS require
+    JS_SetPropertyStr(ctx_, g, "WebSocket", JS_NewCFunction(ctx_, jsWebSocketCtor, "WebSocket", 1));   // G2
     JS_SetPropertyStr(ctx_, g, "atob", JS_NewCFunction(ctx_, jsAtob, "atob", 1));
     JS_SetPropertyStr(ctx_, g, "fetch", JS_NewCFunction(ctx_, jsFetch, "fetch", 2));
     JS_SetPropertyStr(ctx_, g, "__dirname", JS_NewString(ctx_, ""));   // 海豹占位，防打包插件读 undefined
@@ -1034,6 +1305,7 @@ void JsPluginManager::installGlobals() {
     JS_SetPropertyStr(ctx_, ext, "unregisterConfig",       JS_NewCFunction(ctx_, jsNoop, "unregisterConfig", 1));
 
     JSValue seal = JS_NewObject(ctx_);
+    JS_SetPropertyStr(ctx_, seal, "base64ToImage", JS_NewCFunction(ctx_, jsBase64ToImage, "base64ToImage", 1));   // G3
     JS_SetPropertyStr(ctx_, seal, "ext", ext);
     JS_SetPropertyStr(ctx_, seal, "replyToSender", JS_NewCFunction(ctx_, jsReplyToSender, "replyToSender", 3));
     JS_SetPropertyStr(ctx_, seal, "replyGroup",    JS_NewCFunction(ctx_, jsReplyGroup, "replyGroup", 3));
@@ -1076,7 +1348,7 @@ void JsPluginManager::installGlobals() {
     JS_SetPropertyStr(ctx_, seal, "setPlayerGroupCard",            JS_NewCFunction(ctx_, jsSetPlayerGroupCard, "setPlayerGroupCard", 2));
     JS_SetPropertyStr(ctx_, seal, "memberBan",  JS_NewCFunction(ctx_, jsMemberBan, "memberBan", 4));
     JS_SetPropertyStr(ctx_, seal, "memberKick", JS_NewCFunction(ctx_, jsMemberKick, "memberKick", 3));
-    JS_SetPropertyStr(ctx_, seal, "applyPlayerGroupCardByTemplate", JS_NewCFunction(ctx_, jsNoop, "applyPlayerGroupCardByTemplate", 2));
+    JS_SetPropertyStr(ctx_, seal, "applyPlayerGroupCardByTemplate", JS_NewCFunction(ctx_, jsApplyPlayerGroupCardByTemplate, "applyPlayerGroupCardByTemplate", 2));   // G5
     JS_SetPropertyStr(ctx_, seal, "newMessage", JS_NewCFunction(ctx_, jsNewObj, "newMessage", 0));
     JS_SetPropertyStr(ctx_, seal, "getEndPoints", JS_NewCFunction(ctx_, jsGetEndPoints, "getEndPoints", 0));
     JS_SetPropertyStr(ctx_, seal, "getCtxProxyFirst", JS_NewCFunction(ctx_, jsGetCtxProxy, "getCtxProxyFirst", 2));
@@ -1138,10 +1410,11 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
         fs::path d = fs::path(std::u8string(dstr.begin(), dstr.end()));   // UTF-8（规则包中文目录安全）
         if (!fs::is_directory(d, e2)) return;
         for (auto& e : fs::directory_iterator(d, e2)) {
-            if (e2 || !e.is_regular_file() || e.path().extension() != ".js") continue;
+            if (e2 || !e.is_regular_file() || (e.path().extension() != ".js" && e.path().extension() != ".ts")) continue;
             std::ifstream f(e.path(), std::ios::binary);
             std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
             PluginMeta meta = parseMeta(src);
+            if (e.path().extension() == ".ts") src = jsTsToJs(src, dnx_u8str(e.path().filename()));   // G4: TS→JS
             if (meta.name.empty()) meta.name = dnx_u8str(e.path().stem());
             meta.file = dnx_u8str(e.path().filename());
             meta.inMod = fromMod;
@@ -1285,7 +1558,7 @@ int JsPluginManager::compareVersions(const std::string& a, const std::string& b)
         return out;
     };
     auto va = split(a), vb = split(b);
-    size_t n = std::max(va.size(), vb.size());
+    size_t n = (std::max)(va.size(), vb.size());
     for (size_t i = 0; i < n; ++i) {
         std::string sa = i < va.size() ? va[i] : "0";
         std::string sb = i < vb.size() ? vb[i] : "0";
@@ -1490,6 +1763,21 @@ JsPluginManager::UpdateInfo JsPluginManager::checkUpdate(const std::string& file
     return info;
 }
 
+
+bool JsPluginManager::deletePlugin(const std::string& file, std::string& err) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    std::string dir = dirForFile(file);
+    std::error_code ec;
+    if (!fs::remove(fs::path(dir) / file, ec)) {
+        err = ec ? ec.message() : std::string("delete failed");
+        return false;
+    }
+    // 清理该插件的配置命名空间（ext:<name>:*），防卸载后配置残留/复活。
+    std::string name = file;
+    if (auto p = name.find_last_of('.'); p != std::string::npos) name = name.substr(0, p);
+    kvClearNamespace("ext:" + name);
+    return true;
+}
 bool JsPluginManager::updatePlugin(const std::string& file, std::string& err) {
     if (!updateFetch_) { err = "update fetch not available"; return false; }
     std::string dir = dir_.empty() ? "data/plugins/js" : dir_;

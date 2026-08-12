@@ -82,6 +82,19 @@
 
 ## 更新日志
 
+- **JS fetch 默认放行（T8）**：JS 插件 `fetch` 默认对齐海豹裸 fetch（仅保留 shell 字符安全过滤），系统设置新增“严格模式”开关可恢复外置API开关 + SSRF/白名单拦截。
+- **插件卸载清理**：JS 插件删除时同步清理其配置命名空间（ext:<name>:*），防卸载后配置残留。
+### 2026-08-13 · build 844（安全加固 + 插件兼容）
+
+- **管理面板强制口令**：不再存在“空口令直通”的默认状态——未设置口令时只放行设置流程，其余 API 一律 401；新增首次设置口令引导（前端），默认监听保持 0.0.0.0 不变。
+- **接口凭据与 SSRF 加固**：`X-API-Key` 由服务端校验（配置 api_key 时生效，常量时间比较）；聊天图片下载加入 SSRF 黑名单与 curl 配置转义；api_key 停止打印、`config/server.json` 移出 git 跟踪。
+- **口令与部署加固**：管理口令 PBKDF2-SHA256 加盐哈希（兼容旧明文迁移）+ 登录失败限速（5 次/60s）；Docker 去特权能力（cap-drop / no-new-privileges / read-only）；NapCat 反向 WS 随机 access_token（两端同步）；备份解压后真实路径二次校验。
+- **插件签名（可选）**：配置 PEM 公钥后 JS/Lua 插件上传必须携带 RSA-SHA256 签名，否则拒绝；未配置公钥时行为不变；附签名工具 tools/sign-plugin.py。
+- **Lua 插件安全（兼容 Dice!）**：上传 dry-run 预检（descriptor 权限声明 + 静态高危模式扫描）+ 安装前人工确认；sendMsg/HTTP/文件/Shell/原生加载调用写入审计日志（data/audit/lua_audit.jsonl）；cpath 收窄改为可选开关（默认与 Dice! 一致）。
+- **JS 插件兼容（对齐海豹）**：补齐 CommonJS `require`、`WebSocket`（drogon 客户端）、`seal.base64ToImage`（MD5 命名写 TempDir）、`.ts` 插件加载（esbuild 优先，简易剥离回退）、`seal.applyPlayerGroupCardByTemplate` 真实实现。
+- **CI 安全扫描**：接入 Gitleaks / Semgrep / Trivy 门禁。
+- **待实测**：以上均为代码级验证（编译通过），需实机回归——强制口令/登录、图片下载、插件上传确认流、Lua/JS 插件兼容与审计日志、Docker 部署。
+
 ### 2026-08-11 · build 828（开发中）
 
 - **QQ 官方机器人 2026-08-10 能力更新**：全部 OpenAPI 调用统一迁移到 `api.bot.qq.com`；Markdown 支持可选图片资源强校验；新增群禁言查询/设置、入群申请列表/审批、自动审批策略查询/创建/修改/删除/执行及白名单管理；`GROUP_JOIN_REQUEST` 已接入骰主通知与现有自动审批逻辑，群详情新增“官方群管”操作页。

@@ -37,3 +37,5 @@ Thumbs.db
 /backups/
 /restore-pending/
 /restore-rollbacks/
+/config/server.json
+/config/webui_sessions.json

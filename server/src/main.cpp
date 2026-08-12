@@ -201,8 +201,9 @@ void printStartupInfo(const dice::ConfigManager& configMgr,
         std::cout << " ";
     std::cout << "│\n";
 
-    std::cout << "  │  API Key     : " << apiKey;
-    for (int i = 0; i < 22 - static_cast<int>(apiKey.size()); ++i)
+    const std::string apiKeyMask = apiKey.empty() ? std::string("not set") : apiKey.substr(0, 4) + "****";
+    std::cout << "  │  API Key     : " << apiKeyMask;
+    for (int i = 0; i < 22 - static_cast<int>(apiKeyMask.size()); ++i)
         std::cout << " ";
     std::cout << "│\n";
 
@@ -511,7 +512,7 @@ static int realMain(int argc, char* argv[]) {
     // 全局 fetch → 走命令路由的受控 HTTP（外置API开关 + 白名单 + SSRF 防护）。
     jsMod.setHttpFetch([&cmdRouter](const std::string& method, const std::string& url,
                                     const std::string& headers, const std::string& body, int& status) {
-        return cmdRouter.jsHttpFetch(method, url, headers, body, status);
+        return cmdRouter.jsHttpFetch(method, url, headers, body, status, true);   // T8: JS fetch 默认放行（可配 js_fetch_strict 恢复拦截）
     });
     // 插件更新检测/下载（面板管理操作，免外置API开关，仅 SSRF 防护）。
     jsMod.setUpdateFetch([&cmdRouter](const std::string& url, int& status) {
@@ -626,6 +627,7 @@ static int realMain(int argc, char* argv[]) {
 
     // 初始化 Lua 插件子系统：引擎、模块发现和核心 API。
     dice::LuaPluginManager luaMod;
+    dice::LuaPluginManager::setCpathStrict(configMgr.get<bool>("dice/lua_cpath_strict", false));   // 兼容优先默认关
     luaMod.init();
     luaMod.setDeckDraw([&cardDeck](const std::string& name) -> std::string {
         return cardDeck.has(name) ? cardDeck.drawFromDeck(name).value_or("") : std::string();
@@ -2119,16 +2121,31 @@ static int realMain(int argc, char* argv[]) {
 
     // ── WebUI 登录鉴权 ───────────────────────────────────
     dice::WebAuth::instance().configure(configMgr.get<std::string>("webui/password", ""),
-        std::filesystem::path(configPath) / "webui_sessions.json");
+        std::filesystem::path(configPath) / "webui_sessions.json",
+        configMgr.get<std::string>("server/api_key", ""));
+    // H2: X-API-Key 凭据（服务间/脚本调用）。仅配置了 key 时生效。
+    const std::string apiKey = configMgr.get<std::string>("server/api_key", "");
+
     // 前置拦截：设了口令时，/api/* 需有效会话 Cookie（放行登录/状态查询与静态文件）。
     app.registerPreHandlingAdvice(
-        [](const drogon::HttpRequestPtr& req,
+        [apiKey](const drogon::HttpRequestPtr& req,
            drogon::AdviceCallback&& stop, drogon::AdviceChainCallback&& next) {
             const std::string& path = req->path();
             if (path.rfind("/api/", 0) != 0 ||                       // 静态文件
-                path == "/api/auth/login" || path == "/api/auth/status") { next(); return; }
-            if (!dice::WebAuth::instance().hasPassword()) { next(); return; }   // 未设口令=不鉴权
-            if (dice::WebAuth::instance().validToken(req->getCookie("dice_session"))) { next(); return; }
+                path == "/api/auth/login" || path == "/api/auth/status" ||
+                path == "/api/auth/logout" || path == "/api/auth/setup") { next(); return; }
+            auto& auth = dice::WebAuth::instance();
+            // 未设置口令：强制先设置（默认 0.0.0.0 监听，空口令直通 = 未授权接管/RCE）。
+            if (!auth.hasPassword()) {
+                auto resp = drogon::HttpResponse::newHttpResponse();
+                resp->setStatusCode(drogon::k401Unauthorized);
+                resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+                resp->setBody("{\"code\":401,\"message\":\"need_setup\",\"need_setup\":true}");
+                stop(resp); return;
+            }
+            if (auth.validToken(req->getCookie("dice_session"))) { next(); return; }
+            // 服务间/脚本调用：X-API-Key 与 server/api_key 匹配（仅配置了 key 时生效）。
+            if (!apiKey.empty() && auth.checkApiKey(req->getHeader("X-API-Key"))) { next(); return; }
             auto resp = drogon::HttpResponse::newHttpResponse();
             resp->setStatusCode(drogon::k401Unauthorized);
             resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
@@ -2148,17 +2165,37 @@ static int realMain(int argc, char* argv[]) {
             [jResp](const drogon::HttpRequestPtr& req,
                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 bool required = dice::WebAuth::instance().hasPassword();
-                bool authed = !required || dice::WebAuth::instance().validToken(req->getCookie("dice_session"));
-                cb(jResp({{"code", 0}, {"message", "ok"}, {"data", {{"required", required}, {"authed", authed}}}}));
+                bool needSetup = !required;
+                bool authed = required && dice::WebAuth::instance().validToken(req->getCookie("dice_session"));
+                cb(jResp({{"code", 0}, {"message", "ok"}, {"data", {{"required", required}, {"authed", authed}, {"need_setup", needSetup}}}}));
             }, {drogon::Get});
         // 登录：校验口令 → 颁发 token，写 Cookie。
         app.registerHandler("/api/auth/login",
             [jResp](const drogon::HttpRequestPtr& req,
                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 try {
+                    // M1: 登录限速（同一 IP 60 秒内最多 5 次失败）。
+                    static std::mutex sLoginMu;
+                    static std::unordered_map<std::string, std::pair<int, long long>> sLoginFails;
+                    const std::string ip = req->peerAddr().toIp();
+                    {
+                        std::lock_guard<std::mutex> lk(sLoginMu);
+                        const long long now = static_cast<long long>(std::time(nullptr));
+                        auto& f = sLoginFails[ip];
+                        if (now - f.second >= 60) f = {0, now};
+                        if (f.first >= 5) {
+                            cb(jResp({{"code", 429}, {"message", "尝试过于频繁，请稍后再试"}}, drogon::k429TooManyRequests));
+                            return;
+                        }
+                    }
                     auto j = nlohmann::json::parse(req->getBody());
                         std::string pw = j.value("password", "");
-                        if (!dice::WebAuth::instance().hasPassword() || dice::WebAuth::instance().checkPassword(pw)) {
+                        if (!dice::WebAuth::instance().hasPassword()) {
+                            cb(jResp({{"code", 401}, {"message", "请先设置管理口令"}}, drogon::k401Unauthorized));
+                            return;
+                        }
+                        if (dice::WebAuth::instance().checkPassword(pw)) {
+                            { std::lock_guard<std::mutex> lk(sLoginMu); sLoginFails.erase(ip); }
                             const bool trustDevice = j.value("trust_device", false);
                             bool trustedPersisted = true;
                             std::string token = dice::WebAuth::instance().issueToken(trustDevice, &trustedPersisted);
@@ -2177,10 +2214,35 @@ static int realMain(int argc, char* argv[]) {
                         resp->addCookie(ck);
                         cb(resp);
                     } else {
+                        { std::lock_guard<std::mutex> lk(sLoginMu); const long long now = static_cast<long long>(std::time(nullptr)); auto& f = sLoginFails[ip]; if (now - f.second >= 60) f = {0, now}; ++f.first; }
                         cb(jResp({{"code", 401}, {"message", "密码错误"}}, drogon::k401Unauthorized));
                     }
                 } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }
             }, {drogon::Post});
+        // 首次设置管理口令（仅空口令时可用；成功后自动登录）。
+        app.registerHandler("/api/auth/setup",
+            [jResp, &configMgr](const drogon::HttpRequestPtr& req,
+                    std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+                try {
+                    if (dice::WebAuth::instance().hasPassword()) {
+                        cb(jResp({{"code", 403}, {"message", "口令已设置"}}, drogon::k403Forbidden));
+                        return;
+                    }
+                    auto j = nlohmann::json::parse(req->getBody());
+                    std::string pw = j.value("password", "");
+                    if (pw.size() < 4) { cb(jResp({{"code", 400}, {"message", "口令至少 4 位"}}, drogon::k400BadRequest)); return; }
+                    configMgr.set<std::string>("webui/password", dice::WebAuth::instance().hashPassword(pw));
+                    configMgr.save();
+                    dice::WebAuth::instance().setPassword(pw);
+                    auto resp = jResp({{"code", 0}, {"message", "ok"}, {"data", {{"authed", true}}}});
+                    drogon::Cookie ck("dice_session", dice::WebAuth::instance().issueToken(false));
+                    ck.setPath("/"); ck.setHttpOnly(true);
+                    ck.setSameSite(drogon::Cookie::SameSite::kLax);
+                    resp->addCookie(ck);
+                    cb(resp);
+                } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }
+            }, {drogon::Post});
+
         // 退出：吊销当前 token。
         app.registerHandler("/api/auth/logout",
             [jResp](const drogon::HttpRequestPtr& req,
@@ -2196,7 +2258,7 @@ static int realMain(int argc, char* argv[]) {
                     if (req->method() == drogon::Put) {
                         auto j = nlohmann::json::parse(req->getBody());
                         std::string pw = j.value("password", "");
-                        configMgr.set<std::string>("webui/password", pw);
+                        configMgr.set<std::string>("webui/password", dice::WebAuth::instance().hashPassword(pw));
                         configMgr.save();
                         dice::WebAuth::instance().setPassword(pw);
                     }
@@ -2627,7 +2689,7 @@ static int realMain(int argc, char* argv[]) {
         // 导入 Lua mod：上传 .lua/.json/.zip（base64）。归位语义见 LuaPluginManager::importUpload
         //（对齐原版：json+目录成对、一包多 mod、纯 json 查询类、仅 model/rulebook 的规则类都认）。
         app.registerHandler("/api/mod/lua/upload",
-            [jsonResp, luaList, &luaMod](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+            [jsonResp, luaList, &luaMod, &configMgr](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 try {
                     auto j = nlohmann::json::parse(req->getBody());
                     std::string filename = j.value("filename", std::string("mod.zip"));
@@ -2636,13 +2698,27 @@ static int realMain(int argc, char* argv[]) {
                     if (auto comma = content.find(",base64,"); comma != std::string::npos) content = content.substr(comma + 8);
                     else if (auto c2 = content.find(','); c2 != std::string::npos && content.rfind("data:", 0) == 0) content = content.substr(c2 + 1);
                     std::string bytes = drogon::utils::base64Decode(content);
-                    std::string err; std::vector<std::string> names;
-                    if (!luaMod.importUpload(filename, bytes, &err, &names)) {
+                    const bool dryRun = j.value("dry_run", false);
+                    std::string err; std::vector<std::string> names, perms, risks;
+                    if (!dryRun) {
+                        // 真正安装时才校验签名；预检只展示权限/风险。
+                        std::string verr;
+                        if (!dice::pluginverify::verify(configMgr.get<std::string>("dice/plugin_verify_key", ""),
+                                                        bytes, j.value("signature", std::string()), verr)) {
+                            cb(jsonResp({{"code", 1}, {"message", verr}}));
+                            return;
+                        }
+                    }
+                    if (!luaMod.importUpload(filename, bytes, &err, &names, dryRun, &perms, &risks)) {
                         cb(jsonResp({{"code", 1}, {"message", err}}));
                         return;
                     }
+                    if (dryRun) {
+                        cb(jsonResp({{"code", 0}, {"message", "ok"}, {"data", {{"dry_run", true}, {"permissions", perms}, {"risks", risks}}}}));
+                        return;
+                    }
                     luaMod.reload();
-                    cb(jsonResp({{"code", 0}, {"message", "ok"}, {"data", luaList()}}));
+                    cb(jsonResp({{"code", 0}, {"message", "ok"}, {"data", {{"mods", luaList()}, {"permissions", perms}, {"risks", risks}}}}));
                 } catch (const std::exception& e) { cb(jsonResp({{"code", 1}, {"message", e.what()}})); }
             }, {drogon::Post});
     }

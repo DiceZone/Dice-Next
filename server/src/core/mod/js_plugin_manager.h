@@ -91,7 +91,9 @@ public:
     struct UpdateInfo { bool ok = false; bool hasUpdate = false;
                         std::string current, latest, updateUrl, error; };
     UpdateInfo checkUpdate(const std::string& file) const;     // does NOT reload
-    bool updatePlugin(const std::string& file, std::string& err);  // overwrites file; caller reloads
+    bool updatePlugin(const std::string& file, std::string& err);
+    /// 删除插件：删文件 + 清理该插件的配置命名空间（ext:<name>:*），防持久残留。
+    bool deletePlugin(const std::string& file, std::string& err);  // overwrites file; caller reloads
     /// List ALL plugin files in the plugin dir — loaded (enabled) ones plus any
     /// `*.js.disabled` files (shown disabled). For the WebUI management page.
     std::vector<PluginMeta> listAll() const;
@@ -114,6 +116,12 @@ public:
     // delivered via the injected sender (a timer runs outside a message turn).
     using ScheduleFn = std::function<void(double delaySec, std::function<void()>)>;
     void setScheduler(ScheduleFn f) { scheduler_ = std::move(f); }
+
+    // G2: WebSocket（drogon 客户端 + quickjs 事件回调；浏览器兼容 WebSocket API）。
+    void wsConnect(JSContext* ctx, JSValue obj, const std::string& url);
+    void wsSend(int64_t id, const std::string& data);
+    void wsClose(int64_t id);
+    void wsCleanup();
     using SenderFn = std::function<void(const std::string& platform, bool isPrivate,
                         const std::string& groupId, const std::string& userId, const std::string& text)>;
     void setSender(SenderFn f) { sender_ = std::move(f); }
@@ -294,6 +302,10 @@ private:
     GroupAdminFn groupAdmin_;
     BanFn banOp_;
     BanQueryFn banQuery_;
+    void wsFire(int64_t id, const char* evt, const std::string& data);   // drogon loop 线程调用
+    std::map<int64_t, JSValue> wsObjs_;   // 连接 id → JS 对象引用（持 mutex_）
+    int64_t wsSeq_ = 0;
+
     struct Timer { JSValue cb; double intervalSec; };
     std::map<int64_t, Timer> timers_;     // active setTimeout/setInterval callbacks
     int64_t timerSeq_ = 0;
