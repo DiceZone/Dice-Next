@@ -79,3 +79,4 @@ Dice!Next 是对 [Dice!](https://github.com/Dice-Developer-Team/Dice) 的致敬�
 Dice!Next 以 **GNU Affero General Public License v3.0 or later（AGPL-3.0-or-later）** 发布。你可以在遵守该许可证的前提下使用、复制、修改和再发布本项目。
 
 如果你修改本项目并通过网络向他人提供服务，AGPL 要求向相应用户提供对应的完整源代码；分发修改版本时也必须保留许可证、版权与致谢信息。完整条款见 [LICENSE](LICENSE)。
+ 
