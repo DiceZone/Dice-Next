@@ -13,9 +13,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # gitleaks-action 现在强制要求 license；改用开源 CLI 直接扫描（无需 license）。
+      - name: Install gitleaks CLI
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          chmod +x /usr/local/bin/gitleaks
+      - name: Run Gitleaks
+        run: gitleaks detect --source . --redact --verbose --no-banner
 
   sast:
     name: SAST (Semgrep)
