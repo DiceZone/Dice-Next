@@ -37,6 +37,7 @@
 #include "adapter/onebot_v11_adapter.h"
 #include "adapter/qq_official_adapter.h"
 #include "core/command_router.h"
+#include "core/friend_approval_policy.h"
 #include "core/causal/causal_rule_manager.h"
 #include "core/causal/cooldown_manager.h"
 #include "core/causal/counter_store.h"
@@ -798,7 +799,7 @@ static int realMain(int argc, char* argv[]) {
             if (auto body = cmdRouter.commandBody(m.content); body && !body->empty()) {
                 auto jr = jsMod.handle(m.platform, m.senderId, nick, m.targetId, card, pv, *body,
                                        cmdRouter.jsPrivilegeLevel(m), m.atList);
-                if (jr.matched && !jr.reply.empty()) { reply = jr.reply; replySrc = "plugin"; }
+                if (jr.matched && !jr.reply.empty()) { reply = jr.reply; replySrc = "plugin_command"; }
             }
         }
         // Lua 模块的因果回复。
@@ -814,7 +815,7 @@ static int realMain(int argc, char* argv[]) {
                 if (legacy != m.content)
                     lr = luaMod.dispatch(legacy, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform);
             }
-            if (lr.matched && !lr.reply.empty()) { reply = lr.reply; replySrc = "plugin"; }
+            if (lr.matched && !lr.reply.empty()) { reply = lr.reply; replySrc = "plugin_command"; }
         }
         // C++ 因果规则（优先于普通自定义回复）。
         if (reply.empty()) {
@@ -1000,6 +1001,7 @@ static int realMain(int argc, char* argv[]) {
         // normal fallback path when no built-in command matched.
         bool forcedByAt = dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);
         auto reply = cmdRouter.handleMessage(msg);
+        bool didCommand = !reply.empty();
         // 阶段3：回复来源分类（builtin/plugin/reply），供 AI 翻译按范围过滤。
         std::string replySrc = "builtin";
         // No command matched → custom replies, unless the group is disabled or has
@@ -1010,9 +1012,10 @@ static int realMain(int argc, char* argv[]) {
         // 骰娘自己的回复回声已在适配器层被自回声去重丢弃，不会到这里，故无需在此限制。
         if (reply.empty() && (!disabled || forcedByAt) && !replyOff)
             reply = replyFallback(msg, replySrc);
+        if (!reply.empty() && replySrc == "plugin_command") didCommand = true;
         // ── 先在消息线程消费本条消息的一次性路由状态 ─────────────
         // 回复投递可能转入 AI 后台线程，这些状态晚取会被下一条消息拿走/污染。
-        std::string aiCat = (replySrc == "plugin") ? "plugin"
+        std::string aiCat = (replySrc == "plugin" || replySrc == "plugin_command") ? "plugin"
                           : (replySrc == "reply")  ? "custom"
                           : cmdRouter.lastReplyCategory();
         std::string quoteId = cmdRouter.takeQuoteOverride();
@@ -1269,12 +1272,13 @@ static int realMain(int argc, char* argv[]) {
         if (!disabled && !reply.empty() && !msg.fromSelf && msg.type == dice::MessageType::kGroup && !msg.targetId.empty())
             broadcast = dice::BroadcastManager::instance().takeFor(msg.platform + ":" + msg.targetId);
 
-        // Auto-build the player's profile (every processed message; a non-empty
-        // reply counts as a command for the activity counter). 自身消息不建档。
-        if (!msg.fromSelf) cmdRouter.recordPlayerActivity(msg, !reply.empty());
-        // “活跃” = 本群最近用过指令（非空回复即一次指令，与 recordPlayerActivity 同口径）。
+        // Auto-build the player's profile. Only built-in/rule-pack commands and
+        // JS/Lua command matches count; custom replies, non-command hooks and AI
+        // conversation are ordinary chat and must not grant usage-based approval.
+        if (!msg.fromSelf) cmdRouter.recordPlayerActivity(msg, didCommand);
+        // “活跃” = 本群最近用过指令（与 recordPlayerActivity 同口径）。
         // 这样定时任务的 inactive>=N 条件表示“N 天无指令”，纯聊天不计入，符合“无指令退群”语义。
-        if (msg.type == dice::MessageType::kGroup && !msg.targetId.empty() && !reply.empty())
+        if (msg.type == dice::MessageType::kGroup && !msg.targetId.empty() && didCommand)
             cmdRouter.markGroupActive(msg.platform, msg.targetId);   // #47 群活跃度（按指令）
         // .log transcript recording (skipped for disabled groups). 操作者手打的
         // 自控消息（fromSelf 且已过自回声去重）视同正常消息记录；骰娘自己的回复回声不会到这里。
@@ -1875,24 +1879,28 @@ static int realMain(int argc, char* argv[]) {
             cmdRouter.notifyMasters(dice::notice::kImportant,
                 "\xe6\x94\xb6\xe5\x88\xb0\xe5\xa5\xbd\xe5\x8f\x8b\xe7\x94\xb3\xe8\xaf\xb7\xef\xbc\x9a" + userLabel(e.userId)
                     + (e.comment.empty() ? "" : "\xef\xbc\x88\xe9\x99\x84\xe8\xa8\x80\xef\xbc\x9a" + e.comment + "\xef\xbc\x89"), "friend_req", e.adapterId);
-            // 策略：all=任意通过 / keyword=含关键词才通过(其余留人工) / reject=禁止任何人添加 /
+            // 策略：all=任意通过 / keyword=含关键词才通过(其余留人工) /
+            //       group_used=曾在任意群触发指令才通过 / reject=禁止任何人添加 /
             //       manual=不自动处理。未设 friend_policy 时由旧 auto_approve_friend 派生。
             std::string pol = ev.value("friend_policy", std::string());
             if (pol.empty()) pol = ev.value("auto_approve_friend", false)
                 ? (ev.value("friend_keyword", std::string()).empty() ? "all" : "keyword") : "manual";
-            if (pol == "all") {
+            const bool usedInGroup = pol == "group_used"
+                && cmdRouter.hasGroupCommandHistory(e.platform, e.userId);
+            const auto decision = dice::evaluateFriendRequest(
+                pol, e.comment, ev.value("friend_keyword", std::string()), usedInGroup);
+            if (decision == dice::FriendRequestDecision::kApprove) {
                 a->setFriendRequest(e.flag, true);
-                DICE_LOG_INFO("event: 好友申请自动通过(任意) from {}", e.userId);
-            } else if (pol == "keyword") {
-                std::string kw = ev.value("friend_keyword", std::string());
-                if (!kw.empty() && e.comment.find(kw) != std::string::npos) {
-                    a->setFriendRequest(e.flag, true);
+                if (pol == "group_used")
+                    DICE_LOG_INFO("event: 好友申请因存在群聊指令记录自动通过 from {}", e.userId);
+                else if (pol == "keyword")
                     DICE_LOG_INFO("event: 好友申请含关键词自动通过 from {}", e.userId);
-                }   // 不含关键词 → 留人工，不处理
-            } else if (pol == "reject") {
+                else
+                    DICE_LOG_INFO("event: 好友申请自动通过(任意) from {}", e.userId);
+            } else if (decision == dice::FriendRequestDecision::kReject) {
                 a->setFriendRequest(e.flag, false);
                 DICE_LOG_INFO("event: 好友申请自动拒绝(禁止添加) from {}", e.userId);
-            }   // manual → 不处理
+            }   // manual / 条件不满足 → 留人工，不处理
         } else if (e.type == ET::kGroupRequest) {
             if (!diceFlag("listen_group_request", true)) return;     // 群请求事件开关
             if (e.subType == "invite") {
@@ -2441,9 +2449,11 @@ static int realMain(int argc, char* argv[]) {
                     bool replyOff = msg.type == dice::MessageType::kGroup && !msg.targetId.empty()
                                     && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId);
                     reply = cmdRouter.handleMessage(msg, forced);
+                    bool didCommand = !reply.empty();
                     std::string replySrc = "builtin";   // 来源分类（同 live 管线）
                     if (reply.empty() && (!disabled || forcedByAt) && !replyOff)
                         reply = replyFallback(msg, replySrc);   // 与 live 完全同链（含因果规则）
+                    if (!reply.empty() && replySrc == "plugin_command") didCommand = true;
                     // 智能化阶段A：测试台也走 AI 对话（无其它回复+触发时），方便骰主预览。
                     // 测试台不读 chat.db 上下文（用空上下文），仅验证触发+生成+发送。
                     if (reply.empty() && !disabled && (dice::aichat::enabled(configMgr) || dice::ainpc::enabled(configMgr))
@@ -2497,7 +2507,7 @@ static int realMain(int argc, char* argv[]) {
                     if (!reply.empty()) reply = cmdRouter.applySelf(msg, reply);
                     // 测试台同样走 AI 润色 + 翻译（与 live 一致），方便骰主在
                     // 「指令测试」页直接预览效果；失败/破坏数字回退原文。
-                    std::string aiCat = (replySrc == "plugin") ? "plugin"
+                    std::string aiCat = (replySrc == "plugin" || replySrc == "plugin_command") ? "plugin"
                                       : (replySrc == "reply")  ? "custom"
                                       : cmdRouter.lastReplyCategory();
                     if (!reply.empty()
@@ -2510,7 +2520,8 @@ static int realMain(int argc, char* argv[]) {
                             reply = dice::aitrans::translate(configMgr, tgt, reply);
                     }
                     if (!disabled) cmdRouter.recordMessage(msg, reply);
-                    cmdRouter.recordPlayerActivity(msg, !reply.empty());
+                    // 测试台沿用统计行为，但绝不能伪造真实的群聊使用资格。
+                    cmdRouter.recordPlayerActivity(msg, didCommand, false);
                 }
                 out["reply"]   = reply;
                 out["matched"] = !reply.empty();

@@ -1,5 +1,6 @@
 {
   "auto_approve_friend": false,
+  "friend_policy": "manual",
   "friend_keyword": "",
   "auto_approve_group": false,
   "group_keyword": "",

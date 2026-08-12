@@ -250,6 +250,7 @@ struct PlayerProfileRow {
     std::string nickname;     // last-seen display name
     int trustLevel = 0;       // 信任等级 (0=普通, higher=trusted; matches banlist whitelist idea)
     int cmdCount = 0;         // 总指令数
+    int groupCmdCount = 0;    // 群聊中成功触发的指令数（好友申请审批使用）
     int favor = 0;            // 好感度 (DiceFavor)
     std::string lastCmdAt;    // 上次指令时间 (ISO 8601)
     std::string createdAt;    // 首次建档时间 (ISO 8601)
@@ -565,6 +566,7 @@ private:
             orm::make_column("nickname", &PlayerProfileRow::nickname),
             orm::make_column("trust_level", &PlayerProfileRow::trustLevel),
             orm::make_column("cmd_count", &PlayerProfileRow::cmdCount),
+            orm::make_column("group_cmd_count", &PlayerProfileRow::groupCmdCount, orm::default_value(0)),
             orm::make_column("favor", &PlayerProfileRow::favor),
             orm::make_column("last_cmd_at", &PlayerProfileRow::lastCmdAt),
             orm::make_column("created_at", &PlayerProfileRow::createdAt)
