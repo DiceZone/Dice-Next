@@ -21,6 +21,7 @@ set(TEST_SOURCES
     test_dice_expression.cpp
     test_check_roll_override.cpp
     test_markdown.cpp
+    test_heart_debounce.cpp
 
     # Project source files needed by tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/causal/cooldown_manager.cpp

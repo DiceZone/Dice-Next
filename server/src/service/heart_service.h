@@ -11,6 +11,7 @@
 #include "../adapter/kook_adapter.h"
 #include "../adapter/qq_official_adapter.h"
 #include "ai_gateway.h"
+#include "heart_debounce.h"
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -191,6 +192,11 @@ private:
         long long lastReportAt = 0;
         std::string lastReportIso;
         long long lastSwitchAt = 0;
+        // Timestamp of the first consecutive offline observation.  The old
+        // implementation compared against lastSwitchAt, so a brief gateway
+        // reconnect after a long online session could be reported offline at
+        // the very first sample instead of being debounced.
+        long long offlineObservedAt = 0;
         long long penaltyUntil = 0;
         bool permanentlyBlocked = false;
         std::string lastLoginIso;
@@ -341,9 +347,16 @@ private:
                     if (adapter->getLoginId().empty() && state.lastStatus == "unknown") continue;
                     desired = adapter->isConnected() ? "online" : "offline";
                     if (desired == "offline" && state.lastStatus == "unknown") continue;
-                    if (!bypassThrottle)
-                        shouldReport = state.lastStatus != desired ||
-                            (desired == "online" && now - state.lastReportAt >= interval());
+                    if (!bypassThrottle) {
+                        if (desired == "online") {
+                            state.offlineObservedAt = 0;
+                            shouldReport = state.lastStatus != desired ||
+                                now - state.lastReportAt >= interval();
+                        } else {
+                            shouldReport = offlineTransitionReady(
+                                state.lastStatus, false, now, state.offlineObservedAt);
+                        }
+                    }
                 }
             }
             if (shouldReport) result.push_back({Target{adapter, ""}, desired});
@@ -363,10 +376,14 @@ private:
                 auto& state = states_[id];
                 if (state.permanentlyBlocked || now < state.penaltyUntil) continue;
                 if (!bypassThrottle) {
-                    if (state.lastStatus != "online" && desired == "offline") continue;
-                    const bool switching = desired != state.lastStatus;
-                    shouldReport = switching ? (now - state.lastSwitchAt >= 60)
-                                             : (now - state.lastReportAt >= interval());
+                    if (desired == "online") {
+                        state.offlineObservedAt = 0;
+                        shouldReport = state.lastStatus != desired ||
+                            now - state.lastReportAt >= interval();
+                    } else {
+                        shouldReport = offlineTransitionReady(
+                            state.lastStatus, false, now, state.offlineObservedAt);
+                    }
                 }
             }
             if (shouldReport) result.push_back({target, desired});
@@ -590,6 +607,7 @@ private:
                 state.lastStatus = status;
                 state.lastReportAt = epoch();
                 state.lastReportIso = nowUtcIso();
+                state.offlineObservedAt = 0;
                 state.lastError.clear();
             } else {
                 state.lastError = httpStatus == 0 ? "网络请求失败" : "HTTP " + std::to_string(httpStatus);
@@ -617,6 +635,7 @@ private:
             state.lastStatus = reported;
             state.lastReportAt = now;
             state.lastReportIso = nowUtcIso();
+            state.offlineObservedAt = 0;
             state.lastError.clear();
             state.warned401 = false;
             if (reported == "offline") state.lastLoginIso.clear();
