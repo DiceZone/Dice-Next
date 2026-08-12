@@ -20,7 +20,7 @@ jobs:
           tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
           chmod +x /usr/local/bin/gitleaks
       - name: Run Gitleaks
-        run: gitleaks detect --source . --redact --verbose --no-banner
+        run: gitleaks detect --source . --redact --verbose --no-banner --config .gitleaks.toml
 
   sast:
     name: SAST (Semgrep)
