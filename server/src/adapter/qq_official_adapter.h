@@ -369,7 +369,7 @@ private:
         gateway_=std::make_shared<QQGatewaySocket>(host,port,path,
             [self](std::string raw){ if(!self->stopping_) self->onGateway(raw); },
             [self](const std::string& error){ if(!self->stopping_) self->fail("连接 QQ Gateway 失败："+error); },
-            [self]{ if(!self->stopping_){ self->connected_=false; self->connecting_=false; }});
+            [self]{ if(!self->stopping_){ self->connected_=false; self->connecting_=false; self->scheduleGatewayReconnect(); }});
         gateway_->start();
     }
     void onGateway(const std::string& raw) {
