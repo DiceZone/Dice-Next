@@ -397,6 +397,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
       - name: Calculate release build number
         id: build
         shell: bash
@@ -412,6 +413,7 @@ jobs:
           fi
           printf 'build=%s\n' "$build" >> "$GITHUB_OUTPUT"
           printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
+          printf 'base_counter=%s\n' "$counter" >> "$GITHUB_OUTPUT"
           printf 'tag=v%s-beta.%s\n' "$version" "$build" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
@@ -436,14 +438,62 @@ jobs:
           find artifacts -maxdepth 2 -type f -print
       - name: Record successful build number
         shell: bash
+        env:
+          BUILD_KEY: ${{ steps.build.outputs.key }}
+          BUILD_NUMBER: ${{ steps.build.outputs.build }}
+          BASE_COUNTER: ${{ steps.build.outputs.base_counter }}
         run: |
           set -euo pipefail
-          printf '%s:%s\n' '${{ steps.build.outputs.key }}' '${{ steps.build.outputs.build }}' > server/build_counter.txt
+          desired_counter="${BUILD_KEY}:${BUILD_NUMBER}"
+          printf '%s\n' "$desired_counter" > server/build_counter.txt
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add server/build_counter.txt
-          git commit -m 'chore: record successful build ${{ steps.build.outputs.build }}'
-          git push origin HEAD:main
+          git commit -m "chore: record successful build ${BUILD_NUMBER}"
+
+          # GitHub occasionally returns a transient HTTP 500 after all expensive
+          # platform builds have completed. Retry the small counter push instead
+          # of throwing away the whole release. Fetch between attempts so a
+          # concurrent ordinary commit can be rebased safely.
+          for attempt in 1 2 3 4 5 6; do
+            if git push origin HEAD:main; then
+              echo "Recorded successful build ${BUILD_NUMBER}."
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 6 ]; then
+              break
+            fi
+
+            delay=$((5 << (attempt - 1)))
+            if [ "$delay" -gt 60 ]; then delay=60; fi
+            echo "::warning::Build counter push failed (attempt ${attempt}/6); retrying in ${delay}s."
+            sleep "$delay"
+
+            if ! git fetch origin main:refs/remotes/origin/main; then
+              echo "::warning::Could not refresh origin/main; the next push attempt will retry the connection."
+              continue
+            fi
+
+            remote_counter=$(git show origin/main:server/build_counter.txt 2>/dev/null | tr -d '[:space:]' || true)
+            if [ "$remote_counter" = "$desired_counter" ]; then
+              echo "Remote already contains build ${BUILD_NUMBER}; treating the previous push as successful."
+              exit 0
+            fi
+            if [ "$remote_counter" != "$BASE_COUNTER" ]; then
+              echo "::error::Remote build counter changed from '${BASE_COUNTER}' to '${remote_counter}' while this release was running. Refusing to overwrite it."
+              exit 1
+            fi
+
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              echo "::error::Could not rebase the build counter commit onto the latest main branch."
+              exit 1
+            fi
+          done
+
+          echo "::error::Failed to record build ${BUILD_NUMBER} after 6 push attempts."
+          exit 1
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
