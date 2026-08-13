@@ -88,6 +88,31 @@ TEST(WebAuth, TrustedDeviceSessionSurvivesReconfigure) {
     auth.configure("", {});
     fs::remove_all(root, ec);
 }
+
+TEST(WebAuth, HashedPasswordSurvivesRestart) {
+    const fs::path root = temporaryConfigRoot("web_auth_password");
+    const fs::path sessions = root / "config" / "webui_sessions.json";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+
+    const std::string password = "restart-safe-password";
+    const std::string stored = WebAuth::hashPassword(password);
+    ASSERT_TRUE(stored.rfind("pbkdf2$", 0) == 0);
+    ASSERT_TRUE(WebAuth::verifyPassword(stored, password));
+    ASSERT_FALSE(WebAuth::verifyPassword(stored, "wrong-password"));
+
+    // configure() is the startup path: it receives the hash read back from
+    // config/webui.json and must validate the user's original plain password.
+    auto& auth = WebAuth::instance();
+    auth.configure(stored, sessions);
+    ASSERT_TRUE(auth.checkPassword(password));
+    ASSERT_FALSE(auth.checkPassword("wrong-password"));
+    ASSERT_FALSE(WebAuth::verifyPassword("pbkdf2$bad$format", password));
+    ASSERT_FALSE(WebAuth::verifyPassword(stored + "$extra", password));
+
+    auth.configure("", {});
+    fs::remove_all(root, ec);
+}
 TEST(ConfigManager, ScopedSettingsResolveAccountThenAdapterThenGlobal) {
     json all = {
         {"events", {

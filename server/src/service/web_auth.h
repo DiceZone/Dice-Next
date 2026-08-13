@@ -10,6 +10,7 @@
 #include <system_error>
 #include <sstream>
 #include <iomanip>
+#include <cctype>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <nlohmann/json.hpp>
@@ -86,19 +87,30 @@ public:
     static bool verifyPassword(const std::string& stored, const std::string& pw) {
         if (stored.empty()) return pw.empty();
         if (stored.rfind("pbkdf2$", 0) != 0) return pw == stored;   // 旧明文（尚未升级）
-        const size_t d1 = stored.find('$', 7);
-        const size_t d2 = d1 == std::string::npos ? std::string::npos : stored.find('$', d1 + 1);
-        if (d1 == std::string::npos || d2 == std::string::npos) return false;
-        auto unhex = [](const std::string& h) {
-            std::string b; int v = 0;
+        // hashPassword() emits exactly: pbkdf2$<32 hex salt>$<64 hex digest>.
+        const size_t separator = stored.find('$', 7);
+        if (separator == std::string::npos || stored.find('$', separator + 1) != std::string::npos) return false;
+        const std::string saltHex = stored.substr(7, separator - 7);
+        const std::string hashHex = stored.substr(separator + 1);
+        if (saltHex.size() != 32 || hashHex.size() != 64) return false;
+        auto unhex = [](const std::string& h, std::string& b) {
+            b.clear();
+            b.reserve(h.size() / 2);
             for (size_t i = 0; i + 1 < h.size(); i += 2) {
-                std::istringstream ss(h.substr(i, 2)); ss >> std::hex >> v; b += static_cast<char>(v);
+                const auto hi = static_cast<unsigned char>(h[i]);
+                const auto lo = static_cast<unsigned char>(h[i + 1]);
+                if (!std::isxdigit(hi) || !std::isxdigit(lo)) return false;
+                unsigned int value = 0;
+                std::istringstream ss(h.substr(i, 2));
+                ss >> std::hex >> value;
+                if (ss.fail()) return false;
+                b += static_cast<char>(value);
             }
-            return b;
+            return true;
         };
-        const std::string salt = unhex(stored.substr(d1 + 1, d2 - d1 - 1));
-        const std::string hash = unhex(stored.substr(d2 + 1));
-        if (salt.empty() || hash.size() != 32) return false;
+        std::string salt;
+        std::string hash;
+        if (!unhex(saltHex, salt) || !unhex(hashHex, hash) || salt.size() != 16 || hash.size() != 32) return false;
         unsigned char out[32];
         PKCS5_PBKDF2_HMAC(pw.c_str(), static_cast<int>(pw.size()),
                           reinterpret_cast<const unsigned char*>(salt.data()), static_cast<int>(salt.size()),

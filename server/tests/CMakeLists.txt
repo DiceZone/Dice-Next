@@ -54,6 +54,7 @@ target_include_directories(dice-next-tests PRIVATE
 
 # Link against the same dependencies as the main server
 target_link_libraries(dice-next-tests PRIVATE
+    OpenSSL::Crypto
     nlohmann_json::nlohmann_json
     sqlite_orm::sqlite_orm
     spdlog::spdlog
