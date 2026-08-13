@@ -3525,7 +3525,7 @@ static int realMain(int argc, char* argv[]) {
     // ── 自动备份：按间隔或每日时刻执行，按保留天数清理旧档案 ──
     auto autoBackupTick = [&db, &configMgr]() {
         try {
-            if (!configMgr.get<bool>("backup/auto_enabled", false)) return;
+            if (!configMgr.get<bool>("backup/auto_enabled", true)) return;
             const std::time_t now = std::time(nullptr);
             const long long last = configMgr.get<long long>("backup/auto_last_at", 0);
             const std::string schedule = configMgr.get<std::string>("backup/auto_schedule", "interval");

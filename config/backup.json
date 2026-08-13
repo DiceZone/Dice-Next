@@ -1,16 +1,27 @@
 {
   "auto_daily_time": "04:00",
-  "auto_enabled": false,
+  "auto_enabled": true,
   "auto_interval_hours": 24,
   "auto_keep_days": 7,
   "auto_last_at": 0,
   "auto_schedule": "interval",
   "auto_selection": {
+    "auditLogs": false,
+    "cardTemplates": true,
+    "characterCards": true,
+    "chatHistory": true,
+    "chatMedia": false,
     "config": true,
-    "databases": true,
-    "logs": true,
-    "media": true,
-    "plugins": true,
-    "resources": true
+    "coreDatabase": true,
+    "decks": true,
+    "gameLogImages": false,
+    "gameLogs": true,
+    "help": true,
+    "jsPlugins": true,
+    "luaMods": true,
+    "resourceImages": false,
+    "rules": true,
+    "runtimeLogs": false,
+    "uploadedAssets": false
   }
 }

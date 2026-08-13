@@ -1715,7 +1715,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     app.registerHandler("/api/backup/create", [&db, &cfg](Req req, CB&& cb) {
         try {
             const J body = req->body().empty() ? J::object() : J::parse(req->body());
-            const backup::Selection selection = backup::Selection::fromJson(body.value("selection", J::object()));
+            const backup::Selection selection = body.contains("selection")
+                ? backup::Selection::fromJson(body["selection"]) : backup::Selection::full();
             std::filesystem::path archive; std::string error;
             if (!backup::createArchive(db, cfg.configPath(), archive, error, selection)) { jsonReply(fail(error), std::move(cb)); return; }
             std::error_code ec;
@@ -1754,7 +1755,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     app.registerHandler("/api/backup/config", [&cfg](Req, CB&& cb) {
         const backup::Selection selection = backup::Selection::fromJson(
             cfg.get<J>("backup/auto_selection", J::object()));
-        jsonReply(ok(J{{"enabled", cfg.get<bool>("backup/auto_enabled", false)},
+        jsonReply(ok(J{{"enabled", cfg.get<bool>("backup/auto_enabled", true)},
                        {"schedule", cfg.get<std::string>("backup/auto_schedule", "interval")},
                        {"intervalHours", cfg.get<int>("backup/auto_interval_hours", 24)},
                        {"dailyTime", cfg.get<std::string>("backup/auto_daily_time", "04:00")},
@@ -1765,7 +1766,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     app.registerHandler("/api/backup/config", [&cfg](Req req, CB&& cb) {
         try {
             const J j = J::parse(req->body());
-            const bool enabled = j.value("enabled", false);
+            const bool enabled = j.value("enabled", true);
             const std::string schedule = j.value("schedule", std::string("interval"));
             const int hours = j.value("intervalHours", 24);
             const std::string daily = j.value("dailyTime", std::string("04:00"));
