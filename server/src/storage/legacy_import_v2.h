@@ -178,10 +178,14 @@ inline void upsertUserSetting(Database& db, const std::string& uid, const std::s
 inline int importCards(Database& db, const fs::path& userDir, int& users) {
     auto* cst = db.getCardStorage();
     if (!cst) return 0;
+    auto* mainSt = db.getStorage();
+    std::vector<std::tuple<std::string, std::string, std::string>> bindings;
     fs::path file = legacyDataFile(userDir, {"PlayerCards.RDconf", "PlayerCards.RDconf.bak", "PlayerCards.bak"});
     if (file.empty()) return 0;
     int imported = 0;
-    legacy2::loadLLMap(file.string(), [&](legacy2::BReader& r, long long uid) {
+    try {
+        cst->transaction([&] {
+            legacy2::loadLLMap(file.string(), [&](legacy2::BReader& r, long long uid) {
         legacy2::LegacyPlayer p = legacy2::readPlayer(r);
         if (p.cards.empty()) return;
         ++users;
@@ -244,9 +248,25 @@ inline int importCards(Database& db, const fs::path& userDir, int& users) {
         // concept as UserSettingRow(cardBind), so this is a direct conversion.
         for (auto& [gid, idx] : p.groupBind) {
             auto it = cardNames.find(idx);
-            if (it != cardNames.end()) upsertUserSetting(db, user, std::to_string(gid), "cardBind", it->second);
+            if (it != cardNames.end()) bindings.emplace_back(user, std::to_string(gid), it->second);
         }
-    });
+            });
+            return true;
+        });
+    } catch (const std::exception& e) {
+        DICE_LOG_ERROR("LegacyImport: card transaction failed: {}", e.what());
+    }
+    if (mainSt && !bindings.empty()) {
+        try {
+            mainSt->transaction([&] {
+                for (const auto& [user, group, card] : bindings)
+                    upsertUserSetting(db, user, group, "cardBind", card);
+                return true;
+            });
+        } catch (const std::exception& e) {
+            DICE_LOG_ERROR("LegacyImport: card binding transaction failed: {}", e.what());
+        }
+    }
     return imported;
 }
 
@@ -257,7 +277,10 @@ inline int importUsers(Database& db, const fs::path& userDir, LuaPluginManager* 
     fs::path file = legacyDataFile(userDir, {"UserConf.dat", "UserConf.dat.bak", "UserConf.bak"});
     if (file.empty()) return 0;
     int imported = 0;
-    legacy2::loadLLMap(file.string(), [&](legacy2::BReader& r, long long uid) {
+    std::vector<std::tuple<std::string, std::string, std::string>> luaValues;
+    try {
+        st->transaction([&] {
+            legacy2::loadLLMap(file.string(), [&](legacy2::BReader& r, long long uid) {
         legacy2::LegacyUser u = legacy2::readUser(r);
         int trust = 0, favor = 0;
         if (auto it = u.conf.find("trust"); it != u.conf.end()) trust = (int)it->second.asInt();
@@ -300,7 +323,7 @@ inline int importUsers(Database& db, const fs::path& userDir, LuaPluginManager* 
                         || value.kind == legacy2::AttrVal::Kind::Int
                         || value.kind == legacy2::AttrVal::Kind::Num
                         || value.kind == legacy2::AttrVal::Kind::Str))
-                    luaMod->confSet("u:" + user, key, scalar);
+                    luaValues.emplace_back("u:" + user, key, std::move(scalar));
             }
             // Old NN/Nick is per-group.  Preserve it as the current .nn
             // setting rather than collapsing all group cards into one profile.
@@ -308,7 +331,15 @@ inline int importUsers(Database& db, const fs::path& userDir, LuaPluginManager* 
                 if (!nickForGroup.empty()) upsertUserSetting(db, user, std::to_string(gid), "nick", nickForGroup);
             ++imported;
         } catch (...) {}
-    });
+            });
+            return true;
+        });
+    } catch (const std::exception& e) {
+        DICE_LOG_ERROR("LegacyImport: user transaction failed: {}", e.what());
+    }
+    if (luaMod && !luaValues.empty() && !luaMod->confSetBatch(luaValues)) {
+        DICE_LOG_ERROR("LegacyImport: failed to batch-import {} Lua user settings", luaValues.size());
+    }
     return imported;
 }
 
@@ -334,7 +365,8 @@ inline int importBlacklist(Database& db, const fs::path& confDir) {
             if (uid.empty() || uid == "0") continue;
             offenders[uid] = e.value("note", std::string("legacy import"));
         }
-        for (auto& [uid, note] : offenders) {
+        st->transaction([&] {
+            for (auto& [uid, note] : offenders) {
             auto cnt = st->count<BanlistRow>(orm::where(
                 orm::c(&BanlistRow::targetType) == 0 and orm::c(&BanlistRow::listType) == 0
                 and orm::c(&BanlistRow::targetId) == uid));
@@ -343,7 +375,9 @@ inline int importBlacklist(Database& db, const fs::path& confDir) {
                 b.reason = utf8Truncate(note, 200); b.createdAt = utils::nowIso8601();
                 st->insert(b); ++imported;
             }
-        }
+            }
+            return true;
+        });
     } catch (...) {}
     return imported;
 }
@@ -995,12 +1029,10 @@ inline std::vector<std::string> legacySessionAreas(const json& source) {
     return areas;
 }
 
-inline std::string nextLegacyGameCode(LuaPluginManager& luaMod) {
+inline std::string nextLegacyGameCode(const json& index) {
     static constexpr char alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     static std::mt19937_64 rng(std::random_device{}());
     std::uniform_int_distribution<size_t> pick(0, sizeof(alphabet) - 2);
-    json index = json::parse(luaMod.confGet("game:index", "sessions"), nullptr, false);
-    if (!index.is_object()) index = json::object();
     std::string code;
     do {
         code.clear(); code.reserve(16);
@@ -1021,6 +1053,7 @@ inline int importSessions(const fs::path& root, LuaPluginManager* luaMod,
     json index = json::parse(luaMod->confGet("game:index", "sessions"), nullptr, false);
     if (!index.is_object()) index = json::object();
     int imported = 0;
+    std::vector<std::tuple<std::string, std::string, std::string>> luaValues;
     for (const auto& entry : fs::directory_iterator(dir, ec)) {
         if (ec || !entry.is_regular_file() || entry.path().extension() != ".json") continue;
         json old = json::parse(readFile(entry.path()), nullptr, false);
@@ -1030,14 +1063,14 @@ inline int importSessions(const fs::path& root, LuaPluginManager* luaMod,
         const std::string stem = entry.path().stem().string();
         const std::string sessionId = "legacy-" + stem + "-" + std::to_string((long long)std::chrono::high_resolution_clock::now().time_since_epoch().count());
         const std::string scope = "game:session:" + sessionId;
-        const std::string code = nextLegacyGameCode(*luaMod);
+        const std::string code = nextLegacyGameCode(index);
         const std::string name = old.value("name", stem);
-        luaMod->confSet(scope, "__name", name);
-        luaMod->confSet(scope, "__code", code);
-        luaMod->confSet(scope, "__areas", json(areas).dump());
-        if (old.contains("master")) luaMod->confSet(scope, "__gms", legacyIdList(old["master"]).dump());
-        if (old.contains("player")) luaMod->confSet(scope, "__pls", legacyIdList(old["player"]).dump());
-        if (old.contains("observer")) luaMod->confSet(scope, "legacyObservers", legacyIdList(old["observer"]).dump());
+        luaValues.emplace_back(scope, "__name", name);
+        luaValues.emplace_back(scope, "__code", code);
+        luaValues.emplace_back(scope, "__areas", json(areas).dump());
+        if (old.contains("master")) luaValues.emplace_back(scope, "__gms", legacyIdList(old["master"]).dump());
+        if (old.contains("player")) luaValues.emplace_back(scope, "__pls", legacyIdList(old["player"]).dump());
+        if (old.contains("observer")) luaValues.emplace_back(scope, "legacyObservers", legacyIdList(old["observer"]).dump());
         if (old.contains("roulette") && old["roulette"].is_object()) {
             json roulette = json::object();
             for (auto& [face, value] : old["roulette"].items()) if (value.is_object()) {
@@ -1045,13 +1078,13 @@ inline int importSessions(const fs::path& root, LuaPluginManager* luaMod,
                 if (value.contains("pool") && value["pool"].is_array()) item["left"] = value["pool"];
                 roulette[face] = std::move(item);
             }
-            if (!roulette.empty()) luaMod->confSet(scope, "__rou", roulette.dump());
+            if (!roulette.empty()) luaValues.emplace_back(scope, "__rou", roulette.dump());
         }
         if (old.contains("data") && old["data"].is_object()) for (auto& [key, value] : old["data"].items()) {
             if (key.empty()) continue;
-            luaMod->confSet(scope, key, value.is_string() ? value.get<std::string>() : value.dump());
+            luaValues.emplace_back(scope, key, value.is_string() ? value.get<std::string>() : value.dump());
         }
-        for (const auto& groupId : areas) luaMod->confSet("game:" + groupId, "__session", sessionId);
+        for (const auto& groupId : areas) luaValues.emplace_back("game:" + groupId, "__session", sessionId);
         index[code] = sessionId;
         LegacyLogContext context;
         context.groupId = areas.front(); context.name = name; context.gameName = name; context.gameCode = code;
@@ -1066,7 +1099,11 @@ inline int importSessions(const fs::path& root, LuaPluginManager* luaMod,
         }
         ++imported;
     }
-    luaMod->confSet("game:index", "sessions", index.dump());
+    luaValues.emplace_back("game:index", "sessions", index.dump());
+    if (!luaMod->confSetBatch(luaValues)) {
+        DICE_LOG_ERROR("LegacyImport: failed to batch-import {} game session settings", luaValues.size());
+        return 0;
+    }
     return imported;
 }
 
@@ -1165,7 +1202,13 @@ inline int importLogs(Database& db, const fs::path& root,
         }
     } catch (...) {}
     int imported = 0;
-    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+    const int messagesBefore = messages;
+    int lastReported = messages;
+    const auto started = std::chrono::steady_clock::now();
+    bool committed = false;
+    try {
+        committed = st->transaction([&] {
+            for (const auto& entry : fs::directory_iterator(dir, ec)) {
         if (ec || !entry.is_regular_file() || entry.path().extension() != ".txt") continue;
         const std::string file = entry.path().filename().string();
         if (importedSources.count(file)) continue;
@@ -1196,7 +1239,14 @@ inline int importLogs(Database& db, const fs::path& root,
             GameLogMessageRow row;
             row.logId = logId; row.sender = sender; row.userId = uid;
             row.content = utils::trim(content); row.createdAt = legacyLogIso(stamp); row.images = "[]";
-            try { st->insert(row); ++messages; } catch (...) {}
+            try {
+                st->insert(row);
+                ++messages;
+                if (messages - lastReported >= 25000) {
+                    DICE_LOG_INFO("LegacyImport: imported {} log messages...", messages - messagesBefore);
+                    lastReported = messages;
+                }
+            } catch (...) {}
             sender.clear(); uid.clear(); stamp.clear(); content.clear();
         };
         while (std::getline(in, line)) {
@@ -1217,18 +1267,35 @@ inline int importLogs(Database& db, const fs::path& root,
             upsertGroupSetting(db, "onebot_v11", ctx.groupId, "activeLogName", ctx.name);
         }
         ++imported;
+            }
+            return true;
+        });
+    } catch (const std::exception& e) {
+        DICE_LOG_ERROR("LegacyImport: log transaction failed: {}", e.what());
     }
+    if (!committed) {
+        messages = messagesBefore;
+        return 0;
+    }
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    DICE_LOG_INFO("LegacyImport: imported {} logs and {} messages in {} ms", imported, messages - messagesBefore, elapsedMs);
     return imported;
 }
 
 inline int importChatConf(Database& db, const fs::path& userDir, int& groups, LuaPluginManager* luaMod = nullptr) {
     fs::path file = legacyDataFile(userDir, {"ChatConf.dat", "ChatConf.dat.bak", "ChatConf.bak"});
     if (file.empty()) return 0;
+    auto* st = db.getStorage();
+    if (!st) return 0;
     const std::string K_DISABLE = "\xe5\x81\x9c\xe7\x94\xa8\xe6\x8c\x87\xe4\xbb\xa4"; // 停用指令
     const std::string K_COCRULE = "rc\xe6\x88\xbf\xe8\xa7\x84";                       // rc房规
     const std::string K_WELCOME = "\xe5\x85\xa5\xe7\xbe\xa4\xe6\xac\xa2\xe8\xbf\x8e"; // 入群欢迎
     int settings = 0;
-    legacy2::loadLLMap(file.string(), [&](legacy2::BReader& r, long long gid) {
+    std::vector<std::tuple<std::string, std::string, std::string>> luaValues;
+    try {
+        st->transaction([&] {
+            legacy2::loadLLMap(file.string(), [&](legacy2::BReader& r, long long gid) {
         ++groups;
         LegacyChat c = readChat(r);
         const std::string plat = "onebot_v11";
@@ -1240,7 +1307,7 @@ inline int importChatConf(Database& db, const fs::path& userDir, int& groups, Lu
             if (key.empty()) continue;
             if (value.kind == legacy2::AttrVal::Kind::Bool || value.kind == legacy2::AttrVal::Kind::Int
                     || value.kind == legacy2::AttrVal::Kind::Num || value.kind == legacy2::AttrVal::Kind::Str)
-                luaMod->confSet("g:" + g, key, legacyScalar(value));
+                luaValues.emplace_back("g:" + g, key, legacyScalar(value));
         }
         if (!c.name.empty()) { upsertGroupSetting(db, plat, g, "legacyGroupName", c.name); ++settings; }
         // 停用指令 → enabled=0（机器人在该群关闭）
@@ -1257,7 +1324,15 @@ inline int importChatConf(Database& db, const fs::path& userDir, int& groups, Lu
             std::string w = it->second.asStr();
             if (!w.empty()) { upsertGroupSetting(db, plat, g, "welcome", w); ++settings; }
         }
-    });
+            });
+            return true;
+        });
+    } catch (const std::exception& e) {
+        DICE_LOG_ERROR("LegacyImport: group config transaction failed: {}", e.what());
+    }
+    if (luaMod && !luaValues.empty() && !luaMod->confSetBatch(luaValues)) {
+        DICE_LOG_ERROR("LegacyImport: failed to batch-import {} Lua group settings", luaValues.size());
+    }
     return settings;
 }
 
@@ -1274,28 +1349,39 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
     fs::path confDir = root / "conf";
     if (!fs::exists(root)) return json{{"ok", false}, {"error", "目录不存在: " + diceDataDir}};
 
+    const auto importStarted = std::chrono::steady_clock::now();
+    auto timed = [](const char* stage, auto&& fn) {
+        const auto started = std::chrono::steady_clock::now();
+        DICE_LOG_INFO("LegacyImport: starting {}", stage);
+        auto result = fn();
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        DICE_LOG_INFO("LegacyImport: completed {} in {} ms", stage, elapsedMs);
+        return result;
+    };
+
     int users = 0;
-    int cards = importCards(db, userDir, users);
-    int profiles = importUsers(db, userDir, luaMod);
-    int black = importBlacklist(db, confDir);
-    int replies = importReplies(reply, confDir);
-    int help = importHelp(db, i18n, confDir);
+    int cards = timed("cards", [&] { return importCards(db, userDir, users); });
+    int profiles = timed("users", [&] { return importUsers(db, userDir, luaMod); });
+    int black = timed("blacklist", [&] { return importBlacklist(db, confDir); });
+    int replies = timed("reply rules", [&] { return importReplies(reply, confDir); });
+    int help = timed("help", [&] { return importHelp(db, i18n, confDir); });
     int orphans = 0;
-    int msgs = importCustomMsg(db, i18n, confDir, orphans);
-    int masters = importMasters(cfg, confDir);
-    int links = importLinks(cfg, confDir);
-    int notices = importNotices(cfg, confDir);
+    int msgs = timed("custom messages", [&] { return importCustomMsg(db, i18n, confDir, orphans); });
+    int masters = timed("masters", [&] { return importMasters(cfg, confDir); });
+    int links = timed("links", [&] { return importLinks(cfg, confDir); });
+    int notices = timed("notices", [&] { return importNotices(cfg, confDir); });
 
     // Structured deck/mod/plugin import results.  Old `plugin/` is distinct
     // from `mod/` and must not be silently ignored.
-    auto deckResult = importDecks(root, opts);
-    auto modResult = importMods(root, opts);
-    auto pluginResult = importPlugins(root, opts);
+    auto deckResult = timed("decks", [&] { return importDecks(root, opts); });
+    auto modResult = timed("Lua mods", [&] { return importMods(root, opts); });
+    auto pluginResult = timed("Lua plugins", [&] { return importPlugins(root, opts); });
 
     std::map<std::string, LegacyLogContext> logContexts;
-    int sessions = importSessions(root, luaMod, logContexts);
+    int sessions = timed("sessions", [&] { return importSessions(root, luaMod, logContexts); });
     int logMessages = 0;
-    int logs = importLogs(db, root, logContexts, logMessages);
+    int logs = timed("logs", [&] { return importLogs(db, root, logContexts, logMessages); });
 
     // Reload engines if import succeeded and pointers are provided
     if (deckResult.success > 0 && deck) {
@@ -1308,7 +1394,9 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
     }
 
     int chatGroups = 0;
-    int chatSettings = importChatConf(db, userDir, chatGroups, luaMod);
+    int chatSettings = timed("group settings", [&] { return importChatConf(db, userDir, chatGroups, luaMod); });
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - importStarted).count();
 
     DICE_LOG_INFO("LegacyImport: cards={} (users={}) profiles={} black={} replies={} help={} msgs={} orphans={} masters={} links={} notices={} decks(s/f/sk={}/{}/{}) mods(s/f/sk={}/{}/{}) plugins(s/f/sk={}/{}/{}) sessions={} logs={} logMessages={} chatGroups={} chatSettings={}",
                   cards, users, profiles, black, replies, help, msgs, orphans, masters, links, notices,
@@ -1317,6 +1405,7 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
                   pluginResult.success, pluginResult.failed, pluginResult.skipped,
                   sessions, logs, logMessages,
                   chatGroups, chatSettings);
+    DICE_LOG_INFO("LegacyImport: all stages completed in {} ms", elapsedMs);
     return json{
         {"ok", true},
         {"cards", cards}, {"cardUsers", users}, {"profiles", profiles},
@@ -1324,7 +1413,8 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
         {"orphans", orphans}, {"masters", masters}, {"links", links}, {"notices", notices},
         {"decks", deckResult.toJSON()}, {"mods", modResult.toJSON()}, {"plugins", pluginResult.toJSON()},
         {"sessions", sessions}, {"logs", logs}, {"logMessages", logMessages},
-        {"chatGroups", chatGroups}, {"chatSettings", chatSettings}
+        {"chatGroups", chatGroups}, {"chatSettings", chatSettings},
+        {"elapsedMs", elapsedMs}
     };
 }
 

@@ -1267,6 +1267,56 @@ void LuaPluginManager::confSet(const std::string& scope, const std::string& key,
     sqlite3_finalize(st);
 }
 
+bool LuaPluginManager::confSetBatch(
+        const std::vector<std::tuple<std::string, std::string, std::string>>& values) {
+    std::lock_guard<std::mutex> lk(confMutex_);
+    if (!confDb_) return false;
+    if (values.empty()) return true;
+
+    char* error = nullptr;
+    if (sqlite3_exec(confDb_, "BEGIN IMMEDIATE;", nullptr, nullptr, &error) != SQLITE_OK) {
+        DICE_LOG_ERROR("[lua] begin batch config transaction failed: {}", error ? error : sqlite3_errmsg(confDb_));
+        if (error) sqlite3_free(error);
+        return false;
+    }
+
+    sqlite3_stmt* upsert = nullptr;
+    sqlite3_stmt* remove = nullptr;
+    bool ok = sqlite3_prepare_v2(confDb_,
+        "INSERT INTO lua_conf(scope,k,v) VALUES(?,?,?) ON CONFLICT(scope,k) DO UPDATE SET v=excluded.v;",
+        -1, &upsert, nullptr) == SQLITE_OK &&
+        sqlite3_prepare_v2(confDb_, "DELETE FROM lua_conf WHERE scope=? AND k=?;",
+        -1, &remove, nullptr) == SQLITE_OK;
+
+    for (const auto& [scope, key, value] : values) {
+        if (!ok) break;
+        sqlite3_stmt* statement = value.empty() ? remove : upsert;
+        sqlite3_reset(statement);
+        sqlite3_clear_bindings(statement);
+        sqlite3_bind_text(statement, 1, scope.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2, key.c_str(), -1, SQLITE_TRANSIENT);
+        if (!value.empty()) sqlite3_bind_text(statement, 3, value.c_str(), -1, SQLITE_TRANSIENT);
+        ok = sqlite3_step(statement) == SQLITE_DONE;
+    }
+    sqlite3_finalize(upsert);
+    sqlite3_finalize(remove);
+
+    if (ok) {
+        error = nullptr;
+        ok = sqlite3_exec(confDb_, "COMMIT;", nullptr, nullptr, &error) == SQLITE_OK;
+        if (!ok) {
+            DICE_LOG_ERROR("[lua] commit batch config transaction failed: {}", error ? error : sqlite3_errmsg(confDb_));
+            if (error) sqlite3_free(error);
+        }
+    }
+    if (!ok) {
+        error = nullptr;
+        sqlite3_exec(confDb_, "ROLLBACK;", nullptr, nullptr, &error);
+        if (error) sqlite3_free(error);
+    }
+    return ok;
+}
+
 bool LuaPluginManager::eval(const std::string& code, std::string* err) {
     std::lock_guard<std::recursive_mutex> lk(mutex_);
     if (!state_ && !init()) { if (err) *err = "no state"; return false; }

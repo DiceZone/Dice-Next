@@ -3496,6 +3496,111 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 
+    // WebUI ??????????? .game over ?????????????????
+    // ??????????????????????????????????????
+    // ??????????????????????????????????????
+    app.registerHandler("/api/game-sessions/{1}", [&luaMod, lst, st](Req req, CB&& cb, const std::string& code) {
+        try {
+            if (code.empty() || code.size() > 64) { jsonReply(fail("invalid game code"), std::move(cb)); return; }
+
+            auto index = J::parse(luaMod.confGet("game:index", "sessions"), nullptr, false);
+            if (!index.is_object()) index = J::object();
+            std::string sessionId;
+            if (index.contains(code) && index[code].is_string()) sessionId = index[code].get<std::string>();
+
+            std::vector<GameLogRow> gameLogs;
+            for (auto& log : lst->get_all<GameLogRow>()) {
+                auto meta = J::parse(log.customRules, nullptr, false);
+                if (meta.is_object() && meta.value("gameCode", "") == code) gameLogs.push_back(std::move(log));
+            }
+            if (sessionId.empty() && gameLogs.empty()) {
+                jsonReply(fail("game session not found"), std::move(cb));
+                return;
+            }
+
+            auto detachLiveSession = [&]() {
+                if (sessionId.empty()) return;
+                const std::string scope = "game:session:" + sessionId;
+                auto areas = J::parse(luaMod.confGet(scope, "__areas"), nullptr, false);
+                std::vector<std::tuple<std::string, std::string, std::string>> changes;
+                if (areas.is_array()) for (const auto& area : areas) if (area.is_string()) {
+                    const std::string groupScope = "game:" + area.get<std::string>();
+                    // ???????????????????????
+                    if (luaMod.confGet(groupScope, "__session") == sessionId)
+                        changes.emplace_back(groupScope, "__session", "");
+                }
+                for (const auto& [key, value] : luaMod.confAllOf(scope)) {
+                    (void)value;
+                    changes.emplace_back(scope, key, "");
+                }
+                index.erase(code);
+                changes.emplace_back("game:index", "sessions", index.dump());
+                if (!luaMod.confSetBatch(changes)) throw std::runtime_error("failed to update game session state");
+            };
+
+            auto endRunningLogs = [&]() {
+                std::vector<std::pair<std::string, int>> ended;
+                lst->transaction([&] {
+                    for (auto& log : gameLogs) if (log.status == 0) {
+                        log.status = 2;
+                        lst->update(log);
+                        ended.emplace_back(log.groupId, log.id);
+                    }
+                    return true;
+                });
+                // activeLog ????????/??????????? logId ?????
+                // ?????????????????????
+                if (st && !ended.empty()) st->transaction([&] {
+                    for (const auto& [groupId, logId] : ended) {
+                        const std::string id = std::to_string(logId);
+                        auto activeRows = st->get_all<GroupSettingRow>(orm::where(
+                            orm::c(&GroupSettingRow::groupId) == groupId
+                            and orm::c(&GroupSettingRow::key) == std::string("activeLog")
+                            and orm::c(&GroupSettingRow::value) == id));
+                        for (auto& active : activeRows) {
+                            active.value.clear();
+                            st->update(active);
+                            auto names = st->get_all<GroupSettingRow>(orm::where(
+                                orm::c(&GroupSettingRow::platform) == active.platform
+                                and orm::c(&GroupSettingRow::groupId) == active.groupId
+                                and orm::c(&GroupSettingRow::key) == std::string("activeLogName")));
+                            for (auto& name : names) { name.value.clear(); st->update(name); }
+                        }
+                    }
+                    return true;
+                });
+                return ended.size();
+            };
+
+            if (req->method() == drogon::Put) {
+                detachLiveSession();
+                const auto ended = endRunningLogs();
+                jsonReply(ok(J{{"endedLogs", ended}}), std::move(cb));
+                return;
+            }
+            if (req->method() == drogon::Delete) {
+                detachLiveSession();
+                const auto ended = endRunningLogs();
+                int detached = 0;
+                lst->transaction([&] {
+                    for (auto& log : gameLogs) {
+                        auto meta = J::parse(log.customRules, nullptr, false);
+                        if (!meta.is_object()) continue;
+                        meta.erase("gameCode");
+                        meta.erase("gameName");
+                        log.customRules = meta.dump();
+                        lst->update(log);
+                        ++detached;
+                    }
+                    return true;
+                });
+                jsonReply(ok(J{{"detachedLogs", detached}, {"endedLogs", ended}}), std::move(cb));
+                return;
+            }
+            jsonReply(fail("Method not allowed"), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Put, drogon::Delete});
+
     // POST /api/game-sessions/{code}/export {groupNames:{groupId: displayName}, format:txt|csv|html}
     // 将同一团号的各群日志按时间合并；〔场景：…〕是纯正文标记，不使用 <…> 以免被染色器当作发言标题。
     app.registerHandler("/api/game-sessions/{1}/export", [lst](Req req, CB&& cb, const std::string& code) {

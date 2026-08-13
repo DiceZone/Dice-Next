@@ -9,6 +9,8 @@
 #include <string>
 #include <map>
 #include <set>
+#include <tuple>
+#include <vector>
 #include <cstdint>
 #include <sqlite_orm/sqlite_orm.h>
 
@@ -21,6 +23,13 @@ class LuaPluginManager {
 public:
     void reload() {}
     void confSet(const std::string& scope, const std::string& key, const std::string& value) { conf_[scope][key] = value; }
+    bool confSetBatch(const std::vector<std::tuple<std::string, std::string, std::string>>& values) {
+        for (const auto& [scope, key, value] : values) {
+            if (value.empty()) conf_[scope].erase(key);
+            else conf_[scope][key] = value;
+        }
+        return true;
+    }
     std::string confGet(const std::string& scope, const std::string& key) const {
         auto it = conf_.find(scope); if (it == conf_.end()) return {};
         auto kv = it->second.find(key); return kv == it->second.end() ? std::string() : kv->second;

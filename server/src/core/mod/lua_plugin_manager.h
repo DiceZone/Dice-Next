@@ -15,6 +15,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <tuple>
 #include <mutex>
 #include <functional>
 #include <filesystem>
@@ -117,6 +118,9 @@ public:
     std::string confGet(const std::string& scope, const std::string& key) const;
     bool        confHas(const std::string& scope, const std::string& key) const;
     void        confSet(const std::string& scope, const std::string& key, const std::string& val);
+    /// Bulk upsert/delete configuration values in one SQLite transaction.
+    /// Intended for migrations; regular plugin calls should keep using confSet().
+    bool        confSetBatch(const std::vector<std::tuple<std::string, std::string, std::string>>& values);
     // 枚举某 key 在所有 u:<uid> 作用域的值（rank_user 用 getUserConf(nil,field)）。
     std::vector<std::pair<std::string, std::string>> confAllUsers(const std::string& key) const;
     // 枚举某作用域全部键值（玩家管理详情页查看/编辑该用户的插件变量）。
