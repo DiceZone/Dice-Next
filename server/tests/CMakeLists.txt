@@ -18,6 +18,7 @@ set(TEST_SOURCES
     test_master_delivery.cpp
     test_backup_service.cpp
     test_timezone.cpp
+    test_js_plugin_reload.cpp
     test_dice_expression.cpp
     test_check_roll_override.cpp
     test_markdown.cpp
@@ -39,6 +40,7 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_matcher.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/dice/dice_expression.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/mod/js_plugin_manager.cpp
 )
 
 add_executable(dice-next-tests ${TEST_SOURCES})
@@ -48,6 +50,7 @@ set_target_properties(dice-next-tests PROPERTIES LINKER_LANGUAGE CXX)
 
 target_include_directories(dice-next-tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_BINARY_DIR}/generated
 )
@@ -55,9 +58,11 @@ target_include_directories(dice-next-tests PRIVATE
 # Link against the same dependencies as the main server
 target_link_libraries(dice-next-tests PRIVATE
     OpenSSL::Crypto
+    Drogon::Drogon
     nlohmann_json::nlohmann_json
     sqlite_orm::sqlite_orm
     spdlog::spdlog
+    qjs
 )
 
 # MSVC needs /bigobj for large test files with many includes

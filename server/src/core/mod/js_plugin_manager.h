@@ -247,6 +247,7 @@ private:
     void installGlobals();
     void freeRuntime();
     int  loadDirLocked(const std::string& dir);   // loadDir body; caller holds mutex_
+    void wsCleanupLocked();                        // caller already holds mutex_
     void openKvStore();                           // 打开 data/plugins.db + 建表 + 导入旧 json + 装载缓存
     static std::string kvNamespace(const std::string& key);  // 从扁平 key 推导 ns 列
     // Drain the JS microtask/job queue (resolves promises, e.g. awaited fetch),

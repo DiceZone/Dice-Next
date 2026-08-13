@@ -1059,6 +1059,10 @@ void JsPluginManager::wsClose(int64_t id) {
 
 void JsPluginManager::wsCleanup() {
     std::lock_guard<std::mutex> lk(mutex_);
+    wsCleanupLocked();
+}
+
+void JsPluginManager::wsCleanupLocked() {
     for (auto& [id, obj] : wsObjs_) if (ctx_) JS_FreeValue(ctx_, obj);
     wsObjs_.clear();
     { std::lock_guard<std::mutex> lk2(sWsMutex); for (auto& [id, c] : sWsConns) if (c) c->stop(); sWsConns.clear(); }
@@ -1102,7 +1106,7 @@ void JsPluginManager::freeRuntime() {
         exts_.clear();
         for (auto& [id, t] : timers_) JS_FreeValue(ctx_, t.cb);   // drop pending timers
         timers_.clear();
-        wsCleanup();   // G2: 关闭 WebSocket 连接并释放 JS 对象引用
+        wsCleanupLocked();   // reload already owns mutex_; destructor is single-threaded
         JS_FreeContext(ctx_); ctx_ = nullptr;
     }
     if (rt_) { JS_FreeRuntime(rt_); rt_ = nullptr; }

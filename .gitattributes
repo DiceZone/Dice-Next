@@ -1,0 +1,3 @@
+# Build counters are semantic values, not ordinary text. The configured merge
+# driver keeps the greatest counter for the same major.minor release line.
+server/build_counter.txt merge=dicenext-build-counter
