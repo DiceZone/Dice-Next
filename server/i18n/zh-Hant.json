@@ -43,21 +43,21 @@
     },
     "pool": {
       "usage": "指令 .ww 用法：.ww 骰數 [成功線]；或 .ww 骰數a加骰線c成功線+附加成功，如 .ww 10a8c7+2（a預設10，c預設8）",
-      "result": "{nick} 擲骰：{expr}"
+      "result": "**{nick}** 擲骰：`{expr}`"
     },
     "dx": {
       "usage": "指令 .dx 用法：.dx 骰數c加骰線（雙十字，如 .dx 3c8）或 .dx 骰數a加骰線（數成功骰池/WoD，如 .dx 5a7）"
     },
     "rav": {
       "usage": "指令 .rav 用法：.rav 甲 乙（數值或屬性），如 .rav 60 50 或 .rav 偵查 潛行",
-      "result": "{nick} 的對抗檢定：\n{la}：1D100={ra}/{va} {lva}\n{lb}：1D100={rb}/{vb} {lvb}\n{outcome}",
+      "result": "**{nick}** 的對抗檢定：\n> **{la}**：`1D100={ra}/{va}` {lva}\n> **{lb}**：`1D100={rb}/{vb}` {lvb}\n**{outcome}**",
       "a_wins": "「{a}」勝出！",
       "b_wins": "「{b}」勝出！",
       "tie": "平局"
     },
     "check": {
-      "result": "{nick}進行{attr}檢定：{roll}/{rate} {level}",
-      "result_reason": "由於{reason} {nick}進行{attr}檢定：{roll}/{rate} {level}",
+      "result": "**{nick}** 進行 **{attr}** 檢定：`{roll}/{rate}` **{level}**",
+      "result_reason": "由於 **{reason}**，**{nick}** 進行 **{attr}** 檢定：`{roll}/{rate}` **{level}**",
       "need_value": "請給出屬性值，例如 .ra 偵查 60",
       "no_card": "未找到屬性「{attr}」，請先用 .st 錄入，或直接 .ra {attr} 數值",
       "preview_invalid": "指定出目解析失敗，請使用 .ra(出目)成功率，例如 .ra(1)50",
@@ -78,10 +78,10 @@
       "success": "成功",
       "failure": "失敗",
       "fumble": "大失敗！",
-      "result": "{nick}進行{attr}檢定：{roll}/{rate} {level}",
-      "result_reason": "由於{reason} {nick}進行{attr}檢定：{roll}/{rate} {level}",
+      "result": "**{nick}** 進行 **{attr}** 檢定：`{roll}/{rate}` **{level}**",
+      "result_reason": "由於 **{reason}**，**{nick}** 進行 **{attr}** 檢定：`{roll}/{rate}` **{level}**",
       "resist_usage": "用法：.bav <主動值/屬性> <被動值/屬性> —— BRP 抵抗表對抗。例 .bav 力量 體型",
-      "resist": "{nick} 抵抗對抗：{la}({va}) vs {lb}({vb}) → 目標 {target}% {roll} {outcome}",
+      "resist": "**{nick}** 的抵抗對抗：\n> **{la}**（{va}） vs **{lb}**（{vb}）\n> 目標 `{target}%` · 出目 `{roll}` · **{outcome}**",
       "resist_win": "{a} 勝！",
       "resist_lose": "{a} 敗（{b} 抵抗成功）"
     },
@@ -100,7 +100,7 @@
       }
     },
     "coc": {
-      "build": "{nick}的調查員作成:{res}",
+      "build": "**{nick}** 的調查員作成：{res}",
       "total": "共計",
       "attr": {
         "str": "力量",
@@ -115,14 +115,14 @@
       }
     },
     "dnd": {
-      "build": "為{nick}的冒險者生成隨機六維（降序）:{res}",
+      "build": "為 **{nick}** 的冒險者生成隨機六維（降序）：{res}",
       "total": "總計"
     },
     "sc": {
-      "result": "理智檢定 {output}"
+      "result": "**理智檢定**\n{output}"
     },
     "st": {
-      "result": "技能檢定 {output}"
+      "result": "**技能檢定**\n{output}"
     }
   },
   "card": {
@@ -140,7 +140,7 @@
       "usage": "指令 .sc 用法：.sc 成功損失/失敗損失 [當前San]，如 .sc 1/1d6 70；已 .st 理智 可省略 San",
       "no_san": "未設定 San 值，請先 .st 理智 [數值]，或在指令後給出當前 San",
       "invalid_san": "San 值需為 1-99 的整數",
-      "result": "{nick} 的理智檢定：1D100={res}/{san} {grade}\n理智減少 {loss} → 剩餘 {final}",
+      "result": "**{nick}** 的理智檢定：`1D100={res}/{san}` **{grade}**\n> 理智減少 {loss} → 剩餘 {final}",
       "result_noloss": "{nick} 的理智檢定：1D100={res}/{san} {grade}\n無理智損失"
     },
     "en": {
@@ -677,7 +677,7 @@
     },
     "ds": {
       "need_zero": "{nick} 目前並非瀕死（HP 需為 0）才能進行死亡豁免。",
-      "result": "{nick} 的死亡豁免檢定：[1d20={roll}]={total} {outcome}",
+      "result": "**{nick}** 的死亡豁免檢定：`[1d20={roll}]={total}` **{outcome}**",
       "success": "成功！死亡豁免成功 +1",
       "fail": "有些不妙！死亡豁免失敗 +1",
       "critfail": "大失敗！死亡豁免失敗 +2",
@@ -688,14 +688,14 @@
     },
     "rc": {
       "usage": "指令 .rc 用法（DND 模式）：.rc <屬性>[+調整] [原因]，可加 優勢/劣勢,如 .rc 優勢 力量+2",
-      "result": "{nick} 的「{attr}」檢定：{roll} {mod} = {total}"
+      "result": "**{nick}** 的 **{attr}** 檢定：`{roll} {mod} = {total}`"
     },
     "rdc": {
       "usage": "DND 調整值檢定：.rdc [輪數#] [B/P] [屬性或技能] [±加值] [理由] [成功閾值]。屬性按(屬性值-10)/2向下取整，技能讀取獨立檢定加值；B取高、P取低，輪數最多9。例：.rdc 3# B 力量+2 破門 15",
       "mode_off": ".rdc 僅能在已開啟 DND5e 模式的群中使用（.setdnd on）。",
       "turns": "輪數必須為 1 至 9。",
       "no_value": "找不到 DND 屬性或技能「{attr}」。",
-      "result": "{nick} 的「{attr}」調整值檢定{reason}：\n{detail}"
+      "result": "**{nick}** 的 **{attr}** 調整值檢定{reason}：\n{detail}"
     }
   },
   "setdnd": {

@@ -10,6 +10,7 @@
 #include "qq_gateway_socket.h"
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
+#include "../common/markdown.h"
 
 #include <drogon/HttpClient.h>
 
@@ -110,8 +111,15 @@ private:
     /// KOOK CardMessage is a documented rich-message type.  Keep oversized
     /// messages in the existing KMarkdown/text path so no reply is truncated.
     json outboundPayload(const std::string& target, const std::string& content) {
-        if (!effectiveCardMode() || content.size() > 5000)
-            return json{{"type", 1}, {"target_id", target}, {"content", content}};
+        if (content.size() > 5000)
+            return json{{"type", 1}, {"target_id", target}, {"content", markdown::toPlainText(content)}};
+        if (!effectiveCardMode()) {
+            // KOOK type=9 is KMarkdown text rather than a card. Use it only
+            // when the shared reply actually contains formatting so ordinary
+            // dice expressions are not interpreted as markup.
+            const int type = markdown::hasFormatting(content) ? 9 : 1;
+            return json{{"type", type}, {"target_id", target}, {"content", content}};
+        }
         const json card = json::array({{
             {"type", "card"}, {"theme", "primary"}, {"size", "sm"},
             {"modules", json::array({{

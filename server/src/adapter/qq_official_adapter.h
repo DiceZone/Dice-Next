@@ -7,6 +7,7 @@
 #include "qq_gateway_socket.h"
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
+#include "../common/markdown.h"
 
 #include <drogon/HttpClient.h>
 #include <drogon/utils/Utilities.h>
@@ -931,17 +932,23 @@ private:
 
         auto client = httpsClient("api.bot.qq.com");
         if (!client) { lastError_ = "无法解析 api.bot.qq.com"; return; }
-        const bool useCard = effectiveCardMode() && !forceTraditional && m.type != MessageType::kChannel;
+        // Group/C2C Markdown is a native QQ Bot 2.0 message type. Besides the
+        // explicit card mode, use it for shared default replies that contain
+        // Markdown. Channel messages and fallback retries are plain text.
+        const bool useMarkdown = !forceTraditional && m.type != MessageType::kChannel &&
+                                 (effectiveCardMode() || markdown::hasFormatting(text));
+        std::string wireText = useMarkdown ? text : markdown::toPlainText(text);
+        if (wireText.empty() && !text.empty()) wireText = text;
 
         auto request = drogon::HttpRequest::newHttpRequest();
         request->setMethod(drogon::Post); request->setPath(path);
         request->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         request->addHeader("Host", "api.bot.qq.com");
         request->addHeader("Authorization", "QQBot " + accessToken_);
-        json body = useCard
-            ? json{{"content", " "}, {"msg_type", 2}, {"markdown", {{"content", text}, {"force_verify_image_resource", forceVerifyImageResource_}}}}
-            : json{{"content", text}};
-        if (!useCard && m.type != MessageType::kChannel) body["msg_type"] = 0;
+        json body = useMarkdown
+            ? json{{"content", " "}, {"msg_type", 2}, {"markdown", {{"content", wireText}, {"force_verify_image_resource", forceVerifyImageResource_}}}}
+            : json{{"content", wireText}};
+        if (!useMarkdown && m.type != MessageType::kChannel) body["msg_type"] = 0;
         if (!m.id.empty()) {
             body["msg_id"] = m.id;
             const int seq = nextReplySeq(m.id);
@@ -951,9 +958,9 @@ private:
             if (!eventId.empty()) body["event_id"] = eventId;
         }
         request->setBody(body.dump());
-        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, useCard](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
+        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, useMarkdown](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
             const bool httpRejected = response && response->statusCode() >= 300;
-            if (useCard && httpRejected) {
+            if (useMarkdown && httpRejected) {
                 DICE_LOG_WARN("QQOfficial '{}': Markdown/card message rejected by {}, retrying traditional text", self->name_, path);
                 self->sendTextTo(message, text, true);
                 return;

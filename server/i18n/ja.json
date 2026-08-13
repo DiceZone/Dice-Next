@@ -38,21 +38,21 @@
     },
     "pool": {
       "usage": "コマンド .ww の使い方: .ww <ダイス数> [成功値]、または .ww <ダイス数>a<振り足し値>c<成功値>+<追加成功>。例: .ww 10a8c7+2（a は既定10、c は既定8）",
-      "result": "{nick} のダイス: {expr}"
+      "result": "**{nick}** のダイス: `{expr}`"
     },
     "dx": {
       "usage": "コマンド .dx の使い方: .dx <ダイス数>c<クリティカル値>（ダブルクロス、例 .dx 3c8）または .dx <ダイス数>a<目標値>（成功プール/WoD、例 .dx 5a7）"
     },
     "rav": {
       "usage": "コマンド .rav の使い方: .rav <A> <B>（数値または能力値）、例 .rav 60 50 または .rav 目星 隠密",
-      "result": "{nick} の対抗判定:\n{la}: 1D100={ra}/{va} {lva}\n{lb}: 1D100={rb}/{vb} {lvb}\n{outcome}",
+      "result": "**{nick}** の対抗判定:\n> **{la}**: `1D100={ra}/{va}` {lva}\n> **{lb}**: `1D100={rb}/{vb}` {lvb}\n**{outcome}**",
       "a_wins": "「{a}」の勝ち！",
       "b_wins": "「{b}」の勝ち！",
       "tie": "引き分け"
     },
     "check": {
-      "result": "{nick} の{attr}ロール: {roll}/{rate} {level}",
-      "result_reason": "{reason}のため、{nick} の{attr}ロール: {roll}/{rate} {level}",
+      "result": "**{nick}** の **{attr}** ロール: `{roll}/{rate}` **{level}**",
+      "result_reason": "**{reason}** のため、**{nick}** の **{attr}** ロール: `{roll}/{rate}` **{level}**",
       "need_value": "目標値を指定してください。例 .ra 目星 60",
       "no_card": "能力値「{attr}」が見つかりません。先に .st で登録するか、.ra {attr} 60 のように値を指定してください",
       "preview_invalid": "指定出目を解析できません。.ra(出目)成功率（例: .ra(1)50）を使用してください",
@@ -73,10 +73,10 @@
       "success": "成功",
       "failure": "失敗",
       "fumble": "ファンブル！",
-      "result": "{nick} の{attr}ロール: {roll}/{rate} {level}",
-      "result_reason": "{reason}のため、{nick} の{attr}ロール: {roll}/{rate} {level}",
+      "result": "**{nick}** の **{attr}** ロール: `{roll}/{rate}` **{level}**",
+      "result_reason": "**{reason}** のため、**{nick}** の **{attr}** ロール: `{roll}/{rate}` **{level}**",
       "resist_usage": "使い方: .bav <能動値/能力値> <受動値/能力値> — BRP抵抗表。例 .bav STR SIZ",
-      "resist": "{nick} の抵抗: {la}({va}) vs {lb}({vb}) → 目標 {target}% {roll} {outcome}",
+      "resist": "**{nick}** の抵抗判定:\n> **{la}**（{va}） vs **{lb}**（{vb}）\n> 目標 `{target}%` · ロール `{roll}` · **{outcome}**",
       "resist_win": "{a} の勝ち！",
       "resist_lose": "{a} の負け（{b} が抵抗成功）"
     },
@@ -95,7 +95,7 @@
       }
     },
     "coc": {
-      "build": "{nick} の探索者:{res}",
+      "build": "**{nick}** の探索者:{res}",
       "total": "合計",
       "attr": {
         "str": "STR",
@@ -110,14 +110,14 @@
       }
     },
     "dnd": {
-      "build": "{nick} の冒険者の能力値（降順）:{res}",
+      "build": "**{nick}** の冒険者の能力値（降順）:{res}",
       "total": "合計 "
     },
     "sc": {
-      "result": "正気度判定 {output}"
+      "result": "**正気度判定**\n{output}"
     },
     "st": {
-      "result": "技能判定 {output}"
+      "result": "**技能判定**\n{output}"
     }
   },
   "card": {
@@ -135,7 +135,7 @@
       "usage": "コマンド .sc の使い方: .sc <成功時減少>/<失敗時減少> [現在SAN]、例 .sc 1/1d6 70；理智を設定済みならSANは省略可",
       "no_san": "SAN値が未設定です — 先に .st 理智 [値] を使うか、コマンドの後に現在SANを指定してください",
       "invalid_san": "SANは1〜99の整数で指定してください",
-      "result": "{nick} の正気度判定: 1D100={res}/{san} {grade}\nSAN -{loss} → 残り {final}",
+      "result": "**{nick}** の正気度判定: `1D100={res}/{san}` **{grade}**\n> SAN -{loss} → 残り {final}",
       "result_noloss": "{nick} の正気度判定: 1D100={res}/{san} {grade}\nSAN減少なし"
     },
     "en": {
@@ -672,7 +672,7 @@
     },
     "ds": {
       "need_zero": "{nick} は死亡判定を行うには瀕死（HP = 0）である必要があります。",
-      "result": "{nick} の死亡判定: [1d20={roll}]={total} {outcome}",
+      "result": "**{nick}** の死亡判定: `[1d20={roll}]={total}` **{outcome}**",
       "success": "成功！ 死亡判定の成功 +1",
       "fail": "まずい！ 死亡判定の失敗 +1",
       "critfail": "致命的失敗！ 死亡判定の失敗 +2",
@@ -683,14 +683,14 @@
     },
     "rc": {
       "usage": "コマンド .rc の使い方（DNDモード）: .rc <能力>[+補正] [理由]、有利/不利も可、例 .rc 优势 力量+2",
-      "result": "{nick} の「{attr}」判定: {roll} {mod} = {total}"
+      "result": "**{nick}** の **{attr}** 判定: `{roll} {mod} = {total}`"
     },
     "rdc": {
       "usage": "DND 調整値判定: .rdc [回数#] [B/P] [能力値または技能] [±補正] [理由] [成功閾値]。能力値は floor((能力値-10)/2)、技能は独立した判定補正を使用します。Bは高い方、Pは低い方、最大9回。例: .rdc 3# B 力量+2 扉を破る 15",
       "mode_off": ".rdc はこのグループで DND5e モードを有効にした場合のみ使えます（.setdnd on）。",
       "turns": "回数は 1 から 9 の間で指定してください。",
       "no_value": "DND 能力値または技能「{attr}」が見つかりません。",
-      "result": "{nick} の「{attr}」調整値判定{reason}:\n{detail}"
+      "result": "**{nick}** の **{attr}** 調整値判定{reason}:\n{detail}"
     }
   },
   "setdnd": {

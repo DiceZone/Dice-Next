@@ -37,21 +37,21 @@
     },
     "pool": {
       "usage": "Command .ww usage: .ww <dice> [success-line], or .ww <dice>a<add-line>c<success-line>+<bonus>, e.g. .ww 10a8c7+2 (a defaults to 10; c defaults to 8)",
-      "result": "{nick} rolls: {expr}"
+      "result": "**{nick}** rolls: `{expr}`"
     },
     "dx": {
       "usage": "Command .dx usage: .dx <dice>c<add-line> (double-cross, e.g. .dx 3c8) or .dx <dice>a<add-line> (success pool/WoD, e.g. .dx 5a7)"
     },
     "rav": {
       "usage": "Command .rav usage: .rav <A> <B> (values or attributes), e.g. .rav 60 50 or .rav Spot Sneak",
-      "result": "{nick}'s opposed check:\n{la}: 1D100={ra}/{va} {lva}\n{lb}: 1D100={rb}/{vb} {lvb}\n{outcome}",
+      "result": "**{nick}** makes an opposed check:\n> **{la}**: `1D100={ra}/{va}` {lva}\n> **{lb}**: `1D100={rb}/{vb}` {lvb}\n**{outcome}**",
       "a_wins": "\"{a}\" wins!",
       "b_wins": "\"{b}\" wins!",
       "tie": "Tie"
     },
     "check": {
-      "result": "{nick} rolls {attr}: {roll}/{rate} {level}",
-      "result_reason": "For {reason}, {nick} rolls {attr}: {roll}/{rate} {level}",
+      "result": "**{nick}** rolls **{attr}**: `{roll}/{rate}` **{level}**",
+      "result_reason": "For **{reason}**, **{nick}** rolls **{attr}**: `{roll}/{rate}` **{level}**",
       "need_value": "Please provide a target value, e.g. .ra Spot 60",
       "no_card": "Attribute \"{attr}\" not found; set it with .st first, or give a value like .ra {attr} 60",
       "preview_invalid": "Invalid fixed outcome; use .ra(outcome)rate, for example .ra(1)50",
@@ -72,10 +72,10 @@
       "success": "Success",
       "failure": "Failure",
       "fumble": "Fumble!",
-      "result": "{nick} rolls {attr}: {roll}/{rate} {level}",
-      "result_reason": "For {reason}, {nick} rolls {attr}: {roll}/{rate} {level}",
+      "result": "**{nick}** rolls **{attr}**: `{roll}/{rate}` **{level}**",
+      "result_reason": "For **{reason}**, **{nick}** rolls **{attr}**: `{roll}/{rate}` **{level}**",
       "resist_usage": "Usage: .bav <active value/attr> <passive value/attr> — BRP resistance table. e.g. .bav STR SIZ",
-      "resist": "{nick} resistance: {la}({va}) vs {lb}({vb}) → target {target}% {roll} {outcome}",
+      "resist": "**{nick}** resistance:\n> **{la}** ({va}) vs **{lb}** ({vb})\n> Target `{target}%` · Roll `{roll}` · **{outcome}**",
       "resist_win": "{a} wins!",
       "resist_lose": "{a} loses ({b} resists)"
     },
@@ -94,7 +94,7 @@
       }
     },
     "coc": {
-      "build": "{nick}'s investigator:{res}",
+      "build": "**{nick}**'s investigator:{res}",
       "total": "Total",
       "attr": {
         "str": "STR",
@@ -109,14 +109,14 @@
       }
     },
     "dnd": {
-      "build": "{nick}'s adventurer ability scores (descending):{res}",
+      "build": "**{nick}**'s adventurer ability scores (descending):{res}",
       "total": "Total "
     },
     "sc": {
-      "result": "Sanity check {output}"
+      "result": "**Sanity check**\n{output}"
     },
     "st": {
-      "result": "Skill check {output}"
+      "result": "**Skill check**\n{output}"
     }
   },
   "card": {
@@ -134,7 +134,7 @@
       "usage": "Command .sc usage: .sc <successLoss>/<failLoss> [currentSan], e.g. .sc 1/1d6 70; omit San if 理智 is set",
       "no_san": "No San value set — use .st 理智 [value] first, or pass current San after the command",
       "invalid_san": "San must be an integer between 1 and 99",
-      "result": "{nick}'s Sanity Check: 1D100={res}/{san} {grade}\nSan -{loss} → {final} left",
+      "result": "**{nick}**'s Sanity Check: `1D100={res}/{san}` **{grade}**\n> San -{loss} → {final} left",
       "result_noloss": "{nick}'s Sanity Check: 1D100={res}/{san} {grade}\nNo San loss"
     },
     "en": {
@@ -671,7 +671,7 @@
     },
     "ds": {
       "need_zero": "{nick} must be dying (HP = 0) to make a death save.",
-      "result": "{nick}'s death save: [1d20={roll}]={total} {outcome}",
+      "result": "**{nick}**'s death save: `[1d20={roll}]={total}` **{outcome}**",
       "success": "Success! Death-save success +1",
       "fail": "Not good! Death-save failure +1",
       "critfail": "Critical fail! Death-save failure +2",
@@ -682,14 +682,14 @@
     },
     "rc": {
       "usage": "Command .rc usage (DND mode): .rc <ability>[+mod] [reason], optional advantage/disadvantage, e.g. .rc 优势 力量+2",
-      "result": "{nick}'s \"{attr}\" check: {roll} {mod} = {total}"
+      "result": "**{nick}**'s **{attr}** check: `{roll} {mod} = {total}`"
     },
     "rdc": {
       "usage": "DND ability-modifier check: .rdc [rounds#] [B/P] [ability or skill] [±bonus] [reason] [DC]. Ability modifiers use floor((score-10)/2); skills use their separate check modifier. B keeps high, P keeps low; maximum 9 rounds. Example: .rdc 3# B strength+2 force door 15",
       "mode_off": ".rdc can only be used when DND5e mode is enabled for this group (.setdnd on).",
       "turns": "Rounds must be between 1 and 9.",
       "no_value": "No DND ability score or skill modifier found for \"{attr}\".",
-      "result": "{nick}'s \"{attr}\" ability-modifier check{reason}:\n{detail}"
+      "result": "**{nick}**'s **{attr}** ability-modifier check{reason}:\n{detail}"
     }
   },
   "setdnd": {

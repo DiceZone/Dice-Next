@@ -44,21 +44,21 @@
     },
     "pool": {
       "usage": "指令 .ww 用法：.ww 骰数 [成功线]；或 .ww 骰数a加骰线c成功线+附加成功，如 .ww 10a8c7+2（a默认10，c默认8）",
-      "result": "{nick} 掷骰：{expr}"
+      "result": "**{nick}** 掷骰：`{expr}`"
     },
     "dx": {
       "usage": "指令 .dx 用法：.dx 骰数c加骰线（双十字，如 .dx 3c8）或 .dx 骰数a加骰线（数成功骰池/WoD，如 .dx 5a7）"
     },
     "rav": {
       "usage": "指令 .rav 用法：.rav 甲 乙（数值或属性），如 .rav 60 50 或 .rav 侦查 潜行",
-      "result": "{nick} 的对抗检定：\n{la}：1D100={ra}/{va} {lva}\n{lb}：1D100={rb}/{vb} {lvb}\n{outcome}",
+      "result": "**{nick}** 的对抗检定：\n> **{la}**：`1D100={ra}/{va}` {lva}\n> **{lb}**：`1D100={rb}/{vb}` {lvb}\n**{outcome}**",
       "a_wins": "「{a}」胜出！",
       "b_wins": "「{b}」胜出！",
       "tie": "平局"
     },
     "check": {
-      "result": "{nick}进行{attr}检定：{roll}/{rate} {level}",
-      "result_reason": "由于{reason} {nick}进行{attr}检定：{roll}/{rate} {level}",
+      "result": "**{nick}** 进行 **{attr}** 检定：`{roll}/{rate}` **{level}**",
+      "result_reason": "由于 **{reason}**，**{nick}** 进行 **{attr}** 检定：`{roll}/{rate}` **{level}**",
       "need_value": "请给出属性值，例如 .ra 侦查 60",
       "no_card": "未找到属性「{attr}」，请先用 .st 录入，或直接 .ra {attr} 数值",
       "preview_invalid": "指定出目解析失败，请使用 .ra(出目)成功率，例如 .ra(1)50",
@@ -79,10 +79,10 @@
       "success": "成功",
       "failure": "失败",
       "fumble": "大失败！",
-      "result": "{nick}进行{attr}检定：{roll}/{rate} {level}",
-      "result_reason": "由于{reason} {nick}进行{attr}检定：{roll}/{rate} {level}",
+      "result": "**{nick}** 进行 **{attr}** 检定：`{roll}/{rate}` **{level}**",
+      "result_reason": "由于 **{reason}**，**{nick}** 进行 **{attr}** 检定：`{roll}/{rate}` **{level}**",
       "resist_usage": "用法：.bav <主动值/属性> <被动值/属性> —— BRP 抵抗表对抗。例 .bav 力量 体型",
-      "resist": "{nick} 抵抗对抗：{la}({va}) vs {lb}({vb}) → 目标 {target}% {roll} {outcome}",
+      "resist": "**{nick}** 的抵抗对抗：\n> **{la}**（{va}） vs **{lb}**（{vb}）\n> 目标 `{target}%` · 出目 `{roll}` · **{outcome}**",
       "resist_win": "{a} 胜！",
       "resist_lose": "{a} 败（{b} 抵抗成功）"
     },
@@ -101,7 +101,7 @@
       }
     },
     "coc": {
-      "build": "{nick}的调查员作成:{res}",
+      "build": "**{nick}** 的调查员作成：{res}",
       "total": "共计",
       "attr": {
         "str": "力量",
@@ -116,14 +116,14 @@
       }
     },
     "dnd": {
-      "build": "为{nick}的冒险者生成随机六维（降序）:{res}",
+      "build": "为 **{nick}** 的冒险者生成随机六维（降序）：{res}",
       "total": "总计"
     },
     "sc": {
-      "result": "理智检定 {output}"
+      "result": "**理智检定**\n{output}"
     },
     "st": {
-      "result": "技能检定 {output}"
+      "result": "**技能检定**\n{output}"
     }
   },
   "card": {
@@ -141,7 +141,7 @@
       "usage": "指令 .sc 用法：.sc 成功损失/失败损失 [当前San]，如 .sc 1/1d6 70；已 .st 理智 可省略 San",
       "no_san": "未设定 San 值，请先 .st 理智 [数值]，或在指令后给出当前 San",
       "invalid_san": "San 值需为 1-99 的整数",
-      "result": "{nick} 的理智检定：1D100={res}/{san} {grade}\n理智减少 {loss} → 剩余 {final}",
+      "result": "**{nick}** 的理智检定：`1D100={res}/{san}` **{grade}**\n> 理智减少 {loss} → 剩余 {final}",
       "result_noloss": "{nick} 的理智检定：1D100={res}/{san} {grade}\n无理智损失"
     },
     "en": {
@@ -678,7 +678,7 @@
     },
     "ds": {
       "need_zero": "{nick} 当前并非濒死（HP 需为 0）才能进行死亡豁免。",
-      "result": "{nick} 的死亡豁免检定：[1d20={roll}]={total} {outcome}",
+      "result": "**{nick}** 的死亡豁免检定：`[1d20={roll}]={total}` **{outcome}**",
       "success": "成功！死亡豁免成功 +1",
       "fail": "有些不妙！死亡豁免失败 +1",
       "critfail": "大失败！死亡豁免失败 +2",
@@ -689,14 +689,14 @@
     },
     "rc": {
       "usage": "指令 .rc 用法（DND 模式）：.rc <属性>[+调整] [原因]，可加 优势/劣势,如 .rc 优势 力量+2",
-      "result": "{nick} 的「{attr}」检定：{roll} {mod} = {total}"
+      "result": "**{nick}** 的 **{attr}** 检定：`{roll} {mod} = {total}`"
     },
     "rdc": {
       "usage": "DND 调整值检定：.rdc [轮数#] [B/P] [属性或技能] [±加值或骰式] [理由] [成功阈值]。属性按(属性值-10)/2向下取整，技能读取独立检定加值；B取高、P取低，轮数最多9。加值可写 +2 或 +1d4，支持紧凑写法 .rdc3#+1d4力量 15。",
       "mode_off": ".rdc 仅能在已开启 DND5e 模式的群中使用（.setdnd on）。",
       "turns": "轮数必须为 1 至 9。",
       "no_value": "找不到 DND 属性或技能「{attr}」。",
-      "result": "{nick}进行{attr}检定{reason}:\n{detail}"
+      "result": "**{nick}** 进行 **{attr}** 检定{reason}：\n{detail}"
     }
   },
   "setdnd": {

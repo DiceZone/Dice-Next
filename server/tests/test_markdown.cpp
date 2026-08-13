@@ -49,3 +49,14 @@ TEST(markdown, detects_common_formatting) {
     EXPECT_TRUE(hasFormatting("# heading"));
     EXPECT_FALSE(hasFormatting("1d6*2+1 snake_case"));
 }
+
+TEST(markdown, downgraded_default_roll_has_no_markdown_markers) {
+    const std::string formatted =
+        "**Alice** makes a **Spot Hidden** check: `42/60` **Success**\n"
+        "> Result: `1D100=42`";
+    const std::string plain = toPlainText(formatted);
+    EXPECT_EQ(plain,
+              "Alice makes a Spot Hidden check: 42/60 Success\n"
+              "Result: 1D100=42");
+    EXPECT_FALSE(hasFormatting(plain));
+}
