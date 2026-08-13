@@ -62,20 +62,38 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: main
-      - uses: actions/checkout@v4
-        with:
-          repository: DiceZone/onedice-cpp-lib
-          path: onedice-cpp-lib
-          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+      - name: Checkout onedice-cpp-lib (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf onedice-cpp-lib
+            if git clone --depth 1 https://github.com/DiceZone/onedice-cpp-lib.git onedice-cpp-lib; then
+              break
+            fi
+            echo "onedice-cpp-lib clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d onedice-cpp-lib/.git ] || { echo "onedice-cpp-lib clone failed after 3 attempts" >&2; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           name: webui-dist
           path: web/dist
-      - uses: actions/checkout@v4
-        with:
-          repository: DiceZone/Dice-Next-Doc
-          path: docs
-          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+      - name: Checkout docs (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf docs
+            if git clone --depth 1 https://github.com/DiceZone/Dice-Next-Doc.git docs; then
+              break
+            fi
+            echo "Dice-Next-Doc clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d docs/.git ] || { echo "Dice-Next-Doc clone failed after 3 attempts" >&2; exit 1; }
       - name: Install build tools
         run: |
           sudo apt-get update
@@ -157,20 +175,38 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: main
-      - uses: actions/checkout@v4
-        with:
-          repository: DiceZone/onedice-cpp-lib
-          path: onedice-cpp-lib
-          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+      - name: Checkout onedice-cpp-lib (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf onedice-cpp-lib
+            if git clone --depth 1 https://github.com/DiceZone/onedice-cpp-lib.git onedice-cpp-lib; then
+              break
+            fi
+            echo "onedice-cpp-lib clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d onedice-cpp-lib/.git ] || { echo "onedice-cpp-lib clone failed after 3 attempts" >&2; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           name: webui-dist
           path: web/dist
-      - uses: actions/checkout@v4
-        with:
-          repository: DiceZone/Dice-Next-Doc
-          path: docs
-          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+      - name: Checkout docs (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf docs
+            if git clone --depth 1 https://github.com/DiceZone/Dice-Next-Doc.git docs; then
+              break
+            fi
+            echo "Dice-Next-Doc clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d docs/.git ] || { echo "Dice-Next-Doc clone failed after 3 attempts" >&2; exit 1; }
 
       - name: Restore vcpkg cache
         uses: actions/cache@v4
@@ -264,20 +300,38 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: main
-      - uses: actions/checkout@v4
-        with:
-          repository: DiceZone/onedice-cpp-lib
-          path: onedice-cpp-lib
-          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+      - name: Checkout onedice-cpp-lib (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf onedice-cpp-lib
+            if git clone --depth 1 https://github.com/DiceZone/onedice-cpp-lib.git onedice-cpp-lib; then
+              break
+            fi
+            echo "onedice-cpp-lib clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d onedice-cpp-lib/.git ] || { echo "onedice-cpp-lib clone failed after 3 attempts" >&2; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           name: webui-dist
           path: web/dist
-      - uses: actions/checkout@v4
-        with:
-          repository: DiceZone/Dice-Next-Doc
-          path: docs
-          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+      - name: Checkout docs (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf docs
+            if git clone --depth 1 https://github.com/DiceZone/Dice-Next-Doc.git docs; then
+              break
+            fi
+            echo "Dice-Next-Doc clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d docs/.git ] || { echo "Dice-Next-Doc clone failed after 3 attempts" >&2; exit 1; }
       - name: Restore vcpkg cache
         uses: actions/cache@v4
         with:
