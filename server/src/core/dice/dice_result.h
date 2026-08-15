@@ -7,6 +7,12 @@
 namespace dice {
 
 using json = nlohmann::json;
+enum class DiceFailureKind {
+    kNone,
+    kUnsupportedSyntax,
+    kEvaluation,
+};
+
 
 /**
  * @brief Result of a dice roll operation.
@@ -38,6 +44,7 @@ struct DiceResult {
     std::string formattedOutput;
     std::string error;
     int errorCode = 0;
+    DiceFailureKind failureKind = DiceFailureKind::kNone;
 
     // ─── Convenience ──────────────────────────────────────────
 
@@ -67,7 +74,8 @@ struct DiceResult {
     static DiceResult failure(
         const std::string& expr,
         const std::string& errorMsg,
-        int code = 2001);
+        int code = 2001,
+        DiceFailureKind kind = DiceFailureKind::kUnsupportedSyntax);
 
     // ─── JSON Serialization ───────────────────────────────────
 
@@ -107,12 +115,14 @@ inline DiceResult DiceResult::success(
 inline DiceResult DiceResult::failure(
     const std::string& expr,
     const std::string& errorMsg,
-    int code) {
+    int code,
+    DiceFailureKind kind) {
 
     DiceResult r;
     r.expression = expr;
     r.error = errorMsg;
     r.errorCode = code;
+    r.failureKind = kind;
     return r;
 }
 

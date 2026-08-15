@@ -141,9 +141,11 @@ DiceResult DiceExpression::evaluate(const std::string& input) {
         return DiceResult::success(input, results, total, false, false,
                                     formatted, formatted);
     } catch (const AppException& e) {
-        return DiceResult::failure(input, e.userMessage(), e.errorCodeInt());
+        return DiceResult::failure(input, e.userMessage(), e.errorCodeInt(),
+                                   DiceFailureKind::kEvaluation);
     } catch (const std::exception& e) {
-        return DiceResult::failure(input, std::string("evaluation error: ") + e.what(), 2001);
+        return DiceResult::failure(input, std::string("evaluation error: ") + e.what(), 2001,
+                                   DiceFailureKind::kEvaluation);
     }
 }
 

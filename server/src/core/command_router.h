@@ -27,6 +27,7 @@
 #include <chrono>
 #include <functional>
 #include "../config/config_manager.h"
+#include "../config/scoped_settings.h"
 #include "../common/logger.h"
 #include "../common/version.h"
 #include "../common/utils.h"
@@ -607,6 +608,90 @@ private:
         return out.str();
     }
 
+    struct RoutedExpressionResult {
+        bool ok = false;
+        std::string detail;
+        std::string error;
+        std::string engine;
+        std::vector<int> individualResults;
+    };
+
+    static std::vector<std::string> normalizeExpressionOrder(const nlohmann::json& value) {
+        static const std::array<std::string, 3> valid = {"dicenext", "onedice", "dicescript"};
+        std::vector<std::string> order;
+        if (value.is_array()) {
+            for (const auto& item : value) {
+                if (!item.is_string()) continue;
+                const std::string id = item.get<std::string>();
+                if (std::find(valid.begin(), valid.end(), id) == valid.end()) continue;
+                if (std::find(order.begin(), order.end(), id) == order.end()) order.push_back(id);
+            }
+        }
+        if (order.empty()) order.assign(valid.begin(), valid.end());
+        return order;
+    }
+
+    std::vector<std::string> expressionOrder(const Message& msg) const {
+        nlohmann::json diceSettings = nlohmann::json::object();
+        try {
+            diceSettings = scoped_settings::resolveSection(
+                cfg_.getAll(), "dice", msg.platform, msg.adapterId);
+        } catch (...) {}
+        const std::string mode = diceSettings.value("expression_mode", std::string("enhanced"));
+        if (mode == "original") return {"dicenext"};
+        if (mode == "compatible") return {"dicenext", "onedice"};
+        if (mode == "custom")
+            return normalizeExpressionOrder(diceSettings.value("expression_order", nlohmann::json::array()));
+        return {"dicenext", "onedice", "dicescript"};
+    }
+
+    static constexpr bool diceScriptAvailable() noexcept {
+        // DiceScript's generated C99 library has not been published upstream yet.
+        // This stable slot keeps configuration/order compatible; the bridge will
+        // replace this capability check when the C API becomes available.
+        return false;
+    }
+
+    RoutedExpressionResult evaluateExpression(const Message& msg, const std::string& expr) {
+        std::string lastUnsupported;
+        bool attempted = false;
+        bool skippedDiceScript = false;
+        for (const std::string& id : expressionOrder(msg)) {
+            if (id == "dicenext") {
+                attempted = true;
+                auto result = engine_.roll(expr);
+                if (result.ok()) return {true, result.formattedOutput, {}, id, result.individualResults};
+                if (result.failureKind == DiceFailureKind::kEvaluation)
+                    return {false, {}, result.error, id, {}};
+                lastUnsupported = result.error;
+                continue;
+            }
+            if (id == "onedice") {
+                attempted = true;
+                auto probe = onedice::eval(expr, 100, [](long long) { return 1LL; });
+                if (!probe.ok) {
+                    if (probe.errorKind == onedice::ErrorKind::Evaluation)
+                        return {false, {}, probe.error, id, {}};
+                    lastUnsupported = probe.error;
+                    continue;
+                }
+                if (auto fate = tryFate(expr)) return {true, *fate, {}, id, {}};
+                auto result = onedice::eval(expr, 100);
+                if (!result.ok) return {false, {}, result.error, id, {}};
+                return {true, result.detail, {}, id, {}};
+            }
+            if (id == "dicescript" && !diceScriptAvailable()) {
+                skippedDiceScript = true;
+                continue;
+            }
+        }
+        if (!attempted && skippedDiceScript)
+            return {false, {}, "DiceScript C99 组件尚未包含在当前构建中", "dicescript", {}};
+        if (lastUnsupported.empty() && skippedDiceScript)
+            lastUnsupported = "DiceScript C99 组件尚未包含在当前构建中";
+        return {false, {}, lastUnsupported.empty() ? "unsupported expression" : lastUnsupported, {}, {}};
+    }
+
     /// Detect & handle a roll command (".r", ".rh", ".rs", ".r3d6", ".r3d6 攻击").
     /// Returns nullopt if `cmd` is not a roll command (so other handlers run).
     std::optional<std::string> tryHandleRoll(Locale loc, const Message& msg,
@@ -711,39 +796,24 @@ private:
             }
         }
 
-        // 命运骰 NdF (Fate / Fudge dice)
-        if (auto fate = tryFate(expr)) {
-            return i18n_.tr(loc, reason.empty() ? "dice.roll.result" : "dice.roll.result_reason",
-                {{"nick", nick}, {"reason", reason}, {"res", *fate}});
-        }
-
         if (turns == 1) {
-            auto result = engine_.roll(expr);
-            std::string res;
-            if (result.ok()) {
+            auto result = evaluateExpression(msg, expr);
+            if (!result.ok) return i18n_.tr(loc, "dice.error.roll", {{"error", result.error}});
+            if (!result.individualResults.empty())
                 recordSimpleDiceResult(expr, result.individualResults);
-                res = result.formattedOutput;  // 原版 Dice! 格式优先
-            } else {
-                // Fall back to the OneDice standard engine for richer expressions
-                // the original parser doesn't handle (kh/kl、a/c 骰池、max/min …).
-                auto od = onedice::eval(expr, 100);
-                if (!od.ok) return i18n_.tr(loc, "dice.error.roll", {{"error", result.error}});
-                res = od.detail;
-            }
             return i18n_.tr(loc, reason.empty() ? "dice.roll.result" : "dice.roll.result_reason",
-                {{"nick", nick}, {"reason", reason}, {"res", res}});
+                {{"nick", nick}, {"reason", reason}, {"res", result.detail}});
         }
 
-        // Multi-roll: one result per line (each line but the last ends with ", ").
+        // Multi-roll uses the same configured engine chain for every round.
         std::ostringstream res;
         for (int i = 0; i < turns; ++i) {
-            auto result = engine_.roll(expr);
-            if (!result.ok()) {
-                return i18n_.tr(loc, "dice.error.roll", {{"error", result.error}});
-            }
-            recordSimpleDiceResult(expr, result.individualResults);
+            auto result = evaluateExpression(msg, expr);
+            if (!result.ok) return i18n_.tr(loc, "dice.error.roll", {{"error", result.error}});
+            if (!result.individualResults.empty())
+                recordSimpleDiceResult(expr, result.individualResults);
             if (i > 0) res << ", \n";
-            res << result.formattedOutput;
+            res << result.detail;
         }
         return i18n_.tr(loc, reason.empty() ? "dice.roll.multi" : "dice.roll.multi_reason",
             {{"nick", nick}, {"reason", reason},
@@ -3915,6 +3985,12 @@ private:
     }
 
 public:
+    std::string rollExpressionForAi(const Message& msg, const std::string& expression) {
+        auto result = evaluateExpression(msg, expression);
+        return result.ok ? result.detail
+                         : (std::string("表达式无效: ") + result.error);
+    }
+
     /// Whether this message explicitly @s this bot (not @all).
     static bool isAtSelf(const Message& msg) {
         return !msg.selfId.empty()

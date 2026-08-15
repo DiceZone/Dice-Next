@@ -9,6 +9,7 @@
 #include <thread>
 #include <algorithm>
 #include <cctype>
+#include <set>
 
 namespace dice {
 
@@ -32,6 +33,8 @@ static json makeDefaultConfig() {
             {"message_format", "traditional"},   // 出站消息表现形式：traditional / card
             {"blacklist_quit_level", "member"},  // 黑名单退群默认等级: member=任一成员触发 / admin=仅群主级触发
             {"respond_self", false},             // 自响应：用骰娘账号自身消息自控（默认关）
+            {"expression_mode", "enhanced"},    // enhanced / compatible / original / custom
+            {"expression_order", json::array({"dicenext", "onedice", "dicescript"})},
             {"console_start_hidden", true},      // 启动即最小化到托盘（隐藏控制台，退出走托盘）
             {"scoped_overrides", json::object()}, // #17: adapter/account overrides; account > adapter > global
             {"rules", {
@@ -130,6 +133,28 @@ static bool validateConfig(const json& value, std::string& error) {
     if (value.contains("dice") && value["dice"].contains("scoped_overrides")
         && !value["dice"]["scoped_overrides"].is_object()) {
         error = "dice.scoped_overrides 配置必须是对象"; return false;
+    }
+    if (value.contains("dice") && value["dice"].is_object()) {
+        const auto& dice = value["dice"];
+        if (dice.contains("expression_mode")) {
+            if (!dice["expression_mode"].is_string()) { error = "dice.expression_mode 必须是字符串"; return false; }
+            const std::string mode = dice["expression_mode"].get<std::string>();
+            if (mode != "enhanced" && mode != "compatible" && mode != "original" && mode != "custom") {
+                error = "dice.expression_mode 不是有效模式"; return false;
+            }
+        }
+        if (dice.contains("expression_order")) {
+            if (!dice["expression_order"].is_array()) { error = "dice.expression_order 必须是数组"; return false; }
+            std::set<std::string> seen;
+            for (const auto& engine : dice["expression_order"]) {
+                if (!engine.is_string()) { error = "dice.expression_order 只能包含字符串"; return false; }
+                const std::string id = engine.get<std::string>();
+                if ((id != "dicenext" && id != "onedice" && id != "dicescript") || !seen.insert(id).second) {
+                    error = "dice.expression_order 包含无效或重复的引擎"; return false;
+                }
+            }
+            if (seen.empty()) { error = "dice.expression_order 至少需要一个引擎"; return false; }
+        }
     }
     return true;
 }

@@ -924,14 +924,11 @@ static int realMain(int argc, char* argv[]) {
 
     // 智能化阶段D：AI 工具执行器工厂 —— 给定一条消息，返回一个 ToolExec 回调，能真的
     // 掷骰（骰子引擎）/抽牌（牌堆）/查属性（发送者人物卡）。供 AI 对话 function-calling 用。
-    auto makeAiTool = [&engine, &cardDeck, &cmdRouter](dice::Message m) -> dice::aitools::ToolExec {
-        return [&engine, &cardDeck, &cmdRouter, m](const std::string& tn, const nlohmann::json& ta) -> std::string {
+    auto makeAiTool = [&cardDeck, &cmdRouter](dice::Message m) -> dice::aitools::ToolExec {
+        return [&cardDeck, &cmdRouter, m](const std::string& tn, const nlohmann::json& ta) -> std::string {
             if (tn == "roll_dice") {
                 std::string expr = ta.value("expression", std::string("d100"));
-                auto res = engine.roll(expr);
-                if (res.ok()) return res.formattedOutput;
-                auto od = onedice::eval(expr, 100);
-                return od.ok ? od.detail : (std::string("\xe8\xa1\xa8\xe8\xbe\xbe\xe5\xbc\x8f\xe6\x97\xa0\xe6\x95\x88: ") + res.error);  // 表达式无效:
+                return cmdRouter.rollExpressionForAi(m, expr);
             }
             if (tn == "draw_deck") {
                 std::string dn = ta.value("name", std::string());

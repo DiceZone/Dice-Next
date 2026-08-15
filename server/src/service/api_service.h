@@ -2573,6 +2573,133 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         }).detach();
     }, {drogon::Post});
 
+    // ── 骰子表达式引擎链 ────────────────────────────────────────
+    // 全局 < 适配器类型 < 具体账号；只有“不支持该语法”才会继续下一个引擎。
+    app.registerHandler("/api/system/expression-engine", [&cfg, st](Req req, CB&& cb) {
+        try {
+            static const std::set<std::string> kModes = {
+                "enhanced", "compatible", "original", "custom"
+            };
+            static const std::array<std::string, 3> kEngines = {
+                "dicenext", "onedice", "dicescript"
+            };
+            auto platformForAccount = [&](const std::string& id) -> std::string {
+                int aid = 0;
+                try { aid = std::stoi(id); } catch (...) { return {}; }
+                auto row = st->get_pointer<AdapterRow>(aid);
+                if (!row) return {};
+                if (row->type == static_cast<int>(AdapterType::kQQOfficial)) return "qq_official";
+                if (row->type == static_cast<int>(AdapterType::kDiscord)) return "discord";
+                if (row->type == static_cast<int>(AdapterType::kKook)) return "kook";
+                return "onebot_v11";
+            };
+            auto scopeInfo = [&](const J& input) {
+                std::string scope = input.value("scope", std::string("global"));
+                std::string target = input.value("target", std::string());
+                std::string platform = input.value("platform", std::string());
+                if (scope != "adapter" && scope != "account") scope = "global";
+                if (scope == "adapter") platform = target;
+                if (scope == "account") {
+                    const std::string actual = platformForAccount(target);
+                    if (!actual.empty()) platform = actual;
+                }
+                return std::tuple<std::string, std::string, std::string>{scope, target, platform};
+            };
+            auto normalizedOrder = [&](const J& value) {
+                J out = J::array();
+                std::set<std::string> seen;
+                if (value.is_array()) for (const auto& item : value) {
+                    if (!item.is_string()) continue;
+                    const std::string id = item.get<std::string>();
+                    if (std::find(kEngines.begin(), kEngines.end(), id) == kEngines.end()) continue;
+                    if (seen.insert(id).second) out.push_back(id);
+                }
+                if (out.empty()) for (const auto& id : kEngines) out.push_back(id);
+                return out;
+            };
+            auto effectiveOrder = [&](const std::string& mode, const J& custom) {
+                if (mode == "original") return J::array({"dicenext"});
+                if (mode == "compatible") return J::array({"dicenext", "onedice"});
+                if (mode == "custom") return normalizedOrder(custom);
+                return J::array({"dicenext", "onedice", "dicescript"});
+            };
+            auto responseFor = [&](const std::string& scope, const std::string& target,
+                                   const std::string& platform) {
+                const J all = cfg.getAll();
+                J resolved;
+                if (scope == "adapter") resolved = scoped_settings::resolveSection(all, "dice", platform, "");
+                else if (scope == "account") resolved = scoped_settings::resolveSection(all, "dice", platform, target);
+                else resolved = all.value("dice", J::object());
+                if (!resolved.is_object()) resolved = J::object();
+                std::string mode = resolved.value("expression_mode", std::string("enhanced"));
+                if (!kModes.count(mode)) mode = "enhanced";
+                J custom = normalizedOrder(resolved.value("expression_order", J::array()));
+                J sources = J::object();
+                for (const std::string key : {"expression_mode", "expression_order"}) {
+                    sources[key] = scope == "global" ? "global" : scoped_settings::sourceFor(
+                        all, "dice", key, platform, scope == "account" ? target : "");
+                }
+                return J{
+                    {"mode", mode},
+                    {"order", custom},
+                    {"effective_order", effectiveOrder(mode, custom)},
+                    {"scope", scope}, {"target", target}, {"platform", platform},
+                    {"overrides", scope == "global" ? J::object() : scoped_settings::rawSection(all, scope, target, "dice")},
+                    {"sources", sources},
+                    {"engines", J::array({
+                        J{{"id", "dicenext"}, {"available", true}},
+                        J{{"id", "onedice"}, {"available", true}},
+                        J{{"id", "dicescript"}, {"available", false}}
+                    })}
+                };
+            };
+
+            J selector = J::object();
+            if (req->method() == drogon::Get) {
+                selector["scope"] = req->getParameter("scope");
+                selector["target"] = req->getParameter("target");
+                selector["platform"] = req->getParameter("platform");
+                auto [scope, target, platform] = scopeInfo(selector);
+                if (scope != "global" && target.empty()) { jsonReply(fail("请选择适配器或账号"), std::move(cb)); return; }
+                if (scope == "account" && platform.empty()) { jsonReply(fail("账号不存在"), std::move(cb)); return; }
+                jsonReply(ok(responseFor(scope, target, platform)), std::move(cb));
+                return;
+            }
+
+            const J input = J::parse(req->body());
+            auto [scope, target, platform] = scopeInfo(input);
+            if (scope != "global" && target.empty()) { jsonReply(fail("请选择适配器或账号"), std::move(cb)); return; }
+            if (scope == "account" && platform.empty()) { jsonReply(fail("账号不存在"), std::move(cb)); return; }
+            const J values = input.contains("values") && input["values"].is_object() ? input["values"] : input;
+            const J clear = input.value("clear", J::array());
+            J filtered = J::object();
+            if (values.contains("expression_mode")) {
+                if (!values["expression_mode"].is_string() || !kModes.count(values["expression_mode"].get<std::string>())) {
+                    jsonReply(fail("无效的表达式模式"), std::move(cb)); return;
+                }
+                filtered["expression_mode"] = values["expression_mode"];
+            }
+            if (values.contains("expression_order")) {
+                const J order = normalizedOrder(values["expression_order"]);
+                if (!values["expression_order"].is_array() || values["expression_order"].empty()) {
+                    jsonReply(fail("自定义模式至少需要一个引擎"), std::move(cb)); return;
+                }
+                filtered["expression_order"] = order;
+            }
+            if (scope == "global") {
+                if (filtered.contains("expression_mode")) cfg.set<std::string>("dice/expression_mode", filtered["expression_mode"].get<std::string>());
+                if (filtered.contains("expression_order")) cfg.set<J>("dice/expression_order", filtered["expression_order"]);
+            } else {
+                J filteredClear = J::array();
+                if (clear.is_array()) for (const auto& key : clear)
+                    if (key == "expression_mode" || key == "expression_order") filteredClear.push_back(key);
+                scoped_settings::setSection(cfg, scope, target, "dice", filtered, filteredClear);
+            }
+            cfg.save();
+            jsonReply(ok(responseFor(scope, target, platform)), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Put});
+
     // ── 好友/加群邀请 审批策略 ─────────────────────────────────
     app.registerHandler("/api/system/events", [&cfg, st](Req req, CB&& cb) {
         try {

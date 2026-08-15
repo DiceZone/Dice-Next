@@ -20,6 +20,7 @@ set(TEST_SOURCES
     test_timezone.cpp
     test_js_plugin_reload.cpp
     test_dice_expression.cpp
+    test_expression_fallback.cpp
     test_check_roll_override.cpp
     test_markdown.cpp
     test_heart_debounce.cpp
@@ -63,6 +64,7 @@ target_link_libraries(dice-next-tests PRIVATE
     sqlite_orm::sqlite_orm
     spdlog::spdlog
     qjs
+    onedice::onedice
 )
 
 # MSVC needs /bigobj for large test files with many includes
