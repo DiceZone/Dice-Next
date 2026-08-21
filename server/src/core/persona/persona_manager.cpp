@@ -198,6 +198,7 @@ int PersonaManager::copyTemplate(int srcId, const std::string& newName) {
             er.locale = e.locale;
             er.key = e.key;
             er.value = e.value;
+            er.format = e.format;
             st->insert(er);
         }
 
@@ -274,7 +275,8 @@ std::vector<PersonaEntryRow> PersonaManager::listEntries(int personaId) const {
 }
 
 bool PersonaManager::setEntry(int personaId, const std::string& locale,
-                               const std::string& key, const std::string& value) {
+                               const std::string& key, const std::string& value,
+                               const std::string& format) {
     auto* st = db_.getStorage();
     if (!st) return false;
 
@@ -288,6 +290,7 @@ bool PersonaManager::setEntry(int personaId, const std::string& locale,
         if (!rows.empty()) {
             auto row = rows.front();
             row.value = value;
+            row.format = format == "markdown" ? "markdown" : "plain";
             st->update(row);
         } else {
             PersonaEntryRow row;
@@ -295,6 +298,7 @@ bool PersonaManager::setEntry(int personaId, const std::string& locale,
             row.locale = locale;
             row.key = key;
             row.value = value;
+            row.format = format == "markdown" ? "markdown" : "plain";
             st->insert(row);
         }
         return true;
@@ -355,9 +359,11 @@ void PersonaManager::loadIntoI18n(int personaId) {
 
     // Group entries by locale and build flat JSON objects
     std::map<Locale, json> bundlesByLocale;
+    std::map<Locale, json> formatsByLocale;
     for (const auto& e : entries) {
         Locale loc = localeFromString(e.locale);
         bundlesByLocale[loc][e.key] = e.value;
+        formatsByLocale[loc][e.key] = e.format;
     }
 
     // Clear existing persona bundles first
@@ -365,7 +371,7 @@ void PersonaManager::loadIntoI18n(int personaId) {
 
     // Inject each locale's bundle
     for (const auto& [loc, bundle] : bundlesByLocale) {
-        i18n_.setPersonaBundles(loc, bundle);
+        i18n_.setPersonaBundles(loc, bundle, formatsByLocale[loc]);
     }
 
     DICE_LOG_INFO("PersonaManager: loaded {} entries ({} locales) into I18n for persona {}",
@@ -391,7 +397,8 @@ json PersonaManager::exportTemplate(int id) const {
         entriesArr.push_back(json{
             {"locale", e.locale},
             {"key", e.key},
-            {"value", e.value}
+            {"value", e.value},
+            {"format", e.format}
         });
     }
     j["entries"] = entriesArr;
@@ -414,8 +421,9 @@ int PersonaManager::importTemplate(const json& data) {
             std::string locale = e.value("locale", "zh-Hans");
             std::string key = e.value("key", "");
             std::string value = e.value("value", "");
+            std::string format = e.value("format", "plain");
             if (!key.empty()) {
-                setEntry(newId, locale, key, value);
+                setEntry(newId, locale, key, value, format);
             }
         }
     }

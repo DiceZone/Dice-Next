@@ -1,5 +1,6 @@
 #include "i18n.h"
 #include "../common/logger.h"
+#include "../common/markdown.h"
 
 #include <fstream>
 #include <filesystem>
@@ -9,6 +10,9 @@
 namespace fs = std::filesystem;
 
 namespace dice {
+
+thread_local bool I18n::outboundCaptureActive_ = false;
+thread_local bool I18n::outboundCaptureMarkdown_ = false;
 
 // ═══════════════════════════════════════════════════════════════
 // Construction
@@ -208,21 +212,26 @@ std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const
     auto ovIt = overrides_.find(loc);
     if (ovIt != overrides_.end()) {
         auto kIt = ovIt->second.find(key);
-        if (kIt != ovIt->second.end()) return interpolate(kIt->second, args);
+        if (kIt != ovIt->second.end()) return renderTemplate(kIt->second.value, args, kIt->second.format);
     }
     // persona layer (between override and bundle)
-    if (const json* personaNode = lookupPersonaNode(loc, key)) return interpolate(personaNode->get<std::string>(), args);
-    if (const json* locNode = lookupNode(loc, key)) return interpolate(locNode->get<std::string>(), args);
+    if (const json* personaNode = lookupPersonaNode(loc, key))
+        return renderTemplate(personaNode->get<std::string>(), args, lookupPersonaFormat(loc, key));
+    if (const json* locNode = lookupNode(loc, key)) {
+        const std::string raw = locNode->get<std::string>();
+        return renderTemplate(raw, args, trustedTemplateFormat(raw));
+    }
 
     const json* node = nullptr;
     if (loc != defaultLocale_) {
         auto dIt = overrides_.find(defaultLocale_);
         if (dIt != overrides_.end()) {
             auto kIt = dIt->second.find(key);
-            if (kIt != dIt->second.end()) return interpolate(kIt->second, args);
+            if (kIt != dIt->second.end()) return renderTemplate(kIt->second.value, args, kIt->second.format);
         }
         // default locale persona layer
-        if (const json* dPersona = lookupPersonaNode(defaultLocale_, key)) return interpolate(dPersona->get<std::string>(), args);
+        if (const json* dPersona = lookupPersonaNode(defaultLocale_, key))
+            return renderTemplate(dPersona->get<std::string>(), args, lookupPersonaFormat(defaultLocale_, key));
         node = lookupNode(defaultLocale_, key);  // fall back to default locale bundle
     }
     if (!node) {
@@ -232,7 +241,38 @@ std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const
                        key, localeToString(loc));
         return key;
     }
-    return interpolate(node->get<std::string>(), args);
+    const std::string raw = node->get<std::string>();
+    return renderTemplate(raw, args, trustedTemplateFormat(raw));
+}
+
+ContentFormat I18n::trustedTemplateFormat(const std::string& value) {
+    return markdown::hasFormatting(value) ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
+}
+
+void I18n::beginOutboundCapture() {
+    outboundCaptureActive_ = true;
+    outboundCaptureMarkdown_ = false;
+}
+
+ContentFormat I18n::endOutboundCapture() {
+    const bool useMarkdown = outboundCaptureActive_ && outboundCaptureMarkdown_;
+    outboundCaptureActive_ = false;
+    outboundCaptureMarkdown_ = false;
+    return useMarkdown ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
+}
+
+void I18n::noteOutboundFormat(ContentFormat format) {
+    if (outboundCaptureActive_ && format == ContentFormat::kMarkdown)
+        outboundCaptureMarkdown_ = true;
+}
+
+std::string I18n::renderTemplate(const std::string& value, const Args& args,
+                                 ContentFormat format) {
+    noteOutboundFormat(format);
+    if (format != ContentFormat::kMarkdown || args.empty()) return interpolate(value, args);
+    Args safe;
+    for (const auto& [name, arg] : args) safe[name] = markdown::escapeLiteral(arg);
+    return interpolate(value, safe);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -272,9 +312,10 @@ std::string I18n::interpolate(const std::string& tmpl, const Args& args) {
 // Overrides
 // ═══════════════════════════════════════════════════════════════
 
-void I18n::setOverride(Locale loc, const std::string& key, const std::string& value) {
+void I18n::setOverride(Locale loc, const std::string& key, const std::string& value,
+                       ContentFormat format) {
     std::lock_guard<std::mutex> lock(mutex_);
-    overrides_[loc][key] = value;
+    overrides_[loc][key] = OverrideValue{value, format};
 }
 
 void I18n::clearOverride(Locale loc, const std::string& key) {
@@ -289,11 +330,26 @@ bool I18n::hasOverride(Locale loc, const std::string& key) const {
     return it != overrides_.end() && it->second.count(key) > 0;
 }
 
+ContentFormat I18n::getOverrideFormat(Locale loc, const std::string& key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = overrides_.find(loc);
+    if (it == overrides_.end()) return ContentFormat::kPlainText;
+    auto kt = it->second.find(key);
+    return kt == it->second.end() ? ContentFormat::kPlainText : kt->second.format;
+}
+
 std::string I18n::getDefault(Locale loc, const std::string& key) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const json* node = lookupNode(loc, key);
     if (!node && loc != defaultLocale_) node = lookupNode(defaultLocale_, key);
     return node ? node->get<std::string>() : std::string();
+}
+
+ContentFormat I18n::getDefaultFormat(Locale loc, const std::string& key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const json* node = lookupNode(loc, key);
+    if (!node && loc != defaultLocale_) node = lookupNode(defaultLocale_, key);
+    return node ? trustedTemplateFormat(node->get<std::string>()) : ContentFormat::kPlainText;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -332,6 +388,14 @@ const json* I18n::lookupPersonaNode(Locale loc, const std::string& key) const {
     return kit->is_string() ? &(*kit) : nullptr;
 }
 
+ContentFormat I18n::lookupPersonaFormat(Locale loc, const std::string& key) const {
+    auto it = personaFormats_.find(loc);
+    if (it == personaFormats_.end() || !it->second.is_object()) return ContentFormat::kPlainText;
+    auto kit = it->second.find(key);
+    if (kit == it->second.end() || !kit->is_string()) return ContentFormat::kPlainText;
+    return contentFormatFromString(kit->get<std::string>());
+}
+
 void I18n::setPersona(int personaId) {
     std::lock_guard<std::mutex> lock(mutex_);
     activePersonaId_ = personaId;
@@ -349,10 +413,11 @@ bool I18n::loadPersona() {
     return true;
 }
 
-void I18n::setPersonaBundles(Locale loc, const json& bundles) {
+void I18n::setPersonaBundles(Locale loc, const json& bundles, const json& formats) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (bundles.is_object() && !bundles.empty()) {
         personaBundles_[loc] = bundles;
+        personaFormats_[loc] = formats.is_object() ? formats : json::object();
         DICE_LOG_INFO("I18n: persona bundles injected for locale '{}' ({} entries)",
                       localeToString(loc), personaBundles_[loc].size());
     }
@@ -361,6 +426,7 @@ void I18n::setPersonaBundles(Locale loc, const json& bundles) {
 void I18n::clearPersonaBundles() {
     std::lock_guard<std::mutex> lock(mutex_);
     personaBundles_.clear();
+    personaFormats_.clear();
     DICE_LOG_INFO("I18n: persona bundles cleared");
 }
 

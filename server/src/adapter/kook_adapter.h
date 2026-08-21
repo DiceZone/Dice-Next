@@ -90,41 +90,51 @@ public:
         gateway_.reset();
     }
 
-    void sendMessage(const Message& msg) override { sendTo(msg, msg.content); }
-    void sendReply(const Message& original, const std::string& text) override { sendTo(original, text); }
+    void sendMessage(const Message& msg) override { sendTo(msg, msg.content, ContentFormat::kPlainText); }
+    void sendReply(const Message& original, const std::string& text) override {
+        sendReplyFormatted(original, text, ContentFormat::kPlainText);
+    }
+    void sendReplyFormatted(const Message& original, const std::string& text, ContentFormat format) override {
+        sendTo(original, text, format);
+    }
     void sendGroupMessage(const std::string& channelId, const std::string& text) override {
+        sendGroupMessageFormatted(channelId, text, ContentFormat::kPlainText);
+    }
+    void sendGroupMessageFormatted(const std::string& channelId, const std::string& text, ContentFormat format) override {
         const std::string native = nativeId(channelId, identity::Kind::Group);
         const std::string content = translateCQ(text);
         if (native.empty() || content.empty()) return;
         restRequest(drogon::Post, "/api/v3/message/create",
-                    outboundPayload(native, content), nullptr);
+                    outboundPayload(native, content, format), nullptr);
     }
     void sendPrivateMessage(const std::string& userId, const std::string& text) override {
+        sendPrivateMessageFormatted(userId, text, ContentFormat::kPlainText);
+    }
+    void sendPrivateMessageFormatted(const std::string& userId, const std::string& text, ContentFormat format) override {
         const std::string native = nativeId(userId, identity::Kind::User);
         const std::string content = translateCQ(text);
         if (native.empty() || content.empty()) return;
         restRequest(drogon::Post, "/api/v3/direct-message/create",
-                    outboundPayload(native, content), nullptr);
+                    outboundPayload(native, content, format), nullptr);
     }
 
 private:
     /// KOOK CardMessage is a documented rich-message type.  Keep oversized
     /// messages in the existing KMarkdown/text path so no reply is truncated.
-    json outboundPayload(const std::string& target, const std::string& content) {
+    json outboundPayload(const std::string& target, const std::string& content, ContentFormat format) {
+        const bool isMarkdown = format == ContentFormat::kMarkdown;
         if (content.size() > 5000)
-            return json{{"type", 1}, {"target_id", target}, {"content", markdown::toPlainText(content)}};
+            return json{{"type", 1}, {"target_id", target}, {"content", isMarkdown ? markdown::toPlainText(content) : content}};
         if (!effectiveCardMode()) {
-            // KOOK type=9 is KMarkdown text rather than a card. Use it only
-            // when the shared reply actually contains formatting so ordinary
-            // dice expressions are not interpreted as markup.
-            const int type = markdown::hasFormatting(content) ? 9 : 1;
+            const int type = isMarkdown ? 9 : 1;
             return json{{"type", type}, {"target_id", target}, {"content", content}};
         }
+        const std::string wire = isMarkdown ? content : markdown::escapeLiteral(content);
         const json card = json::array({{
             {"type", "card"}, {"theme", "primary"}, {"size", "sm"},
             {"modules", json::array({{
                 {"type", "section"},
-                {"text", {{"type", "kmarkdown"}, {"content", content}}}
+                {"text", {{"type", "kmarkdown"}, {"content", wire}}}
             }})}
         }});
         return json{{"type", 10}, {"target_id", target}, {"content", card.dump()}};
@@ -356,7 +366,7 @@ private:
         return native.empty() ? publicId : native;
     }
 
-    void sendTo(const Message& m, const std::string& text) {
+    void sendTo(const Message& m, const std::string& text, ContentFormat format) {
         // 回复优先走入站带回的原生 id（免查表）。
         std::string native;
         if (m.extra.is_object()) native = m.extra.value("__identity_native_target", std::string());
@@ -364,12 +374,12 @@ private:
         if (content.empty()) return;
         if (m.type == MessageType::kPrivate) {
             if (!native.empty()) restRequest(drogon::Post, "/api/v3/direct-message/create",
-                                             outboundPayload(native, content), nullptr);
-            else sendPrivateMessage(m.targetId, text);
+                                             outboundPayload(native, content, format), nullptr);
+            else sendPrivateMessageFormatted(m.targetId, text, format);
         } else {
             if (!native.empty()) restRequest(drogon::Post, "/api/v3/message/create",
-                                             outboundPayload(native, content), nullptr);
-            else sendGroupMessage(m.targetId, text);
+                                             outboundPayload(native, content, format), nullptr);
+            else sendGroupMessageFormatted(m.targetId, text, format);
         }
     }
 

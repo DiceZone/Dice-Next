@@ -174,13 +174,24 @@ public:
         gateway_.reset();
     }
 
-    void sendMessage(const Message& msg) override { sendTo(msg, msg.content); }
-    void sendReply(const Message& original, const std::string& text) override { sendTo(original, text); }
+    void sendMessage(const Message& msg) override { sendTo(msg, msg.content, ContentFormat::kPlainText); }
+    void sendReply(const Message& original, const std::string& text) override {
+        sendReplyFormatted(original, text, ContentFormat::kPlainText);
+    }
+    void sendReplyFormatted(const Message& original, const std::string& text, ContentFormat format) override {
+        sendTo(original, text, format);
+    }
     void sendGroupMessage(const std::string& groupId, const std::string& text) override {
-        Message m; m.type = MessageType::kGroup; m.targetId = groupId; sendTo(m, text);
+        sendGroupMessageFormatted(groupId, text, ContentFormat::kPlainText);
+    }
+    void sendGroupMessageFormatted(const std::string& groupId, const std::string& text, ContentFormat format) override {
+        Message m; m.type = MessageType::kGroup; m.targetId = groupId; sendTo(m, text, format);
     }
     void sendPrivateMessage(const std::string& userId, const std::string& text) override {
-        Message m; m.type = MessageType::kPrivate; m.targetId = userId; sendTo(m, text);
+        sendPrivateMessageFormatted(userId, text, ContentFormat::kPlainText);
+    }
+    void sendPrivateMessageFormatted(const std::string& userId, const std::string& text, ContentFormat format) override {
+        Message m; m.type = MessageType::kPrivate; m.targetId = userId; sendTo(m, text, format);
     }
 
     /// 本地图片 → 公网 URL 的发布器（main.cpp 注入，走 系统设置→图床）。
@@ -905,18 +916,19 @@ private:
     }
 
     /// 出站入口：拆出媒体标记走富媒体（限 3 条防刷频），剩余文本走文字消息。
-    void sendTo(const Message& m, const std::string& text) {
+    void sendTo(const Message& m, const std::string& text, ContentFormat format) {
         auto parts = splitMedia(text);
         for (size_t i = 0; i < parts.media.size() && i < 3; ++i) sendMediaTo(m, parts.media[i]);
         std::string plain = parts.text;
         const auto b = plain.find_first_not_of(" \t\r\n");
         plain = (b == std::string::npos) ? std::string() : plain.substr(b, plain.find_last_not_of(" \t\r\n") - b + 1);
-        if (plain.empty()) { if (parts.media.empty()) sendTextTo(m, text); return; }   // 纯媒体不再发空文本
-        sendTextTo(m, plain);
+        if (plain.empty()) { if (parts.media.empty()) sendTextTo(m, text, format); return; }   // 纯媒体不再发空文本
+        sendTextTo(m, plain, format);
     }
     /// QQ 官方机器人支持 Markdown，但它仍受机器人后台能力开关约束。卡片模式
     /// 下优先以 Markdown 发送；收到明确 HTTP 拒绝后自动用传统文本重试一次。
-    void sendTextTo(const Message& m, const std::string& text, bool forceTraditional = false) {
+    void sendTextTo(const Message& m, const std::string& text, ContentFormat format,
+                    bool forceTraditional = false) {
         if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
         std::string target;
         if (m.extra.is_object()) target = m.extra.value("__identity_native_target", std::string());
@@ -932,12 +944,14 @@ private:
 
         auto client = httpsClient("api.bot.qq.com");
         if (!client) { lastError_ = "无法解析 api.bot.qq.com"; return; }
-        // Group/C2C Markdown is a native QQ Bot 2.0 message type. Besides the
-        // explicit card mode, use it for shared default replies that contain
-        // Markdown. Channel messages and fallback retries are plain text.
+        // Only explicit Markdown is rich text. Card mode can place literal text
+        // in a Markdown container, but escapes it first so punctuation survives.
+        const bool explicitMarkdown = format == ContentFormat::kMarkdown;
         const bool useMarkdown = !forceTraditional && m.type != MessageType::kChannel &&
-                                 (effectiveCardMode() || markdown::hasFormatting(text));
-        std::string wireText = useMarkdown ? text : markdown::toPlainText(text);
+                                 (effectiveCardMode() || explicitMarkdown);
+        std::string wireText = useMarkdown
+            ? (explicitMarkdown ? text : markdown::escapeLiteral(text))
+            : (explicitMarkdown ? markdown::toPlainText(text) : text);
         if (wireText.empty() && !text.empty()) wireText = text;
 
         auto request = drogon::HttpRequest::newHttpRequest();
@@ -958,11 +972,11 @@ private:
             if (!eventId.empty()) body["event_id"] = eventId;
         }
         request->setBody(body.dump());
-        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, useMarkdown](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
+        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, format, useMarkdown](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
             const bool httpRejected = response && response->statusCode() >= 300;
             if (useMarkdown && httpRejected) {
                 DICE_LOG_WARN("QQOfficial '{}': Markdown/card message rejected by {}, retrying traditional text", self->name_, path);
-                self->sendTextTo(message, text, true);
+                self->sendTextTo(message, text, format, true);
                 return;
             }
             if (result != drogon::ReqResult::Ok || !response || httpRejected) {

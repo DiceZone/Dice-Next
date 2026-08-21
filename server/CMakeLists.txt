@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(dice-next-server VERSION 3.0.0 LANGUAGES CXX)
+project(dice-next-server VERSION 3.0.0 LANGUAGES C CXX)
 
 # ─── C++ Standard ─────────────────────────────────────────────
 set(CMAKE_CXX_STANDARD 20)
@@ -51,6 +51,12 @@ find_package(Lua REQUIRED)
 set(ONEDICE_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../onedice-cpp-lib
                  ${CMAKE_BINARY_DIR}/onedice-cpp-lib)
+
+# dicescript-c-lib — sibling C99 DiceScript compatibility engine
+set(DICESCRIPT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(DICESCRIPT_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../dicescript-c-lib
+                 ${CMAKE_BINARY_DIR}/dicescript-c-lib)
 
 # ─── Source Files ────────────────────────────────────────────
 
@@ -139,6 +145,7 @@ target_link_libraries(dice-next-server PRIVATE
     ZLIB::ZLIB
     ${DICE_ZSTD_TARGET}
     onedice::onedice
+    dicescript::dicescript
     qjs
     ${LUA_LIBRARIES}
 )

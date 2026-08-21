@@ -25,6 +25,27 @@ bool protectedOneBotCode(const std::string& text, size_t pos) {
            text.compare(pos, 5, "[图:") == 0;
 }
 
+bool expressionMarkerAt(const std::string& text, size_t pos, std::string_view marker) {
+    if (pos == 0 || pos + marker.size() >= text.size()) return false;
+    const unsigned char before = static_cast<unsigned char>(text[pos - 1]);
+    const unsigned char after = static_cast<unsigned char>(text[pos + marker.size()]);
+    if (marker == "__") {
+        // CommonMark does not treat an underscore run inside an identifier as
+        // emphasis. Preserve names such as foo__bar during plain-text output.
+        return std::isalnum(before) && std::isalnum(after);
+    }
+    if (marker == "**" || marker == "||") {
+        // Keep numeric expression operators (2**3 / 1||0). Default reply
+        // result expressions are normally inline-code protected as well, but
+        // this makes the converter safe when called on raw expression text.
+        const bool leftOperand = std::isdigit(before) || before == ')' || before == ']';
+        const bool rightOperand = std::isdigit(after) || after == '(' || after == '[' ||
+                                  after == '+' || after == '-';
+        return leftOperand && rightOperand;
+    }
+    return false;
+}
+
 // Protect content that must survive the Markdown downgrade byte-for-byte:
 // OneBot protocol codes, escaped punctuation and inline-code contents.
 std::string protectInline(const std::string& input, std::vector<std::string>& protectedText) {
@@ -32,6 +53,17 @@ std::string protectInline(const std::string& input, std::vector<std::string>& pr
     std::string out;
     out.reserve(input.size());
     for (size_t i = 0; i < input.size();) {
+        bool protectedMarker = false;
+        for (const std::string_view marker : {std::string_view("**"), std::string_view("__"), std::string_view("||")}) {
+            if (input.compare(i, marker.size(), marker) == 0 && expressionMarkerAt(input, i, marker)) {
+                protectedText.emplace_back(marker);
+                out += placeholder(protectedText.size() - 1);
+                i += marker.size();
+                protectedMarker = true;
+                break;
+            }
+        }
+        if (protectedMarker) continue;
         if (input[i] == '[' && protectedOneBotCode(input, i)) {
             const size_t end = input.find(']', i + 1);
             if (end != std::string::npos) {
@@ -92,7 +124,20 @@ void stripPairs(std::string& text, const std::string& marker) {
         const size_t open = text.find(marker, from);
         if (open == std::string::npos) break;
         const size_t close = text.find(marker, open + marker.size());
-        if (close == std::string::npos || close == open + marker.size()) break;
+        if (close == std::string::npos) {
+            // A long reply can be segmented between opening and closing
+            // delimiters before the adapter downgrade. Remove the orphan on
+            // this segment instead of leaking Markdown punctuation to OneBot.
+            text.erase(open, marker.size());
+            from = open;
+            continue;
+        }
+        if (close == open + marker.size()) {
+            // Empty interpolated emphasis such as **{optional}** becomes ****.
+            text.erase(open, marker.size() * 2);
+            from = open;
+            continue;
+        }
         text.erase(close, marker.size());
         text.erase(open, marker.size());
         from = close - marker.size();
@@ -191,6 +236,26 @@ bool hasFormatting(const std::string& text) {
         if (p + 1 < line.size() && (line[p] == '-' || line[p] == '*' || line[p] == '+') && line[p + 1] == ' ') return true;
     }
     return false;
+}
+
+std::string escapeLiteral(const std::string& text) {
+    static constexpr std::string_view kEscapable = R"(\`*_{}[]()#+-.!>|~)";
+    std::string out;
+    out.reserve(text.size() + text.size() / 8);
+    for (size_t i = 0; i < text.size();) {
+        if (text[i] == '[' && protectedOneBotCode(text, i)) {
+            const size_t end = text.find(']', i + 1);
+            if (end != std::string::npos) {
+                out.append(text, i, end - i + 1);
+                i = end + 1;
+                continue;
+            }
+        }
+        const char ch = text[i++];
+        if (kEscapable.find(ch) != std::string_view::npos) out += '\\';
+        out += ch;
+    }
+    return out;
 }
 
 std::string toPlainText(const std::string& markdownText) {

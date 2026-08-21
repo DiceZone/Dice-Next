@@ -180,7 +180,8 @@ bool Database::open(const std::string& path) {
                         orm::primary_key().autoincrement()),
                     orm::make_column("locale", &I18nOverrideRow::locale),
                     orm::make_column("key", &I18nOverrideRow::key),
-                    orm::make_column("value", &I18nOverrideRow::value)
+                    orm::make_column("value", &I18nOverrideRow::value),
+                    orm::make_column("format", &I18nOverrideRow::format, orm::default_value("plain"))
                 ),
                 // ── player_profiles ──
                 orm::make_table("player_profiles",
@@ -295,7 +296,8 @@ bool Database::open(const std::string& path) {
                     orm::make_column("persona_id", &PersonaEntryRow::personaId),
                     orm::make_column("locale", &PersonaEntryRow::locale),
                     orm::make_column("key", &PersonaEntryRow::key),
-                    orm::make_column("value", &PersonaEntryRow::value)
+                    orm::make_column("value", &PersonaEntryRow::value),
+                    orm::make_column("format", &PersonaEntryRow::format, orm::default_value("plain"))
                 )
             )
         );

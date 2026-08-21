@@ -65,6 +65,7 @@ target_link_libraries(dice-next-tests PRIVATE
     spdlog::spdlog
     qjs
     onedice::onedice
+    dicescript::dicescript
 )
 
 # MSVC needs /bigobj for large test files with many includes

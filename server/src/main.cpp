@@ -406,7 +406,7 @@ static int realMain(int argc, char* argv[]) {
         try {
             int n = 0;
             for (auto& r : st0->get_all<dice::I18nOverrideRow>()) {
-                i18n.setOverride(dice::localeFromString(r.locale), r.key, r.value); ++n;
+                i18n.setOverride(dice::localeFromString(r.locale), r.key, r.value, dice::contentFormatFromString(r.format)); ++n;
             }
             if (n) DICE_LOG_INFO("i18n: loaded {} template override(s)", n);
         } catch (...) {}
@@ -978,7 +978,7 @@ static int realMain(int argc, char* argv[]) {
 
     // Wire: incoming messages → command router; if no command matched, fall back
     // to the custom-reply word library; then send via the originating adapter.
-    adapterMgr.onMessage([&adapterMgr, &cmdRouter, &jsMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, replyFallback](const dice::Message& msg) {
+    adapterMgr.onMessage([&adapterMgr, &cmdRouter, &jsMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, &i18n, replyFallback](const dice::Message& msg) {
         // Multi-bot群: a known dice bot always wins over @-as-argument and JS
         // plugin exceptions.  Otherwise retain the plugin @-argument exception.
         if (cmdRouter.mentionsOtherKnownDiceBot(msg) ||
@@ -999,7 +999,9 @@ static int realMain(int argc, char* argv[]) {
         // remains absolute. This also lets @-addressed plugin commands reach their
         // normal fallback path when no built-in command matched.
         bool forcedByAt = dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);
+        dice::I18n::beginOutboundCapture();
         auto reply = cmdRouter.handleMessage(msg);
+        dice::ContentFormat replyFormat = dice::I18n::endOutboundCapture();
         bool didCommand = !reply.empty();
         // 阶段3：回复来源分类（builtin/plugin/reply），供 AI 翻译按范围过滤。
         std::string replySrc = "builtin";
@@ -1009,8 +1011,10 @@ static int realMain(int argc, char* argv[]) {
                         && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId);
         // 自控：操作者用骰娘账号手打的消息走**完整管线**（内置/插件/自定义回复）；
         // 骰娘自己的回复回声已在适配器层被自回声去重丢弃，不会到这里，故无需在此限制。
-        if (reply.empty() && (!disabled || forcedByAt) && !replyOff)
+        if (reply.empty() && (!disabled || forcedByAt) && !replyOff) {
             reply = replyFallback(msg, replySrc);
+            replyFormat = dice::ContentFormat::kPlainText;
+        }
         if (!reply.empty() && replySrc == "plugin_command") didCommand = true;
         // ── 先在消息线程消费本条消息的一次性路由状态 ─────────────
         // 回复投递可能转入 AI 后台线程，这些状态晚取会被下一条消息拿走/污染。
@@ -1054,10 +1058,11 @@ static int realMain(int argc, char* argv[]) {
         auto finishReply = [&adapterMgr, &cmdRouter, &configMgr, &db](
             const dice::Message& msg, std::string reply, std::string broadcast,
             const std::string& aiCat, const std::string& quoteId,
-            std::vector<std::string> fwdNodes, bool recordLog, bool linkReplyOk) {
+            std::vector<std::string> fwdNodes, bool recordLog, bool linkReplyOk,
+            dice::ContentFormat replyFormat) {
             // Resolve self tokens ({self}/{strSelfName}/{strSelfCall}) in the final
             // text — works for both command replies and custom replies.
-            if (!reply.empty())     reply = cmdRouter.applySelf(msg, reply);
+            if (!reply.empty())     reply = cmdRouter.applySelf(msg, reply, replyFormat);
             if (!broadcast.empty()) broadcast = cmdRouter.applySelf(msg, broadcast);
             // 阶段2：AI 润色 —— 类别在覆盖范围内 + 总开关+润色开关开启。失败/超时/
             // 破坏数字一律回退原文，绝不影响掷骰结果。
@@ -1146,15 +1151,15 @@ static int realMain(int argc, char* argv[]) {
                 // 普通消息「顺序」发，保证 A→B 阅读顺序一致。
                 bool quoteFirst = quote && segs.size() == 1;
                 auto sendSegs = [&](const auto& a) {
-                    if (wantForward && !fwdNodes.empty() && a->sendGroupForwardMsg(msg.targetId, fwdNodes)) return;
+                    if (wantForward && !fwdNodes.empty() && a->sendGroupForwardMsgFormatted(msg.targetId, fwdNodes, replyFormat)) return;
                     for (size_t k = 0; k < segs.size(); ++k) {
                         // 分段之间留几毫秒，避免同一适配器并发发消息导致客户端乱序。
                         if (k > 0) std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                        if (k == 0 && quoteFirst) a->sendReply(replyMsg, segs[0]);
+                        if (k == 0 && quoteFirst) a->sendReplyFormatted(replyMsg, segs[0], replyFormat);
                         // 私聊回复发到 targetId（普通私聊=对方=senderId；自身消息自控时
                         // =对话对方，避免回复发给骰娘自己）。sendReply 亦用 targetId，一致。
-                        else if (priv) a->sendPrivateMessage(msg.targetId, segs[k]);
-                        else a->sendGroupMessage(msg.targetId, segs[k]);
+                        else if (priv) a->sendPrivateMessageFormatted(msg.targetId, segs[k], replyFormat);
+                        else a->sendGroupMessageFormatted(msg.targetId, segs[k], replyFormat);
                     }
                 };
                 // 只通过消息来源的那个适配器回复，避免多账号/多适配器时串台。
@@ -1253,7 +1258,7 @@ static int realMain(int argc, char* argv[]) {
                         ? ("[CQ:at,qq=" + msgC.senderId + "] " + aiReply) : aiReply;
                     // AI 对话回复不带一次性路由状态（无引用覆写/转发节点），类别为空 →
                     // finishReply 内的润色/翻译自然跳过（本就是 AI 生成，无需再加工）。
-                    finishReply(msgC, rep, "", "", "", {}, rec, lnk);
+                    finishReply(msgC, rep, "", "", "", {}, rec, lnk, dice::ContentFormat::kPlainText);
                     // A1：互动结束后评估好感变化并写回（已在后台线程，先发后评不拖回复）。
                     if (npcHit && npc.moodEnabled)
                         dice::ainpc::updateMood(configMgr, db.getChatStorage(), npc, gkey,
@@ -1346,17 +1351,17 @@ static int realMain(int argc, char* argv[]) {
                      && !cmdRouter.aiLangFor(msg).empty()));
             if (needBg) {
                 bool rec = !disabled, lnk = linkReplyOk;
-                auto job = [finishReply, msg, reply, broadcast, aiCat, quoteId, fwdNodes, rec, lnk]() {
-                    finishReply(msg, reply, broadcast, aiCat, quoteId, fwdNodes, rec, lnk);
+                auto job = [finishReply, msg, reply, broadcast, aiCat, quoteId, fwdNodes, rec, lnk, replyFormat]() {
+                    finishReply(msg, reply, broadcast, aiCat, quoteId, fwdNodes, rec, lnk, replyFormat);
                 };
                 if (!dice::aiwork::Worker::instance().post(std::move(job))) {
                     // AI 队列堵死（持续超时）→ 跳过润色/翻译（类别传空即跳过）直接发，
                     // 保证指令回复永远送达。
                     DICE_LOG_INFO("AI \xe9\x98\x9f\xe5\x88\x97\xe5\xb7\xb2\xe6\xbb\xa1\xef\xbc\x8c\xe8\xb7\xb3\xe8\xbf\x87\xe6\xb6\xa6\xe8\x89\xb2/\xe7\xbf\xbb\xe8\xaf\x91\xe7\x9b\xb4\xe6\x8e\xa5\xe5\x8f\x91\xe9\x80\x81");  // 队列已满，跳过润色/翻译直接发送
-                    finishReply(msg, reply, broadcast, "", quoteId, fwdNodes, !disabled, linkReplyOk);
+                    finishReply(msg, reply, broadcast, "", quoteId, fwdNodes, !disabled, linkReplyOk, replyFormat);
                 }
             } else {
-                finishReply(msg, reply, broadcast, aiCat, quoteId, fwdNodes, !disabled, linkReplyOk);
+                finishReply(msg, reply, broadcast, aiCat, quoteId, fwdNodes, !disabled, linkReplyOk, replyFormat);
             }
         }
     });

@@ -18,6 +18,7 @@
 //   tr(Locale::kEn, "dice.error.roll", {{"error", "bad expr"}})
 // looks up  { "dice": { "error": { "roll": "Roll error: {error}" } } }.
 
+#include "../common/content_format.h"
 #include "../common/types.h"
 
 #include <string>
@@ -102,13 +103,24 @@ public:
     // caller (DB); load them back via setOverride at startup.
 
     /// Set/replace the override for (loc, key).
-    void setOverride(Locale loc, const std::string& key, const std::string& value);
+    void setOverride(Locale loc, const std::string& key, const std::string& value,
+                     ContentFormat format = ContentFormat::kPlainText);
     /// Remove the override for (loc, key) → falls back to the bundle default.
     void clearOverride(Locale loc, const std::string& key);
     /// Whether an override exists for (loc, key).
     bool hasOverride(Locale loc, const std::string& key) const;
+    /// Explicit format of an override; absent overrides return plain text.
+    ContentFormat getOverrideFormat(Locale loc, const std::string& key) const;
     /// The bundle DEFAULT for (loc, key), ignoring overrides (for edit/reset UI).
     std::string getDefault(Locale loc, const std::string& key) const;
+    /// Format of a trusted built-in template. It is derived only from bundled
+    /// project resources, never from user input or a rendered reply.
+    ContentFormat getDefaultFormat(Locale loc, const std::string& key) const;
+
+    /// Capture the richest template format used while one command builds a
+    /// reply, without changing the command router's string-returning API.
+    static void beginOutboundCapture();
+    static ContentFormat endOutboundCapture();
 
     /// Flatten the whole bundle for @p loc into {dotted-key → default value} for
     /// every string leaf (powers the "全部文本可自定义" editor). Overrides are NOT
@@ -131,8 +143,9 @@ public:
     bool loadPersona();
 
     /// Inject persona bundles for a locale (called by PersonaManager).
-    /// @p bundles is a flat {dotted-key → string} JSON object.
-    void setPersonaBundles(Locale loc, const json& bundles);
+    /// @p formats maps the same keys to "plain" or "markdown". Missing
+    /// formats remain plain so existing personas keep their literal semantics.
+    void setPersonaBundles(Locale loc, const json& bundles, const json& formats = json::object());
 
     /// Clear all persona bundles (called when switching to default persona).
     void clearPersonaBundles();
@@ -146,6 +159,11 @@ private:
     /// Persona bundles are flat {dotted-key → string}, so no nested traversal.
     /// Caller must hold mutex_.
     const json* lookupPersonaNode(Locale loc, const std::string& key) const;
+    ContentFormat lookupPersonaFormat(Locale loc, const std::string& key) const;
+    static ContentFormat trustedTemplateFormat(const std::string& value);
+    static void noteOutboundFormat(ContentFormat format);
+    static std::string renderTemplate(const std::string& value, const Args& args,
+                                      ContentFormat format);
 
     /// All locales this engine knows how to load.
     static std::vector<Locale> supportedLocales();
@@ -153,11 +171,18 @@ private:
     std::string resourceDir_;
     Locale defaultLocale_;
     std::map<Locale, json> bundles_;
-    std::map<Locale, std::map<std::string, std::string>> overrides_;  // (loc,key) → user value
+    struct OverrideValue {
+        std::string value;
+        ContentFormat format = ContentFormat::kPlainText;
+    };
+    std::map<Locale, std::map<std::string, OverrideValue>> overrides_;
     std::map<Locale, json> personaBundles_;   // persona overlay (flat key→string)
+    std::map<Locale, json> personaFormats_;   // persona overlay (flat key→format)
     int activePersonaId_ = 0;                   // current persona (0=default/off)
     std::map<std::string, Locale> keywordMap_;  // _meta.keywords → locale（键已转小写）
     mutable std::mutex mutex_;
+    static thread_local bool outboundCaptureActive_;
+    static thread_local bool outboundCaptureMarkdown_;
 };
 
 }  // namespace dice

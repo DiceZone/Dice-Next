@@ -175,6 +175,39 @@ TEST(I18nPersona, InterpolationMultiplePlaceholders) {
     ASSERT_EQ(result, "Alice rolled 1d100 and got 55");
 }
 
+TEST(I18nFormat, ExistingOverrideDefaultsToLiteralPlainText) {
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setOverride(Locale::kZhHans, "test.key", "**literal** #1");
+
+    I18n::beginOutboundCapture();
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "**literal** #1");
+    EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()), static_cast<int>(ContentFormat::kPlainText));
+    EXPECT_EQ(static_cast<int>(i18n.getOverrideFormat(Locale::kZhHans, "test.key")), static_cast<int>(ContentFormat::kPlainText));
+}
+
+TEST(I18nFormat, ExplicitMarkdownIsCapturedAndEscapesArguments) {
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setOverride(Locale::kZhHans, "test.key", "**{nick}**", ContentFormat::kMarkdown);
+
+    I18n::beginOutboundCapture();
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "test.key", {{"nick", "A**B"}}), "**A\\*\\*B**");
+    EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()), static_cast<int>(ContentFormat::kMarkdown));
+}
+
+TEST(I18nFormat, PersonaFormatIsExplicitAndLegacyPersonaStaysPlain) {
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    json bundle = {{"plain.key", "**literal**"}, {"md.key", "**bold**"}};
+    json formats = {{"md.key", "markdown"}};
+    i18n.setPersonaBundles(Locale::kZhHans, bundle, formats);
+
+    I18n::beginOutboundCapture();
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "plain.key"), "**literal**");
+    EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()), static_cast<int>(ContentFormat::kPlainText));
+    I18n::beginOutboundCapture();
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "md.key"), "**bold**");
+    EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()), static_cast<int>(ContentFormat::kMarkdown));
+}
+
 // ─── .rpmode vs .rp Conflict Test ─────────────────────────────
 // Verify that the command routing logic correctly distinguishes
 // ".rpmode" from ".rp" (COC7 penalty dice).

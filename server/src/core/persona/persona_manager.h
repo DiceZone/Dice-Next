@@ -69,7 +69,8 @@ public:
 
     /// Set or update an entry (upsert by persona_id + locale + key).
     bool setEntry(int personaId, const std::string& locale,
-                  const std::string& key, const std::string& value);
+                  const std::string& key, const std::string& value,
+                  const std::string& format = "plain");
 
     /// Delete an entry.
     bool deleteEntry(int personaId, const std::string& locale, const std::string& key);

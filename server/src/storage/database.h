@@ -214,6 +214,7 @@ struct I18nOverrideRow {
     std::string locale;   // BCP-47 code, e.g. "zh-Hant"
     std::string key;      // dotted i18n key, e.g. "dice.roll.result"
     std::string value;
+    std::string format = "plain"; // plain | markdown; legacy rows stay literal
 };
 
 /// Per-(platform, group) settings: bot enabled flag (.bot on/off), and future
@@ -361,6 +362,7 @@ struct PersonaEntryRow {
     std::string locale;          // BCP-47 code, e.g. "zh-Hans"
     std::string key;             // dotted i18n key, e.g. "dice.roll.result"
     std::string value;           // override text
+    std::string format = "plain"; // plain | markdown
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -556,7 +558,8 @@ private:
                 orm::primary_key().autoincrement()),
             orm::make_column("locale", &I18nOverrideRow::locale),
             orm::make_column("key", &I18nOverrideRow::key),
-            orm::make_column("value", &I18nOverrideRow::value)
+            orm::make_column("value", &I18nOverrideRow::value),
+            orm::make_column("format", &I18nOverrideRow::format, orm::default_value("plain"))
         ),
         orm::make_table("player_profiles",
             orm::make_column("id", &PlayerProfileRow::id,
@@ -669,7 +672,8 @@ private:
             orm::make_column("persona_id", &PersonaEntryRow::personaId),
             orm::make_column("locale", &PersonaEntryRow::locale),
             orm::make_column("key", &PersonaEntryRow::key),
-            orm::make_column("value", &PersonaEntryRow::value)
+            orm::make_column("value", &PersonaEntryRow::value),
+            orm::make_column("format", &PersonaEntryRow::format, orm::default_value("plain"))
         )
     ));
 

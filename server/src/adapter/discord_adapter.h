@@ -10,6 +10,7 @@
 #include "qq_gateway_socket.h"
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
+#include "../common/markdown.h"
 
 #include <drogon/HttpClient.h>
 
@@ -113,26 +114,39 @@ public:
         gateway_.reset();
     }
 
-    void sendMessage(const Message& msg) override { sendTo(msg, msg.content); }
-    void sendReply(const Message& original, const std::string& text) override { sendTo(original, text); }
+    void sendMessage(const Message& msg) override { sendTo(msg, msg.content, ContentFormat::kPlainText); }
+    void sendReply(const Message& original, const std::string& text) override {
+        sendReplyFormatted(original, text, ContentFormat::kPlainText);
+    }
+    void sendReplyFormatted(const Message& original, const std::string& text, ContentFormat format) override {
+        sendTo(original, text, format);
+    }
     void sendGroupMessage(const std::string& channelId, const std::string& text) override {
-        postChannelMessage(nativeId(channelId, identity::Kind::Group), text);
+        sendGroupMessageFormatted(channelId, text, ContentFormat::kPlainText);
+    }
+    void sendGroupMessageFormatted(const std::string& channelId, const std::string& text, ContentFormat format) override {
+        const std::string wire = format == ContentFormat::kMarkdown ? text : markdown::escapeLiteral(text);
+        postChannelMessage(nativeId(channelId, identity::Kind::Group), wire);
     }
     void sendPrivateMessage(const std::string& userId, const std::string& text) override {
+        sendPrivateMessageFormatted(userId, text, ContentFormat::kPlainText);
+    }
+    void sendPrivateMessageFormatted(const std::string& userId, const std::string& text, ContentFormat format) override {
         const std::string native = nativeId(userId, identity::Kind::User);
+        const std::string wire = format == ContentFormat::kMarkdown ? text : markdown::escapeLiteral(text);
         // 需要先建 DM 频道（有缓存则直发）。
         {
             std::lock_guard lock(dmMutex_);
             auto it = dmChannels_.find(native);
-            if (it != dmChannels_.end()) { postChannelMessage(it->second, text); return; }
+            if (it != dmChannels_.end()) { postChannelMessage(it->second, wire); return; }
         }
         auto self = shared_from_this();
         restRequest("POST", "/api/v10/users/@me/channels", json{{"recipient_id", native}},
-            [self, native, text](const json& resp) {
+            [self, native, wire](const json& resp) {
                 const std::string channel = resp.value("id", std::string());
                 if (channel.empty()) { self->lastError_ = "Discord 无法创建私信频道"; return; }
                 { std::lock_guard lock(self->dmMutex_); self->dmChannels_[native] = channel; }
-                self->postChannelMessage(channel, text);
+                self->postChannelMessage(channel, wire);
             });
     }
 
@@ -428,12 +442,12 @@ private:
         return native.empty() ? publicId : native;
     }
 
-    void sendTo(const Message& m, const std::string& text) {
+    void sendTo(const Message& m, const std::string& text, ContentFormat format) {
         std::string channel;
         if (m.extra.is_object()) channel = m.extra.value("channel_id", std::string());   // 入站原生频道
-        if (channel.empty() && m.type == MessageType::kPrivate) { sendPrivateMessage(m.targetId, text); return; }
+        if (channel.empty() && m.type == MessageType::kPrivate) { sendPrivateMessageFormatted(m.targetId, text, format); return; }
         if (channel.empty()) channel = nativeId(m.targetId, identity::Kind::Group);
-        postChannelMessage(channel, text);
+        postChannelMessage(channel, format == ContentFormat::kMarkdown ? text : markdown::escapeLiteral(text));
     }
 
     void fail(const std::string& e) {

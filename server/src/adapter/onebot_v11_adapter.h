@@ -121,11 +121,11 @@ public:
     // ─── Send Messages ───────────────────────────────────────
 
     // 跨骰：出站预处理——跨骰护栏（开头是指令→插零宽空格）+ 登记自回声去重。
-    std::string prepOutgoing(const std::string& target, const std::string& text) {
-        // Markdown is the platform-neutral outbound format. OneBot v11 has no
-        // Markdown message type, so only its adapter copy is downgraded. CQ and
-        // image codes are protected by the converter and parsed afterwards.
-        std::string out = guardCrossBot(markdown::toPlainText(text));
+    std::string prepOutgoing(const std::string& target, const std::string& text,
+                             ContentFormat format = ContentFormat::kPlainText) {
+        // Never guess from user text. Only explicitly-marked Markdown is
+        // downgraded; legacy plugin/custom text remains byte-for-byte literal.
+        std::string out = guardCrossBot(format == ContentFormat::kMarkdown ? markdown::toPlainText(text) : text);
         SelfEchoFilter::instance().mark(platform() + ":" + target, normalizeEcho(out));
         return out;
     }
@@ -158,12 +158,16 @@ public:
     }
 
     void sendReply(const Message& original, const std::string& replyText) override {
+        sendReplyFormatted(original, replyText, ContentFormat::kPlainText);
+    }
+    void sendReplyFormatted(const Message& original, const std::string& replyText,
+                            ContentFormat format) override {
         // Build an array-format reply, quoting the original message when possible.
         json messageArray = json::array();
         if (!original.id.empty()) {
             messageArray.push_back({{"type","reply"},{"data",json{{"id",original.id}}}});
         }
-        for (auto& seg : buildSegments(prepOutgoing(original.targetId, replyText))) messageArray.push_back(seg);
+        for (auto& seg : buildSegments(prepOutgoing(original.targetId, replyText, format))) messageArray.push_back(seg);
 
         // Route to the SAME conversation the message came from — do not
         // broadcast to both group and private (that was a bug).
@@ -377,7 +381,11 @@ public:
         sendOneBotAction("set_group_name", {{"group_id", parseId(groupId)}, {"group_name", name}});
     }
     void sendGroupMessage(const std::string& groupId, const std::string& text) override {
-        sendOneBotAction("send_group_msg", {{"group_id", parseId(groupId)}, {"message", buildSegments(prepOutgoing(groupId, text))}});
+        sendGroupMessageFormatted(groupId, text, ContentFormat::kPlainText);
+    }
+    void sendGroupMessageFormatted(const std::string& groupId, const std::string& text,
+                                   ContentFormat format) override {
+        sendOneBotAction("send_group_msg", {{"group_id", parseId(groupId)}, {"message", buildSegments(prepOutgoing(groupId, text, format))}});
     }
     /// Send to a group as a STRING message so the platform parses CQ codes
     /// ([CQ:at,qq=..] / [CQ:image,..]). auto_escape=false keeps them as codes.
@@ -386,18 +394,27 @@ public:
             {{"group_id", parseId(groupId)}, {"message", normalizeCQText(prepOutgoing(groupId, cqText))}, {"auto_escape", false}});
     }
     void sendPrivateMessage(const std::string& userId, const std::string& text) override {
-        sendOneBotAction("send_private_msg", {{"user_id", parseId(userId)}, {"message", buildSegments(prepOutgoing(userId, text))}});
+        sendPrivateMessageFormatted(userId, text, ContentFormat::kPlainText);
+    }
+    void sendPrivateMessageFormatted(const std::string& userId, const std::string& text,
+                                     ContentFormat format) override {
+        sendOneBotAction("send_private_msg", {{"user_id", parseId(userId)}, {"message", buildSegments(prepOutgoing(userId, text, format))}});
     }
     /// Send a 合并转发 (merged-forward / chat-record) message: each node is one bubble,
     /// attributed to the bot. Uses the OneBot `send_group_forward_msg` custom-node API.
     bool sendGroupForwardMsg(const std::string& groupId,
                              const std::vector<std::string>& nodes) override {
+        return sendGroupForwardMsgFormatted(groupId, nodes, ContentFormat::kPlainText);
+    }
+    bool sendGroupForwardMsgFormatted(const std::string& groupId,
+                                      const std::vector<std::string>& nodes,
+                                      ContentFormat format) override {
         if (nodes.empty()) return false;
         std::string botName = loginName_.empty() ? std::string("\xe9\xaa\xb0\xe5\xa8\x98") : loginName_;  // 骰娘
         std::string uin = loginId_.empty() ? std::string("10000") : loginId_;
         json messages = json::array();
         for (const auto& n : nodes) {
-            const std::string plain = prepOutgoing(groupId, n);
+            const std::string plain = prepOutgoing(groupId, n, format);
             messages.push_back({
                 {"type", "node"},
                 {"data", {{"name", botName}, {"uin", uin}, {"content", buildSegments(plain)}}}

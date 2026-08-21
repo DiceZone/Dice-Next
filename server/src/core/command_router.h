@@ -29,6 +29,7 @@
 #include "../config/config_manager.h"
 #include "../config/scoped_settings.h"
 #include "../common/logger.h"
+#include "../common/markdown.h"
 #include "../common/version.h"
 #include "../common/utils.h"
 #include "../platform/system_info.h"
@@ -39,6 +40,7 @@
 #include "../service/ai_translate.h"   // 阶段三：.lang AI 翻译语言
 #include "persona/persona_manager.h"
 #include <onedice/onedice.h>
+#include <dicescript/dicescript.h>
 
 #include <functional>
 #include <regex>
@@ -645,20 +647,10 @@ private:
         return {"dicenext", "onedice", "dicescript"};
     }
 
-    static constexpr bool diceScriptAvailable() noexcept {
-        // DiceScript's generated C99 library has not been published upstream yet.
-        // This stable slot keeps configuration/order compatible; the bridge will
-        // replace this capability check when the C API becomes available.
-        return false;
-    }
-
     RoutedExpressionResult evaluateExpression(const Message& msg, const std::string& expr) {
         std::string lastUnsupported;
-        bool attempted = false;
-        bool skippedDiceScript = false;
         for (const std::string& id : expressionOrder(msg)) {
             if (id == "dicenext") {
-                attempted = true;
                 auto result = engine_.roll(expr);
                 if (result.ok()) return {true, result.formattedOutput, {}, id, result.individualResults};
                 if (result.failureKind == DiceFailureKind::kEvaluation)
@@ -667,28 +659,44 @@ private:
                 continue;
             }
             if (id == "onedice") {
-                attempted = true;
                 auto probe = onedice::eval(expr, 100, [](long long) { return 1LL; });
-                if (!probe.ok) {
-                    if (probe.errorKind == onedice::ErrorKind::Evaluation)
-                        return {false, {}, probe.error, id, {}};
+                if (!probe.ok && probe.errorKind == onedice::ErrorKind::UnsupportedSyntax) {
                     lastUnsupported = probe.error;
                     continue;
                 }
+                // A deterministic probe may hit an outcome-dependent evaluation
+                // error (for example a random denominator becoming zero).  The
+                // syntax is still eligible, so evaluate it exactly once with the
+                // real random source; any real failure stops the chain below.
                 if (auto fate = tryFate(expr)) return {true, *fate, {}, id, {}};
                 auto result = onedice::eval(expr, 100);
                 if (!result.ok) return {false, {}, result.error, id, {}};
                 return {true, result.detail, {}, id, {}};
             }
-            if (id == "dicescript" && !diceScriptAvailable()) {
-                skippedDiceScript = true;
-                continue;
+            if (id == "dicescript") {
+                dicescript_result validation{};
+                if (!dicescript_validate(expr.c_str(), &validation)) {
+                    if (validation.error_kind == DICESCRIPT_ERROR_UNSUPPORTED_SYNTAX) {
+                        lastUnsupported = validation.error;
+                        continue;
+                    }
+                    return {false, {}, validation.error, id, {}};
+                }
+
+                dicescript_options options{};
+                dicescript_default_options(&options);
+                options.default_faces = 100;
+                dicescript_result result{};
+                if (!dicescript_eval(expr.c_str(), &options, &result))
+                    return {false, {}, result.error, id, {}};
+
+                std::vector<int> samples;
+                samples.reserve(result.sample_count);
+                for (uint32_t i = 0; i < result.sample_count; ++i)
+                    samples.push_back(static_cast<int>(result.samples[i]));
+                return {true, result.detail, {}, id, std::move(samples)};
             }
         }
-        if (!attempted && skippedDiceScript)
-            return {false, {}, "DiceScript C99 组件尚未包含在当前构建中", "dicescript", {}};
-        if (lastUnsupported.empty() && skippedDiceScript)
-            lastUnsupported = "DiceScript C99 组件尚未包含在当前构建中";
         return {false, {}, lastUnsupported.empty() ? "unsupported expression" : lastUnsupported, {}, {}};
     }
 
@@ -820,19 +828,34 @@ private:
              {"turn", std::to_string(turns)}, {"res", "\n" + res.str()}});
     }
 
-    /// Read the leading dice-expression token. Includes all ASCII alphanumerics
-    /// (so OneDice operators like kh/kl/a/c/max work when glued, e.g. "4d6kh3")
-    /// plus arithmetic/tuple symbols. Stops at a space or any non-ASCII byte
-    /// (e.g. a Chinese reason), so ".r3d6攻击" still splits expr/reason correctly.
+    /// Read the leading dice-expression token. Besides ASCII operators this
+    /// recognizes the small set of non-ASCII DiceScript operators explicitly,
+    /// while an arbitrary Chinese suffix still starts the roll reason.
     static std::string readDiceToken(const std::string& s) {
+        static const std::array<std::string, 8> extendedTokens = {
+            "优势", "優勢", "劣势", "劣勢", "＋", "－", "＊", "／"
+        };
         size_t i = 0;
         while (i < s.size()) {
             unsigned char c = static_cast<unsigned char>(s[i]);
             bool ok = std::isalnum(c) ||
                 c=='+'||c=='-'||c=='*'||c=='/'||c=='^'||
+                c=='%'||c=='?'||c==':'||
+                c=='<'||c=='>'||c=='&'||c=='|'||c=='!'||
                 c=='('||c==')'||c=='['||c==']'||c==','||c=='#';
-            if (!ok) break;
-            ++i;
+            if (ok) {
+                ++i;
+                continue;
+            }
+            bool matched = false;
+            for (const auto& token : extendedTokens) {
+                if (s.compare(i, token.size(), token) == 0) {
+                    i += token.size();
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) break;
         }
         return s.substr(0, i);
     }
@@ -9665,12 +9688,14 @@ public:
     void setForwardNodes(std::vector<std::string> nodes) { forwardNodes_ = std::move(nodes); }
     std::vector<std::string> takeForwardNodes() { auto v = std::move(forwardNodes_); forwardNodes_.clear(); return v; }
 
-    std::string applySelf(const Message& msg, std::string text) const {
+    std::string applySelf(const Message& msg, std::string text,
+                          ContentFormat format = ContentFormat::kPlainText) const {
         if (text.find('{') == std::string::npos) return text;
         std::string call = resolveSelfCall(msg), name = resolveSelfName(msg);
         auto rep = [&](const char* tok, const std::string& val) {
+            const std::string safe = format == ContentFormat::kMarkdown ? markdown::escapeLiteral(val) : val;
             std::string t = tok; size_t p;
-            while ((p = text.find(t)) != std::string::npos) text.replace(p, t.size(), val);
+            while ((p = text.find(t)) != std::string::npos) text.replace(p, t.size(), safe);
         };
         rep("{self}", call);
         rep("{strSelfCall}", call);

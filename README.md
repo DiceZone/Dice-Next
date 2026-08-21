@@ -26,6 +26,7 @@ Dice!Next 是面向 TRPG 跑团与骰点场景的本地部署骰娘。它提供�
 | [Dice-Next-Doc](https://github.com/DiceZone/Dice-Next-Doc) | 文档站、路线图与内置指令数据。 |
 | [Dice-Next-Docker](https://github.com/DiceZone/Dice-Next-Docker) | Docker 部署（含 NapCat 反向 WS 一键配置）。 |
 | [onedice-cpp-lib](https://github.com/DiceZone/onedice-cpp-lib) | 掷骰表达式解析与计算引擎。 |
+| [dicescript-c-lib](https://github.com/DiceZone/dicescript-c-lib) | DiceScript C99 数值与 TRPG 骰式兼容引擎。 |
 
 建议保持以下目录结构：
 
@@ -35,7 +36,8 @@ workspace/
 ├─ Dice-Next-WebUI/
 ├─ Dice-Next-Doc/
 ├─ Dice-Next-Docker/
-└─ onedice-cpp-lib/
+├─ onedice-cpp-lib/
+└─ dicescript-c-lib/
 ```
 
 ## 开发与构建

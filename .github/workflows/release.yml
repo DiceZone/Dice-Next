@@ -76,6 +76,20 @@ jobs:
             sleep 15
           done
           [ -d onedice-cpp-lib/.git ] || { echo "onedice-cpp-lib clone failed after 3 attempts" >&2; exit 1; }
+      - name: Checkout dicescript-c-lib (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf dicescript-c-lib
+            if git clone --depth 1 https://github.com/DiceZone/dicescript-c-lib.git dicescript-c-lib; then
+              break
+            fi
+            echo "dicescript-c-lib clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d dicescript-c-lib/.git ] || { echo "dicescript-c-lib clone failed after 3 attempts" >&2; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           name: webui-dist
@@ -189,6 +203,20 @@ jobs:
             sleep 15
           done
           [ -d onedice-cpp-lib/.git ] || { echo "onedice-cpp-lib clone failed after 3 attempts" >&2; exit 1; }
+      - name: Checkout dicescript-c-lib (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf dicescript-c-lib
+            if git clone --depth 1 https://github.com/DiceZone/dicescript-c-lib.git dicescript-c-lib; then
+              break
+            fi
+            echo "dicescript-c-lib clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d dicescript-c-lib/.git ] || { echo "dicescript-c-lib clone failed after 3 attempts" >&2; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           name: webui-dist
@@ -314,6 +342,20 @@ jobs:
             sleep 15
           done
           [ -d onedice-cpp-lib/.git ] || { echo "onedice-cpp-lib clone failed after 3 attempts" >&2; exit 1; }
+      - name: Checkout dicescript-c-lib (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf dicescript-c-lib
+            if git clone --depth 1 https://github.com/DiceZone/dicescript-c-lib.git dicescript-c-lib; then
+              break
+            fi
+            echo "dicescript-c-lib clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d dicescript-c-lib/.git ] || { echo "dicescript-c-lib clone failed after 3 attempts" >&2; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           name: webui-dist

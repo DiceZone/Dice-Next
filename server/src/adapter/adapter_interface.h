@@ -3,6 +3,7 @@
 // Protocol-agnostic abstract interface for chat platform adapters.
 // Replace the old DD:: namespace (hardcoded QQAPI) with a
 // plugin-based architecture — OneBot v11, Milky, Discord, Kook, etc.
+#include "../common/content_format.h"
 
 #include <string>
 #include <functional>
@@ -145,6 +146,12 @@ public:
 
     /// Reply to a specific message (platform-specific quoting)
     virtual void sendReply(const Message& original, const std::string& replyText) = 0;
+    /// Format-aware path used by the core reply pipeline. Existing plugin and
+    /// adapter calls remain plain text through sendReply for compatibility.
+    virtual void sendReplyFormatted(const Message& original, const std::string& replyText,
+                                    ContentFormat /*format*/) {
+        sendReply(original, replyText);
+    }
 
     // ─── Event Callbacks ─────────────────────────────────────
 
@@ -246,6 +253,10 @@ public:
 
     /// Send a plain text message to a group/user from the web admin. Default no-op.
     virtual void sendGroupMessage(const std::string& /*groupId*/, const std::string& /*text*/) {}
+    virtual void sendGroupMessageFormatted(const std::string& groupId, const std::string& text,
+                                           ContentFormat /*format*/) {
+        sendGroupMessage(groupId, text);
+    }
 
     /// Send a group message whose text may contain platform codes (CQ codes like
     /// [CQ:at,qq=..] / [CQ:image,..]) that the platform should parse. Default
@@ -256,6 +267,10 @@ public:
 
     /// Send a private message to a user. Default no-op.
     virtual void sendPrivateMessage(const std::string& /*userId*/, const std::string& /*text*/) {}
+    virtual void sendPrivateMessageFormatted(const std::string& userId, const std::string& text,
+                                             ContentFormat /*format*/) {
+        sendPrivateMessage(userId, text);
+    }
 
     /// Send a "merged forward" (合并转发/聊天记录) to a group: each entry in @p nodes
     /// becomes one chat bubble inside a single forwarded record. Returns true if it
@@ -263,6 +278,11 @@ public:
     /// caller should then fall back to plain segmented messages). Default: unsupported.
     virtual bool sendGroupForwardMsg(const std::string& /*groupId*/,
                                      const std::vector<std::string>& /*nodes*/) { return false; }
+    virtual bool sendGroupForwardMsgFormatted(const std::string& groupId,
+                                              const std::vector<std::string>& nodes,
+                                              ContentFormat /*format*/) {
+        return sendGroupForwardMsg(groupId, nodes);
+    }
 
     /// Upload a file to a group's files (.log end → txt). @p content is the raw
     /// file bytes (so the platform client needn't share a filesystem with us —

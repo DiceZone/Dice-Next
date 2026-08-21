@@ -11,6 +11,7 @@
 #include "../core/dice/dice_expression.h"
 #include "../core/dice/dice_rules.h"
 #include "../common/utils.h"
+#include "../common/markdown.h"
 #include "../common/version.h"
 #include "../adapter/adapter_interface.h"
 #include "../adapter/adapter_manager.h"
@@ -1089,7 +1090,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             for (auto& e : personaMgr.listEntries(id)) {
                 arr.push_back(J{
                     {"id", e.id}, {"personaId", e.personaId},
-                    {"locale", e.locale}, {"key", e.key}, {"value", e.value}
+                    {"locale", e.locale}, {"key", e.key}, {"value", e.value}, {"format", e.format}
                 });
             }
             jsonReply(ok(arr), std::move(cb));
@@ -1104,8 +1105,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             std::string locale = j.value("locale", "zh-Hans");
             std::string key = j.value("key", "");
             std::string value = j.value("value", "");
+            std::string format = j.value("format", "plain");
             if (key.empty()) { jsonReply(fail("key is required"), std::move(cb)); return; }
-            if (!personaMgr.setEntry(id, locale, key, value)) {
+            if (!personaMgr.setEntry(id, locale, key, value, format)) {
                 jsonReply(fail("failed to set entry"), std::move(cb)); return;
             }
             // Hot-reload into I18n if this persona is currently active
@@ -1486,8 +1488,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
             // overrides for this locale, from DB
             std::map<std::string, std::string> ov;
+            std::map<std::string, std::string> ovFormat;
             if (st) for (auto& r : st->get_all<I18nOverrideRow>())
-                if (r.locale == lang) ov[r.key] = r.value;
+                if (r.locale == lang) { ov[r.key] = r.value; ovFormat[r.key] = r.format; }
 
             // Derive the {placeholder} variables a template uses + their descriptions.
             auto deriveVars = [&i18n, loc](const std::string& tmpl) -> J {
@@ -1542,6 +1545,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         {"key", key},
                         {"default", def},
                         {"override", ov.count(key) ? J(ov[key]) : J(nullptr)},
+                        {"format", ov.count(key) ? ovFormat[key] : "plain"},
+                        {"defaultFormat", contentFormatName(i18n.getDefaultFormat(loc, key))},
                         {"v2key", legacyv2::v2KeyFor(key)},
                         {"example", example},
                         {"vars", deriveVars(def)}
@@ -1580,13 +1585,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             std::string lang = j.value("locale", "");
             std::string key = j.value("key", "");
             std::string value = j.value("value", "");
+            std::string format = j.value("format", "plain") == "markdown" ? "markdown" : "plain";
             if (lang.empty() || key.empty()) { jsonReply(fail("locale & key required"), std::move(cb)); return; }
             // upsert DB
             auto rows = st->get_all<I18nOverrideRow>(
                 orm::where(orm::c(&I18nOverrideRow::locale) == lang and orm::c(&I18nOverrideRow::key) == key));
-            if (rows.empty()) { I18nOverrideRow r; r.locale = lang; r.key = key; r.value = value; st->insert(r); }
-            else { auto r = rows.front(); r.value = value; st->update(r); }
-            i18n.setOverride(localeFromString(lang), key, value);
+            if (rows.empty()) { I18nOverrideRow r; r.locale = lang; r.key = key; r.value = value; r.format = format; st->insert(r); }
+            else { auto r = rows.front(); r.value = value; r.format = format; st->update(r); }
+            i18n.setOverride(localeFromString(lang), key, value, contentFormatFromString(format));
             jsonReply(ok(nullptr), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Put});
@@ -1600,11 +1606,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Delete});
 
-    // Export all custom reply overrides → { locale: { key: value } }.
+    // Export all custom reply overrides with explicit format metadata.
     app.registerHandler("/api/templates/export", [st](Req, CB&& cb) {
         try {
             J out = J::object();
-            if (st) for (auto& r : st->get_all<I18nOverrideRow>()) out[r.locale][r.key] = r.value;
+            if (st) for (auto& r : st->get_all<I18nOverrideRow>())
+                out[r.locale][r.key] = J{{"value", r.value}, {"format", r.format}};
             jsonReply(ok(out), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
@@ -1620,17 +1627,32 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             for (auto& [lang, keys] : data.items()) {
                 if (!keys.is_object()) continue;
                 for (auto& [key, val] : keys.items()) {
-                    if (!val.is_string()) continue;
-                    std::string value = val.get<std::string>();
+                    std::string value, format = "plain";
+                    if (val.is_string()) value = val.get<std::string>();
+                    else if (val.is_object()) {
+                        value = val.value("value", "");
+                        format = val.value("format", "plain") == "markdown" ? "markdown" : "plain";
+                    } else continue;
                     auto rows = st->get_all<I18nOverrideRow>(
                         orm::where(orm::c(&I18nOverrideRow::locale) == lang and orm::c(&I18nOverrideRow::key) == key));
-                    if (rows.empty()) { I18nOverrideRow r; r.locale = lang; r.key = key; r.value = value; st->insert(r); }
-                    else { auto r = rows.front(); r.value = value; st->update(r); }
-                    i18n.setOverride(localeFromString(lang), key, value);
+                    if (rows.empty()) { I18nOverrideRow r; r.locale = lang; r.key = key; r.value = value; r.format = format; st->insert(r); }
+                    else { auto r = rows.front(); r.value = value; r.format = format; st->update(r); }
+                    i18n.setOverride(localeFromString(lang), key, value, contentFormatFromString(format));
                     ++n;
                 }
             }
             jsonReply(ok(J{{"imported", n}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Post});
+
+    // Exact platform previews used by the reply editor. Plain text never runs
+    // through a Markdown heuristic; only explicitly-marked Markdown is reduced.
+    app.registerHandler("/api/templates/preview", [](Req req, CB&& cb) {
+        try {
+            J body = J::parse(req->body());
+            std::string text = body.value("text", "");
+            const bool isMarkdown = body.value("format", "plain") == "markdown";
+            jsonReply(ok(J{{"markdown", text}, {"onebot", isMarkdown ? markdown::toPlainText(text) : text}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
@@ -1653,8 +1675,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             auto defaults = i18n.flatten(loc);
             // overrides for this locale from DB
             std::map<std::string, std::string> ov;
+            std::map<std::string, std::string> ovFormat;
             if (st) for (auto& r : st->get_all<I18nOverrideRow>())
-                if (r.locale == lang) ov[r.key] = r.value;
+                if (r.locale == lang) { ov[r.key] = r.value; ovFormat[r.key] = r.format; }
             J arr = J::array();
             for (auto& [key, def] : defaults) {
                 auto oi = ov.find(key);
@@ -1663,6 +1686,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"group", key.substr(0, key.find('.'))},
                     {"default", def},
                     {"override", oi != ov.end() ? J(oi->second) : J(nullptr)},
+                    {"format", oi != ov.end() ? ovFormat[key] : "plain"},
+                    {"defaultFormat", contentFormatName(i18n.getDefaultFormat(loc, key))},
                     {"v2key", legacyv2::v2KeyFor(key)}
                 });
             }
@@ -1674,6 +1699,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"group", key.substr(0, key.find('.'))},
                     {"default", ""},
                     {"override", val},
+                    {"format", ovFormat[key]},
+                    {"defaultFormat", "plain"},
                     {"v2key", legacyv2::v2KeyFor(key)}
                 });
             }
@@ -2649,7 +2676,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"engines", J::array({
                         J{{"id", "dicenext"}, {"available", true}},
                         J{{"id", "onedice"}, {"available", true}},
-                        J{{"id", "dicescript"}, {"available", false}}
+                        J{{"id", "dicescript"}, {"available", true}}
                     })}
                 };
             };
@@ -2680,11 +2707,24 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 filtered["expression_mode"] = values["expression_mode"];
             }
             if (values.contains("expression_order")) {
-                const J order = normalizedOrder(values["expression_order"]);
-                if (!values["expression_order"].is_array() || values["expression_order"].empty()) {
+                const J& rawOrder = values["expression_order"];
+                if (!rawOrder.is_array() || rawOrder.empty()) {
                     jsonReply(fail("自定义模式至少需要一个引擎"), std::move(cb)); return;
                 }
-                filtered["expression_order"] = order;
+                std::set<std::string> seen;
+                for (const auto& item : rawOrder) {
+                    if (!item.is_string()) {
+                        jsonReply(fail("表达式引擎标识必须是字符串"), std::move(cb)); return;
+                    }
+                    const std::string id = item.get<std::string>();
+                    if (std::find(kEngines.begin(), kEngines.end(), id) == kEngines.end()) {
+                        jsonReply(fail("未知的表达式引擎: " + id), std::move(cb)); return;
+                    }
+                    if (!seen.insert(id).second) {
+                        jsonReply(fail("表达式引擎顺序不能包含重复项"), std::move(cb)); return;
+                    }
+                }
+                filtered["expression_order"] = normalizedOrder(rawOrder);
             }
             if (scope == "global") {
                 if (filtered.contains("expression_mode")) cfg.set<std::string>("dice/expression_mode", filtered["expression_mode"].get<std::string>());
