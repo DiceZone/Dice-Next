@@ -106,3 +106,38 @@ TEST(ExpressionFallback, DiceScriptKeepsEvaluationFailuresTerminal) {
     ASSERT_FALSE(dicescript_eval("1d6/0", &options, &result));
     ASSERT_TRUE(result.error_kind == DICESCRIPT_ERROR_EVALUATION);
 }
+
+TEST(ExpressionFallback, FullDiceScriptVmValidationDoesNotRoll) {
+    dicescript_runtime_options options{};
+    dicescript_script_result result{};
+    uint32_t calls = 0;
+    dicescript_default_runtime_options(&options);
+    options.dice.random = diceScriptMax;
+    options.dice.random_userdata = &calls;
+    auto* context = dicescript_context_create(&options);
+    ASSERT_TRUE(context != nullptr);
+
+    ASSERT_TRUE(dicescript_context_validate_expression(
+        context, "[1, 2, 3].sum() + 2d6", &result));
+    ASSERT_EQ(calls, 0u);
+    ASSERT_EQ(result.dice_rolls, 0u);
+
+    ASSERT_TRUE(dicescript_context_eval(
+        context, "[1, 2, 3].sum() + 2d6", &result));
+    ASSERT_EQ(result.integer, 18);
+    ASSERT_EQ(calls, 2u);
+    ASSERT_EQ(result.dice_rolls, 2u);
+    ASSERT_EQ(result.sample_count, 2u);
+    ASSERT_TRUE(dicescript_context_validate_expression_prefix(
+        context, "[1, 2, 3].sum() + 2d6 attack", &result));
+    ASSERT_TRUE(std::string(result.matched) == "[1, 2, 3].sum() + 2d6");
+    ASSERT_TRUE(std::string(result.rest) == " attack");
+    ASSERT_EQ(calls, 2u);
+    ASSERT_EQ(result.dice_rolls, 0u);
+
+    ASSERT_FALSE(dicescript_context_validate_expression(
+        context, "a=1; a+1", &result));
+    ASSERT_TRUE(result.error_kind == DICESCRIPT_ERROR_UNSUPPORTED_SYNTAX);
+    ASSERT_EQ(calls, 2u);
+    dicescript_context_destroy(context);
+}

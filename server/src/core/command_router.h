@@ -54,11 +54,13 @@
 #include <optional>
 #include <map>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <cctype>
 #include <algorithm>
 #include <array>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 #include <set>
 #include <fstream>
@@ -647,6 +649,48 @@ private:
         return {"dicenext", "onedice", "dicescript"};
     }
 
+    struct DiceScriptHostState {
+        CommandRouter* router = nullptr;
+        const Message* message = nullptr;
+        std::unordered_map<std::string, std::string> values;
+        std::unordered_set<std::string> missing;
+    };
+
+    static uint64_t diceScriptRandom(void*, uint64_t upperBound) {
+        if (upperBound <= 1) return 0;
+        static thread_local std::mt19937_64 rng([] {
+            std::random_device rd;
+            return (static_cast<uint64_t>(rd()) << 32) ^
+                   static_cast<uint64_t>(rd());
+        }());
+        return std::uniform_int_distribution<uint64_t>(0, upperBound - 1)(rng);
+    }
+
+    static size_t diceScriptLoad(void* userdata, const char* name,
+                                 char* buffer, size_t capacity) {
+        auto* state = static_cast<DiceScriptHostState*>(userdata);
+        if (state == nullptr || state->router == nullptr ||
+            state->message == nullptr || name == nullptr || *name == '\0')
+            return 0;
+        const std::string key(name);
+        auto it = state->values.find(key);
+        if (it == state->values.end()) {
+            if (state->missing.count(key) != 0) return 0;
+            auto value = state->router->aiGetAttr(*state->message, key);
+            if (!value) {
+                state->missing.insert(key);
+                return 0;
+            }
+            it = state->values.emplace(
+                key, std::string("{\"t\":0,\"v\":") +
+                         std::to_string(*value) + "}").first;
+        }
+        const size_t required = it->second.size() + 1;
+        if (buffer != nullptr && capacity >= required)
+            std::memcpy(buffer, it->second.c_str(), required);
+        return required;
+    }
+
     RoutedExpressionResult evaluateExpression(const Message& msg, const std::string& expr) {
         std::string lastUnsupported;
         for (const std::string& id : expressionOrder(msg)) {
@@ -674,8 +718,34 @@ private:
                 return {true, result.detail, {}, id, {}};
             }
             if (id == "dicescript") {
-                dicescript_result validation{};
-                if (!dicescript_validate(expr.c_str(), &validation)) {
+                dicescript_runtime_options options{};
+                dicescript_default_runtime_options(&options);
+                options.dice.default_faces = 100;
+                options.dice.random = diceScriptRandom;
+                options.dice.random_userdata = nullptr;
+                options.enable_default_dice = 1;
+                std::snprintf(options.default_dice_side_expression,
+                              sizeof(options.default_dice_side_expression), "100");
+                options.enable_dice_coc = 1;
+                options.enable_dice_fate = 1;
+                options.enable_dice_wod = 1;
+                options.enable_dice_double_cross = 1;
+                std::unique_ptr<dicescript_context,
+                    decltype(&dicescript_context_destroy)> context(
+                        dicescript_context_create(&options),
+                        &dicescript_context_destroy);
+                if (!context)
+                    return {false, {}, "failed to create DiceScript context", id, {}};
+
+                DiceScriptHostState hostState{this, &msg};
+                dicescript_host_callbacks host{};
+                host.load = diceScriptLoad;
+                host.userdata = &hostState;
+                dicescript_context_set_host_callbacks(context.get(), &host);
+
+                dicescript_script_result validation{};
+                if (!dicescript_context_validate_expression(
+                        context.get(), expr.c_str(), &validation)) {
                     if (validation.error_kind == DICESCRIPT_ERROR_UNSUPPORTED_SYNTAX) {
                         lastUnsupported = validation.error;
                         continue;
@@ -683,18 +753,17 @@ private:
                     return {false, {}, validation.error, id, {}};
                 }
 
-                dicescript_options options{};
-                dicescript_default_options(&options);
-                options.default_faces = 100;
-                dicescript_result result{};
-                if (!dicescript_eval(expr.c_str(), &options, &result))
+                dicescript_script_result result{};
+                if (!dicescript_context_eval(context.get(), expr.c_str(), &result))
                     return {false, {}, result.error, id, {}};
 
                 std::vector<int> samples;
                 samples.reserve(result.sample_count);
                 for (uint32_t i = 0; i < result.sample_count; ++i)
                     samples.push_back(static_cast<int>(result.samples[i]));
-                return {true, result.detail, {}, id, std::move(samples)};
+                const std::string detail = result.detail[0] != '\0'
+                    ? std::string(result.detail) : std::string(result.text);
+                return {true, detail, {}, id, std::move(samples)};
             }
         }
         return {false, {}, lastUnsupported.empty() ? "unsupported expression" : lastUnsupported, {}, {}};
@@ -832,6 +901,29 @@ private:
     /// recognizes the small set of non-ASCII DiceScript operators explicitly,
     /// while an arbitrary Chinese suffix still starts the roll reason.
     static std::string readDiceToken(const std::string& s) {
+        // Let the full DiceScript parser find the longest expression prefix
+        // without evaluating it.  This keeps spaces inside arrays/dicts and
+        // method calls such as "[1, 2, 3].sum() + 2d6" intact while leaving
+        // the following text as the roll reason.  The legacy scanner below is
+        // retained for OneDice-only spellings outside DiceScript's grammar.
+        if (!s.empty()) {
+            dicescript_runtime_options options{};
+            dicescript_default_runtime_options(&options);
+            options.enable_dice_coc = 1;
+            options.enable_dice_fate = 1;
+            options.enable_dice_wod = 1;
+            options.enable_dice_double_cross = 1;
+            std::unique_ptr<dicescript_context,
+                decltype(&dicescript_context_destroy)> context(
+                    dicescript_context_create(&options),
+                    &dicescript_context_destroy);
+            dicescript_script_result parsed{};
+            if (context && dicescript_context_validate_expression_prefix(
+                    context.get(), s.c_str(), &parsed) &&
+                parsed.consumed_bytes != 0)
+                return std::string(parsed.matched);
+        }
+
         static const std::array<std::string, 8> extendedTokens = {
             "优势", "優勢", "劣势", "劣勢", "＋", "－", "＊", "／"
         };
