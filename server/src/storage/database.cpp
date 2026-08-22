@@ -354,6 +354,7 @@ bool Database::open(const std::string& path) {
                     orm::make_column("id", &ChatMsgRow::id,
                         orm::primary_key().autoincrement()),
                     orm::make_column("platform", &ChatMsgRow::platform),
+                    orm::make_column("adapter_id", &ChatMsgRow::adapterId),
                     orm::make_column("group_id", &ChatMsgRow::groupId),
                     orm::make_column("msg_id", &ChatMsgRow::msgId),
                     orm::make_column("user_id", &ChatMsgRow::userId),

@@ -14,6 +14,7 @@
 #include <vector>
 #include <functional>
 #include <cmath>
+#include <cstdlib>
 
 namespace dice::test {
 
@@ -121,10 +122,16 @@ public:
 inline int runAll() {
     std::cout.sync_with_stdio(true);
     std::cout << "=== Dice!Next Test Suite ===" << std::endl;
-    std::cout << "Running " << registry().size() << " test cases..." << std::endl << std::endl;
+    const char* filterEnv = std::getenv("DICENEXT_TEST_FILTER");
+    const std::string filter = filterEnv ? filterEnv : "";
+    size_t selected = 0;
+    for (const auto& tc : registry())
+        if (filter.empty() || (tc.suite + "." + tc.name).find(filter) != std::string::npos) ++selected;
+    std::cout << "Running " << selected << " of " << registry().size() << " test cases..." << std::endl << std::endl;
 
     std::string lastSuite;
     for (auto& tc : registry()) {
+        if (!filter.empty() && (tc.suite + "." + tc.name).find(filter) == std::string::npos) continue;
         if (tc.suite != lastSuite) {
             std::cout << "[" << tc.suite << "]" << std::endl;
             lastSuite = tc.suite;

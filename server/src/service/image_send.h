@@ -9,6 +9,7 @@
 // 旧数据里已存的 http://..../api/assets/.. 链接同样被识别并按此重新转换。
 
 #include "../config/config_manager.h"
+#include "../config/scoped_settings.h"
 
 #include <drogon/utils/Utilities.h>
 #include <nlohmann/json.hpp>
@@ -22,9 +23,14 @@ namespace dice::imgsend {
 inline ConfigManager* g_cfg = nullptr;
 inline void init(ConfigManager& cfg) { g_cfg = &cfg; }
 
-inline nlohmann::json conf() {
+inline nlohmann::json conf(const std::string& platform = {},
+                           const std::string& adapterId = {}) {
     if (!g_cfg) return nlohmann::json::object();
-    try { return g_cfg->get<nlohmann::json>("dice/image_send", nlohmann::json::object()); }
+    try {
+        return scoped_settings::resolveSection(
+            g_cfg->getAll(), "dice", platform, adapterId)
+            .value("image_send", nlohmann::json::object());
+    }
     catch (...) { return nlohmann::json::object(); }
 }
 
@@ -52,7 +58,9 @@ inline std::string fileToBase64(const std::string& path) {
 
 /// 发送期解析：把图片段里的本地路径/本站资产链接转成平台可用值。
 /// 远程外链、base64://、file:// 原样放行。
-inline std::string resolve(const std::string& file) {
+inline std::string resolve(const std::string& file,
+                           const std::string& platform = {},
+                           const std::string& adapterId = {}) {
     if (file.empty()) return file;
     if (file.rfind("base64://", 0) == 0 || file.rfind("file:", 0) == 0) return file;
     std::string name;        // data/assets 内的文件名（可走 httpurl）
@@ -71,7 +79,7 @@ inline std::string resolve(const std::string& file) {
             if (!rest.empty() && rest.find('/') == std::string::npos) name = rest;
         }
     }
-    auto c = conf();
+    auto c = conf(platform, adapterId);
     std::string mode = c.value("mode", std::string("base64"));
     if (mode == "httpurl" && !name.empty()) {
         std::string host = c.value("host", std::string());

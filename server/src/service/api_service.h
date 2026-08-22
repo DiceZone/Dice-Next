@@ -242,6 +242,14 @@ static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
     return adapter;
 }
 
+static void applyScopedAdapterSettings(const AdapterPtr& adapter, ConfigManager& cfg) {
+    if (!adapter) return;
+    const auto resolved = scoped_settings::resolveSection(
+        cfg.getAll(), "dice", adapter->platform(), adapter->id());
+    adapter->setMessageFormatOverride(IAdapter::parseFormatOverride(
+        resolved.value("message_format", std::string("traditional"))));
+}
+
 static J replyToJson(const ReplyRuleRow& r) {
     const char* modes[] = {"keyword","prefix","regex","search"};
     // conditions[]: parse stored JSON, else synthesize from the legacy fields.
@@ -1199,8 +1207,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // 出站消息表现形式。传统模式始终发送纯文本；卡片模式由各适配器按其
     // 官方能力渲染，无法使用富消息的平台会安全回退为传统文本。
-    // 支持全局默认 + 按适配器/帐号单独覆盖（适配器配置 message_format：
-    // 空=跟随全局 / traditional / card）。
+    // 兼容旧前端接口。实际配置统一写入作用域配置树，避免把运行策略
+    // 混入适配器连接凭据。
     app.registerHandler("/api/system/message-format", [&cfg, st, &adapterMgr](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
@@ -1215,28 +1223,23 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         std::string am = e.value("mode", std::string());
                         if (am != "card" && am != "traditional") am = "";
                         int aid = 0; try { aid = std::stoi(id); } catch (...) { continue; }
-                        auto row = st->get_pointer<AdapterRow>(aid);
-                        if (!row) continue;
-                        J cfg2 = J::parse(row->config, nullptr, false);
-                        if (!cfg2.is_object()) cfg2 = J::object();
-                        if (am.empty()) cfg2.erase("message_format");
-                        else cfg2["message_format"] = am;
-                        row->config = cfg2.dump();
-                        st->update(*row);
-                        if (auto a = adapterMgr.getAdapter(id))
-                            a->setMessageFormatOverride(IAdapter::parseFormatOverride(am));
+                        try { (void)st->get<AdapterRow>(aid); } catch (...) { continue; }
+                        const J values = am.empty() ? J::object() : J{{"message_format", am}};
+                        const J clear = am.empty() ? J::array({"message_format"}) : J::array();
+                        scoped_settings::setSection(cfg, "account", id, "dice", values, clear);
                     }
-                    persistAdaptersToConfig(st, cfg);
                 }
                 cfg.save();
                 IAdapter::setCardMessageMode(mode == "card");
+                for (const auto& row : st->get_all<AdapterRow>())
+                    applyScopedAdapterSettings(adapterMgr.getAdapter(std::to_string(row.id)), cfg);
             }
             const std::string mode = cfg.get<std::string>("dice/message_format", "traditional") == "card"
                 ? "card" : "traditional";
             J adapters = J::array();
             for (auto& r : st->get_all<AdapterRow>()) {
-                J cfg2 = J::parse(r.config, nullptr, false);
-                if (!cfg2.is_object()) cfg2 = J::object();
+                const J cfg2 = scoped_settings::rawSection(
+                    cfg.getAll(), "account", std::to_string(r.id), "dice");
                 adapters.push_back(J{{"id", std::to_string(r.id)}, {"type", r.type == static_cast<int>(AdapterType::kQQOfficial) ? "qq_official" : r.type == static_cast<int>(AdapterType::kDiscord) ? "discord" : r.type == static_cast<int>(AdapterType::kKook) ? "kook" : "onebot_v11"},
                                      {"name", r.name},
                                      {"loginId", [&] { auto a = adapterMgr.getAdapter(std::to_string(r.id)); return a ? a->getLoginId() : std::string(); }()},
@@ -2176,6 +2179,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 // Create real adapter instance and auto-start if enabled
                 if (a.enabled) {
                     auto adapter = makeRuntimeAdapter(a);
+                    applyScopedAdapterSettings(adapter, cfg);
                     adapterMgr.registerAdapter(adapter);
                     adapterMgr.startAdapter(std::to_string(a.id));
                 }
@@ -2221,12 +2225,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 // Handle toggle in AdapterManager
                 if (a.enabled && !wasEnabled) {
                     auto adapter = makeRuntimeAdapter(a);
+                    applyScopedAdapterSettings(adapter, cfg);
                     adapterMgr.registerAdapter(adapter);
                     adapterMgr.startAdapter(std::to_string(a.id));
                 } else if (a.enabled && wasEnabled && credentialsChanged) {
                     adapterMgr.stopAdapter(std::to_string(a.id));
                     adapterMgr.unregisterAdapter(std::to_string(a.id));
                     auto adapter = makeRuntimeAdapter(a);
+                    applyScopedAdapterSettings(adapter, cfg);
                     adapterMgr.registerAdapter(adapter);
                     adapterMgr.startAdapter(std::to_string(a.id));
                 } else if (!a.enabled && wasEnabled) {
@@ -2255,11 +2261,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Put, drogon::Delete, drogon::Patch});
 
     // POST /api/adapters/{id}/test — connection check
-    app.registerHandler("/api/adapters/{1}/test", [st, &adapterMgr](Req, CB&& cb, const std::string& id) {
+    app.registerHandler("/api/adapters/{1}/test", [st, &adapterMgr, &cfg](Req, CB&& cb, const std::string& id) {
         try {
             int aid = std::stoi(id);
             auto a = st->get<AdapterRow>(aid);
             auto adapter = makeRuntimeAdapter(a);
+            applyScopedAdapterSettings(adapter, cfg);
             adapter->start();
             std::this_thread::sleep_for(std::chrono::seconds(2));
             bool connected = adapter->isConnected();
@@ -2271,7 +2278,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // POST /api/adapters/{id}/reconnect — manually resume a timed-out adapter
     // (resets the reconnect backoff). The adapter stays enabled; this is NOT an un-disable.
-    app.registerHandler("/api/adapters/{1}/reconnect", [st, &adapterMgr](Req, CB&& cb, const std::string& id) {
+    app.registerHandler("/api/adapters/{1}/reconnect", [st, &adapterMgr, &cfg](Req, CB&& cb, const std::string& id) {
         try {
             int aid = std::stoi(id);
             auto a = st->get<AdapterRow>(aid);
@@ -2280,6 +2287,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 // Not registered (e.g. was disabled) → register + start fresh.
                 if (!a.enabled) { a.enabled = true; st->update(a); }
                 auto na = makeRuntimeAdapter(a);
+                applyScopedAdapterSettings(na, cfg);
                 adapterMgr.registerAdapter(na);
                 adapterMgr.startAdapter(std::to_string(a.id));
             } else {
@@ -2318,53 +2326,123 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // ── 全局设置 ────────────────────────────────────────────────
-    // GET 读取全部（带默认值）；PUT 写入任意提供的键。存于 dice/ 命名空间。
-    app.registerHandler("/api/system/global", [&cfg, &adapterMgr](Req req, CB&& cb) {
-        // {key, default-bool} and {key, default-int}; keep in sync with GET/PUT.
-        static const std::vector<std::pair<std::string,bool>> kBools = {
+    // ── 可分作用域的系统设置 ────────────────────────────────────
+    // 名称保留 /global 以兼容旧 WebUI；实际支持 global / adapter / account，
+    // 解析优先级为帐号 > 适配器类型 > 全局。废弃的原 Dice 记录项不再暴露或写回。
+    app.registerHandler("/api/system/global", [&cfg, &adapterMgr, st](Req req, CB&& cb) {
+        static const J kDefaults = {
             {"silent_global", false},
             {"disabled_jrrp", false}, {"disabled_me", false}, {"disabled_deck", false},
             {"disabled_draw", false}, {"disabled_send", false}, {"disabled_help", false},
             {"deck_hide_underscore", true},
             {"listen_group_request", true}, {"listen_group_add", true},
             {"listen_friend_request", true}, {"listen_friend_add", true},
-            {"listen_at_when_off", true},
+            {"listen_at_when_off", true}, {"leave_black_qq", false},
             {"allow_official_direct_bind", false},
-            {"private_mode", false}, {"check_group_license", false}, {"leave_discuss", false},
-            {"leave_black_qq", false},
-            {"cloud_visible", true}, {"cloud_black_share", true},
-            {"api_enabled", false},
+            {"api_enabled", false}, {"api_timeout", 5},
+            {"message_format", "traditional"},
+            {"save_log_images", false},
+            {"image_send", J{{"mode", "base64"}, {"host", ""}}},
+            {"image_host", J{{"mode", "none"}}},
+            {"chat_retention_days", 7},
+            {"user_group", ""}, {"user_group_enforce", false}, {"user_group_invite", true},
         };
-        static const std::vector<std::pair<std::string,int>> kInts = {
-            {"allow_stranger", 1}, {"inactive_user_line", 0}, {"inactive_group_line", 0},
-            {"group_clear_limit", 20}, {"group_invalid_size", 500}, {"api_timeout", 5},
+        auto platformForAccount = [st](const std::string& id) -> std::string {
+            int aid = 0; try { aid = std::stoi(id); } catch (...) { return {}; }
+            auto row = st->get_pointer<AdapterRow>(aid); if (!row) return {};
+            if (row->type == static_cast<int>(AdapterType::kQQOfficial)) return "qq_official";
+            if (row->type == static_cast<int>(AdapterType::kDiscord)) return "discord";
+            if (row->type == static_cast<int>(AdapterType::kKook)) return "kook";
+            return "onebot_v11";
+        };
+        auto normalizeScope = [&](std::string scope, std::string target, std::string platform) {
+            if (scope != "adapter" && scope != "account") scope = "global";
+            if (scope == "adapter") platform = target;
+            if (scope == "account") platform = platformForAccount(target);
+            return std::tuple<std::string,std::string,std::string>{scope,target,platform};
+        };
+        auto validateValue = [](const std::string& key, const J& value) -> bool {
+            if (key == "message_format")
+                return value.is_string() && (value == "traditional" || value == "card");
+            if (key == "image_send")
+                return value.is_object() && (value.value("mode", std::string("base64")) == "base64"
+                    || value.value("mode", std::string("base64")) == "httpurl");
+            if (key == "image_host") {
+                const std::string mode = value.is_object() ? value.value("mode", std::string("none")) : "";
+                return mode == "none" || mode == "generic" || mode == "local";
+            }
+            if (key == "user_group") return value.is_string();
+            if (key == "api_timeout") return value.is_number_integer() && value.get<int>() >= 1 && value.get<int>() <= 30;
+            if (key == "chat_retention_days") return value.is_number_integer() && value.get<int>() >= 0 && value.get<int>() <= 3650;
+            if (kDefaults.contains(key) && kDefaults[key].is_boolean()) return value.is_boolean();
+            return false;
+        };
+        auto refreshMessageFormats = [&]() {
+            const J all = cfg.getAll();
+            const std::string globalMode = all.value("dice", J::object()).value("message_format", std::string("traditional"));
+            IAdapter::setCardMessageMode(globalMode == "card");
+            for (const auto& adapter : adapterMgr.allAdapters()) {
+                J resolved = scoped_settings::resolveSection(all, "dice", adapter->platform(), adapter->id());
+                adapter->setMessageFormatOverride(IAdapter::parseFormatOverride(
+                    resolved.value("message_format", globalMode)));
+            }
+        };
+        auto responseFor = [&](const std::string& scope, const std::string& target,
+                               const std::string& platform) {
+            const J all = cfg.getAll();
+            J resolved = scope == "global" ? all.value("dice", J::object())
+                : scoped_settings::resolveSection(all, "dice", platform, scope == "account" ? target : "");
+            if (!resolved.is_object()) resolved = J::object();
+            J values = J::object(), sources = J::object();
+            for (auto it = kDefaults.begin(); it != kDefaults.end(); ++it) {
+                values[it.key()] = resolved.contains(it.key()) ? resolved[it.key()] : it.value();
+                sources[it.key()] = scope == "global" ? "global" : scoped_settings::sourceFor(
+                    all, "dice", it.key(), platform, scope == "account" ? target : "");
+            }
+            return J{{"values", values}, {"scope", scope}, {"target", target}, {"platform", platform},
+                     {"overrides", scope == "global" ? J::object() : scoped_settings::rawSection(all, scope, target, "dice")},
+                     {"sources", sources}};
         };
         try {
             if (req->method() == drogon::Get) {
-                J out = J::object();
-                for (auto& [k, d] : kBools) out[k] = cfg.get<bool>("dice/" + k, d);
-                for (auto& [k, d] : kInts)  out[k] = cfg.get<int>("dice/" + k, d);
-                jsonReply(ok(out), std::move(cb));
+                auto [scope, target, platform] = normalizeScope(
+                    req->getParameter("scope"), req->getParameter("target"), req->getParameter("platform"));
+                if (scope != "global" && target.empty()) { jsonReply(fail("请选择适配器或账号"), std::move(cb)); return; }
+                if (scope == "account" && platform.empty()) { jsonReply(fail("账号不存在"), std::move(cb)); return; }
+                jsonReply(ok(responseFor(scope, target, platform)), std::move(cb));
             } else {
                 auto j = J::parse(req->body());
+                auto [scope, target, platform] = normalizeScope(j.value("scope", std::string("global")),
+                    j.value("target", std::string()), j.value("platform", std::string()));
+                if (scope != "global" && target.empty()) { jsonReply(fail("请选择适配器或账号"), std::move(cb)); return; }
+                if (scope == "account" && platform.empty()) { jsonReply(fail("账号不存在"), std::move(cb)); return; }
+                const J input = j.contains("values") && j["values"].is_object() ? j["values"] : j;
+                J filtered = J::object();
+                for (auto it = input.begin(); it != input.end(); ++it) {
+                    if (!kDefaults.contains(it.key())) continue;
+                    if (!validateValue(it.key(), it.value())) { jsonReply(fail("无效的设置值: " + it.key()), std::move(cb)); return; }
+                    filtered[it.key()] = it.value();
+                }
+                J clear = j.value("clear", J::array());
                 // B：关键全局开关变更 → 通知骰主（仅在值真的变化时）。
                 bool oldSilent  = cfg.get<bool>("dice/silent_global", false);
-                bool oldPrivate = cfg.get<bool>("dice/private_mode", false);
-                for (auto& [k, d] : kBools) if (j.contains(k) && j[k].is_boolean()) cfg.set<bool>("dice/" + k, j[k].get<bool>());
-                for (auto& [k, d] : kInts)  if (j.contains(k) && j[k].is_number()) cfg.set<int>("dice/" + k, j[k].get<int>());
+                if (scope == "global") {
+                    for (auto it = filtered.begin(); it != filtered.end(); ++it) cfg.set<J>("dice/" + it.key(), it.value());
+                } else {
+                    J filteredClear = J::array();
+                    if (clear.is_array()) for (const auto& key : clear)
+                        if (key.is_string() && kDefaults.contains(key.get<std::string>())) filteredClear.push_back(key);
+                    scoped_settings::setSection(cfg, scope, target, "dice", filtered, filteredClear);
+                }
                 cfg.save();
                 bool newSilent  = cfg.get<bool>("dice/silent_global", false);
-                bool newPrivate = cfg.get<bool>("dice/private_mode", false);
-                if (newSilent != oldSilent)
+                if (scope == "global" && newSilent != oldSilent)
                     dice::notice::notify(cfg, adapterMgr, dice::notice::kImportant,
                         newSilent ? "\xe5\x85\xa8\xe5\xb1\x80\xe9\x9d\x99\xe9\xbb\x98\xe5\xb7\xb2\xe5\xbc\x80\xe5\x90\xaf\xef\xbc\x88\xe7\xbd\x91\xe9\xa1\xb5\xef\xbc\x89"
                                   : "\xe5\x85\xa8\xe5\xb1\x80\xe9\x9d\x99\xe9\xbb\x98\xe5\xb7\xb2\xe5\x85\xb3\xe9\x97\xad\xef\xbc\x88\xe7\xbd\x91\xe9\xa1\xb5\xef\xbc\x89", "", "", "global");
-                if (newPrivate != oldPrivate)
-                    dice::notice::notify(cfg, adapterMgr, dice::notice::kImportant,
-                        newPrivate ? "\xe5\xb7\xb2\xe5\x88\x87\xe6\x8d\xa2\xe4\xb8\xba\xe7\xa7\x81\xe7\x94\xa8\xe6\xa8\xa1\xe5\xbc\x8f\xef\xbc\x88\xe7\xbd\x91\xe9\xa1\xb5\xef\xbc\x89"
-                                   : "\xe5\xb7\xb2\xe5\x88\x87\xe6\x8d\xa2\xe4\xb8\xba\xe5\x85\xac\xe7\x94\xa8\xe6\xa8\xa1\xe5\xbc\x8f\xef\xbc\x88\xe7\xbd\x91\xe9\xa1\xb5\xef\xbc\x89", "", "", "global");
-                jsonReply(ok(), std::move(cb));
+                if (filtered.contains("message_format") || (clear.is_array() && std::find(clear.begin(), clear.end(), "message_format") != clear.end()))
+                    refreshMessageFormats();
+                jsonReply(ok(responseFor(scope, target, platform)), std::move(cb));
             }
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
@@ -2743,12 +2821,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // ── 好友/加群邀请 审批策略 ─────────────────────────────────
     app.registerHandler("/api/system/events", [&cfg, st](Req req, CB&& cb) {
         try {
-            static const std::set<std::string> kFriend = {"manual", "all", "keyword", "group_used", "reject"};
+            static const std::set<std::string> kFriend = {"manual", "all", "keyword", "whitelist", "group_used", "nonblacklist", "reject"};
             static const std::set<std::string> kGroup  = {"manual", "all", "whitelist", "ignore", "reject"};
             static const std::set<std::string> kScopedKeys = {
                 "friend_policy", "friend_keyword", "group_invite_policy",
                 "group_invite_reject_blacklist", "group_invite_reject_nonfriend",
-                "group_name_keyword_leave", "poke", "poke_command", "poke_enabled"
+                "group_name_keyword_leave", "poke", "poke_command", "poke_enabled",
+                "welcome_min_delay", "welcome_min_cooldown"
             };
             auto platformForAccount = [&](const std::string& id) -> std::string {
                 int aid = 0;
@@ -2806,8 +2885,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"poke", ev.value("poke", std::string())},
                     {"poke_command", ev.value("poke_command", std::string())},
                     {"poke_enabled", ev.value("poke_enabled", true)},
-                    {"welcome_min_delay", all.value("events", J::object()).value("welcome_min_delay", 0)},
-                    {"welcome_min_cooldown", all.value("events", J::object()).value("welcome_min_cooldown", 0)},
+                    {"welcome_min_delay", ev.value("welcome_min_delay", 0)},
+                    {"welcome_min_cooldown", ev.value("welcome_min_cooldown", 0)},
                     {"scope", scope}, {"target", target}, {"platform", platform},
                     {"overrides", scoped_settings::rawSection(all, scope, target, "events")},
                     {"sources", sources}
@@ -2846,6 +2925,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (values.contains("group_invite_policy")) {
                     std::string v = values["group_invite_policy"].get<std::string>();
                     if (!kGroup.count(v)) { jsonReply(fail("无效的群邀请策略"), std::move(cb)); return; }
+                }
+                if (values.contains("welcome_min_delay") &&
+                    (!values["welcome_min_delay"].is_number_integer() || values["welcome_min_delay"].get<int>() < 0 || values["welcome_min_delay"].get<int>() > 300)) {
+                    jsonReply(fail("入群欢迎最低延迟必须为 0-300 秒"), std::move(cb)); return;
+                }
+                if (values.contains("welcome_min_cooldown") &&
+                    (!values["welcome_min_cooldown"].is_number_integer() || values["welcome_min_cooldown"].get<int>() < 0 || values["welcome_min_cooldown"].get<int>() > 3600)) {
+                    jsonReply(fail("入群欢迎最低冷却必须为 0-3600 秒"), std::move(cb)); return;
                 }
 
                 if (scope == "global") {
@@ -5095,7 +5182,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 // 网页发送的消息也持久化。
                 if (auto* cst = db.getChatStorage()) {
                     try {
-                        ChatMsgRow r; r.platform = plat; r.groupId = gid;
+                        ChatMsgRow r; r.platform = plat; r.adapterId = a->id(); r.groupId = gid;
                         r.userId = a->getLoginId(); r.sender = me; r.content = text;
                         r.self = 1; r.time = static_cast<int64_t>(std::time(nullptr));
                         cst->insert(r);
@@ -5151,7 +5238,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 a->sendPrivateMessage(targetId, text);
                 if (auto* cst = db.getChatStorage()) {
                     try {
-                        ChatMsgRow r; r.platform = plat; r.groupId = scope;
+                        ChatMsgRow r; r.platform = plat; r.adapterId = a->id(); r.groupId = scope;
                         r.userId = a->getLoginId();
                         r.sender = a->getLoginName().empty() ? std::string("\xe9\xaa\xb0\xe5\xa8\x98") : a->getLoginName();
                         r.content = text; r.self = 1; r.time = static_cast<int64_t>(std::time(nullptr));
@@ -5220,7 +5307,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // 自动清理好友天数（0 = 关闭）。
+    // 自动清理好友与群聊：好友不活跃天数、单轮最多退群数、最大群规模。
     app.registerHandler("/api/system/friend-clean", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
@@ -5229,10 +5316,22 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     int d = j["days"].get<int>();
                     if (d < 0) d = 0; if (d > 3650) d = 3650;
                     cfg.set<int>("dice/friend_clean_days", d);
-                    cfg.save();
                 }
+                if (j.contains("groupLimit")) {
+                    int n = j["groupLimit"].get<int>();
+                    cfg.set<int>("dice/group_clear_limit", (std::clamp)(n, 0, 10000));
+                }
+                if (j.contains("maxGroupSize")) {
+                    int n = j["maxGroupSize"].get<int>();
+                    cfg.set<int>("dice/max_group_size", (std::clamp)(n, 0, 1000000));
+                }
+                cfg.save();
             }
-            jsonReply(ok(J{{"days", cfg.get<int>("dice/friend_clean_days", 0)}}), std::move(cb));
+            jsonReply(ok(J{
+                {"days", cfg.get<int>("dice/friend_clean_days", 0)},
+                {"groupLimit", cfg.get<int>("dice/group_clear_limit", 20)},
+                {"maxGroupSize", cfg.get<int>("dice/max_group_size", 0)}
+            }), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Put, drogon::Get});
 
@@ -5274,11 +5373,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (j.contains("retentionDays")) {
                     int d = j["retentionDays"].get<int>();
                     if (d < 0) d = 0; if (d > 3650) d = 3650;
-                    cfg.set<int>("chat/retention_days", d);
+                    cfg.set<int>("dice/chat_retention_days", d);
                     cfg.save();
                 }
             }
-            jsonReply(ok(J{{"retentionDays", cfg.get<int>("chat/retention_days", 7)}}), std::move(cb));
+            jsonReply(ok(J{{"retentionDays", cfg.get<int>("dice/chat_retention_days", 7)}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 

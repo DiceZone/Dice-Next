@@ -1236,7 +1236,7 @@ private:
     /// Build a OneBot message array from text that may embed image/at/face/music codes
     /// (CQ codes or compatible placeholders). Plain runs become text segments; unknown
     /// bracket codes are kept as literal text.
-    static json buildSegments(const std::string& text) {
+    json buildSegments(const std::string& text) const {
         json arr = json::array();
         std::string buf;
         auto flush = [&]() { if (!buf.empty()) { arr.push_back(json{{"type", "text"}, {"data", json{{"text", buf}}}}); buf.clear(); } };
@@ -1249,7 +1249,8 @@ private:
                         // 图片按「图片发送方式」配置转换（本地路径/本站资产
                         // 链接 → base64:// 或 http://<host>/api/assets/..）。
                         if (seg.value("type", "") == "image")
-                            seg["data"]["file"] = imgsend::resolve(seg["data"].value("file", ""));
+                            seg["data"]["file"] = imgsend::resolve(
+                                seg["data"].value("file", ""), platform(), id());
                         flush(); arr.push_back(seg); i = end + 1; continue;
                     }
                 }
@@ -1264,7 +1265,7 @@ private:
     /// 字符串格式发送前的归一化——平台中立 [img,file=..] 转成 CQ 图片码，
     /// [CQ:image,..] 的本地资产引用按「图片发送方式」重解析；其余码原样保留
     /// （[CQ:poke] 等仍由平台解析）。
-    static std::string normalizeCQText(const std::string& text) {
+    std::string normalizeCQText(const std::string& text) const {
         std::string out; out.reserve(text.size());
         auto cqEscape = [](const std::string& s) {
             std::string r; r.reserve(s.size());
@@ -1281,7 +1282,8 @@ private:
                 if (end != std::string::npos) {
                     json seg = parseCode(text.substr(i + 1, end - i - 1));
                     if (seg.is_object() && seg.value("type", "") == "image") {
-                        out += "[CQ:image,file=" + cqEscape(imgsend::resolve(seg["data"].value("file", ""))) + "]";
+                        out += "[CQ:image,file=" + cqEscape(imgsend::resolve(
+                            seg["data"].value("file", ""), platform(), id())) + "]";
                         i = end + 1;
                         continue;
                     }

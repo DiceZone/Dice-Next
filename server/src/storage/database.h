@@ -181,6 +181,7 @@ struct GameLogMessageRow {
 struct ChatMsgRow {
     int64_t id = 0;
     std::string platform;
+    std::string adapterId;   // concrete adapter account; empty for historical rows
     std::string groupId;
     std::string msgId;       // platform message id (empty for outgoing/web sends)
     std::string userId;      // speaker id (bot selfId for replies)
@@ -714,6 +715,7 @@ private:
             orm::make_column("id", &ChatMsgRow::id,
                 orm::primary_key().autoincrement()),
             orm::make_column("platform", &ChatMsgRow::platform),
+            orm::make_column("adapter_id", &ChatMsgRow::adapterId),
             orm::make_column("group_id", &ChatMsgRow::groupId),
             orm::make_column("msg_id", &ChatMsgRow::msgId),
             orm::make_column("user_id", &ChatMsgRow::userId),

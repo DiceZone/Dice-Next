@@ -250,7 +250,7 @@ public:
         const bool botCmd = cmdL0.rfind("bot", 0) == 0;
         const bool privileged = isMaster(msg) || senderTrust(msg) >= 4;
         // 全局静默 (console DisabledGlobal)：非信任用户完全沉默；.bot / Master 例外。
-        if (silentGlobal() && !privileged && !botCmd) return "";
+        if (silentGlobal(msg) && !privileged && !botCmd) return "";
         // 外置模式 (停用指令)：停用内置指令，但返回 "" 让上层继续匹配自定义回复。
         // .bot / Master 例外（否则无法在群内恢复）。
         if (groupExternalMode(msg) && !isMaster(msg) && !botCmd) return "";
@@ -635,12 +635,20 @@ private:
         return order;
     }
 
-    std::vector<std::string> expressionOrder(const Message& msg) const {
-        nlohmann::json diceSettings = nlohmann::json::object();
+    nlohmann::json diceSettingsFor(const Message& msg) const {
         try {
-            diceSettings = scoped_settings::resolveSection(
-                cfg_.getAll(), "dice", msg.platform, msg.adapterId);
-        } catch (...) {}
+            return scoped_settings::resolveSection(cfg_.getAll(), "dice", msg.platform, msg.adapterId);
+        } catch (...) { return nlohmann::json::object(); }
+    }
+
+public:
+    bool listenAtWhenOff(const Message& msg) const {
+        return diceSettingsFor(msg).value("listen_at_when_off", true);
+    }
+private:
+
+    std::vector<std::string> expressionOrder(const Message& msg) const {
+        const nlohmann::json diceSettings = diceSettingsFor(msg);
         const std::string mode = diceSettings.value("expression_mode", std::string("enhanced"));
         if (mode == "original") return {"dicenext"};
         if (mode == "compatible") return {"dicenext", "onedice"};
@@ -5073,31 +5081,23 @@ private:
     // ─── 全局 / 外置 / 单群命令停用 (console + 群管词条) ─────────
     /// Global silent mode (原版 console DisabledGlobal): non-trusted users get no
     /// reply at all. From config dice.silent_global (bool).
-    bool silentGlobal() const {
-        try {
-            json all = cfg_.getAll();
-            if (all.contains("dice") && all["dice"].contains("silent_global"))
-                return all["dice"]["silent_global"].get<bool>();
-        } catch (...) {}
-        return false;
+    bool silentGlobal(const Message& msg) const {
+        return diceSettingsFor(msg).value("silent_global", false);
     }
     /// Globally-disabled command names for non-trusted users (原版 DisabledMe/Jrrp/
     /// Draw/Send/Deck). Read from individual config bools dice/disabled_<cmd> (系统设置
     /// 页的开关），兼容旧的 dice/disabled_global 数组形式。
-    std::vector<std::string> globalDisabledCmds() const {
+    std::vector<std::string> globalDisabledCmds(const Message& msg) const {
         std::vector<std::string> v;
         static const char* names[] = {"jrrp", "me", "deck", "draw", "send", "help"};
         try {
-            json all = cfg_.getAll();
-            if (all.contains("dice") && all["dice"].is_object()) {
-                const json& d = all["dice"];
-                for (auto* n : names) {
-                    std::string key = std::string("disabled_") + n;
-                    if (d.contains(key) && d[key].is_boolean() && d[key].get<bool>()) v.push_back(n);
-                }
-                if (d.contains("disabled_global") && d["disabled_global"].is_array())
-                    for (auto& e : d["disabled_global"]) if (e.is_string()) v.push_back(toLower(e.get<std::string>()));
+            const json d = diceSettingsFor(msg);
+            for (auto* n : names) {
+                std::string key = std::string("disabled_") + n;
+                if (d.value(key, false)) v.push_back(n);
             }
+            if (d.contains("disabled_global") && d["disabled_global"].is_array())
+                for (auto& e : d["disabled_global"]) if (e.is_string()) v.push_back(toLower(e.get<std::string>()));
         } catch (...) {}
         return v;
     }
@@ -5160,7 +5160,7 @@ private:
         int trust = senderTrust(msg);
         bool privileged = trust >= 4 || isMaster(msg);
         if (!privileged) {
-            for (auto& g : globalDisabledCmds()) if (g == head) {
+            for (auto& g : globalDisabledCmds(msg)) if (g == head) {
                 if (head == "jrrp") return i18n_.tr(loc, "gate.jrrp_global");
                 if (head == "me")   return i18n_.tr(loc, "gate.me_global");
                 return i18n_.tr(loc, "gate.cmd_global", {{"cmd", head}});
@@ -7354,7 +7354,8 @@ private:
             std::string val = trim(args.substr(6));
             if (val.empty() || val == "0") { setGroupSetting(msg, "welcome_delay", ""); return i18n_.tr(loc, "welcome.delay_off"); }
             int sec = 0; try { sec = std::stoi(val); } catch (...) { return i18n_.tr(loc, "welcome.bad_value"); }
-            int globalMin = cfg_.get<int>("events/welcome_min_delay", 0);
+            int globalMin = scoped_settings::resolveSection(
+                cfg_.getAll(), "events", msg.platform, msg.adapterId).value("welcome_min_delay", 0);
             if (sec < globalMin) return i18n_.tr(loc, "welcome.below_min", {{"min", std::to_string(globalMin)}});
             if (sec > 300) return i18n_.tr(loc, "welcome.bad_range");
             setGroupSetting(msg, "welcome_delay", std::to_string(sec));
@@ -7365,7 +7366,8 @@ private:
             std::string val = trim(args.substr(3));
             if (val.empty() || val == "0") { setGroupSetting(msg, "welcome_cooldown", ""); return i18n_.tr(loc, "welcome.cd_off"); }
             int sec = 0; try { sec = std::stoi(val); } catch (...) { return i18n_.tr(loc, "welcome.bad_value"); }
-            int globalMin = cfg_.get<int>("events/welcome_min_cooldown", 0);
+            int globalMin = scoped_settings::resolveSection(
+                cfg_.getAll(), "events", msg.platform, msg.adapterId).value("welcome_min_cooldown", 0);
             if (sec < globalMin) return i18n_.tr(loc, "welcome.below_min", {{"min", std::to_string(globalMin)}});
             if (sec > 3600) return i18n_.tr(loc, "welcome.bad_range");
             setGroupSetting(msg, "welcome_cooldown", std::to_string(sec));
@@ -8318,7 +8320,9 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     /// Append a transcript line for every message while a group log is recording.
     /// Called from the message loop (records the user line and, if any, the reply).
     // ── 日志内图片：提取 / 可选落地下载 ─────────────────────────
-    bool saveLogImages() const { return cfg_.get<bool>("dice/save_log_images", false); }
+    bool saveLogImages(const Message& msg) const {
+        return diceSettingsFor(msg).value("save_log_images", false);
+    }
     // 从原始消息提取图片引用（[CQ:image,url=/file=..] 与 海豹 [图片:..]/[图:..]）→ JSON 数组串。
     std::string extractImageRefs(const std::string& raw) const {
         std::vector<std::string> urls;
@@ -8390,7 +8394,8 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         return std::filesystem::exists(outPath, ec);
     }
     // 把图片数组里的远端 url 落地到 data/logs/images/，成功的替换为本地文件名。
-    std::string downloadLogImages(const std::string& jsonArr, int logId) const {
+    std::string downloadLogImages(const std::string& jsonArr, int logId,
+                                  const Message& msg) const {
         nlohmann::json a;
         try { a = nlohmann::json::parse(jsonArr); } catch (...) { return jsonArr; }
         if (!a.is_array()) return jsonArr;
@@ -8409,8 +8414,8 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
             if (!isHostSafe(u)) { out.push_back(u); continue; }   // SSRF 黑名单：内网/环回/控制字符一律不下载
             if (!curlDownload(u, path)) { out.push_back(u); continue; }   // 下载失败→保留临时 url
             // generic 图床：立即上传拿稳定 url（趁 QQ 链接还活着）；失败退回本地文件名。
-            if (imghost::mode(cfg_) == "generic") {
-                if (auto stable = imghost::uploadGeneric(cfg_, path)) { out.push_back(*stable); continue; }
+            if (imghost::mode(cfg_, msg.platform, msg.adapterId) == "generic") {
+                if (auto stable = imghost::uploadGeneric(cfg_, path, msg.platform, msg.adapterId)) { out.push_back(*stable); continue; }
             }
             out.push_back(fname);   // local / none / 上传失败 → 本地文件名
         }
@@ -8441,7 +8446,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                 m.content = logContent; m.createdAt = nowIso();
                 // 从原始消息提取图片引用；骰主开启「保存图片」则落地到本地。
                 std::string imgs = extractImageRefs(msg.rawContent.empty() ? msg.content : msg.rawContent);
-                if (!imgs.empty()) m.images = saveLogImages() ? downloadLogImages(imgs, logId) : imgs;
+                if (!imgs.empty()) m.images = saveLogImages(msg) ? downloadLogImages(imgs, logId, msg) : imgs;
                 st->insert(m);
             }
         } catch (...) {}
@@ -9416,13 +9421,8 @@ private:
     }
     void saveTempDecks(const Message& msg, const json& j) { setGroupSetting(msg, "tempDecks", j.dump()); }
     /// Hide `_`-prefixed deck metadata keys in the list? config dice/deck_hide_underscore (default true).
-    bool deckHideUnderscore() const {
-        try {
-            json all = cfg_.getAll();
-            if (all.contains("dice") && all["dice"].contains("deck_hide_underscore"))
-                return all["dice"]["deck_hide_underscore"].get<bool>();
-        } catch (...) {}
-        return true;
+    bool deckHideUnderscore(const Message& msg) const {
+        return diceSettingsFor(msg).value("deck_hide_underscore", true);
     }
 
     std::optional<std::string> tryHandleDraw(Locale loc, const Message& msg, const std::string& cmd) {
@@ -9554,7 +9554,7 @@ private:
         // 列表：文件牌堆（可隐藏 `_` 元数据键）+ 本群临时牌堆。
         std::string list;
         size_t shown = 0, total = 0;
-        bool hideUnderscore = deckHideUnderscore();
+        bool hideUnderscore = deckHideUnderscore(msg);
         for (const auto& n : deck_.deckNames()) {
             if (hideUnderscore && !n.empty() && n[0] == '_') continue;
             ++total;

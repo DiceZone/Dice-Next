@@ -476,13 +476,18 @@ inline bool stageRestoreArchive(const fs::path& archive, std::string& error) {
         std::error_code ec2;
         const fs::path stageReal = fs::canonical(stage, ec2);
         if (ec2) { error = "无法解析暂存目录"; fs::remove_all(stage, ec); return false; }
-        std::string stagePrefix = stageReal.string();
-        if (!stagePrefix.empty() && stagePrefix.back() != '/') stagePrefix += '/';
         for (auto& entry : fs::recursive_directory_iterator(stage, ec2)) {
             if (ec2) { error = "读取解压内容失败"; fs::remove_all(stage, ec); return false; }
             if (!entry.is_regular_file(ec2)) continue;
             const fs::path real = fs::canonical(entry.path(), ec2);
-            if (ec2 || real.string().rfind(stagePrefix, 0) != 0) {
+            const fs::path relative = ec2 ? fs::path() : real.lexically_relative(stageReal);
+            bool escaped = ec2 || relative.empty() || relative.is_absolute();
+            if (!escaped) {
+                for (const auto& component : relative) {
+                    if (component == "..") { escaped = true; break; }
+                }
+            }
+            if (escaped) {
                 error = "备份解压路径越界"; fs::remove_all(stage, ec); return false;
             }
         }
@@ -512,6 +517,29 @@ inline bool stageStoredRestore(const std::string& name, bool automatic, std::str
     return stageRestoreArchive(archive, error);
 }
 
+inline bool clearForFullRestore(const fs::path& root, bool preserveActiveLogs, std::string& error) {
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) return true;
+    for (const auto& entry : fs::directory_iterator(root, ec)) {
+        if (ec) { error = ec.message(); return false; }
+        if (preserveActiveLogs && entry.path().filename() == "logs" && entry.is_directory(ec)) {
+            for (const auto& logEntry : fs::directory_iterator(entry.path(), ec)) {
+                if (ec) { error = ec.message(); return false; }
+                // The logger is already alive when a restore is applied.  On
+                // Windows its current file cannot be renamed or deleted, so
+                // keep the app-log directory while replacing all state data.
+                if (logEntry.path().filename() == "app") continue;
+                fs::remove_all(logEntry.path(), ec);
+                if (ec) { error = ec.message(); return false; }
+            }
+            continue;
+        }
+        fs::remove_all(entry.path(), ec);
+        if (ec) { error = ec.message(); return false; }
+    }
+    return true;
+}
+
 // Called after logging is ready but before ConfigManager and Database are opened.
 inline bool applyPendingRestore(std::string& notice) {
     std::error_code ec; fs::path stage = "restore-pending";
@@ -537,16 +565,33 @@ inline bool applyPendingRestore(std::string& notice) {
             notice = "已应用局部待恢复备份；恢复前的数据保存在 " + rollback.string();
             return true;
         }
-        if (fs::exists("data")) fs::rename("data", rollback / "data");
-        if (fs::exists("config")) fs::rename("config", rollback / "config");
-        if (fs::exists(stage / "data")) fs::rename(stage / "data", "data"); else fs::create_directories("data");
-        if (fs::exists(stage / "config")) fs::rename(stage / "config", "config");
+        // Do not rename the whole data directory: the startup logger already
+        // holds data/logs/app on Windows.  Snapshot current content, clear all
+        // replaceable state, then overlay the staged full backup.  Active
+        // runtime log files are deliberately preserved and are not state.
+        std::string copyError;
+        if (fs::exists("data") && !copyTree("data", rollback / "data", copyError))
+            throw std::runtime_error(copyError);
+        if (fs::exists("config") && !copyTree("config", rollback / "config", copyError))
+            throw std::runtime_error(copyError);
+        if (!clearForFullRestore("data", true, copyError)) throw std::runtime_error(copyError);
+        if (!clearForFullRestore("config", false, copyError)) throw std::runtime_error(copyError);
+        fs::create_directories("data", ec);
+        fs::create_directories("config", ec);
+        if (fs::exists(stage / "data") && !copyTree(stage / "data", "data", copyError))
+            throw std::runtime_error(copyError);
+        if (fs::exists(stage / "config") && !copyTree(stage / "config", "config", copyError))
+            throw std::runtime_error(copyError);
         fs::remove_all(stage, ec);
         notice = "已应用待恢复备份；恢复前的数据保存在 " + rollback.string();
         return true;
     } catch (const std::exception& e) {
-        // Best effort rollback if the replacement did not complete.
-        try { if (!fs::exists("data") && fs::exists(rollback / "data")) fs::rename(rollback / "data", "data"); } catch (...) {}
+        // Best-effort overlay from the rollback if replacement did not complete.
+        try {
+            std::string ignored;
+            if (fs::exists(rollback / "data")) copyTree(rollback / "data", "data", ignored);
+            if (fs::exists(rollback / "config")) copyTree(rollback / "config", "config", ignored);
+        } catch (...) {}
         notice = "恢复失败：" + std::string(e.what()); return false;
     }
 }

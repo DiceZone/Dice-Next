@@ -6,6 +6,7 @@
 #include <vector>
 #include <atomic>
 #include <nlohmann/json.hpp>
+#include <memory>
 
 namespace dice {
 
@@ -83,6 +84,9 @@ public:
         setImpl(key, value);
     }
 
+    /// Remove one path from the in-memory configuration tree.
+    bool erase(const std::string& key);
+
     /// Retrieve the entire configuration tree as a JSON object.
     json getAll() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -128,7 +132,9 @@ private:
     bool createdOnLoad_ = false;
     bool discardedObsoleteDefaultConfig_ = false;
 
-    std::atomic<int> writing_{0};  // >0 when save() is writing (suppress self-triggered reload)
+    // Delayed debounce workers can outlive ConfigManager. Keep their counter in
+    // shared storage so destruction never leaves a detached thread with a dangling reference.
+    std::shared_ptr<std::atomic<int>> writing_ = std::make_shared<std::atomic<int>>(0);
     // ─── Internal helpers ────────────────────────────────────
 
     json* navigateTo(const std::string& key, bool createMissing = false);

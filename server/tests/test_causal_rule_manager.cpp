@@ -563,7 +563,7 @@ TEST(CausalCounter, CounterSetAction) {
     CausalRuleManager mgr(*db, *cfg, cdMgr, ctrStore);
 
     // Pre-set a counter value
-    ctrStore.set("1:count:user:user1", 50);
+    ctrStore.set("1:count:per-user:user1", 50);
 
     CausalRule rule;
     rule.id = 1;
@@ -597,7 +597,7 @@ TEST(CausalCounter, CounterResetAction) {
     CausalRuleManager mgr(*db, *cfg, cdMgr, ctrStore);
 
     // Pre-set a counter value
-    ctrStore.set("1:count:user:user1", 42);
+    ctrStore.set("1:count:per-user:user1", 42);
 
     CausalRule rule;
     rule.id = 1;
@@ -622,7 +622,7 @@ TEST(CausalCounter, CounterResetAction) {
     ASSERT_EQ(result.counterChanges[0].newValue, 0);
 
     // Verify the counter is now 0
-    ASSERT_EQ(ctrStore.get("1:count:user:user1"), 0);
+    ASSERT_EQ(ctrStore.get("1:count:per-user:user1"), 0);
 }
 
 TEST(CausalCounter, CounterCheckCondition) {
@@ -633,7 +633,7 @@ TEST(CausalCounter, CounterCheckCondition) {
     CausalRuleManager mgr(*db, *cfg, cdMgr, ctrStore);
 
     // Pre-set a counter value
-    ctrStore.set("1:days:user:user1", 5);
+    ctrStore.set("1:days:per-user:user1", 5);
 
     CausalRule rule;
     rule.id = 1;
@@ -674,7 +674,7 @@ TEST(CausalCounter, CounterCheckAllOperators) {
     CounterStore ctrStore(*db);
     CausalRuleManager mgr(*db, *cfg, cdMgr, ctrStore);
 
-    ctrStore.set("1:val:user:user1", 10);
+    ctrStore.set("1:val:per-user:user1", 10);
 
     // Test each operator with value=10
     struct OpTest { std::string op; int value; bool expected; };
@@ -693,7 +693,7 @@ TEST(CausalCounter, CounterCheckAllOperators) {
         CooldownManager cd2;
         CounterStore cs2(*db2);
         CausalRuleManager m2(*db2, *cfg2, cd2, cs2);
-        cs2.set("1:val:user:user1", 10);
+        cs2.set("1:val:per-user:user1", 10);
 
         CausalRule rule;
         rule.id = 1;

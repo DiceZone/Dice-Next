@@ -86,7 +86,16 @@ std::string protectInline(const std::string& input, std::vector<std::string>& pr
             const std::string delimiter(ticks, '`');
             const size_t close = input.find(delimiter, i + ticks);
             if (close != std::string::npos) {
-                protectedText.push_back(input.substr(i + ticks, close - i - ticks));
+                std::string code = input.substr(i + ticks, close - i - ticks);
+                // CommonMark strips one padding space on each side of a code
+                // span (unless its content is spaces only). Mirror that rule
+                // so spans whose literal content starts/ends with a backtick
+                // downgrade to exactly the same visible text on OneBot.
+                if (code.size() >= 2 && code.front() == ' ' && code.back() == ' ' &&
+                    code.find_first_not_of(' ') != std::string::npos) {
+                    code = code.substr(1, code.size() - 2);
+                }
+                protectedText.push_back(std::move(code));
                 out += placeholder(protectedText.size() - 1);
                 i = close + ticks;
                 continue;

@@ -4,6 +4,7 @@
 
 #include "test_framework.h"
 #include "../src/i18n/i18n.h"
+#include "../src/common/markdown.h"
 #include "../src/common/types.h"
 
 using namespace dice;
@@ -192,6 +193,27 @@ TEST(I18nFormat, ExplicitMarkdownIsCapturedAndEscapesArguments) {
     I18n::beginOutboundCapture();
     EXPECT_EQ(i18n.tr(Locale::kZhHans, "test.key", {{"nick", "A**B"}}), "**A\\*\\*B**");
     EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()), static_cast<int>(ContentFormat::kMarkdown));
+}
+
+TEST(I18nFormat, MarkdownCodeSpanArgumentsStayLiteralAndSafe) {
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setOverride(Locale::kZhHans, "test.roll", "**{nick}** 掷骰：`{expr}`",
+                     ContentFormat::kMarkdown);
+
+    I18n::beginOutboundCapture();
+    const std::string rich = i18n.tr(Locale::kZhHans, "test.roll",
+        {{"nick", "A**B"}, {"expr", "24a8={3,⑧,9}+{⑩,2}=6"}});
+    EXPECT_EQ(rich, "**A\\*\\*B** 掷骰：`24a8={3,⑧,9}+{⑩,2}=6`");
+    EXPECT_EQ(markdown::toPlainText(rich), "A**B 掷骰：24a8={3,⑧,9}+{⑩,2}=6");
+    EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()),
+              static_cast<int>(ContentFormat::kMarkdown));
+
+    // A backtick supplied by an argument must remain code content rather than
+    // escaping the template and injecting new Markdown.
+    const std::string withBacktick = i18n.tr(Locale::kZhHans, "test.roll",
+        {{"nick", "Alice"}, {"expr", "1d6=`oops`+1"}});
+    EXPECT_EQ(withBacktick, "**Alice** 掷骰：``1d6=`oops`+1``");
+    EXPECT_EQ(markdown::toPlainText(withBacktick), "Alice 掷骰：1d6=`oops`+1");
 }
 
 TEST(I18nFormat, PersonaFormatIsExplicitAndLegacyPersonaStaysPlain) {

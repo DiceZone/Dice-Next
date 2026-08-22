@@ -720,7 +720,58 @@ inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, in
     return imported;
 }
 
-// ── Console.xml / console.yaml → dice.masters (config) ───────
+inline std::string trimConsoleScalar(std::string value) {
+    auto space = [](unsigned char c) { return std::isspace(c) != 0; };
+    while (!value.empty() && space(static_cast<unsigned char>(value.front()))) value.erase(value.begin());
+    while (!value.empty() && space(static_cast<unsigned char>(value.back()))) value.pop_back();
+    if (value.size() >= 2 && ((value.front() == '"' && value.back() == '"') ||
+        (value.front() == '\'' && value.back() == '\''))) value = value.substr(1, value.size() - 2);
+    return value;
+}
+
+/// Parse the integer map written by original Dice! under `config:` (YAML) or
+/// `<conf><item>Key=Value</item>...</conf>` (legacy XML).
+inline std::map<std::string, int> parseConsoleSettings(const std::string& body, bool xml) {
+    std::map<std::string, int> out;
+    auto add = [&](std::string key, std::string value) {
+        key = trimConsoleScalar(std::move(key)); value = trimConsoleScalar(std::move(value));
+        if (key.empty() || value.empty()) return;
+        try { size_t used = 0; int n = std::stoi(value, &used); if (used == value.size()) out[key] = n; }
+        catch (...) {}
+    };
+    if (!xml) {
+        bool inConfig = false;
+        std::istringstream lines(body); std::string line;
+        while (std::getline(lines, line)) {
+            auto hash = line.find('#'); if (hash != std::string::npos) line.erase(hash);
+            const size_t indent = line.find_first_not_of(" \t");
+            std::string clean = trimConsoleScalar(line);
+            if (!inConfig) { if (clean == "config:") inConfig = true; continue; }
+            if (clean.empty()) continue;
+            if (indent == 0) break;
+            auto colon = clean.find(':'); if (colon == std::string::npos) continue;
+            add(clean.substr(0, colon), clean.substr(colon + 1));
+        }
+        return out;
+    }
+    size_t start = body.find("<conf");
+    if (start == std::string::npos || (start = body.find('>', start)) == std::string::npos) return out;
+    const size_t finish = body.find("</conf>", ++start);
+    if (finish == std::string::npos) return out;
+    while (start < finish) {
+        const size_t open = body.find('<', start); if (open == std::string::npos || open >= finish) break;
+        const size_t gt = body.find('>', open + 1); if (gt == std::string::npos || gt >= finish) break;
+        if (body[open + 1] == '/') { start = gt + 1; continue; }
+        const size_t close = body.find('<', gt + 1); if (close == std::string::npos || close > finish) break;
+        std::string scalar = trimConsoleScalar(body.substr(gt + 1, close - gt - 1));
+        const size_t eq = scalar.find('=');
+        if (eq != std::string::npos) add(scalar.substr(0, eq), scalar.substr(eq + 1));
+        start = close + 1;
+    }
+    return out;
+}
+
+// ── Console.xml / console.yaml → current formal settings ──────
 inline int importMasters(ConfigManager& cfg, const fs::path& confDir) {
     std::string body = readFile(confDir / "Console.xml");
     if (body.empty()) body = readFile(confDir / "console.xml");  // case-sensitive filesystems
@@ -767,6 +818,47 @@ inline int importMasters(ConfigManager& cfg, const fs::path& confDir) {
             while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
             if (key == "master") { add(line.substr(colon + 1)); break; }
         }
+    }
+
+    // Consume original Console settings into active Dice!Next capabilities.
+    // Obsolete cloud/private/discussion flags are deliberately ignored rather
+    // than kept as inert historical records.
+    const auto legacy = parseConsoleSettings(body, xml);
+    auto get = [&](const char* key) -> std::optional<int> {
+        auto it = legacy.find(key); if (it == legacy.end()) return std::nullopt; return it->second;
+    };
+    auto mapBool = [&](const char* oldKey, const char* newPath) {
+        if (auto value = get(oldKey)) { cfg.set<bool>(newPath, *value != 0); ++imported; }
+    };
+    auto mapInt = [&](const char* oldKey, const char* newPath, int minValue, int maxValue) {
+        if (auto value = get(oldKey)) {
+            cfg.set<int>(newPath, (std::clamp)(*value, minValue, maxValue)); ++imported;
+        }
+    };
+    mapBool("DisabledGlobal", "dice/silent_global");
+    mapBool("DisabledJrrp", "dice/disabled_jrrp");
+    mapBool("DisabledMe", "dice/disabled_me");
+    mapBool("DisabledDeck", "dice/disabled_deck");
+    mapBool("DisabledDraw", "dice/disabled_draw");
+    mapBool("DisabledSend", "dice/disabled_send");
+    // The old flag is negative (1 = do not listen while off), whereas the
+    // current setting is positive (true = an @ mention may still trigger).
+    if (auto value = get("DisabledListenAt")) {
+        cfg.set<bool>("dice/listen_at_when_off", *value == 0); ++imported;
+    }
+    mapBool("ListenGroupRequest", "dice/listen_group_request");
+    mapBool("ListenGroupAdd", "dice/listen_group_add");
+    mapBool("ListenFriendRequest", "dice/listen_friend_request");
+    mapBool("ListenFriendAdd", "dice/listen_friend_add");
+    mapBool("LeaveBlackQQ", "dice/leave_black_qq");
+    mapBool("ReferMsgReply", "dice/quote_reply");
+    mapInt("InactiveUserLine", "dice/friend_clean_days", 0, 3650);
+    mapInt("GroupClearLimit", "dice/group_clear_limit", 0, 10000);
+    mapInt("GroupInvalidSize", "dice/max_group_size", 0, 1000000);
+    if (auto allow = get("AllowStranger")) {
+        cfg.set<std::string>("events/friend_policy",
+            *allow <= 0 ? "whitelist" : *allow == 1 ? "group_used" : "nonblacklist");
+        ++imported;
     }
     if (imported) { cfg.set<json>("dice/masters", arr); cfg.save(); }
     return imported;

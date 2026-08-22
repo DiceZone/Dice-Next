@@ -727,7 +727,8 @@ TEST(BackupRestore, ArchivesStagesAndAppliesAtStartup) {
     ASSERT_TRUE(backup::stageStoredRestore(archive.filename().string(), false, error));
     { std::ofstream f("data/custom.txt"); f << "changed"; }
     { std::ofstream f("config/server.json"); f << "{}"; }
-    std::string notice; ASSERT_TRUE(backup::applyPendingRestore(notice));
+    std::string notice; const bool restoredOk = backup::applyPendingRestore(notice);
+    if (!restoredOk) std::cerr << "backup restore detail: " << notice << std::endl; ASSERT_TRUE(restoredOk);
     ASSERT_TRUE(notice.find("已应用") != std::string::npos);
     std::ifstream restored("data/custom.txt"); std::string content; std::getline(restored, content);
     ASSERT_EQ(content, "before-restore");
@@ -873,4 +874,50 @@ TEST(BackCompat, ValidateDeckAcceptsOriginalDiceFormat) {
     })";
     std::string error = validateDeckJson(originalFormat);
     ASSERT_TRUE(error.empty());
+}
+
+TEST(LegacyConsole, ParsesYamlSettings) {
+    const auto values = parseConsoleSettings(
+        "master: 1\nconfig:\n  InactiveUserLine: 365\n  GroupClearLimit: 10\n  AllowStranger: 2\nclock:\n  - task: save\n", false);
+    ASSERT_EQ(values.at("InactiveUserLine"), 365);
+    ASSERT_EQ(values.at("GroupClearLimit"), 10);
+    ASSERT_EQ(values.at("AllowStranger"), 2);
+    ASSERT_TRUE(values.find("master") == values.end());
+}
+
+TEST(LegacyConsole, ParsesXmlSettings) {
+    const auto values = parseConsoleSettings(
+        "<root><master>1</master><conf><a>InactiveUserLine=360</a>"
+        "<b>GroupInvalidSize=500</b><c>DisabledListenAt=1</c></conf></root>", true);
+    ASSERT_EQ(values.at("InactiveUserLine"), 360);
+    ASSERT_EQ(values.at("GroupInvalidSize"), 500);
+    ASSERT_EQ(values.at("DisabledListenAt"), 1);
+}
+
+TEST(LegacyConsole, MigratesSettingsIntoActiveCapabilities) {
+    fs::path root = makeTempDir("console_settings");
+    fs::create_directories(root / "conf");
+    {
+        std::ofstream out(root / "conf" / "console.yaml");
+        out << "master: 1707642\nconfig:\n"
+               "  InactiveUserLine: 180\n"
+               "  GroupClearLimit: 12\n"
+               "  GroupInvalidSize: 600\n"
+               "  DisabledListenAt: 1\n"
+               "  LeaveBlackQQ: 1\n"
+               "  AllowStranger: 2\n";
+    }
+    ConfigManager cfg((root / "config").string());
+    ASSERT_TRUE(cfg.load());
+    ASSERT_TRUE(importMasters(cfg, root / "conf") > 0);
+    ASSERT_EQ(cfg.get<int>("dice/friend_clean_days"), 180);
+    ASSERT_EQ(cfg.get<int>("dice/group_clear_limit"), 12);
+    ASSERT_EQ(cfg.get<int>("dice/max_group_size"), 600);
+    ASSERT_FALSE(cfg.get<bool>("dice/listen_at_when_off"));
+    ASSERT_TRUE(cfg.get<bool>("dice/leave_black_qq"));
+    ASSERT_EQ(cfg.get<std::string>("events/friend_policy"), "nonblacklist");
+    auto masters = cfg.get<json>("dice/masters", json::array());
+    ASSERT_EQ(masters.size(), static_cast<size_t>(1));
+    ASSERT_EQ(masters[0].value("id", ""), "1707642");
+    cleanupTempDir(root);
 }

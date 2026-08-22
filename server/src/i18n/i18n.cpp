@@ -1,6 +1,7 @@
 #include "i18n.h"
 #include "../common/logger.h"
 #include "../common/markdown.h"
+#include <algorithm>
 
 #include <fstream>
 #include <filesystem>
@@ -170,6 +171,36 @@ static void flattenNode(const json& node, const std::string& prefix,
     }
 }
 
+static size_t backtickRunLength(const std::string& text, size_t pos) {
+    size_t length = 0;
+    while (pos + length < text.size() && text[pos + length] == '`') ++length;
+    return length;
+}
+
+static size_t findMatchingBacktickRun(const std::string& text, size_t pos,
+                                      size_t wantedLength) {
+    while (pos < text.size()) {
+        const size_t found = text.find('`', pos);
+        if (found == std::string::npos) return found;
+        const size_t length = backtickRunLength(text, found);
+        if (length == wantedLength) return found;
+        pos = found + length;
+    }
+    return std::string::npos;
+}
+
+static size_t longestBacktickRun(const std::string& text) {
+    size_t longest = 0;
+    for (size_t pos = 0; pos < text.size();) {
+        const size_t found = text.find('`', pos);
+        if (found == std::string::npos) break;
+        const size_t length = backtickRunLength(text, found);
+        longest = std::max(longest, length);
+        pos = found + length;
+    }
+    return longest;
+}
+
 std::map<std::string, std::string> I18n::flatten(Locale loc) const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::map<std::string, std::string> out;
@@ -270,9 +301,51 @@ std::string I18n::renderTemplate(const std::string& value, const Args& args,
                                  ContentFormat format) {
     noteOutboundFormat(format);
     if (format != ContentFormat::kMarkdown || args.empty()) return interpolate(value, args);
-    Args safe;
-    for (const auto& [name, arg] : args) safe[name] = markdown::escapeLiteral(arg);
-    return interpolate(value, safe);
+
+    // Markdown arguments normally need escaping, but doing so inside a code
+    // span changes the visible text: `{expr}` became `1D20\+6` and the
+    // backslashes then survived both native Markdown rendering and OneBot's
+    // plain-text downgrade. Render code-span placeholders literally instead.
+    // If an argument itself contains backticks, grow the surrounding delimiter
+    // so it cannot terminate the span and turn user text into Markdown.
+    Args escaped;
+    for (const auto& [name, arg] : args) escaped[name] = markdown::escapeLiteral(arg);
+
+    std::string out;
+    out.reserve(value.size() + 32);
+    size_t pos = 0;
+    while (pos < value.size()) {
+        const size_t open = value.find('`', pos);
+        if (open == std::string::npos) {
+            out += interpolate(value.substr(pos), escaped);
+            break;
+        }
+        out += interpolate(value.substr(pos, open - pos), escaped);
+        const size_t openingLength = backtickRunLength(value, open);
+        const size_t close = findMatchingBacktickRun(value, open + openingLength,
+                                                     openingLength);
+        if (close == std::string::npos) {
+            out += interpolate(value.substr(open), escaped);
+            break;
+        }
+
+        std::string body = interpolate(
+            value.substr(open + openingLength, close - open - openingLength), args);
+        const size_t delimiterLength = std::max(openingLength,
+                                                longestBacktickRun(body) + 1);
+        const std::string delimiter(delimiterLength, '`');
+        const bool onlySpaces = !body.empty() && body.find_first_not_of(' ') == std::string::npos;
+        const bool pad = !body.empty() && !onlySpaces &&
+            (body.front() == '`' || body.back() == '`' ||
+             (body.front() == ' ' && body.back() == ' '));
+        out += delimiter;
+        if (pad) out += ' ';
+        out += body;
+        if (pad) out += ' ';
+        out += delimiter;
+        pos = close + openingLength;
+    }
+    return out;
 }
 
 // ═══════════════════════════════════════════════════════════════

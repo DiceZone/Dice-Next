@@ -15,4 +15,9 @@ TEST(FriendApproval, HandlesAllPolicies) {
 
     ASSERT_TRUE(evaluateFriendRequest("group_used", "", "", true) == FriendRequestDecision::kApprove);
     ASSERT_TRUE(evaluateFriendRequest("group_used", "", "", false) == FriendRequestDecision::kPending);
+
+    ASSERT_TRUE(evaluateFriendRequest("whitelist", "", "", false, true, false) == FriendRequestDecision::kApprove);
+    ASSERT_TRUE(evaluateFriendRequest("whitelist", "", "", true, false, false) == FriendRequestDecision::kPending);
+    ASSERT_TRUE(evaluateFriendRequest("nonblacklist", "", "", false, false, false) == FriendRequestDecision::kApprove);
+    ASSERT_TRUE(evaluateFriendRequest("nonblacklist", "", "", true, true, true) == FriendRequestDecision::kPending);
 }

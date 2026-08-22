@@ -31,8 +31,20 @@ static json makeDefaultConfig() {
             {"self_name", ""},                   // strSelfName: 自我介绍场合的名称（空=用登录昵称）
             {"self_call", ""},                   // strSelfCall: 回执自称，{self} 的重定向目标（空=用 self_name）
             {"message_format", "traditional"},   // 出站消息表现形式：traditional / card
+            {"save_log_images", false},
+            {"image_send", {{"mode", "base64"}, {"host", ""}}},
+            {"image_host", {{"mode", "none"}}},
+            {"chat_retention_days", 7},
+            {"friend_clean_days", 0},
+            {"group_clear_limit", 20},
+            {"max_group_size", 0},
             {"blacklist_quit_level", "member"},  // 黑名单退群默认等级: member=任一成员触发 / admin=仅群主级触发
+            {"leave_black_qq", false},
+            {"listen_at_when_off", true},
             {"respond_self", false},             // 自响应：用骰娘账号自身消息自控（默认关）
+            {"user_group", ""},
+            {"user_group_enforce", false},
+            {"user_group_invite", true},
             {"expression_mode", "enhanced"},    // enhanced / compatible / original / custom
             {"expression_order", json::array({"dicenext", "onedice", "dicescript"})},
             {"console_start_hidden", true},      // 启动即最小化到托盘（隐藏控制台，退出走托盘）
@@ -50,7 +62,7 @@ static json makeDefaultConfig() {
             }}
         }},
         {"events", {
-            {"friend_policy", "manual"},     // 好友申请策略：manual/all/keyword/group_used/reject
+            {"friend_policy", "manual"},     // manual/all/keyword/whitelist/group_used/nonblacklist/reject
             {"auto_approve_friend", false},   // 加好友请求自动同意
             {"friend_keyword", ""},           // 仅当验证信息含此关键词才同意（空=不限）
             {"auto_approve_group", false},     // 加群/邀请请求自动同意
@@ -277,7 +289,7 @@ bool ConfigManager::load() {
 }
 
 bool ConfigManager::reload() {
-    if (writing_.load() > 0) { DICE_LOG_DEBUG("ConfigManager: skip reload (self-write in progress)"); return true; }
+    if (writing_->load() > 0) { DICE_LOG_DEBUG("ConfigManager: skip reload (self-write in progress)"); return true; }
     DICE_LOG_INFO("ConfigManager: reloading from '{}'" , configPath_);
 
     bool ok = load();
@@ -308,7 +320,7 @@ bool ConfigManager::reload() {
 }
 
 bool ConfigManager::save() {
-    ++writing_;  // suppress self-triggered hot reload
+    ++(*writing_);  // suppress self-triggered hot reload
     bool ok = false;
     json snapshot;
     std::function<void(const json&)> snapshotWriter;
@@ -334,7 +346,8 @@ bool ConfigManager::save() {
         catch (const std::exception& e) { DICE_LOG_ERROR("ConfigManager: failed to persist database snapshot: {}", e.what()); }
     }
     // Delay decrement to cover the file-watcher debounce window
-    std::thread([](std::atomic<int>& w) { std::this_thread::sleep_for(std::chrono::milliseconds(1500)); --w; }, std::ref(writing_)).detach();
+    auto writing = writing_;
+    std::thread([writing] { std::this_thread::sleep_for(std::chrono::milliseconds(1500)); --(*writing); }).detach();
     return ok;
 }
 
@@ -399,6 +412,24 @@ void ConfigManager::emitConfigChanged() {
             DICE_LOG_ERROR("ConfigManager: change callback threw: {}", e.what());
         }
     }
+}
+
+bool ConfigManager::erase(const std::string& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> parts;
+    std::istringstream iss(key);
+    std::string part;
+    while (std::getline(iss, part, '/'))
+        if (!part.empty()) parts.push_back(part);
+    if (parts.empty()) return false;
+
+    json* current = &config_;
+    for (size_t i = 0; i + 1 < parts.size(); ++i) {
+        if (!current->is_object() || !current->contains(parts[i])) return false;
+        current = &(*current)[parts[i]];
+    }
+    if (!current->is_object()) return false;
+    return current->erase(parts.back()) > 0;
 }
 
 // ─── Internal: JSON Path Navigation ──────────────────────────

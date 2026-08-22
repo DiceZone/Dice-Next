@@ -13,6 +13,7 @@
 // 存储约定：images 列存「稳定 http URL」(generic 成功) 或「本地文件名」(local/none/失败)。
 
 #include "../config/config_manager.h"
+#include "../config/scoped_settings.h"
 #include <nlohmann/json.hpp>
 #include <string>
 #include <optional>
@@ -23,31 +24,43 @@ namespace dice::imghost {
 
 using json = nlohmann::json;
 
-inline json conf(ConfigManager& cfg) {
-    try { return cfg.get<json>("dice/image_host", json::object()); } catch (...) { return json::object(); }
+inline json conf(ConfigManager& cfg, const std::string& platform = {},
+                 const std::string& adapterId = {}) {
+    try {
+        return scoped_settings::resolveSection(cfg.getAll(), "dice", platform, adapterId)
+            .value("image_host", json::object());
+    } catch (...) { return json::object(); }
 }
-inline std::string mode(ConfigManager& cfg) { return conf(cfg).value("mode", std::string("none")); }
-inline std::string publicBase(ConfigManager& cfg) { return conf(cfg).value("public_base", std::string()); }
+inline std::string mode(ConfigManager& cfg, const std::string& platform = {},
+                        const std::string& adapterId = {}) {
+    return conf(cfg, platform, adapterId).value("mode", std::string("none"));
+}
+inline std::string publicBase(ConfigManager& cfg, const std::string& platform = {},
+                              const std::string& adapterId = {}) {
+    return conf(cfg, platform, adapterId).value("public_base", std::string());
+}
 
 // 本地落地文件 data/logs/images/<file> 的对外 URL（local 模式，需配 public_base）。
-inline std::string publicUrlFor(ConfigManager& cfg, const std::string& filename) {
-    std::string base = publicBase(cfg);
+inline std::string publicUrlFor(ConfigManager& cfg, const std::string& filename,
+                                const std::string& platform = {}, const std::string& adapterId = {}) {
+    std::string base = publicBase(cfg, platform, adapterId);
     if (base.empty()) return "";
     if (base.back() == '/') base.pop_back();
     return base + "/api/logs/images/" + filename;
 }
 // images 列里的 ref（http 稳定 url 或 本地文件名）→ 对外可访问 URL（无法对外则空）。
-inline std::string resolveRef(ConfigManager& cfg, const std::string& ref) {
+inline std::string resolveRef(ConfigManager& cfg, const std::string& ref,
+                              const std::string& platform = {}, const std::string& adapterId = {}) {
     if (ref.rfind("http", 0) == 0) return ref;
     // 骰娘回复里的本地资产（[img,file=data/assets/..]）→ /api/assets/ 路径。
     std::string norm = ref; for (auto& ch : norm) if (ch == '\\') ch = '/';
     if (norm.rfind("data/assets/", 0) == 0) {
-        std::string base = publicBase(cfg);
+        std::string base = publicBase(cfg, platform, adapterId);
         if (base.empty()) return "";
         if (base.back() == '/') base.pop_back();
         return base + "/api/assets/" + norm.substr(std::string("data/assets/").size());
     }
-    return publicUrlFor(cfg, ref);
+    return publicUrlFor(cfg, ref, platform, adapterId);
 }
 
 inline std::string runCapture(const std::string& cmd) {
@@ -86,8 +99,9 @@ inline std::string jsonByPath(const json& j, const std::string& path) {
 
 // generic 模式：curl multipart 上传本地图片 → 稳定 url（失败返回 nullopt）。
 // 值来自骰主自配（半可信），用引号传参；本地路径由我们生成（可信）。
-inline std::optional<std::string> uploadGeneric(ConfigManager& cfg, const std::string& localPath) {
-    auto c = conf(cfg);
+inline std::optional<std::string> uploadGeneric(ConfigManager& cfg, const std::string& localPath,
+                                                const std::string& platform = {}, const std::string& adapterId = {}) {
+    auto c = conf(cfg, platform, adapterId);
     std::string url = c.value("url", std::string());
     if (url.empty()) return std::nullopt;
     std::string field = c.value("file_field", std::string("file"));

@@ -45,6 +45,11 @@ TEST(markdown, preserves_escaped_and_inline_code_content) {
               "*not italic* and _literal_ and 2*3*4_and_more");
 }
 
+TEST(markdown, mirrors_commonmark_code_span_padding) {
+    EXPECT_EQ(toPlainText("`` `edge` ``"), "`edge`");
+    EXPECT_EQ(toPlainText("`  kept  `"), " kept ");
+}
+
 TEST(markdown, detects_common_formatting) {
     EXPECT_TRUE(hasFormatting("**bold**"));
     EXPECT_TRUE(hasFormatting("# heading"));

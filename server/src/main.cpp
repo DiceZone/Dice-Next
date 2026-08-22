@@ -293,6 +293,45 @@ static int realMain(int argc, char* argv[]) {
     dice::ConfigManager configMgr(configPath);
     const bool configLoaded = configMgr.load();
     const bool obsoleteDefaultConfigDiscarded = configMgr.discardedObsoleteDefaultConfig();
+    if (configLoaded) {
+        // Consume settings written by builds that exposed legacy Dice! fields
+        // without wiring them to runtime behaviour. Values with a current
+        // equivalent are migrated; obsolete concepts are removed permanently.
+        const auto all = configMgr.getAll();
+        const auto diceCfg = all.value("dice", nlohmann::json::object());
+        bool changed = false;
+        auto moveInt = [&](const char* oldKey, const char* newKey, int lo, int hi) {
+            if (!diceCfg.contains(oldKey) || !diceCfg[oldKey].is_number_integer()) return;
+            configMgr.set<int>(std::string("dice/") + newKey,
+                std::clamp(diceCfg[oldKey].get<int>(), lo, hi));
+            changed = configMgr.erase(std::string("dice/") + oldKey) || changed;
+        };
+        moveInt("inactive_user_line", "friend_clean_days", 0, 3650);
+        moveInt("group_invalid_size", "max_group_size", 0, 100000);
+        if (diceCfg.contains("allow_stranger") && diceCfg["allow_stranger"].is_number_integer()) {
+            const int policy = diceCfg["allow_stranger"].get<int>();
+            configMgr.set<std::string>("events/friend_policy",
+                policy <= 0 ? "whitelist" : policy == 1 ? "group_used" : "nonblacklist");
+            changed = configMgr.erase("dice/allow_stranger") || changed;
+        }
+        const auto chatCfg = all.value("chat", nlohmann::json::object());
+        if (chatCfg.contains("retention_days") && chatCfg["retention_days"].is_number_integer()) {
+            configMgr.set<int>("dice/chat_retention_days",
+                std::clamp(chatCfg["retention_days"].get<int>(), 0, 3650));
+            changed = configMgr.erase("chat/retention_days") || changed;
+        }
+        for (const char* key : {"private_mode", "check_group_license", "leave_discuss",
+                                "cloud_visible", "cloud_black_share"}) {
+            changed = configMgr.erase(std::string("dice/") + key) || changed;
+        }
+        if (changed) {
+            if (!configMgr.save()) {
+                DICE_LOG_WARN("Failed to persist normalized system settings");
+            } else {
+                DICE_LOG_INFO("Legacy system settings were mapped to current runtime settings");
+            }
+        }
+    }
     // 统一时区：server/timezone_minutes（相对 UTC 的分钟偏移，东为正；
     // 缺省/INT_MIN = 跟随系统本地时区）。所有面向用户的展示/上传时间都走它。
     dice::utils::setTimezoneOffset(configMgr.get<int>(
@@ -998,7 +1037,8 @@ static int realMain(int argc, char* argv[]) {
         // .bot off is bypassed only by an explicit @ to us; a hard web-admin lock
         // remains absolute. This also lets @-addressed plugin commands reach their
         // normal fallback path when no built-in command matched.
-        bool forcedByAt = dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);
+        bool forcedByAt = cmdRouter.listenAtWhenOff(msg)
+            && dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);
         dice::I18n::beginOutboundCapture();
         auto reply = cmdRouter.handleMessage(msg);
         dice::ContentFormat replyFormat = dice::I18n::endOutboundCapture();
@@ -1103,7 +1143,7 @@ static int realMain(int argc, char* argv[]) {
                     if (auto* cst = db.getChatStorage()) {
                         try {
                             dice::ChatMsgRow rout;
-                            rout.platform = msg.platform; rout.groupId = chatScope;
+                            rout.platform = msg.platform; rout.adapterId = msg.adapterId; rout.groupId = chatScope;
                             rout.userId = msg.selfId; rout.sender = botName;
                             rout.content = reply; rout.self = 1;
                             rout.time = static_cast<int64_t>(std::time(nullptr));
@@ -1307,7 +1347,7 @@ static int realMain(int argc, char* argv[]) {
                 try {
                     int64_t now = static_cast<int64_t>(std::time(nullptr));
                     dice::ChatMsgRow rin;
-                    rin.platform = msg.platform; rin.groupId = chatScope; rin.msgId = msg.id;
+                    rin.platform = msg.platform; rin.adapterId = msg.adapterId; rin.groupId = chatScope; rin.msgId = msg.id;
                     rin.userId = msg.senderId;
                     // 群员显示群名片(群昵称)优先，其次 QQ 昵称，最后 QQ 号。
                     std::string sndCard = (msg.extra.contains("card") && msg.extra["card"].is_string())
@@ -1370,19 +1410,17 @@ static int realMain(int argc, char* argv[]) {
     adapterMgr.onEvent([&adapterMgr, &configMgr, &i18n, &localeResolver, &cmdRouter, &jsMod, &db, replyFallback](const dice::BotEvent& e) {
         using ET = dice::EventType;
         nlohmann::json cfgAll = configMgr.getAll();
-        // 全局开关（系统设置页 dice/listen_*）控制各类事件是否响应。
-        auto diceFlag = [&](const char* k, bool def) {
-            if (cfgAll.contains("dice") && cfgAll["dice"].contains(k) && cfgAll["dice"][k].is_boolean())
-                return cfgAll["dice"][k].get<bool>();
-            return def;
-        };
-        auto diceStr = [&](const char* k) -> std::string {
-            if (cfgAll.contains("dice") && cfgAll["dice"].contains(k) && cfgAll["dice"][k].is_string())
-                return cfgAll["dice"][k].get<std::string>();
-            return {};
-        };
         auto a = adapterMgr.getAdapter(e.adapterId);
         if (!a) return;
+        nlohmann::json diceSettings = dice::scoped_settings::resolveSection(
+            cfgAll, "dice", a->platform(), e.adapterId);
+        // 事件开关按帐号 > 适配器 > 全局解析。
+        auto diceFlag = [&](const char* k, bool def) {
+            return diceSettings.value(k, def);
+        };
+        auto diceStr = [&](const char* k) -> std::string {
+            return diceSettings.value(k, std::string());
+        };
         nlohmann::json ev = dice::scoped_settings::resolveSection(
             cfgAll, "events", a->platform(), e.adapterId);
 
@@ -1445,7 +1483,7 @@ static int realMain(int argc, char* argv[]) {
             if (auto* cst = db.getChatStorage()) {
                 try {
                     dice::ChatMsgRow r;
-                    r.platform = e.platform; r.groupId = e.groupId; r.userId = e.userId;
+                    r.platform = e.platform; r.adapterId = e.adapterId; r.groupId = e.groupId; r.userId = e.userId;
                     r.sender = who; r.content = line; r.self = 0;
                     r.time = static_cast<int64_t>(std::time(nullptr));
                     cst->insert(r);
@@ -1510,7 +1548,7 @@ static int realMain(int argc, char* argv[]) {
                         orm::c(&dice::ChatMsgRow::msgId) == mid));
                     if (dup > 0) continue;
                     dice::ChatMsgRow r;
-                    r.platform = e.platform; r.groupId = e.groupId; r.msgId = mid;
+                    r.platform = e.platform; r.adapterId = e.adapterId; r.groupId = e.groupId; r.msgId = mid;
                     r.userId = sfield("user_id");
                     if (m.contains("sender") && m["sender"].is_object()) {
                         r.sender = m["sender"].value("card", std::string());
@@ -1637,6 +1675,25 @@ static int realMain(int argc, char* argv[]) {
                 }
                 // Bot itself was added to a group → greet + refresh group cache.
                 a->refreshGroupList();
+                const int maxGroupSize = diceSettings.value("max_group_size", 0);
+                if (maxGroupSize > 0) {
+                    auto weakAdapter = std::weak_ptr<dice::IAdapter>(a);
+                    const std::string joinedGroup = e.groupId;
+                    const std::string joinedAdapter = e.adapterId;
+                    drogon::app().getLoop()->runAfter(6.0, [weakAdapter, joinedGroup, joinedAdapter,
+                                                            maxGroupSize, &cmdRouter]() {
+                        auto adapter = weakAdapter.lock(); if (!adapter || !adapter->isConnected()) return;
+                        const int members = adapter->getGroupMemberCount(joinedGroup);
+                        if (members <= maxGroupSize) return;
+                        adapter->leaveGroup(joinedGroup);
+                        DICE_LOG_INFO("自动清理群聊：群 {} 共 {} 人，超过最大群规模 {}，已退出",
+                                      joinedGroup, members, maxGroupSize);
+                        cmdRouter.notifyMasters(dice::notice::kImportant,
+                            "群 " + joinedGroup + " 共 " + std::to_string(members)
+                                + " 人，超过最大群规模 " + std::to_string(maxGroupSize) + "，已自动退出",
+                            "group_size_leave", joinedAdapter);
+                    });
+                }
                 std::string g = ev.value("group_joined", std::string());
                 if (g.empty()) g = i18n.tr(loc, "event.group_joined");
                 if (!g.empty()) a->sendGroupMessage(e.groupId, g);
@@ -1645,7 +1702,8 @@ static int realMain(int argc, char* argv[]) {
             // Blacklist-quit: if a blacklisted user joins and the group's level is
             // "member" (any member triggers退群), leave the group. ("admin" level
             // only triggers for owner-level offenders, which a joiner never is.)
-            if (cmdRouter.isUserBlacklisted(e.userId) &&
+            if (diceFlag("leave_black_qq", false) &&
+                cmdRouter.isUserBlacklisted(e.userId) &&
                 cmdRouter.blacklistQuitLevel(e.platform, e.groupId, e.adapterId) == "member") {
                 a->sendGroupMessage(e.groupId, i18n.tr(loc, "event.blacklist_quit"));
                 a->leaveGroup(e.groupId);
@@ -1884,7 +1942,8 @@ static int realMain(int argc, char* argv[]) {
                 "\xe6\x94\xb6\xe5\x88\xb0\xe5\xa5\xbd\xe5\x8f\x8b\xe7\x94\xb3\xe8\xaf\xb7\xef\xbc\x9a" + userLabel(e.userId)
                     + (e.comment.empty() ? "" : "\xef\xbc\x88\xe9\x99\x84\xe8\xa8\x80\xef\xbc\x9a" + e.comment + "\xef\xbc\x89"), "friend_req", e.adapterId);
             // 策略：all=任意通过 / keyword=含关键词才通过(其余留人工) /
-            //       group_used=曾在任意群触发指令才通过 / reject=禁止任何人添加 /
+            //       whitelist=白名单 / group_used=曾在任意群触发指令 /
+            //       nonblacklist=非黑名单 / reject=禁止任何人添加 /
             //       manual=不自动处理。未设 friend_policy 时由旧 auto_approve_friend 派生。
             std::string pol = ev.value("friend_policy", std::string());
             if (pol.empty()) pol = ev.value("auto_approve_friend", false)
@@ -1892,7 +1951,8 @@ static int realMain(int argc, char* argv[]) {
             const bool usedInGroup = pol == "group_used"
                 && cmdRouter.hasGroupCommandHistory(e.platform, e.userId);
             const auto decision = dice::evaluateFriendRequest(
-                pol, e.comment, ev.value("friend_keyword", std::string()), usedInGroup);
+                pol, e.comment, ev.value("friend_keyword", std::string()), usedInGroup,
+                cmdRouter.isUserWhitelisted(e.userId), cmdRouter.isUserBlacklisted(e.userId));
             if (decision == dice::FriendRequestDecision::kApprove) {
                 a->setFriendRequest(e.flag, true);
                 if (pol == "group_used")
@@ -2086,12 +2146,35 @@ static int realMain(int argc, char* argv[]) {
         }
 
         auto adapters = st->get_all<dice::AdapterRow>();
+        bool migratedAdapterRuntimeSettings = false;
         for (auto& row : adapters) {
+            nlohmann::json extra = nlohmann::json::parse(row.config, nullptr, false);
+            if (!extra.is_object()) extra = nlohmann::json::object();
+            if (extra.contains("message_format")) {
+                const std::string mode = extra.value("message_format", std::string());
+                if (mode == "traditional" || mode == "card") {
+                    dice::scoped_settings::setSection(configMgr, "account",
+                        std::to_string(row.id), "dice",
+                        nlohmann::json{{"message_format", mode}});
+                }
+                extra.erase("message_format");
+                row.config = extra.dump();
+                st->update(row);
+                migratedAdapterRuntimeSettings = true;
+            }
             if (row.enabled) {
                 // 与 WebUI 增改共用同一工厂（api_service::makeRuntimeAdapter），
                 // 避免此处漏掉新平台——曾把 Discord/KOOK 行当 OneBot 建导致空端点重连死循环。
-                adapterMgr.registerAdapter(dice::api::makeRuntimeAdapter(row));
+                auto adapter = dice::api::makeRuntimeAdapter(row);
+                dice::api::applyScopedAdapterSettings(adapter, configMgr);
+                adapterMgr.registerAdapter(adapter);
             }
+        }
+        if (migratedAdapterRuntimeSettings) {
+            nlohmann::json exported = nlohmann::json::array();
+            for (const auto& row : st->get_all<dice::AdapterRow>()) exported.push_back(configFromRow(row));
+            configMgr.set<nlohmann::json>("adapters", exported);
+            configMgr.save();
         }
     }
 
@@ -2509,7 +2592,8 @@ static int realMain(int argc, char* argv[]) {
                     && (!cmdRouter.isForAnotherBot(msg) || jsCommandMatches(jsMod, cmdRouter, msg))
                     && !cmdRouter.isBlocked(msg)) {
                     bool disabled = cmdRouter.isGroupDisabled(msg);
-                    bool forcedByAt = dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);
+                    bool forcedByAt = cmdRouter.listenAtWhenOff(msg)
+                        && dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);
                     bool replyOff = msg.type == dice::MessageType::kGroup && !msg.targetId.empty()
                                     && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId);
                     reply = cmdRouter.handleMessage(msg, forced);
@@ -3314,17 +3398,32 @@ static int realMain(int argc, char* argv[]) {
     });
 
     // ── 聊天记录保留期清理（启动后 1 分钟 + 之后每 6 小时）──
-    // 删除 chat.db 里早于 chat/retention_days（默认 7 天，0=不清理）的消息。
+    // 每条记录按其平台/适配器帐号的有效配置清理；历史记录没有 adapter_id 时
+    // 退化为平台作用域。图片按所有有效配置中的最长保留期保守清理。
     {
         auto chatCleanup = [&db, &configMgr]() {
-            int days = configMgr.get<int>("chat/retention_days", 7);
-            if (days <= 0) return;
             auto* cst = db.getChatStorage(); if (!cst) return;
             try {
-                namespace orm = sqlite_orm;
-                int64_t cutoff = static_cast<int64_t>(std::time(nullptr)) - (int64_t)days * 86400;
-                cst->remove_all<dice::ChatMsgRow>(orm::where(orm::c(&dice::ChatMsgRow::time) < cutoff));
-                dice::chatimg::pruneOld(cutoff);   // 同步清理超期的缓存图片
+                const int64_t now = static_cast<int64_t>(std::time(nullptr));
+                const nlohmann::json all = configMgr.getAll();
+                std::map<std::string, int> retentionCache;
+                int longestDays = 0; bool keepImagesForever = false;
+                for (const auto& row : cst->get_all<dice::ChatMsgRow>()) {
+                    const std::string cacheKey = row.platform + "\n" + row.adapterId;
+                    auto [it, inserted] = retentionCache.emplace(cacheKey, 7);
+                    if (inserted) {
+                        const auto settings = dice::scoped_settings::resolveSection(
+                            all, "dice", row.platform, row.adapterId);
+                        it->second = settings.value("chat_retention_days", 7);
+                    }
+                    const int days = it->second;
+                    if (days <= 0) { keepImagesForever = true; continue; }
+                    longestDays = (std::max)(longestDays, days);
+                    if (row.time > 0 && row.time < now - static_cast<int64_t>(days) * 86400)
+                        cst->remove<dice::ChatMsgRow>(row.id);
+                }
+                if (!keepImagesForever && longestDays > 0)
+                    dice::chatimg::pruneOld(now - static_cast<int64_t>(longestDays) * 86400);
             } catch (...) {}
         };
         app.getLoop()->runAfter(60.0, chatCleanup);
@@ -3380,6 +3479,54 @@ static int realMain(int argc, char* argv[]) {
         };
         app.getLoop()->runAfter(300.0, friendCleanup);     // 启动 5 分钟后（等好友列表同步）
         app.getLoop()->runEvery(43200.0, friendCleanup);   // 之后每 12 小时
+
+        auto groupCleanup = [&configMgr, &adapterMgr, &cmdRouter]() {
+            const nlohmann::json all = configMgr.getAll();
+            int leftCount = 0;
+            for (const auto& adapter : adapterMgr.allAdapters()) {
+                if (!adapter->isConnected()) continue;
+                const nlohmann::json settings = dice::scoped_settings::resolveSection(
+                    all, "dice", adapter->platform(), adapter->id());
+                const int limit = settings.value("group_clear_limit", 20);
+                const int maxSize = settings.value("max_group_size", 0);
+                const bool leaveBlack = settings.value("leave_black_qq", false);
+                adapter->refreshGroupList();
+                for (const auto& [groupId, groupName] : adapter->getGroupList()) {
+                    if (limit > 0 && leftCount >= limit) return;
+                    std::string reason;
+                    const int members = adapter->getGroupMemberCount(groupId);
+                    if (maxSize > 0 && members > maxSize) {
+                        reason = "群规模 " + std::to_string(members) + " 超过上限 " + std::to_string(maxSize);
+                    } else if (leaveBlack) {
+                        const std::string level = cmdRouter.blacklistQuitLevel(
+                            adapter->platform(), groupId, adapter->id());
+                        try {
+                            for (const auto& member : adapter->getMembers(groupId)) {
+                                if (!member.is_object() || !member.contains("user_id")) continue;
+                                std::string uid = member["user_id"].is_string()
+                                    ? member["user_id"].get<std::string>()
+                                    : member["user_id"].is_number_integer()
+                                        ? std::to_string(member["user_id"].get<int64_t>()) : std::string();
+                                if (uid.empty() || !cmdRouter.isUserBlacklisted(uid)) continue;
+                                const std::string role = member.value("role", std::string("member"));
+                                if (level == "member" || role == "owner" || role == "admin") {
+                                    reason = "存在黑名单用户 " + uid; break;
+                                }
+                            }
+                        } catch (...) {}
+                    }
+                    if (reason.empty()) continue;
+                    adapter->leaveGroup(groupId); ++leftCount;
+                    const std::string label = groupName.empty() ? groupId : groupName + "(" + groupId + ")";
+                    DICE_LOG_INFO("自动清理群聊：{}，{}，已退出", label, reason);
+                    cmdRouter.notifyMasters(dice::notice::kImportant,
+                        "自动清理群聊：" + label + "，" + reason + "，已退出",
+                        "group_auto_clean", adapter->id());
+                }
+            }
+        };
+        app.getLoop()->runAfter(330.0, groupCleanup);
+        app.getLoop()->runEvery(43200.0, groupCleanup);
     }
 
     // ── 旧「不活跃自动退群」配置 → 定时任务迁移 ─────────────────

@@ -7,8 +7,42 @@
 #include "../src/i18n/i18n.h"
 #include "../src/storage/database.h"
 #include "../src/config/config_manager.h"
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <utility>
 
 using namespace dice;
+namespace fs = std::filesystem;
+
+namespace {
+class PersonaTestConfig final : public ConfigManager {
+public:
+    PersonaTestConfig() : PersonaTestConfig(makeRoot()) {}
+
+    ~PersonaTestConfig() {
+        std::error_code ec;
+        fs::remove_all(root_, ec);
+    }
+
+private:
+    explicit PersonaTestConfig(fs::path root)
+        : ConfigManager((root / "config").string()), root_(std::move(root)) {}
+
+    static fs::path makeRoot() {
+        static uint64_t sequence = 0;
+        const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+        const fs::path root = fs::temp_directory_path() /
+            ("dice_next_persona_" + std::to_string(nonce) + "_" +
+             std::to_string(++sequence));
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        return root;
+    }
+
+    fs::path root_;
+};
+}
 
 static std::unique_ptr<Database> makeDb() {
     auto db = std::make_unique<Database>();
@@ -16,8 +50,8 @@ static std::unique_ptr<Database> makeDb() {
     return db;
 }
 
-static std::unique_ptr<ConfigManager> makeCfg() {
-    auto cfg = std::make_unique<ConfigManager>("config");
+static std::unique_ptr<PersonaTestConfig> makeCfg() {
+    auto cfg = std::make_unique<PersonaTestConfig>();
     cfg->load();
     return cfg;
 }
