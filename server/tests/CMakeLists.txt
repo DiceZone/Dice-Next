@@ -37,6 +37,7 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/config/config_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/logger.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/markdown.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/markdown_md4c.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/i18n/locale_resolver.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_matcher.cpp
@@ -66,6 +67,7 @@ target_link_libraries(dice-next-tests PRIVATE
     qjs
     onedice::onedice
     dicescript::dicescript
+    dice-md4c
 )
 
 # MSVC needs /bigobj for large test files with many includes

@@ -267,7 +267,99 @@ std::string escapeLiteral(const std::string& text) {
     return out;
 }
 
-std::string toPlainText(const std::string& markdownText) {
+std::string escapeQQMarkdownLiteral(const std::string& text) {
+    // QQ's Markdown renderer also recognizes LaTeX delimiters. Escaping every
+    // punctuation character would turn "(...)" and "[...]" into "\\(...)"
+    // and "\\[...\\]", so only escape text which can actually start Markdown.
+    static constexpr std::string_view kZeroWidthSpace = "\xE2\x80\x8B";
+    std::string out;
+    out.reserve(text.size() + text.size() / 16);
+    size_t lineStart = 0;
+
+    for (size_t i = 0; i < text.size();) {
+        if (text[i] == '[' && protectedOneBotCode(text, i)) {
+            const size_t end = text.find(']', i + 1);
+            if (end != std::string::npos) {
+                out.append(text, i, end - i + 1);
+                i = end + 1;
+                continue;
+            }
+        }
+
+        const char ch = text[i];
+        if (ch == '\\' && i + 1 < text.size() &&
+            (text[i + 1] == '(' || text[i + 1] == '[')) {
+            // A literal user-provided "\(" or "\[" must not become QQ math.
+            out += '\\';
+            out += kZeroWidthSpace;
+            ++i;
+            continue;
+        }
+
+        size_t prefix = lineStart;
+        while (prefix < text.size() && prefix < lineStart + 3 && text[prefix] == ' ') {
+            ++prefix;
+        }
+
+        bool escape = false;
+        if (i == prefix) {
+            if (ch == '#' || ch == '>') {
+                size_t end = i;
+                while (end < text.size() && text[end] == '#') ++end;
+                escape = ch == '>'
+                    ? (i + 1 == text.size() || text[i + 1] == ' ')
+                    : (end - i <= 6 && end < text.size() && text[end] == ' ');
+            } else if ((ch == '-' || ch == '+' || ch == '*') &&
+                       i + 1 < text.size() && text[i + 1] == ' ') {
+                escape = true;
+            }
+        }
+        if (!escape && (ch == '.' || ch == ')') && i > prefix &&
+            i + 1 < text.size() && text[i + 1] == ' ') {
+            escape = std::all_of(text.begin() + static_cast<std::ptrdiff_t>(prefix),
+                                 text.begin() + static_cast<std::ptrdiff_t>(i),
+                                 [](char value) {
+                                     return std::isdigit(static_cast<unsigned char>(value)) != 0;
+                                 });
+        }
+        if (!escape && ch == ']' && i + 1 < text.size() && text[i + 1] == '(') {
+            escape = true;
+        }
+        if (!escape && ch == '!' && i + 1 < text.size() && text[i + 1] == '[') {
+            escape = true;
+        }
+        if (!escape && ch == '<') {
+            const std::string_view rest(text.data() + i, text.size() - i);
+            escape = rest.starts_with("<http://") || rest.starts_with("<https://") ||
+                     rest.starts_with("<mailto:");
+        }
+        if (!escape && ch == '\x60') escape = true;
+        if (!escape && ch == '*') {
+            const bool arithmetic = i > 0 && i + 1 < text.size() &&
+                std::isdigit(static_cast<unsigned char>(text[i - 1])) &&
+                std::isdigit(static_cast<unsigned char>(text[i + 1]));
+            escape = !arithmetic;
+        }
+        if (!escape && ch == '_') {
+            const bool identifier = i > 0 && i + 1 < text.size() &&
+                std::isalnum(static_cast<unsigned char>(text[i - 1])) &&
+                std::isalnum(static_cast<unsigned char>(text[i + 1]));
+            escape = !identifier;
+        }
+        if (!escape && ch == '~') {
+            escape = (i > 0 && text[i - 1] == '~') ||
+                     (i + 1 < text.size() && text[i + 1] == '~');
+        }
+
+        if (escape) out += '\\';
+        out += ch;
+        if (ch == '\n') lineStart = i + 1;
+        ++i;
+    }
+    return out;
+}
+
+std::string legacyToPlainText(const std::string& markdownText) {
     std::istringstream lines(markdownText);
     std::vector<std::string> plainLines;
     std::string line;

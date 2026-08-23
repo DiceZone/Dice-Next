@@ -950,7 +950,7 @@ private:
         const bool useMarkdown = !forceTraditional && m.type != MessageType::kChannel &&
                                  (effectiveCardMode() || explicitMarkdown);
         std::string wireText = useMarkdown
-            ? (explicitMarkdown ? text : markdown::escapeLiteral(text))
+            ? (explicitMarkdown ? text : markdown::escapeQQMarkdownLiteral(text))
             : (explicitMarkdown ? markdown::toPlainText(text) : text);
         if (wireText.empty() && !text.empty()) wireText = text;
 

@@ -46,6 +46,13 @@ find_package(qjs CONFIG REQUIRED)
 
 # Lua — embeddable engine for the original Dice! Lua mod subsystem (C#6)
 find_package(Lua REQUIRED)
+# MD4C — pinned CommonMark/GFM parser used for structural Markdown-to-text
+# downgrade on adapters which only support plain text.
+add_library(dice-md4c STATIC third_party/md4c/md4c.c)
+target_include_directories(dice-md4c PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/md4c
+)
+set_target_properties(dice-md4c PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
 
 # onedice-cpp-lib — sibling dice-string engine project
 set(ONEDICE_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
@@ -65,6 +72,7 @@ set(SOURCES
     src/common/version.cpp
     src/common/logger.cpp
     src/common/markdown.cpp
+    src/common/markdown_md4c.cpp
     src/common/hot_reload.cpp
     src/config/config_manager.cpp
     src/storage/database.cpp
@@ -147,6 +155,7 @@ target_link_libraries(dice-next-server PRIVATE
     onedice::onedice
     dicescript::dicescript
     qjs
+    dice-md4c
     ${LUA_LIBRARIES}
 )
 

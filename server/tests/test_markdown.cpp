@@ -4,6 +4,7 @@
 using dice::markdown::hasFormatting;
 using dice::markdown::toPlainText;
 using dice::markdown::escapeLiteral;
+using dice::markdown::escapeQQMarkdownLiteral;
 
 TEST(markdown, strips_inline_formatting_and_keeps_destinations) {
     const std::string input =
@@ -94,4 +95,42 @@ TEST(markdown, explicit_plain_text_can_be_embedded_without_becoming_formatting) 
     EXPECT_NE(escaped, literal);
     EXPECT_EQ(toPlainText(escaped), literal);
     EXPECT_TRUE(escaped.find("[CQ:image,file=a.png]") != std::string::npos);
+}
+
+TEST(markdown, structured_renderer_handles_lists_links_code_and_entities) {
+    const std::string formatted =
+        "## Overview\n\n"
+        "1. **First**\n"
+        "2. [Help](https://dice.zone/help)\n\n"
+        "\x60**literal code**\x60 &amp;";
+    EXPECT_EQ(toPlainText(formatted),
+              "Overview\n"
+              "1. First\n"
+              "2. Help (https://dice.zone/help)\n"
+              "**literal code** &");
+}
+
+TEST(markdown, qq_plain_banner_does_not_turn_parentheses_into_math) {
+    const std::string banner =
+        "Dice!Next By DiceZone/Shia Ver 3.0.0(858)\n"
+        "[GNUC 13.3.0 2026-08-22 16:24:54 For Adapter/qq_official]\n"
+        "OneDice V1 Compatible";
+    const std::string safe = escapeQQMarkdownLiteral(banner);
+    EXPECT_EQ(safe, banner);
+    EXPECT_TRUE(safe.find("\\(") == std::string::npos);
+    EXPECT_TRUE(safe.find("\\[") == std::string::npos);
+}
+
+TEST(markdown, qq_plain_markdown_syntax_is_preserved_as_literal_text) {
+    const std::string literal =
+        "**不是粗体**\n"
+        "# 1号方案\n"
+        "[文档](https://dice.zone/help)\n"
+        "1. 项目\n"
+        "qq_official 1d6*2";
+    const std::string safe = escapeQQMarkdownLiteral(literal);
+    EXPECT_NE(safe, literal);
+    EXPECT_EQ(toPlainText(safe), literal);
+    EXPECT_TRUE(safe.find("\\(") == std::string::npos);
+    EXPECT_TRUE(safe.find("\\[") == std::string::npos);
 }
