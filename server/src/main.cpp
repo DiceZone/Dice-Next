@@ -47,6 +47,9 @@
 #include "i18n/locale_resolver.h"
 
 #include <optional>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 
 #include <iostream>
 #include <string>
@@ -72,6 +75,22 @@
 #endif
 
 namespace {
+
+bool isDiceFlatsManagedMode() {
+    const char* raw = std::getenv("MODE");
+    if (!raw) return false;
+    std::string mode(raw);
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return mode == "diceflats";
+}
+
+bool isLoopbackPeer(const drogon::HttpRequestPtr& req) {
+    const std::string ip = req->peerAddr().toIp();
+    return ip == "127.0.0.1" || ip == "::1" || ip == "0:0:0:0:0:0:0:1" ||
+           ip.rfind("::ffff:127.", 0) == 0;
+}
 
 /// 按 UTF-8 构造文件系统路径：Windows 的 narrow ifstream/ofstream 把路径当系统码页
 /// (中文系统=GBK)，用它打开 UTF-8 的中文文件名会失败；用 u8string 构造的 path 才正确
@@ -2210,17 +2229,25 @@ static int realMain(int argc, char* argv[]) {
         configMgr.get<std::string>("server/api_key", ""));
     // H2: X-API-Key 凭据（服务间/脚本调用）。仅配置了 key 时生效。
     const std::string apiKey = configMgr.get<std::string>("server/api_key", "");
+    const bool diceFlatsManaged = isDiceFlatsManagedMode();
 
     // 前置拦截：设了口令时，/api/* 需有效会话 Cookie（放行登录/状态查询与静态文件）。
     app.registerPreHandlingAdvice(
-        [apiKey](const drogon::HttpRequestPtr& req,
+        [apiKey, diceFlatsManaged](const drogon::HttpRequestPtr& req,
            drogon::AdviceCallback&& stop, drogon::AdviceChainCallback&& next) {
             const std::string& path = req->path();
             if (path.rfind("/api/", 0) != 0 ||                       // 静态文件
                 path == "/api/auth/login" || path == "/api/auth/status" ||
                 path == "/api/auth/logout" || path == "/api/auth/setup") { next(); return; }
+            // BDC daemon obtains this instance's generated API key only from inside
+            // the managed container. Host/remote requests never see this bypass.
+            if (diceFlatsManaged && path == "/api/managed/bootstrap" &&
+                req->method() == drogon::Post && isLoopbackPeer(req)) { next(); return; }
             auto& auth = dice::WebAuth::instance();
-            // 未设置口令：强制先设置（默认 0.0.0.0 监听，空口令直通 = 未授权接管/RCE）。
+            // 服务间调用不依赖 WebUI 是否已设置口令；否则全新实例虽然已经有
+            // server/api_key，却会先被 need_setup 分支挡住，API Key 实际不可用。
+            if (!apiKey.empty() && auth.checkApiKey(req->getHeader("X-API-Key"))) { next(); return; }
+            // 未设置口令：浏览器访问仍强制先设置（默认 0.0.0.0 监听，空口令直通 = 未授权接管/RCE）。
             if (!auth.hasPassword()) {
                 auto resp = drogon::HttpResponse::newHttpResponse();
                 resp->setStatusCode(drogon::k401Unauthorized);
@@ -2229,8 +2256,7 @@ static int realMain(int argc, char* argv[]) {
                 stop(resp); return;
             }
             if (auth.validToken(req->getCookie("dice_session"))) { next(); return; }
-            // 服务间/脚本调用：X-API-Key 与 server/api_key 匹配（仅配置了 key 时生效）。
-            if (!apiKey.empty() && auth.checkApiKey(req->getHeader("X-API-Key"))) { next(); return; }
+
             auto resp = drogon::HttpResponse::newHttpResponse();
             resp->setStatusCode(drogon::k401Unauthorized);
             resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
@@ -2245,6 +2271,23 @@ static int realMain(int argc, char* argv[]) {
             resp->setBody(out.dump());
             return resp;
         };
+        // BDC 托管引导：仅 MODE=diceflats 且请求来自容器自身回环地址时开放。
+        // 返回值只供 daemon 换取后续正式 X-API-Key 调用，不接受代理头或宿主地址。
+        app.registerHandler("/api/managed/bootstrap",
+            [jResp, apiKey, diceFlatsManaged](const drogon::HttpRequestPtr& req,
+                    std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+                if (!diceFlatsManaged) {
+                    cb(jResp({{"code", 404}, {"message", "not_found"}}, drogon::k404NotFound));
+                    return;
+                }
+                if (!isLoopbackPeer(req)) {
+                    cb(jResp({{"code", 403}, {"message", "loopback_only"}}, drogon::k403Forbidden));
+                    return;
+                }
+                cb(jResp({{"code", 0}, {"message", "ok"},
+                          {"data", {{"api_key", apiKey}, {"mode", "diceflats"}}}}));
+            }, {drogon::Post});
+
         // 是否需要登录 + 当前会话是否已登录。
         app.registerHandler("/api/auth/status",
             [jResp](const drogon::HttpRequestPtr& req,

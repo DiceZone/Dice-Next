@@ -1722,8 +1722,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             legacyv2::ImportOptions opts;
             opts.overwrite = j.value("overwrite", false);
             J report = legacyv2::runImport(db, cfg, i18n, replyMgr, dir, &cardDeck, &luaMod, opts);
-            if (report.value("ok", false)) jsonReply(ok(report), std::move(cb));
-            else jsonReply(fail(report.value("error", std::string("import failed"))), std::move(cb));
+            if (report.value("ok", false)) {
+                if (j.value("remove_marker_on_success", false)) {
+                    std::error_code markerError;
+                    const auto marker = std::filesystem::path(dir) / ".bdc-import-pending";
+                    const bool removed = std::filesystem::remove(marker, markerError);
+                    report["marker_removed"] = removed;
+                    if (markerError) report["marker_remove_error"] = markerError.message();
+                }
+                jsonReply(ok(report), std::move(cb));
+            } else {
+                jsonReply(fail(report.value("error", std::string("import failed"))), std::move(cb));
+            }
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
@@ -2198,26 +2208,43 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 auto a = st->get<AdapterRow>(aid);
                 J adapterCfg = J::parse(a.config, nullptr, false);
                 if (!adapterCfg.is_object()) adapterCfg = J::object();
-                if (j.contains("name")) a.name = j["name"];
-                bool credentialsChanged = false;
+                bool runtimeConfigChanged = false;
+                if (j.contains("name") && j["name"].is_string()) {
+                    runtimeConfigChanged = a.name != j["name"].get<std::string>();
+                    a.name = j["name"];
+                }
                 if (a.type == static_cast<int>(AdapterType::kQQOfficial)) {
-                    if (j.contains("appId")) { credentialsChanged = credentialsChanged || adapterCfg.value("appId", std::string()) != j["appId"].get<std::string>(); adapterCfg["appId"] = j["appId"]; }
-                    if (j.contains("appSecret") && j["appSecret"].is_string() && !j["appSecret"].get<std::string>().empty()) { credentialsChanged = credentialsChanged || adapterCfg.value("appSecret", std::string()) != j["appSecret"].get<std::string>(); adapterCfg["appSecret"] = j["appSecret"]; }
-                    if (j.contains("qqNumber") && j["qqNumber"].is_string()) adapterCfg["qqNumber"] = j["qqNumber"];
+                    if (j.contains("appId")) { runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value("appId", std::string()) != j["appId"].get<std::string>(); adapterCfg["appId"] = j["appId"]; }
+                    if (j.contains("appSecret") && j["appSecret"].is_string() && !j["appSecret"].get<std::string>().empty()) { runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value("appSecret", std::string()) != j["appSecret"].get<std::string>(); adapterCfg["appSecret"] = j["appSecret"]; }
+                    if (j.contains("qqNumber") && j["qqNumber"].is_string()) {
+                        runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value("qqNumber", std::string()) != j["qqNumber"].get<std::string>();
+                        adapterCfg["qqNumber"] = j["qqNumber"];
+                    }
                     if (j.contains("forceVerifyImageResource") && j["forceVerifyImageResource"].is_boolean()) {
-                        credentialsChanged = credentialsChanged || adapterCfg.value("forceVerifyImageResource", false) != j["forceVerifyImageResource"].get<bool>();
+                        runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value("forceVerifyImageResource", false) != j["forceVerifyImageResource"].get<bool>();
                         adapterCfg["forceVerifyImageResource"] = j["forceVerifyImageResource"];
                     }
                     if (adapterCfg.value("appId", std::string()).empty() || adapterCfg.value("appSecret", std::string()).empty()) throw std::runtime_error("QQ 官方机器人需要 AppID 和 AppSecret");
-                } else { if (j.contains("endpoint")) a.endpoint = j["endpoint"]; if (j.contains("accessToken")) a.accessToken = j["accessToken"]; }
+                } else {
+                    if (j.contains("endpoint") && j["endpoint"].is_string()) {
+                        runtimeConfigChanged = runtimeConfigChanged || a.endpoint != j["endpoint"].get<std::string>();
+                        a.endpoint = j["endpoint"];
+                    }
+                    if (j.contains("accessToken") && j["accessToken"].is_string()) {
+                        runtimeConfigChanged = runtimeConfigChanged || a.accessToken != j["accessToken"].get<std::string>();
+                        a.accessToken = j["accessToken"];
+                    }
+                }
                 if (j.contains("heartApiKey") && j["heartApiKey"].is_string())
                     adapterCfg["heartApiKey"] = j["heartApiKey"].get<std::string>();
                 a.config = adapterCfg.dump();
                 bool wasEnabled = a.enabled;
                 if (j.contains("enabled")) a.enabled = j["enabled"];
-                if (j.contains("connectionMode")) {
+                if (j.contains("connectionMode") && j["connectionMode"].is_string()) {
                     std::string m = j["connectionMode"];
-                    a.connectionMode = (m == "reverse_ws") ? 1 : (m == "http") ? 2 : 0;
+                    const int nextMode = (m == "reverse_ws") ? 1 : (m == "http") ? 2 : 0;
+                    runtimeConfigChanged = runtimeConfigChanged || a.connectionMode != nextMode;
+                    a.connectionMode = nextMode;
                 }
                 st->update(a);
                 persistAdaptersToConfig(st, cfg);
@@ -2228,7 +2255,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     applyScopedAdapterSettings(adapter, cfg);
                     adapterMgr.registerAdapter(adapter);
                     adapterMgr.startAdapter(std::to_string(a.id));
-                } else if (a.enabled && wasEnabled && credentialsChanged) {
+                } else if (a.enabled && wasEnabled && runtimeConfigChanged) {
                     adapterMgr.stopAdapter(std::to_string(a.id));
                     adapterMgr.unregisterAdapter(std::to_string(a.id));
                     auto adapter = makeRuntimeAdapter(a);
