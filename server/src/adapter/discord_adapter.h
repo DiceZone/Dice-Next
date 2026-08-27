@@ -43,6 +43,9 @@ public:
     std::string version() const override { return "gateway-v10"; }
     bool isConnected() const override { return connected_; }
     std::string lastError() const override { return lastError_; }
+    ContentFormat preferredReplyFormat(const Message&) const noexcept override {
+        return effectiveCardMode() ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
+    }
     std::string getLoginId() const override { return loginId_; }
     std::string getLoginName() const override { return loginName_; }
     std::string getGroupName(const std::string&) const override { return {}; }

@@ -12,8 +12,12 @@ namespace fs = std::filesystem;
 
 namespace dice {
 
+static void flattenNode(const json& node, const std::string& prefix,
+                        std::map<std::string, std::string>& out);
+
 thread_local bool I18n::outboundCaptureActive_ = false;
 thread_local bool I18n::outboundCaptureMarkdown_ = false;
+thread_local ContentFormat I18n::outboundPreferredOutput_ = ContentFormat::kMarkdown;
 
 // ═══════════════════════════════════════════════════════════════
 // Construction
@@ -43,6 +47,7 @@ bool I18n::load() {
     }
 
     bundles_.clear();
+    preparedBundles_.clear();
     keywordMap_.clear();
     int loaded = 0;
 
@@ -100,6 +105,18 @@ bool I18n::load() {
             for (const auto& kw : j["_meta"]["keywords"])
                 if (kw.is_string() && !kw.get<std::string>().empty())
                     keywordMap_[lower(kw.get<std::string>())] = loc;
+        }
+    }
+
+    // Build both runtime forms once at load/reload time. The Markdown source
+    // remains canonical; plainValue is derived and never edited independently.
+    for (const auto& [loc, bundle] : bundles_) {
+        std::map<std::string, std::string> flat;
+        flattenNode(bundle, "", flat);
+        auto& prepared = preparedBundles_[loc];
+        for (const auto& [key, value] : flat) {
+            const ContentFormat format = trustedTemplateFormat(value);
+            prepared.emplace(key, prepareTemplate(value, format));
         }
     }
 
@@ -235,60 +252,56 @@ const json* I18n::lookupNode(Locale loc, const std::string& key) const {
 std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 查找顺序（更新）：
-    //   请求语言的覆盖 → 请求语言的人格层(若启用) → 请求语言的内置 →
-    //   默认语言的覆盖 → 默认语言的人格层 → 默认语言的内置 → raw key。
-    // 关键：请求语言的「内置文案」必须优先于「默认语言的覆盖」——否则用户把简中
-    // 文案覆盖后，切到英文仍会显示那条简中覆盖（应回到英文内置）。
-    auto ovIt = overrides_.find(loc);
-    if (ovIt != overrides_.end()) {
-        auto kIt = ovIt->second.find(key);
-        if (kIt != ovIt->second.end()) return renderTemplate(kIt->second.value, args, kIt->second.format);
-    }
-    // persona layer (between override and bundle)
-    if (const json* personaNode = lookupPersonaNode(loc, key))
-        return renderTemplate(personaNode->get<std::string>(), args, lookupPersonaFormat(loc, key));
-    if (const json* locNode = lookupNode(loc, key)) {
-        const std::string raw = locNode->get<std::string>();
-        return renderTemplate(raw, args, trustedTemplateFormat(raw));
+    auto renderFrom = [&](const auto& source, Locale wanted) -> std::optional<std::string> {
+        auto localeIt = source.find(wanted);
+        if (localeIt == source.end()) return std::nullopt;
+        auto keyIt = localeIt->second.find(key);
+        if (keyIt == localeIt->second.end()) return std::nullopt;
+        return renderTemplate(keyIt->second, args);
+    };
+
+    // requested locale: override -> persona -> bundled template
+    if (auto rendered = renderFrom(overrides_, loc)) return *rendered;
+    if (auto rendered = renderFrom(preparedPersonaBundles_, loc)) return *rendered;
+    if (auto rendered = renderFrom(preparedBundles_, loc)) return *rendered;
+
+    // default locale uses the same layer order.
+    if (loc != defaultLocale_) {
+        if (auto rendered = renderFrom(overrides_, defaultLocale_)) return *rendered;
+        if (auto rendered = renderFrom(preparedPersonaBundles_, defaultLocale_)) return *rendered;
+        if (auto rendered = renderFrom(preparedBundles_, defaultLocale_)) return *rendered;
     }
 
-    const json* node = nullptr;
-    if (loc != defaultLocale_) {
-        auto dIt = overrides_.find(defaultLocale_);
-        if (dIt != overrides_.end()) {
-            auto kIt = dIt->second.find(key);
-            if (kIt != dIt->second.end()) return renderTemplate(kIt->second.value, args, kIt->second.format);
-        }
-        // default locale persona layer
-        if (const json* dPersona = lookupPersonaNode(defaultLocale_, key))
-            return renderTemplate(dPersona->get<std::string>(), args, lookupPersonaFormat(defaultLocale_, key));
-        node = lookupNode(defaultLocale_, key);  // fall back to default locale bundle
-    }
-    if (!node) {
-        // Last resort: return the key so missing translations are visible
-        // rather than crashing or returning empty output.
-        DICE_LOG_DEBUG("I18n: missing key '{}' for locale '{}'",
-                       key, localeToString(loc));
-        return key;
-    }
-    const std::string raw = node->get<std::string>();
-    return renderTemplate(raw, args, trustedTemplateFormat(raw));
+    DICE_LOG_DEBUG("I18n: missing key '{}' for locale '{}'",
+                   key, localeToString(loc));
+    return key;
 }
 
 ContentFormat I18n::trustedTemplateFormat(const std::string& value) {
     return markdown::hasFormatting(value) ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
 }
 
-void I18n::beginOutboundCapture() {
+I18n::TemplateValue I18n::prepareTemplate(const std::string& value,
+                                           ContentFormat format) {
+    TemplateValue prepared;
+    prepared.value = value;
+    prepared.plainValue = format == ContentFormat::kMarkdown
+        ? markdown::toPlainText(value) : value;
+    prepared.format = format;
+    return prepared;
+}
+
+void I18n::beginOutboundCapture(ContentFormat preferredOutput) {
     outboundCaptureActive_ = true;
     outboundCaptureMarkdown_ = false;
+    outboundPreferredOutput_ = preferredOutput;
 }
 
 ContentFormat I18n::endOutboundCapture() {
     const bool useMarkdown = outboundCaptureActive_ && outboundCaptureMarkdown_;
     outboundCaptureActive_ = false;
     outboundCaptureMarkdown_ = false;
+    outboundPreferredOutput_ = ContentFormat::kMarkdown;
     return useMarkdown ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
 }
 
@@ -297,40 +310,41 @@ void I18n::noteOutboundFormat(ContentFormat format) {
         outboundCaptureMarkdown_ = true;
 }
 
-std::string I18n::renderTemplate(const std::string& value, const Args& args,
-                                 ContentFormat format) {
-    noteOutboundFormat(format);
-    if (format != ContentFormat::kMarkdown || args.empty()) return interpolate(value, args);
+std::string I18n::renderTemplate(const TemplateValue& value, const Args& args) {
+    const bool usePreparedPlain = value.format == ContentFormat::kMarkdown &&
+        outboundCaptureActive_ && outboundPreferredOutput_ == ContentFormat::kPlainText;
+    const ContentFormat outputFormat = usePreparedPlain
+        ? ContentFormat::kPlainText : value.format;
+    const std::string& tmpl = usePreparedPlain ? value.plainValue : value.value;
+    noteOutboundFormat(outputFormat);
+    if (outputFormat != ContentFormat::kMarkdown || args.empty())
+        return interpolate(tmpl, args);
 
     // Markdown arguments normally need escaping, but doing so inside a code
-    // span changes the visible text: `{expr}` became `1D20\+6` and the
-    // backslashes then survived both native Markdown rendering and OneBot's
-    // plain-text downgrade. Render code-span placeholders literally instead.
-    // If an argument itself contains backticks, grow the surrounding delimiter
-    // so it cannot terminate the span and turn user text into Markdown.
+    // span changes the visible text. Code-span placeholders stay literal.
     Args escaped;
     for (const auto& [name, arg] : args) escaped[name] = markdown::escapeLiteral(arg);
 
     std::string out;
-    out.reserve(value.size() + 32);
+    out.reserve(tmpl.size() + 32);
     size_t pos = 0;
-    while (pos < value.size()) {
-        const size_t open = value.find('`', pos);
+    while (pos < tmpl.size()) {
+        const size_t open = tmpl.find('`', pos);
         if (open == std::string::npos) {
-            out += interpolate(value.substr(pos), escaped);
+            out += interpolate(tmpl.substr(pos), escaped);
             break;
         }
-        out += interpolate(value.substr(pos, open - pos), escaped);
-        const size_t openingLength = backtickRunLength(value, open);
-        const size_t close = findMatchingBacktickRun(value, open + openingLength,
+        out += interpolate(tmpl.substr(pos, open - pos), escaped);
+        const size_t openingLength = backtickRunLength(tmpl, open);
+        const size_t close = findMatchingBacktickRun(tmpl, open + openingLength,
                                                      openingLength);
         if (close == std::string::npos) {
-            out += interpolate(value.substr(open), escaped);
+            out += interpolate(tmpl.substr(open), escaped);
             break;
         }
 
         std::string body = interpolate(
-            value.substr(open + openingLength, close - open - openingLength), args);
+            tmpl.substr(open + openingLength, close - open - openingLength), args);
         const size_t delimiterLength = std::max(openingLength,
                                                 longestBacktickRun(body) + 1);
         const std::string delimiter(delimiterLength, '`');
@@ -387,8 +401,11 @@ std::string I18n::interpolate(const std::string& tmpl, const Args& args) {
 
 void I18n::setOverride(Locale loc, const std::string& key, const std::string& value,
                        ContentFormat format) {
+    // MD4C runs before taking the translation mutex, then never on this
+    // template's send-time hot path.
+    TemplateValue prepared = prepareTemplate(value, format);
     std::lock_guard<std::mutex> lock(mutex_);
-    overrides_[loc][key] = OverrideValue{value, format};
+    overrides_[loc][key] = std::move(prepared);
 }
 
 void I18n::clearOverride(Locale loc, const std::string& key) {
@@ -487,19 +504,32 @@ bool I18n::loadPersona() {
 }
 
 void I18n::setPersonaBundles(Locale loc, const json& bundles, const json& formats) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (bundles.is_object() && !bundles.empty()) {
-        personaBundles_[loc] = bundles;
-        personaFormats_[loc] = formats.is_object() ? formats : json::object();
-        DICE_LOG_INFO("I18n: persona bundles injected for locale '{}' ({} entries)",
-                      localeToString(loc), personaBundles_[loc].size());
-    }
-}
+    if (!bundles.is_object() || bundles.empty()) return;
 
+    std::map<std::string, TemplateValue> prepared;
+    for (auto it = bundles.begin(); it != bundles.end(); ++it) {
+        if (!it.value().is_string()) continue;
+        ContentFormat format = ContentFormat::kPlainText;
+        if (formats.is_object()) {
+            auto formatIt = formats.find(it.key());
+            if (formatIt != formats.end() && formatIt->is_string())
+                format = contentFormatFromString(formatIt->get<std::string>());
+        }
+        prepared.emplace(it.key(), prepareTemplate(it.value().get<std::string>(), format));
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    personaBundles_[loc] = bundles;
+    personaFormats_[loc] = formats.is_object() ? formats : json::object();
+    preparedPersonaBundles_[loc] = std::move(prepared);
+    DICE_LOG_INFO("I18n: persona bundles injected for locale '{}' ({} entries)",
+                  localeToString(loc), personaBundles_[loc].size());
+}
 void I18n::clearPersonaBundles() {
     std::lock_guard<std::mutex> lock(mutex_);
     personaBundles_.clear();
     personaFormats_.clear();
+    preparedPersonaBundles_.clear();
     DICE_LOG_INFO("I18n: persona bundles cleared");
 }
 

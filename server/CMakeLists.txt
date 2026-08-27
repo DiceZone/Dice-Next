@@ -74,6 +74,7 @@ set(SOURCES
     src/common/markdown.cpp
     src/common/markdown_md4c.cpp
     src/common/hot_reload.cpp
+    src/service/update_service.cpp
     src/config/config_manager.cpp
     src/storage/database.cpp
     src/storage/migration.cpp

@@ -216,6 +216,27 @@ TEST(I18nFormat, MarkdownCodeSpanArgumentsStayLiteralAndSafe) {
     EXPECT_EQ(markdown::toPlainText(withBacktick), "Alice 掷骰：1d6=`oops`+1");
 }
 
+TEST(I18nFormat, TraditionalCaptureUsesPreRenderedOverride) {
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setOverride(Locale::kZhHans, "test.roll", "**{nick}** rolled `{expr}`",
+                     ContentFormat::kMarkdown);
+
+    I18n::beginOutboundCapture(ContentFormat::kPlainText);
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "test.roll",
+                      {{"nick", "A**B"}, {"expr", "1d20+6"}}),
+              "A**B rolled 1d20+6");
+    EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()),
+              static_cast<int>(ContentFormat::kPlainText));
+
+    // The canonical Markdown source remains available for rich adapters.
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown);
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "test.roll",
+                      {{"nick", "A**B"}, {"expr", "1d20+6"}}),
+              "**A\\*\\*B** rolled `1d20+6`");
+    EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()),
+              static_cast<int>(ContentFormat::kMarkdown));
+}
+
 TEST(I18nFormat, PersonaFormatIsExplicitAndLegacyPersonaStaysPlain) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
     json bundle = {{"plain.key", "**literal**"}, {"md.key", "**bold**"}};
@@ -228,6 +249,11 @@ TEST(I18nFormat, PersonaFormatIsExplicitAndLegacyPersonaStaysPlain) {
     I18n::beginOutboundCapture();
     EXPECT_EQ(i18n.tr(Locale::kZhHans, "md.key"), "**bold**");
     EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()), static_cast<int>(ContentFormat::kMarkdown));
+
+    I18n::beginOutboundCapture(ContentFormat::kPlainText);
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "md.key"), "bold");
+    EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()),
+              static_cast<int>(ContentFormat::kPlainText));
 }
 
 // ─── .rpmode vs .rp Conflict Test ─────────────────────────────

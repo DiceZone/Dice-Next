@@ -22,6 +22,7 @@ set(TEST_SOURCES
     test_dice_expression.cpp
     test_expression_fallback.cpp
     test_roll_command_parser.cpp
+    test_update_service.cpp
     test_check_roll_override.cpp
     test_markdown.cpp
     test_heart_debounce.cpp
@@ -37,6 +38,9 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/storage/database.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/config/config_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/logger.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/version.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_service.cpp
+    ${VERSION_BUILD_SOURCE}
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/markdown.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/markdown_md4c.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/i18n/locale_resolver.cpp
@@ -47,6 +51,7 @@ set(TEST_SOURCES
 )
 
 add_executable(dice-next-tests ${TEST_SOURCES})
+add_dependencies(dice-next-tests prepare_version)
 
 # Explicitly set the linker language (needed when sources are outside the dir)
 set_target_properties(dice-next-tests PROPERTIES LINKER_LANGUAGE CXX)

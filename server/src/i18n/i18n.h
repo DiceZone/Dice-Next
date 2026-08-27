@@ -119,7 +119,8 @@ public:
 
     /// Capture the richest template format used while one command builds a
     /// reply, without changing the command router's string-returning API.
-    static void beginOutboundCapture();
+    static void beginOutboundCapture(
+        ContentFormat preferredOutput = ContentFormat::kMarkdown);
     static ContentFormat endOutboundCapture();
 
     /// Flatten the whole bundle for @p loc into {dotted-key → default value} for
@@ -162,8 +163,15 @@ private:
     ContentFormat lookupPersonaFormat(Locale loc, const std::string& key) const;
     static ContentFormat trustedTemplateFormat(const std::string& value);
     static void noteOutboundFormat(ContentFormat format);
-    static std::string renderTemplate(const std::string& value, const Args& args,
-                                      ContentFormat format);
+    struct TemplateValue {
+        std::string value;
+        std::string plainValue;
+        ContentFormat format = ContentFormat::kPlainText;
+    };
+    static TemplateValue prepareTemplate(const std::string& value,
+                                         ContentFormat format);
+    static std::string renderTemplate(const TemplateValue& value,
+                                      const Args& args);
 
     /// All locales this engine knows how to load.
     static std::vector<Locale> supportedLocales();
@@ -171,18 +179,17 @@ private:
     std::string resourceDir_;
     Locale defaultLocale_;
     std::map<Locale, json> bundles_;
-    struct OverrideValue {
-        std::string value;
-        ContentFormat format = ContentFormat::kPlainText;
-    };
-    std::map<Locale, std::map<std::string, OverrideValue>> overrides_;
+    std::map<Locale, std::map<std::string, TemplateValue>> preparedBundles_;
+    std::map<Locale, std::map<std::string, TemplateValue>> overrides_;
     std::map<Locale, json> personaBundles_;   // persona overlay (flat key→string)
     std::map<Locale, json> personaFormats_;   // persona overlay (flat key→format)
+    std::map<Locale, std::map<std::string, TemplateValue>> preparedPersonaBundles_;
     int activePersonaId_ = 0;                   // current persona (0=default/off)
     std::map<std::string, Locale> keywordMap_;  // _meta.keywords → locale（键已转小写）
     mutable std::mutex mutex_;
     static thread_local bool outboundCaptureActive_;
     static thread_local bool outboundCaptureMarkdown_;
+    static thread_local ContentFormat outboundPreferredOutput_;
 };
 
 }  // namespace dice

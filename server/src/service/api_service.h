@@ -42,6 +42,7 @@
 #include "heart_service.h"  // 心跳上报（heart.dice.zone）
 #include "cloudban_service.h" // 云黑名单同步（cloudban.dice.zone）
 #include "backup_service.h"
+#include "update_service.h"
 #include "../storage/legacy_import_v2.h"
 #include "plugin_verify.h"
 #include "../core/causal/causal_rule_manager.h"
@@ -318,7 +319,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                               DiceEngine& engine, CardDeck& cardDeck, ReplyManager& replyMgr, I18n& i18n,
                               JsPluginManager& jsMod, LuaPluginManager& luaMod,
                               CausalRuleManager& causalMgr, CooldownManager& cooldownMgr,
-                              CounterStore& counterStore, PersonaManager& personaMgr) {
+                              CounterStore& counterStore, PersonaManager& personaMgr,
+                              update::UpdateService& updateService) {
     auto& app = drogon::app();
     auto* st = db.getStorage();
     auto* lst = db.getLogStorage();   // game_logs / game_log_messages live in logs.db
@@ -336,6 +338,52 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         }), std::move(cb));
     }, {drogon::Get});
 
+    // Release 更新：检查和下载均在后台工作线程执行，API 立即返回状态。
+    app.registerHandler("/api/system/update", [&updateService](Req req, CB&& cb) {
+        if (req->method() == drogon::Get) {
+            jsonReply(ok(updateService.status()), std::move(cb));
+            return;
+        }
+        try {
+            const J body = J::parse(req->getBody());
+            std::string error;
+            if (!updateService.updateSettings(body, error)) {
+                jsonReply(fail(error), std::move(cb));
+                return;
+            }
+            updateService.tick();
+            jsonReply(ok(updateService.status()), std::move(cb));
+        } catch (const std::exception& e) {
+            jsonReply(fail(e.what()), std::move(cb));
+        }
+    }, {drogon::Get, drogon::Put});
+
+    app.registerHandler("/api/system/update/check", [&updateService](Req, CB&& cb) {
+        std::string error;
+        if (!updateService.requestCheck(true, error)) {
+            jsonReply(fail(error), std::move(cb));
+            return;
+        }
+        jsonReply(ok(updateService.status()), std::move(cb));
+    }, {drogon::Post});
+
+    app.registerHandler("/api/system/update/download", [&updateService](Req, CB&& cb) {
+        std::string error;
+        if (!updateService.requestDownload(error)) {
+            jsonReply(fail(error), std::move(cb));
+            return;
+        }
+        jsonReply(ok(updateService.status()), std::move(cb));
+    }, {drogon::Post});
+
+    app.registerHandler("/api/system/update/install", [&updateService](Req, CB&& cb) {
+        std::string error;
+        if (!updateService.requestInstall(error)) {
+            jsonReply(fail(error), std::move(cb));
+            return;
+        }
+        jsonReply(ok(updateService.status()), std::move(cb));
+    }, {drogon::Post});
     // ── JS 插件管理 ────────────────────────────────────────────
     // Management for plugins/js/*.js: list / upload / toggle / delete / reload.
     static auto pluginsJson = [](JsPluginManager& jm) {

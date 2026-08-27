@@ -114,6 +114,13 @@ public:
         return resolveCardMessageMode(cardMessageMode(), messageFormatOverride_.load());
     }
 
+    /// Preferred format for a reply generated for this adapter. The core uses
+    /// this before interpolation so Markdown templates can select their cached
+    /// traditional-text variant instead of being parsed once per segment.
+    virtual ContentFormat preferredReplyFormat(const Message&) const noexcept {
+        return ContentFormat::kPlainText;
+    }
+
     /// Unique adapter identifier (e.g. "onebot-v11-1")
     virtual std::string id() const = 0;
 

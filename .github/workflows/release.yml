@@ -478,6 +478,56 @@ jobs:
             fi
           done
           find artifacts -maxdepth 2 -type f -print
+      - name: Generate integrity update manifest
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.build.outputs.tag }}
+          RELEASE_BUILD: ${{ steps.build.outputs.build }}
+        run: |
+          set -euo pipefail
+          version=$(sed -nE 's/project\(dice-next-server VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' server/CMakeLists.txt | head -n1)
+          [[ -n "$version" ]] || { echo 'Cannot read server version' >&2; exit 1; }
+
+          assets='[]'
+          add_asset() {
+            local os="$1" arch="$2" artifact="$3" pattern="$4"
+            shopt -s nullglob
+            local files=(artifacts/"$artifact"/$pattern)
+            shopt -u nullglob
+            if [[ "${#files[@]}" -ne 1 ]]; then
+              echo "Expected exactly one asset for $os-$arch, found ${#files[@]}" >&2
+              exit 1
+            fi
+            local file="${files[0]}"
+            local name sha size
+            name=$(basename "$file")
+            sha=$(sha256sum "$file" | awk '{print $1}')
+            size=$(stat -c '%s' "$file")
+            assets=$(jq -c \
+              --arg os "$os" --arg arch "$arch" --arg name "$name" \
+              --arg sha "$sha" --argjson size "$size" \
+              '. + [{os:$os, arch:$arch, name:$name, sha256:$sha, size:$size}]' <<<"$assets")
+          }
+
+          add_asset windows amd64 DiceNext-windows-amd64 '*.zip'
+          add_asset windows arm64 DiceNext-windows-arm64 '*.zip'
+          add_asset linux amd64 DiceNext-linux-amd64 '*.tar.gz'
+          add_asset linux arm64 DiceNext-linux-arm64 '*.tar.gz'
+          add_asset macos arm64 DiceNext-macos-arm64 '*.tar.gz'
+
+          jq -n \
+            --arg repository 'DiceZone/Dice-Next' \
+            --arg tag "$RELEASE_TAG" \
+            --arg version "$version" \
+            --argjson build "$RELEASE_BUILD" \
+            --arg published_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --arg release_url "https://github.com/DiceZone/Dice-Next/releases/tag/$RELEASE_TAG" \
+            --argjson assets "$assets" \
+            '{schema:1, repository:$repository, tag:$tag, version:$version, build:$build,
+              prerelease:true, published_at:$published_at, release_url:$release_url,
+              assets:$assets}' > update-manifest.json
+          jq -e '.schema == 1 and (.assets | length) == 5' update-manifest.json >/dev/null
+          cat update-manifest.json
       - name: Record successful build number
         shell: bash
         env:
@@ -548,3 +598,4 @@ jobs:
             artifacts/DiceNext-windows-amd64/*.zip
             artifacts/DiceNext-windows-arm64/*.zip
             artifacts/DiceNext-macos-arm64/*.tar.gz
+            update-manifest.json

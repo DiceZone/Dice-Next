@@ -1060,7 +1060,10 @@ static int realMain(int argc, char* argv[]) {
         if (jsMod.ready() && (!disabled || forcedByAt))
             receivedHook = jsMod.handleMessageReceived(msg, cmdRouter.jsPrivilegeLevel(msg));
 
-        dice::I18n::beginOutboundCapture();
+        dice::ContentFormat preferredReplyFormat = dice::ContentFormat::kPlainText;
+        if (auto sourceAdapter = adapterMgr.getAdapter(msg.adapterId))
+            preferredReplyFormat = sourceAdapter->preferredReplyFormat(msg);
+        dice::I18n::beginOutboundCapture(preferredReplyFormat);
         auto reply = cmdRouter.handleMessage(msg);
         dice::ContentFormat replyFormat = dice::I18n::endOutboundCapture();
         bool didCommand = !reply.empty();
@@ -2545,10 +2548,13 @@ static int realMain(int argc, char* argv[]) {
         dice::cloudban::CloudbanService::instance().reportToCloud(tt, id, "other", reason);
     };
 
+    // GitHub Release 更新服务：复用 Windows 管理器的退出码与 pending 目录。
+    dice::update::UpdateService updateService(configMgr, [] { relaunchSelf(); });
+
     // ── Register real REST API endpoints ─────────────────────
     dice::utils::setStartupEpoch();
     dice::api::registerApiRoutes(db, configMgr, adapterMgr, engine, cardDeck, replyManager, i18n, jsMod, luaMod,
-                                 causalMgr, cooldownMgr, counterStore, personaMgr);
+                                 causalMgr, cooldownMgr, counterStore, personaMgr, updateService);
     DICE_LOG_INFO("REST API routes registered");
 
     // ── Playground test harness ──────────────────────────────
@@ -3832,6 +3838,9 @@ static int realMain(int argc, char* argv[]) {
         dice::cloudban::CloudbanService::instance().tick();
     });
 
+    // Release 自动检查：启动后延迟执行，之后由服务按设置的小时间隔自行节流。
+    app.getLoop()->runAfter(20.0, [&updateService] { updateService.tick(); });
+    app.getLoop()->runEvery(60.0, [&updateService] { updateService.tick(); });
     // System tray icon (Windows): 打开应用目录 / 显示·隐藏控制台 / 打开网页面板 / 退出。
     // 默认启动即最小化到托盘（隐藏控制台+弹气泡+禁用其X）；config dice/console_start_hidden=false 可保留旧行为（启动就显示控制台）。
     bool startHidden = configMgr.get<bool>("dice/console_start_hidden", true);

@@ -54,6 +54,10 @@ public:
     std::string version() const override { return "qqbot-2.0"; }
     bool isConnected() const override { return connected_; }
     std::string lastError() const override { return lastError_; }
+    ContentFormat preferredReplyFormat(const Message& message) const noexcept override {
+        return effectiveCardMode() && message.type != MessageType::kChannel && markdownCardReady()
+            ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
+    }
     std::string getLoginId() const override { return loginId_; }
     std::string getLoginName() const override { return loginName_; }
     std::string getGroupName(const std::string&) const override { return {}; }
@@ -260,6 +264,12 @@ public:
     }
 
 private:
+    static constexpr int kMarkdownRejectThreshold = 2;
+    static constexpr int64_t kMarkdownCooldownSeconds = 10 * 60;
+    bool markdownCardReady() const noexcept {
+        return markdownDisabledUntil_.load() <= static_cast<int64_t>(std::time(nullptr));
+    }
+
     struct QrSession { std::string taskId, key; std::time_t createdAt{}; };
     inline static std::mutex qrMutex_;
     inline static std::unordered_map<std::string,QrSession> qrSessions_;
@@ -948,7 +958,7 @@ private:
         // in a Markdown container, but escapes it first so punctuation survives.
         const bool explicitMarkdown = format == ContentFormat::kMarkdown;
         const bool useMarkdown = !forceTraditional && effectiveCardMode() &&
-                                 m.type != MessageType::kChannel;
+                                 m.type != MessageType::kChannel && markdownCardReady();
         std::string wireText = useMarkdown
             ? (explicitMarkdown ? text : markdown::escapeQQMarkdownLiteral(text))
             : (explicitMarkdown ? markdown::toPlainText(text) : text);
@@ -974,8 +984,19 @@ private:
         request->setBody(dumpJsonUtf8Safe(body));
         client->sendRequest(request, [self = shared_from_this(), path, message = m, text, format, useMarkdown](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
             const bool httpRejected = response && response->statusCode() >= 300;
+            if (useMarkdown && !httpRejected && result == drogon::ReqResult::Ok && response)
+                self->markdownRejectStreak_.store(0);
             if (useMarkdown && httpRejected) {
-                DICE_LOG_WARN("QQOfficial '{}': Markdown/card message rejected by {}, retrying traditional text", self->name_, path);
+                const int streak = self->markdownRejectStreak_.fetch_add(1) + 1;
+                if (streak >= kMarkdownRejectThreshold) {
+                    self->markdownDisabledUntil_.store(
+                        static_cast<int64_t>(std::time(nullptr)) + kMarkdownCooldownSeconds);
+                    self->markdownRejectStreak_.store(0);
+                    DICE_LOG_WARN("QQOfficial '{}': Markdown/card rejected {} times; using pre-rendered traditional text for 10 minutes",
+                                  self->name_, streak);
+                } else {
+                    DICE_LOG_WARN("QQOfficial '{}': Markdown/card message rejected by {}, retrying traditional text", self->name_, path);
+                }
                 self->sendTextTo(message, text, format, true);
                 return;
             }
@@ -990,6 +1011,6 @@ private:
     }
     void fail(const std::string&e){lastError_=e;connecting_=false;connected_=false;DICE_LOG_ERROR("QQOfficial '{}': {}",name_,e);}
     inline static std::function<std::string(const std::string&)> imagePublisher_;   // 本地图 → 公网 URL（图床）
-    std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,accessToken_,loginId_,loginName_,sessionId_,gatewayUrl_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{identity::BindingStore::instance().database()}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; int64_t seq_=-1; std::shared_ptr<QQGatewaySocket> gateway_; std::optional<trantor::TimerId> heartbeatTimer_,accessTokenTimer_; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::unordered_map<std::string,int> replySeq_; std::unordered_map<std::string,std::pair<std::string,std::time_t>> pendingEvents_;
+    std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,accessToken_,loginId_,loginName_,sessionId_,gatewayUrl_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{identity::BindingStore::instance().database()}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; int64_t seq_=-1; std::shared_ptr<QQGatewaySocket> gateway_; std::optional<trantor::TimerId> heartbeatTimer_,accessTokenTimer_; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::unordered_map<std::string,int> replySeq_; std::unordered_map<std::string,std::pair<std::string,std::time_t>> pendingEvents_;
 };
 }

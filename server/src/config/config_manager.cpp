@@ -1,4 +1,4 @@
-﻿#include "config_manager.h"
+#include "config_manager.h"
 #include "../common/logger.h"
 #include "../common/utils.h"
 
@@ -93,6 +93,13 @@ static json makeDefaultConfig() {
                                 {"gameLogImages", false}, {"chatMedia", false}}},
             {"auto_last_at", 0}
         }},
+        {"update", {
+            {"auto_check", true},
+            {"check_interval_hours", 6},
+            {"auto_action", "notify"},
+            {"source", "auto"},
+            {"custom_mirror", ""}
+        }},
         {"hot_reload", {
             {"enabled", true},
             {"debounce_ms", 500},
@@ -139,7 +146,7 @@ static bool validateConfig(const json& value, std::string& error) {
     const int port = server.value("port", 18088);
     if (port < 1 || port > 65535) { error = "server.port 必须在 1-65535 之间"; return false; }
     if (value.contains("adapters") && !value["adapters"].is_array()) { error = "adapters 配置必须是数组"; return false; }
-    for (const char* section : {"dice", "events", "webui", "i18n", "backup", "hot_reload"}) {
+    for (const char* section : {"dice", "events", "webui", "i18n", "backup", "update", "hot_reload"}) {
         if (value.contains(section) && !value[section].is_object()) { error = std::string(section) + " 配置必须是对象"; return false; }
     }
     if (value.contains("dice") && value["dice"].contains("scoped_overrides")

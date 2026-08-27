@@ -118,26 +118,98 @@ bool applyPendingRestore(const fs::path& root) {
     return true;
 }
 
+struct UpdateMove {
+    fs::path destination;
+    fs::path backup;
+    bool hadExisting = false;
+};
+
+bool replaceUpdatePath(const fs::path& source, const fs::path& destination,
+                       const fs::path& backup, std::vector<UpdateMove>& moves,
+                       std::wstring& error) {
+    std::error_code ec;
+    if (!fs::exists(source, ec)) return true;
+    UpdateMove record{destination, backup, fs::exists(destination, ec)};
+    moves.push_back(record);
+    return moveTree(source, destination, backup, error);
+}
+
+bool rollbackUpdateMoves(std::vector<UpdateMove>& moves) {
+    bool ok = true;
+    std::error_code ec;
+    for (auto it = moves.rbegin(); it != moves.rend(); ++it) {
+        fs::remove_all(it->destination, ec);
+        ec.clear();
+        if (!it->hadExisting || !fs::exists(it->backup, ec)) continue;
+        std::wstring error;
+        const fs::path conflict = fs::path(it->backup.wstring() + L".restore-conflict");
+        if (!moveTree(it->backup, it->destination, conflict, error)) {
+            std::wcerr << L"Dice!Next rollback failed for " << it->destination.wstring()
+                       << L": " << error << L"\n";
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 bool applyUpdate(const fs::path& root, const fs::path& stage) {
     std::error_code ec;
-    if (!fs::is_regular_file(stage / L"app" / L"dice-next-core.exe", ec)) {
-        std::wcerr << L"Dice!Next update failed: staged app/dice-next-core.exe is missing.\n";
+    if (!fs::is_regular_file(stage / L"app" / L"dice-next-core.exe", ec) ||
+        !fs::is_regular_file(stage / L"dice-next.exe", ec) ||
+        !fs::is_regular_file(stage / L"web" / L"dist" / L"index.html", ec)) {
+        std::wcerr << L"Dice!Next update failed: staged package is incomplete.\n";
         return false;
     }
+
     const fs::path rollback = root / L"updates" / L"rollbacks" / timestamp();
+    std::vector<UpdateMove> moves;
     std::wstring error;
-    for (const wchar_t* item : {L"app", L"lib", L"i18n", L"web", L"docs"}) {
-        if (!moveTree(stage / item, root / item, rollback / item, error)) {
-            std::wcerr << L"Dice!Next update failed while replacing " << item << L": " << error << L"\n";
-            return false;
-        }
+    auto replace = [&](const fs::path& source, const fs::path& destination,
+                       const fs::path& backup) {
+        return replaceUpdatePath(source, destination, backup, moves, error);
+    };
+    auto fail = [&](const std::wstring& item) {
+        std::wcerr << L"Dice!Next update failed while replacing " << item << L": "
+                   << error << L"\n";
+        if (rollbackUpdateMoves(moves))
+            std::wcerr << L"Dice!Next restored the previous version automatically.\n";
+        else
+            std::wcerr << L"Dice!Next rollback was incomplete; keep " << rollback.wstring()
+                       << L" for manual recovery.\n";
+        return false;
+    };
+
+    for (const wchar_t* item : {
+            L"app", L"lib", L"i18n", L"web", L"docs", L"decks", L"card-templates"}) {
+        if (!replace(stage / item, root / item, rollback / item)) return fail(item);
     }
     for (const wchar_t* file : {L"dice-next.exe", L"使用说明.txt"}) {
-        if (!moveTree(stage / file, root / file, rollback / file, error)) {
-            std::wcerr << L"Dice!Next update failed while replacing " << file << L": " << error << L"\n";
-            return false;
+        if (!replace(stage / file, root / file, rollback / file)) return fail(file);
+    }
+
+    // Bundled help replaces the previous bundled set. User decks and card
+    // templates live elsewhere and are not touched by these paths.
+    if (!replace(stage / L"data" / L"helpdoc", root / L"data" / L"helpdoc",
+                 rollback / L"data" / L"helpdoc")) {
+        return fail(L"data/helpdoc");
+    }
+
+    // Built-in example plugins are overlaid file-by-file so third-party
+    // SealDice plugins in data/plugins remain intact.
+    const fs::path pluginStage = stage / L"data" / L"plugins";
+    if (fs::is_directory(pluginStage, ec)) {
+        for (const auto& entry : fs::recursive_directory_iterator(pluginStage, ec)) {
+            if (ec) { error = wideError(ec); return fail(L"data/plugins"); }
+            if (!entry.is_regular_file(ec)) continue;
+            const fs::path relative = fs::relative(entry.path(), pluginStage, ec);
+            if (ec) { error = wideError(ec); return fail(L"data/plugins"); }
+            if (!replace(entry.path(), root / L"data" / L"plugins" / relative,
+                         rollback / L"data" / L"plugins" / relative)) {
+                return fail((fs::path(L"data/plugins") / relative).wstring());
+            }
         }
     }
+
     fs::remove_all(stage, ec);
     std::wcout << L"Dice!Next update applied. Rollback: " << rollback.wstring() << L"\n";
     return true;
