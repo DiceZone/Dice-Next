@@ -1,0 +1,198 @@
+#include "test_framework.h"
+#include "../src/core/mod/lua_plugin_manager.h"
+
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
+
+using namespace dice;
+namespace fs = std::filesystem;
+
+namespace {
+
+fs::path utf8Path(const std::u8string& value) {
+    return fs::path(value);
+}
+
+void writeText(const fs::path& path, const std::string& text) {
+    std::ofstream out(path, std::ios::binary);
+    out << text;
+}
+
+class TempWorkspace {
+public:
+    explicit TempWorkspace(const std::string& prefix)
+        : previous_(fs::current_path()) {
+        const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+        root_ = fs::temp_directory_path() / (prefix + std::to_string(nonce));
+        std::error_code ec;
+        fs::create_directories(root_ / "data" / "mod", ec);
+        fs::create_directories(root_ / "data" / "plugin" / utf8Path(u8"求签"), ec);
+        fs::create_directories(root_ / "data" / "plugin" / "script", ec);
+        fs::create_directories(root_ / "data" / "logs" / "app", ec);
+        fs::current_path(root_);
+    }
+
+    ~TempWorkspace() {
+        std::error_code ec;
+        fs::current_path(previous_, ec);
+        fs::remove_all(root_, ec);
+    }
+
+    fs::path root() const { return root_; }
+
+private:
+    fs::path previous_;
+    fs::path root_;
+};
+
+}  // namespace
+
+TEST(LuaPluginCompat, LegacySiblingLoadLuaAndLoadTimeHttpBothWork) {
+    TempWorkspace workspace("dice_next_lua_compat_");
+    const fs::path pluginDir = workspace.root() / "data" / "plugin";
+
+    writeText(pluginDir / utf8Path(u8"求签3.0.lua"), R"LUA(
+msg_order = {}
+index_deck = { ["月老"] = "月老灵签" }
+
+function draw_today(msg)
+    local deck_key = string.match(msg.fromMsg, "^[%s]*([^%s]*)[%s]*(.-)$", #("求签") + 1) or "月老"
+    local deck_name = index_deck[deck_key]
+    if not deck_name then return "unknown:" .. deck_key end
+    local target = loadLua("求签/" .. deck_name)
+    if not target then return "missing:" .. deck_name end
+    return target.getDraw(msg)
+end
+
+function draw_modern(msg)
+    local target = loadLua("modern")
+    return target and target.value or "missing-modern"
+end
+
+function draw_escape(msg)
+    local target = loadLua("../secret")
+    return target and "unsafe" or "blocked"
+end
+
+msg_order["求签"] = "draw_today"
+msg_order["现代"] = "draw_modern"
+msg_order["越界"] = "draw_escape"
+)LUA");
+
+    writeText(pluginDir / utf8Path(u8"求签") / utf8Path(u8"月老灵签.lua"), R"LUA(
+return {
+    getDraw = function(msg)
+        return "月老签:" .. msg.fromQQ
+    end
+}
+)LUA");
+
+    writeText(pluginDir / "script" / "modern.lua", "return { value = \"modern-ok\" }\n");
+    writeText(workspace.root() / "data" / "secret.lua", "return { value = \"must-not-load\" }\n");
+
+    writeText(pluginDir / "DailyNews-fixed.lua", R"LUA(
+msg_order = {}
+local ok, info = http.get("http://excerpt.example/toolman/getMiniNews")
+local js = require "json"
+local decoded = js.decode(info)
+
+function dailynews(msg)
+    if not ok or not decoded then return "news-failed" end
+    return "新闻:" .. decoded.data.image
+end
+
+msg_order["60s"] = "dailynews"
+)LUA");
+
+    int fetchCalls = 0;
+    {
+        LuaPluginManager manager;
+        manager.setHttpFetch([&](const std::string& method, const std::string& url,
+                                 const std::string&, const std::string&, int& status) {
+            ++fetchCalls;
+            status = 200;
+            return method == "GET" && url == "http://excerpt.example/toolman/getMiniNews"
+                ? std::string(R"JSON({"data":{"image":"https://img.example/daily.png"}})JSON")
+                : std::string();
+        });
+
+        ASSERT_TRUE(manager.init());
+        ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 2);
+        ASSERT_EQ(fetchCalls, 1);
+
+        const auto draw = manager.dispatch(
+            "求签 月老", "user-42", "group-1", "Tester", "", false, 0, "onebot");
+        ASSERT_TRUE(draw.matched);
+        ASSERT_EQ(draw.reply, std::string("月老签:user-42"));
+
+        const auto modern = manager.dispatch(
+            "现代", "user-42", "group-1", "Tester", "", false, 0, "onebot");
+        ASSERT_TRUE(modern.matched);
+        ASSERT_EQ(modern.reply, std::string("modern-ok"));
+
+        const auto escape = manager.dispatch(
+            "越界", "user-42", "group-1", "Tester", "", false, 0, "onebot");
+        ASSERT_TRUE(escape.matched);
+        ASSERT_EQ(escape.reply, std::string("blocked"));
+
+        const auto news = manager.dispatch(
+            "60s", "user-42", "group-1", "Tester", "", false, 0, "onebot");
+        ASSERT_TRUE(news.matched);
+        ASSERT_EQ(news.reply, std::string("新闻:https://img.example/daily.png"));
+    }
+}
+
+TEST(LuaPluginCompat, ExternalLegacyFortuneCorpusWhenProvided) {
+    const char* corpusValue = std::getenv("DICENEXT_LEGACY_FORTUNE_PLUGIN");
+    if (!corpusValue || !*corpusValue) return;  // CI uses the self-contained fixture above.
+
+    const fs::path sourceDir(corpusValue);
+    const fs::path sourcePluginRoot = sourceDir.parent_path();
+    const fs::path sourceEntry = sourcePluginRoot / utf8Path(u8"求签3.0.lua");
+    const fs::path sourceNews = sourcePluginRoot / "DailyNews-fixed.lua";
+    ASSERT_TRUE(fs::is_directory(sourceDir));
+    ASSERT_TRUE(fs::is_regular_file(sourceEntry));
+    ASSERT_TRUE(fs::is_regular_file(sourceNews));
+
+    TempWorkspace workspace("dice_next_lua_corpus_");
+    const fs::path pluginDir = workspace.root() / "data" / "plugin";
+    std::error_code ec;
+    fs::copy(sourceDir, pluginDir / utf8Path(u8"求签"),
+             fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    ASSERT_FALSE(static_cast<bool>(ec));
+    fs::copy_file(sourceEntry, pluginDir / utf8Path(u8"求签3.0.lua"),
+                  fs::copy_options::overwrite_existing, ec);
+    ASSERT_FALSE(static_cast<bool>(ec));
+    fs::copy_file(sourceNews, pluginDir / "DailyNews-fixed.lua",
+                  fs::copy_options::overwrite_existing, ec);
+    ASSERT_FALSE(static_cast<bool>(ec));
+
+    LuaPluginManager manager;
+    manager.setHttpFetch([](const std::string&, const std::string&,
+                            const std::string&, const std::string&, int& status) {
+        status = 200;
+        return std::string(R"JSON({"data":{"image":"https://img.example/actual-daily.png"}})JSON");
+    });
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 2);
+
+    const std::string commands[] = {
+        "求签", "求签 月老", "求签 浅草寺", "求签 原神",
+        "求签 关帝", "求签 吕祖", "求签 先天",
+    };
+    for (const auto& command : commands) {
+        const auto result = manager.dispatch(
+            command, "10001", "20002", "Tester", "", false, 0, "onebot");
+        ASSERT_TRUE(result.matched);
+        ASSERT_TRUE(!result.reply.empty());
+        ASSERT_TRUE(result.reply.find("找不到") == std::string::npos);
+    }
+
+    const auto news = manager.dispatch(
+        "60s", "10001", "20002", "Tester", "", false, 0, "onebot");
+    ASSERT_TRUE(news.matched);
+    ASSERT_TRUE(news.reply.find("https://img.example/actual-daily.png") != std::string::npos);
+}

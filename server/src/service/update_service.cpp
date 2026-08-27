@@ -294,15 +294,18 @@ std::string currentArch() {
 #endif
 }
 UpdateService::UpdateService(ConfigManager& config, std::function<void()> restart)
-    : config_(config), restart_(std::move(restart)),
-      worker_([this](std::stop_token stop) { workerLoop(stop); }) {}
+    : config_(config), restart_(std::move(restart)) {
+    worker_ = std::thread([this] { workerLoop(); });
+}
 
 UpdateService::~UpdateService() {
-    worker_.request_stop();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stopping_ = true;
+    }
     wake_.notify_all();
     if (worker_.joinable()) worker_.join();
 }
-
 UpdateService::Settings UpdateService::settings() const {
     Settings result;
     result.autoCheck = config_.get<bool>("update/auto_check", true);
@@ -549,14 +552,14 @@ void UpdateService::tick() {
     }
 }
 
-void UpdateService::workerLoop(std::stop_token stop) {
-    while (!stop.stop_requested()) {
+void UpdateService::workerLoop() {
+    while (true) {
         Job next = Job::none;
         bool force = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            wake_.wait(lock, stop, [&] { return job_ != Job::none; });
-            if (stop.stop_requested()) break;
+            wake_.wait(lock, [&] { return stopping_ || job_ != Job::none; });
+            if (stopping_) break;
             next = job_;
             job_ = Job::none;
             force = forceCheck_;
@@ -575,6 +578,7 @@ void UpdateService::workerLoop(std::stop_token stop) {
         }
     }
 }
+
 std::vector<UpdateService::Source> UpdateService::configuredSources(const Settings& current) const {
     static const std::array<const char*, 8> mirrors = {
         "https://github.chenc.dev",

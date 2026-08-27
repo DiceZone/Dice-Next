@@ -76,13 +76,39 @@ target_link_libraries(dice-next-tests PRIVATE
     dice-md4c
 )
 
+# Keep the real Lua runtime tests in a separate executable: test_import_v2.cpp
+# deliberately defines a lightweight LuaPluginManager stub for importer-only tests.
+add_executable(dice-next-lua-tests
+    test_main.cpp
+    test_lua_plugin_compat.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/mod/lua_plugin_manager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/logger.cpp
+)
+target_include_directories(dice-next-lua-tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LUA_INCLUDE_DIR}
+)
+target_link_libraries(dice-next-lua-tests PRIVATE
+    Drogon::Drogon
+    nlohmann_json::nlohmann_json
+    spdlog::spdlog
+    yaml-cpp::yaml-cpp
+    unofficial::sqlite3::sqlite3
+    ${LUA_LIBRARIES}
+)
+add_dependencies(dice-next-tests dice-next-lua-tests)
 # MSVC needs /bigobj for large test files with many includes
 if(MSVC)
     target_compile_options(dice-next-tests PRIVATE /utf-8 /bigobj)
+    target_compile_options(dice-next-lua-tests PRIVATE /utf-8 /bigobj)
 else()
     target_compile_options(dice-next-tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(dice-next-lua-tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # ─── CTest Integration ───────────────────────────────────────
 enable_testing()
 add_test(NAME dice_next_tests COMMAND dice-next-tests)
+add_test(NAME dice_next_lua_tests COMMAND dice-next-lua-tests)

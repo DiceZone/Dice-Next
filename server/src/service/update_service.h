@@ -90,7 +90,7 @@ private:
     bool installSupported() const;
     bool isBusyLocked() const;
     bool queueJobLocked(Job job, const std::string& phase, std::string& error);
-    void workerLoop(std::stop_token stop);
+    void workerLoop();
     void doCheck(bool force);
     void doDownload();
     void doInstall();
@@ -114,10 +114,11 @@ private:
     std::function<void()> restart_;
 
     mutable std::mutex mutex_;
-    std::condition_variable_any wake_;
-    std::jthread worker_;
+    std::condition_variable wake_;
+
     Job job_ = Job::none;
     bool forceCheck_ = false;
+    bool stopping_ = false;
 
     std::string phase_ = "idle";
     std::string error_;
@@ -130,6 +131,7 @@ private:
     ReleaseManifest latest_;
     std::vector<Source> sourceOrder_;
     std::int64_t sourceCacheUntil_ = 0;
+    std::thread worker_;
 };
 
 }  // namespace dice::update

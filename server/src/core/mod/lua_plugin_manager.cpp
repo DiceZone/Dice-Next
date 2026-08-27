@@ -13,6 +13,7 @@
 #include <random>
 #include <ctime>
 #include <algorithm>
+#include <array>
 
 extern "C" {
 #include <lua.h>
@@ -703,18 +704,51 @@ static int l_urlDecode(lua_State* L) {
 }
 static int l_loadLua(lua_State* L) {
     auto* m = mgrOf(L); std::string name = argStr(L, 1);
-    if (!m || name.empty()) return 0;
-    // 原版点分命名空间：loadLua("BRP.overview") → script/BRP/overview.lua（DiceLua.cpp fmt->lua_path）。
-    std::string rel = name; for (auto& c : rel) if (c == '.') c = '/';
-    fs::path p = fs::path(m->loadingModDir_) / "script" / (rel + ".lua");
-    std::error_code ec;
-    if (!fs::exists(p, ec)) { DICE_LOG_ERROR("[lua] loadLua: not found {}", dnx_u8str(p)); return 0; }
-    if (dnx_dofile(L, p) != LUA_OK) {
-        DICE_LOG_ERROR("[lua] loadLua '{}' error: {}", name, argStr(L, -1)); lua_pop(L, 1); return 0;
+    if (!m || name.empty()) { lua_pushnil(L); return 1; }
+    // 目录型 mod 使用 script/<namespace>.lua；旧 Dice! 单文件插件则把辅助脚本
+    // 放在入口 .lua 的同级子目录（如 plugin/求签/月老灵签.lua）。两种布局都支持，
+    // 并使用 u8 path 构造，避免 Windows 中文文件名经过本地代码页后找不到。
+    std::string rel = name;
+    for (auto& c : rel) {
+        if (c == '.') c = '/';
+        else if (c == '\\') c = '/';
     }
-    return 1;   // 脚本的返回值留在栈顶
-}
+    rel += ".lua";
+    const fs::path relPath(std::u8string(rel.begin(), rel.end()));
+    if (relPath.is_absolute() || relPath.has_root_name()) {
+        DICE_LOG_ERROR("[lua] loadLua: absolute path rejected '{}'", name);
+        lua_pushnil(L); return 1;
+    }
+    for (const auto& part : relPath) {
+        if (part == "..") {
+            DICE_LOG_ERROR("[lua] loadLua: traversal rejected '{}'", name);
+            lua_pushnil(L); return 1;
+        }
+    }
 
+    const fs::path base(m->loadingModDir_);
+    const std::array<fs::path, 2> candidates = {
+        base / "script" / relPath,
+        base / relPath,
+    };
+    std::error_code ec;
+    fs::path p;
+    for (const auto& candidate : candidates) {
+        ec.clear();
+        if (fs::is_regular_file(candidate, ec)) { p = candidate; break; }
+    }
+    if (p.empty()) {
+        DICE_LOG_ERROR("[lua] loadLua: not found '{}' below {}", name, dnx_u8str(base));
+        lua_pushnil(L); return 1;
+    }
+    const int stackBefore = lua_gettop(L);
+    if (dnx_dofile(L, p) != LUA_OK) {
+        DICE_LOG_ERROR("[lua] loadLua '{}' error: {}", name, argStr(L, -1));
+        lua_settop(L, stackBefore); lua_pushnil(L); return 1;
+    }
+    if (lua_gettop(L) == stackBefore) lua_pushnil(L);
+    return 1;   // 与旧实现一致：只把脚本最后一个返回值交给调用者
+}
 
 // ─── Lua 安全：审计日志 + 静态风险预检 ─────────────────────────
 static std::string luaAuditTs() {

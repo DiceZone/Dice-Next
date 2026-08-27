@@ -1,6 +1,9 @@
 #include "test_framework.h"
 #include "../src/service/update_service.h"
 
+#include <chrono>
+#include <filesystem>
+
 using namespace dice::update;
 
 namespace {
@@ -97,4 +100,17 @@ TEST(UpdateMirror, PrefixesFullGithubUrl) {
         std::string("https://ghproxy.example/") + original);
     ASSERT_EQ(buildMirroredUrl(original, "https://ghproxy.example/"),
         std::string("https://ghproxy.example/") + original);
+}
+TEST(UpdateService, PortableWorkerStartsAndStopsCleanly) {
+    namespace fs = std::filesystem;
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path configPath = fs::temp_directory_path() /
+        ("dice_next_update_config_" + std::to_string(nonce));
+    dice::ConfigManager config(configPath.string());
+    {
+        UpdateService service(config, [] {});
+        ASSERT_EQ(service.status().value("phase", std::string()), std::string("idle"));
+    }
+    std::error_code ec;
+    fs::remove_all(configPath, ec);
 }

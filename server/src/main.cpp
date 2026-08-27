@@ -765,10 +765,11 @@ static int realMain(int argc, char* argv[]) {
         });
     // 卡片模板中的 "js:" 值由 QuickJS 求值。
     cmdRouter.setJsEval([&jsMod](const std::string& script) { return jsMod.evalString(script); });
-    // Lua 插件 http.get/post → 走命令路由的受控 HTTP（外置API开关 + 白名单 + SSRF 防护）。
+    // 旧 Dice! Lua 的 http.get/post 默认可访问公网 HTTP(S)，与原生态兼容；始终保留
+    // SSRF/协议防护，js_fetch_strict=true 时再叠加外置 API 总开关与白名单。
     luaMod.setHttpFetch([&cmdRouter](const std::string& method, const std::string& url,
                                      const std::string& headers, const std::string& body, int& status) {
-        return cmdRouter.jsHttpFetch(method, url, headers, body, status);
+        return cmdRouter.jsHttpFetch(method, url, headers, body, status, true);
     });
     // .game 团务与 Lua msg.game/GameTable 同源存储（lua_mod.db conf "game:<gid>"）。
     cmdRouter.setGameConf({

@@ -8326,8 +8326,8 @@ private:
             if (all.contains("dice") && all["dice"].contains("api_enabled")) return all["dice"]["api_enabled"].get<bool>();
         } catch (...) {} return false;
     }
-    // T8（兼容海豹）：JS fetch 严格模式开关。默认 false = 裸 fetch（仅保留 shell 字符安全）；
-    // true = 恢复 api_enabled + SSRF/白名单拦截。
+    // T8（兼容海豹及旧 Dice! Lua）：插件 fetch 严格模式开关。默认 false = 可访问
+    // 公网 HTTP(S)，仍拦截私网/环回/危险 URL；true = 再要求 api_enabled + 白名单。
     bool jsFetchStrictEnabled() const {
         try { json all = cfg_.getAll();
             if (all.contains("dice") && all["dice"].contains("js_fetch_strict")) return all["dice"]["js_fetch_strict"].get<bool>();
@@ -8349,26 +8349,136 @@ private:
     bool isHostSafe(const std::string& url) const {
         std::string lo = toLower(url);
         if (lo.rfind("http://", 0) != 0 && lo.rfind("https://", 0) != 0) return false;
-        for (unsigned char c : url) if (c <= 0x20 || c == '"' || c == '`' || c == '$' || c == '\\') return false;  // shell 安全
-        size_t s = url.find("://"); if (s == std::string::npos) return false; s += 3;
-        size_t e = url.find_first_of("/:?#", s);
-        std::string host = toLower(url.substr(s, e == std::string::npos ? std::string::npos : e - s));
+        for (unsigned char c : url)
+            if (c <= 0x20 || c == '"' || c == '`' || c == '$' || c == '\\') return false;
+
+        size_t s = url.find("://");
+        if (s == std::string::npos) return false;
+        s += 3;
+        const size_t e = url.find_first_of("/?#", s);
+        std::string authority = toLower(url.substr(
+            s, e == std::string::npos ? std::string::npos : e - s));
+        // curl accepts userinfo and resolves the host after '@'. Rejecting it entirely
+        // prevents strings such as public.example@127.0.0.1 from bypassing host checks.
+        if (authority.empty() || authority.find('@') != std::string::npos) return false;
+
+        auto validPort = [](const std::string& port) {
+            if (port.empty()) return false;
+            for (unsigned char c : port) if (!std::isdigit(c)) return false;
+            try {
+                const int value = std::stoi(port);
+                return value > 0 && value <= 65535;
+            } catch (...) { return false; }
+        };
+
+        std::string host;
+        if (authority.front() == '[') {
+            const size_t close = authority.find(']');
+            if (close == std::string::npos) return false;
+            host = authority.substr(1, close - 1);
+            if (close + 1 < authority.size()) {
+                if (authority[close + 1] != ':' ||
+                    !validPort(authority.substr(close + 2))) return false;
+            }
+        } else {
+            const size_t colon = authority.rfind(':');
+            if (colon != std::string::npos) {
+                // Unbracketed IPv6 is ambiguous in a URL authority and is rejected.
+                if (authority.find(':') != colon || !validPort(authority.substr(colon + 1)))
+                    return false;
+                host = authority.substr(0, colon);
+            } else {
+                host = authority;
+            }
+        }
+        while (!host.empty() && host.back() == '.') host.pop_back();
         if (host.empty()) return false;
-        static const char* bad[] = {"localhost", "127.", "0.0.0.0", "::1", "[::1]", "10.", "192.168.", "169.254."};
-        for (auto* b : bad) if (host.rfind(b, 0) == 0) return false;
-        if (host.rfind("172.", 0) == 0) { int o2 = std::atoi(host.c_str() + 4); if (o2 >= 16 && o2 <= 31) return false; }
-        if (host.size() >= 6 && host.compare(host.size() - 6, 6, ".local") == 0) return false;
+
+        if (host == "localhost" ||
+            (host.size() > 10 && host.compare(host.size() - 10, 10, ".localhost") == 0) ||
+            (host.size() > 6 && host.compare(host.size() - 6, 6, ".local") == 0))
+            return false;
+
+        // IPv6 loopback, unspecified, ULA, link-local and IPv4-mapped addresses.
+        if (host.find(':') != std::string::npos) {
+            if (host == "::" || host == "::1" || host.rfind("::ffff:", 0) == 0 ||
+                host.rfind("fc", 0) == 0 || host.rfind("fd", 0) == 0 ||
+                host.rfind("fe8", 0) == 0 || host.rfind("fe9", 0) == 0 ||
+                host.rfind("fea", 0) == 0 || host.rfind("feb", 0) == 0)
+                return false;
+            return true;
+        }
+
+        // Reject non-canonical numeric IPv4 forms (integer/octal/short forms), then
+        // block non-public ranges for ordinary dotted-decimal addresses.
+        bool numeric = true;
+        for (unsigned char c : host)
+            if (!std::isdigit(c) && c != '.') { numeric = false; break; }
+        if (numeric) {
+            std::array<int, 4> octets{};
+            size_t begin = 0;
+            int count = 0;
+            while (begin <= host.size() && count < 4) {
+                const size_t dot = host.find('.', begin);
+                const std::string part = host.substr(
+                    begin, dot == std::string::npos ? std::string::npos : dot - begin);
+                if (part.empty() || (part.size() > 1 && part.front() == '0')) return false;
+                try {
+                    const int value = std::stoi(part);
+                    if (value < 0 || value > 255) return false;
+                    octets[count++] = value;
+                } catch (...) { return false; }
+                if (dot == std::string::npos) { begin = host.size() + 1; break; }
+                begin = dot + 1;
+            }
+            if (count != 4 || begin <= host.size()) return false;
+            const int a = octets[0], b = octets[1];
+            if (a == 0 || a == 10 || a == 127 || a >= 224 ||
+                (a == 100 && b >= 64 && b <= 127) ||
+                (a == 169 && b == 254) ||
+                (a == 172 && b >= 16 && b <= 31) ||
+                (a == 192 && b == 168) ||
+                (a == 198 && (b == 18 || b == 19)))
+                return false;
+        }
         return true;
     }
     bool isApiUrlAllowed(const std::string& url) const {
         if (!isHostSafe(url)) return false;
-        size_t s = url.find("://") + 3;
-        size_t e = url.find_first_of("/:?#", s);
-        std::string host = toLower(url.substr(s, e == std::string::npos ? std::string::npos : e - s));
+        const size_t s = url.find("://") + 3;
+        const size_t e = url.find_first_of("/?#", s);
+        std::string authority = toLower(url.substr(
+            s, e == std::string::npos ? std::string::npos : e - s));
+        std::string host;
+        if (!authority.empty() && authority.front() == '[') {
+            const size_t close = authority.find(']');
+            host = authority.substr(1, close - 1);
+        } else {
+            const size_t colon = authority.rfind(':');
+            host = authority.substr(0, colon);
+        }
+        while (!host.empty() && host.back() == '.') host.pop_back();
+
         auto wl = apiWhitelist();
         if (!wl.empty()) {
             bool ok = false;
-            for (auto& w : wl) if (!w.empty() && host.find(toLower(w)) != std::string::npos) { ok = true; break; }
+            for (auto w : wl) {
+                w = toLower(w);
+                if (const size_t scheme = w.find("://"); scheme != std::string::npos)
+                    w.erase(0, scheme + 3);
+                if (const size_t slash = w.find_first_of("/:?#"); slash != std::string::npos)
+                    w.erase(slash);
+                while (!w.empty() && (w.front() == '.' || w.front() == '*')) w.erase(w.begin());
+                while (!w.empty() && w.back() == '.') w.pop_back();
+                if (w.empty()) continue;
+                if (host == w ||
+                    (host.size() > w.size() &&
+                     host.compare(host.size() - w.size(), w.size(), w) == 0 &&
+                     host[host.size() - w.size() - 1] == '.')) {
+                    ok = true;
+                    break;
+                }
+            }
             if (!ok) return false;
         }
         return true;
@@ -8467,10 +8577,10 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                             const std::string& headerLines, const std::string& body, int& status,
                             bool openMode = false) {
         status = 0;
-        // T8: openMode（JS fetch）默认放行对齐海豹裸 fetch，仅保留 shell 字符安全；
-        // strict 开启或非 openMode（Lua http 等）时维持 api_enabled + SSRF/白名单拦截。
+        // openMode 对齐海豹 JS fetch 与旧 Dice! Lua http：默认允许公网 HTTP(S)，
+        // 但永远保留协议、SSRF 与 shell 字符防护。strict 时再叠加总开关/白名单。
         if (openMode && !jsFetchStrictEnabled()) {
-            for (unsigned char c : url) if (c <= 0x20 || c == '"' || c == '`' || c == '$' || c == '\\') return "";
+            if (!isHostSafe(url)) return "";
         } else {
             if (!apiEnabled() || !isApiUrlAllowed(url)) return "";
         }
