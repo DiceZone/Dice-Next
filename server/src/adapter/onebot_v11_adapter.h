@@ -750,9 +750,9 @@ private:
         req["echo"] = echo.empty() ? std::to_string(++echoSeq_) : echo;
 
         if (mode_ == "reverse_ws") {
-            sendRevWsFrame(req.dump());
+            sendRevWsFrame(dumpJsonUtf8Safe(req));
         } else if (wsClient_) {
-            wsClient_->getConnection()->send(req.dump());
+            wsClient_->getConnection()->send(dumpJsonUtf8Safe(req));
         }
     }
 

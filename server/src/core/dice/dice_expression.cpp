@@ -4,9 +4,45 @@
 
 #include <sstream>
 #include <cctype>
+#include <iomanip>
 #include <stdexcept>
 
 namespace dice {
+
+namespace {
+
+std::string unexpectedInputUnit(const std::string& input, size_t offset) {
+    const unsigned char first = static_cast<unsigned char>(input[offset]);
+    if (first < 0x80u) return std::string("character '") + input[offset] + "'";
+
+    size_t length = 0;
+    if (first >= 0xc2u && first <= 0xdfu) length = 2;
+    else if (first >= 0xe0u && first <= 0xefu) length = 3;
+    else if (first >= 0xf0u && first <= 0xf4u) length = 4;
+
+    bool valid = length != 0 && offset + length <= input.size();
+    for (size_t i = 1; valid && i < length; ++i)
+        valid = (static_cast<unsigned char>(input[offset + i]) & 0xc0u) == 0x80u;
+    if (valid && length == 3) {
+        const unsigned char second = static_cast<unsigned char>(input[offset + 1]);
+        valid = (first != 0xe0u || second >= 0xa0u) &&
+                (first != 0xedu || second <= 0x9fu);
+    } else if (valid && length == 4) {
+        const unsigned char second = static_cast<unsigned char>(input[offset + 1]);
+        valid = (first != 0xf0u || second >= 0x90u) &&
+                (first != 0xf4u || second <= 0x8fu);
+    }
+    if (valid)
+        return std::string("character '") + input.substr(offset, length) + "'";
+
+    std::ostringstream escaped;
+    escaped << "byte 0x" << std::uppercase << std::hex << std::setw(2)
+            << std::setfill('0') << static_cast<unsigned int>(first);
+    return escaped.str();
+}
+
+}  // namespace
+
 
 // ═══════════════════════════════════════════════════════════════
 // ASTNode factory methods
@@ -317,7 +353,7 @@ std::vector<DiceToken> DiceExpression::tokenize(const std::string& input) {
             default: {
                 // Unknown character
                 std::ostringstream oss;
-                oss << "unexpected character '" << ch << "'";
+                oss << "unexpected " << unexpectedInputUnit(input, i);
                 throw AppException(ApiErrorCode::kDiceInvalidExpression, oss.str());
             }
         }

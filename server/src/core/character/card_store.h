@@ -128,6 +128,17 @@ public:
     /// Call once at startup before serving (rule-pack system P1, global merge).
     static int loadRulePackAliases(const std::string& dir);
 
+    /// Copy a named card verbatim (attributes, text metadata and locks).
+    /// The destination is created or replaced; bindings are left unchanged.
+    bool copyCard(const std::string& user, const std::string& source,
+                  const std::string& destination);
+
+    /// All explicit scope -> card bindings for legacy ".pc grp".
+    std::map<std::string, std::string> listBindings(const std::string& user) const;
+
+    /// Stable JSON export for legacy ".pc tojson".
+    nlohmann::json exportCard(const std::string& user, const std::string& name) const;
+
 private:
     // Internal helpers keyed by (user, cardName).
     std::map<std::string, int> attrsOf(const std::string& user,

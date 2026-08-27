@@ -103,6 +103,7 @@
     "coc": {
       "build": "**{nick}** 的调查员作成：{res}",
       "total": "共计",
+      "asset": "资产",
       "attr": {
         "str": "力量",
         "con": "体质",
@@ -208,7 +209,7 @@
     "unknown": "没有找到「{topic}」的帮助。试试 .helpdoc 查看可用条目。",
     "ambiguous": "「{topic}」匹配到多个帮助条目：{list}，请输入更精确的名称。",
     "topic": {
-      "r": "掷骰 .r [表达式] [原因]：投骰。例 .r3d6+2 攻击；.rh 暗骰；N#expr 连投。",
+      "r": "掷骰 .r [表达式] [原因]：投骰。例 .r3d6+2 攻击；.rh 暗骰；N#expr 连投。默认骰理由可不加空格，如 .rd测试。",
       "rh": "暗骰 .rh [表达式] [原因]：暗骰/暗检定。结果以私聊发给你，群里只提示「<名> 进行了暗骰」，他人看不到点数。暗检定用 .rah / .rch（如 .rah 侦查 60），结果同样私聊；房规(.setcoc)、奖惩骰等照常生效。",
       "ra": "检定 .ra <技能|属性> [成功率] [原因]：COC 检定。省略成功率时读人物卡。可用 .ra(出目)成功率 预览指定成功等级的文案。例 .ra 侦查 / .ra 力量60 / .ra(1)1 / .ra(100)1",
       "rx": "心理学 .rx @调查员 [成功率]：心理学暗骰（守秘人用）。对被 @ 的调查员掷一次心理学检定，含成功等级的详细结果私聊发给你，群里只出一句不剧透的回执。省略成功率时读对方人物卡的「心理学」，默认 10。",
@@ -439,13 +440,20 @@
     "locked": "已锁定当前人物卡（{key}）√",
     "unlocked": "已解锁当前人物卡（{key}）√",
     "lock_already": "当前人物卡已有该锁（{key}）。",
-    "unlock_missing": "当前人物卡没有该锁（{key}）。"
+    "unlock_missing": "当前人物卡没有该锁（{key}）。",
+    "copy_usage": "用法：.pc cpy <新卡名> [源卡名]（省略源卡时复制当前卡）",
+    "copied": "已将人物卡「{source}」复制为「{destination}」。",
+    "groups_empty": "还没有任何群绑定人物卡。",
+    "groups": "人物卡群绑定：\n{list}",
+    "private_scope": "私聊",
+    "templates": "可用人物卡生成模板：\n{list}"
   },
   "deck": {
     "usage": "指令 .draw 用法：.draw 牌堆名（可 .draw3 牌堆名 抽多张）",
     "no_deck": "没有名为「{name}」的牌堆",
     "ambiguous": "「{name}」匹配到多个牌堆：{list}，请输入更精确的名称。",
     "result": "{nick} 抽到：{res}",
+    "hidden": "{nick} 进行了一次暗抽，结果已私聊告知。",
     "list": "共 {count} 个牌堆：\n{list}",
     "empty": "还没有任何牌堆，把牌堆 JSON 放进 decks/ 目录即可",
     "default_set": "已将「{name}」设置为本群默认牌堆，之后直接 .draw 即可抽取。",
@@ -461,7 +469,9 @@
     "temp_tag": "(临时)"
   },
   "mod": {
-    "wip": "模块功能开发中……"
+    "info": "插件 {name}（{kind}，{id}）：{state}",
+    "web_admin": "插件更新、重载、删除和重装请在 WebUI 的插件管理页操作。",
+    "usage": "用法：.mod list / .mod on|off <插件> / .mod info <插件>"
   },
   "authorize": {
     "sent": "许可申请已发送给 Master。"
@@ -576,6 +586,8 @@
     "me_global": "抱歉，已在全局关闭了该命令。",
     "cmd_global": "抱歉，{cmd} 已被全局停用。",
     "in_group": "抱歉，{cmd} 已在本群停用。",
+    "cmd_on": "已在本群启用 {cmd}。",
+    "cmd_off": "已在本群停用 {cmd}。",
     "external_on": "已开启外置模式：停用内置指令，仅保留自定义回复（用「外置关」恢复）。",
     "external_off": "已关闭外置模式：内置指令已恢复。",
     "not_master": "抱歉，该指令仅限本骰 Master 使用。",
@@ -848,6 +860,28 @@
     "proxy_note": "【NPC：{name}】\n"
   },
   "system": {
+  "legacy_user": {
+    "usage": "用法：.user state | trust <用户> [等级] | tojson [用户] | diss <用户> [原因]",
+    "state": "{user} 的用户记录\n信任级别：{trust}\n首次建档：{created}\n指令次数：{commands}\n人物卡：{cards}\n最近指令：{last}",
+    "not_found": "没有用户 {user} 的记录。",
+    "diss_usage": "用法：.user diss <用户> [原因]",
+    "dissed": "已将用户 {user} 加入本地黑名单；人物卡与档案已保留，可撤销。",
+    "already_dissed": "用户 {user} 已在本地黑名单中。",
+    "destructive_web": "为防止聊天误操作，用户档案/人物卡的删除与批量清理只在 WebUI 数据管理中提供。"
+  },
+  "legacy_cloud": {
+    "usage": "用法：.cloud black | update",
+    "disabled": "云黑同步未开启或服务尚未初始化，请先在 WebUI 配置云黑服务。",
+    "queued": "已在后台发起云黑名单同步；结果会写入服务日志。",
+    "update_web": "当前 DiceNext 版本：{version}。程序升级请使用 WebUI/发布包；不支持聊天内下载并覆盖可执行文件。"
+  },
+  "legacy_str": {
+    "unsupported": "旧文本键 {key} 与 DiceNext 没有安全的一对一槽位，请在 WebUI 的“回复文本”中编辑对应的新模板。",
+    "show": "{key} → {mapped}\n{text}",
+    "set": "已通过 DiceNext 统一模板覆盖层设置 {key}。",
+    "reset": "已重置 {key}，恢复当前语言的内置模板。",
+    "failed": "模板覆盖保存失败。"
+  },
     "usage": "用法：.system info（系统信息）/ .system stats（运行统计）",
     "unknown": "未知",
     "info": "系统信息\nOS: {os}\nCPU: {cores} 核 · 占用 {cpu}%\n内存: {memused}/{memtotal} MB（{memload}%）\n本进程内存: {proc} MB",

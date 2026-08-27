@@ -21,6 +21,7 @@ set(TEST_SOURCES
     test_js_plugin_reload.cpp
     test_dice_expression.cpp
     test_expression_fallback.cpp
+    test_roll_command_parser.cpp
     test_check_roll_override.cpp
     test_markdown.cpp
     test_heart_debounce.cpp

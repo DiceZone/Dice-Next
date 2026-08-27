@@ -125,10 +125,9 @@ private:
         const bool isMarkdown = format == ContentFormat::kMarkdown;
         if (content.size() > 5000)
             return json{{"type", 1}, {"target_id", target}, {"content", isMarkdown ? markdown::toPlainText(content) : content}};
-        if (!effectiveCardMode()) {
-            const int type = isMarkdown ? 9 : 1;
-            return json{{"type", type}, {"target_id", target}, {"content", content}};
-        }
+        if (!effectiveCardMode())
+            return json{{"type", 1}, {"target_id", target},
+                        {"content", isMarkdown ? markdown::toPlainText(content) : content}};
         const std::string wire = isMarkdown ? content : markdown::escapeLiteral(content);
         const json card = json::array({{
             {"type", "card"}, {"theme", "primary"}, {"size", "sm"},

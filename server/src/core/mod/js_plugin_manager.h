@@ -24,6 +24,8 @@
 struct sqlite3;   // 持久化 KV 后端（data/plugins.db），仅在 .cpp 里用到完整定义
 
 namespace dice {
+struct Message;
+struct BotEvent;
 
 class JsPluginManager {
 public:
@@ -41,13 +43,26 @@ public:
 
     struct Result { bool matched = false; std::string reply; };
     /// 用已注册 JS 指令处理一条消息；cmdLine = 去前缀后的文本（如 "seal ABC"）。
+    /// Preferred SealDice-compatible entry points.  They preserve raw message
+    /// identity, guild/channel IDs, segments, timestamps and adapter metadata.
+    Result handle(const Message& msg, const std::string& cmdLine, int privilege = 0);
+    Result handleNonCommand(const Message& msg, int privilege = 0);
+    Result handleMessageReceived(const Message& msg, int privilege = 0);
+    Result handleCommandReceived(const Message& msg, const std::string& cmdLine, int privilege = 0);
+    void handleMessageSend(const Message& contextMessage, const Message& sentMessage,
+                           const std::string& flag = "", int privilege = 0);
+
+    void handleEvent(const BotEvent& event, int privilege = 0);
+
     Result handle(const std::string& platform, const std::string& userId,
                   const std::string& nickname, const std::string& groupId, const std::string& groupCard,
                   bool isPrivate, const std::string& cmdLine, int privilege = 0,
                   const std::vector<std::string>& atList = {});
 
-    /// 非指令消息钩子：对每个 ext 调 onNotCommandReceived / onMessageReceived。
-    /// 用于自动回复、随机抓话等监听普通聊天的插件。fullText = 完整消息原文。
+    /// Legacy primitive overloads retained for callers/tests. New code should
+    /// pass Message so SealDice message fields are not discarded.
+    /// handleNonCommand dispatches onNotCommandReceived only; onMessageReceived
+    /// is dispatched exactly once for every accepted message by the full pipeline.
     Result handleNonCommand(const std::string& platform, const std::string& userId,
                              const std::string& nickname, const std::string& groupId, const std::string& groupCard,
                             bool isPrivate, const std::string& fullText, int privilege = 0,
@@ -254,11 +269,12 @@ private:
     // so an async solve() driven by synchronous (blocking) fetch runs to completion.
     void drainJobs();
     // 构造 ctx / msg 两个 JS 对象（caller 负责 JS_FreeValue）。
-    void buildCtxMsg(const std::string& platform, const std::string& userId,
-                      const std::string& nickname, const std::string& groupId, const std::string& groupCard,
-                     bool isPrivate, const std::string& fullMsg, int privilege,
-                     const std::vector<std::string>& atList,
-                     JSValue& outCtx, JSValue& outMsg);
+    void buildCtxMsg(const Message& msg, int privilege, JSValue& outCtx, JSValue& outMsg);
+    JSValue buildCmdArgs(const Message& msg, const std::string& cmdLine,
+                         const std::string& command, const std::string& rest);
+    void dispatchCommandHookLocked(const Message& msg, JSValueConst jctx,
+                                   JSValueConst jmsg, JSValueConst jargs);
+    Result dispatchMessageHook(const Message& msg, int privilege, const char* hook);
     static PluginMeta parseMeta(const std::string& src);
 
     JSRuntime* rt_ = nullptr;

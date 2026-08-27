@@ -17,6 +17,13 @@ namespace dice {
 
 using json = nlohmann::json;
 
+/// Platform transports must never drop a whole event because a plugin or an
+/// error path supplied malformed UTF-8. Valid text is unchanged; malformed
+/// units are replaced with U+FFFD at the final JSON boundary.
+inline std::string dumpJsonUtf8Safe(const json& value) {
+    return value.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Message Envelope — platform-agnostic message representation
 // ═══════════════════════════════════════════════════════════════
@@ -95,11 +102,16 @@ public:
     static int parseFormatOverride(const std::string& v) {
         return v == "card" ? 1 : v == "traditional" ? 0 : -1;
     }
+    static bool resolveCardMessageMode(bool globalEnabled, int scopedMode) noexcept {
+        return globalEnabled && (scopedMode < 0 || scopedMode > 0);
+    }
     /// 每个适配器可单独覆盖出站消息形式（-1=跟随全局，0=传统文本，1=卡片）。
     void setMessageFormatOverride(int mode) noexcept { messageFormatOverride_.store(mode); }
     bool effectiveCardMode() const noexcept {
-        const int v = messageFormatOverride_.load();
-        return v < 0 ? cardMessageMode() : v > 0;
+        // Global mode is the master rich-message switch. Turning it off must
+        // force every adapter and explicitly-Markdown template back to text.
+        // Scoped overrides can still opt out after the master is enabled.
+        return resolveCardMessageMode(cardMessageMode(), messageFormatOverride_.load());
     }
 
     /// Unique adapter identifier (e.g. "onebot-v11-1")

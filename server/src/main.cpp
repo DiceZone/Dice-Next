@@ -857,8 +857,7 @@ static int realMain(int argc, char* argv[]) {
         // JS 插件指令（海豹兼容）优先于自定义回复。
         if (jsMod.ready()) {
             if (auto body = cmdRouter.commandBody(m.content); body && !body->empty()) {
-                auto jr = jsMod.handle(m.platform, m.senderId, nick, m.targetId, card, pv, *body,
-                                       cmdRouter.jsPrivilegeLevel(m), m.atList);
+                auto jr = jsMod.handle(m, *body, cmdRouter.jsPrivilegeLevel(m));
                 if (jr.matched && !jr.reply.empty()) { reply = jr.reply; replySrc = "plugin_command"; }
             }
         }
@@ -906,8 +905,7 @@ static int realMain(int argc, char* argv[]) {
         }
         // 仍无回复 → JS 插件的非指令消息钩子（自动回复 / 随机抓话等）。
         if (reply.empty() && jsMod.ready()) {
-            auto nc = jsMod.handleNonCommand(m.platform, m.senderId, nick, m.targetId, card, pv, m.content,
-                                             cmdRouter.jsPrivilegeLevel(m), m.atList);
+            auto nc = jsMod.handleNonCommand(m, cmdRouter.jsPrivilegeLevel(m));
             if (nc.matched && !nc.reply.empty()) { reply = nc.reply; replySrc = "plugin"; }
         }
         return reply;
@@ -1058,10 +1056,19 @@ static int realMain(int argc, char* argv[]) {
         // normal fallback path when no built-in command matched.
         bool forcedByAt = cmdRouter.listenAtWhenOff(msg)
             && dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);
+        dice::JsPluginManager::Result receivedHook;
+        if (jsMod.ready() && (!disabled || forcedByAt))
+            receivedHook = jsMod.handleMessageReceived(msg, cmdRouter.jsPrivilegeLevel(msg));
+
         dice::I18n::beginOutboundCapture();
         auto reply = cmdRouter.handleMessage(msg);
         dice::ContentFormat replyFormat = dice::I18n::endOutboundCapture();
         bool didCommand = !reply.empty();
+        dice::JsPluginManager::Result commandHook;
+        if (didCommand && jsMod.ready())
+            if (auto body = cmdRouter.commandBody(msg.content); body && !body->empty())
+                commandHook = jsMod.handleCommandReceived(msg, *body, cmdRouter.jsPrivilegeLevel(msg));
+
         // 阶段3：回复来源分类（builtin/plugin/reply），供 AI 翻译按范围过滤。
         std::string replySrc = "builtin";
         // No command matched → custom replies, unless the group is disabled or has
@@ -1073,6 +1080,20 @@ static int realMain(int argc, char* argv[]) {
         if (reply.empty() && (!disabled || forcedByAt) && !replyOff) {
             reply = replyFallback(msg, replySrc);
             replyFormat = dice::ContentFormat::kPlainText;
+        }
+        // onMessageReceived is observational: it must not suppress a built-in or
+        // extension command. Preserve both replies in SealDice hook-before-command order.
+        if (!receivedHook.reply.empty()) {
+            if (reply.empty()) {
+                reply = receivedHook.reply; replySrc = "plugin";
+                replyFormat = dice::ContentFormat::kPlainText;
+            } else reply = receivedHook.reply + "\n" + reply;
+        }
+        if (!commandHook.reply.empty()) {
+            if (reply.empty()) {
+                reply = commandHook.reply; replySrc = "plugin";
+                replyFormat = dice::ContentFormat::kPlainText;
+            } else reply += "\n" + commandHook.reply;
         }
         if (!reply.empty() && replySrc == "plugin_command") didCommand = true;
         // ── 先在消息线程消费本条消息的一次性路由状态 ─────────────
@@ -1114,7 +1135,7 @@ static int realMain(int argc, char* argv[]) {
         // AI 网关是同步 curl（最长 30s），此前润色/翻译/对话都直接跑在适配器消息线程
         // 上，一次超时全部指令失效 30 秒。需要 AI 后处理的回复把这一整段投给
         // aiwork::Worker 后台执行；不需要 AI 时原地执行，行为与旧版完全一致。
-        auto finishReply = [&adapterMgr, &cmdRouter, &configMgr, &db](
+        auto finishReply = [&adapterMgr, &cmdRouter, &configMgr, &db, &jsMod](
             const dice::Message& msg, std::string reply, std::string broadcast,
             const std::string& aiCat, const std::string& quoteId,
             std::vector<std::string> fwdNodes, bool recordLog, bool linkReplyOk,
@@ -1171,6 +1192,21 @@ static int realMain(int argc, char* argv[]) {
                     }
                 }
             }
+            // SealDice onMessageSend observes the final text after it has been
+            // delivered. Hook-originated direct sends intentionally do not
+            // recurse into this path, preventing an accidental message loop.
+            auto notifySent = [&](const auto& adapter, const std::string& text, bool privateOut) {
+                if (!jsMod.ready() || text.empty()) return;
+                dice::Message sent;
+                sent.platform = adapter->platform(); sent.adapterId = adapter->id();
+                sent.selfId = adapter->getLoginId(); sent.senderId = adapter->getLoginId();
+                sent.senderName = adapter->getLoginName(); sent.targetId = msg.targetId;
+                sent.type = privateOut ? dice::MessageType::kPrivate : msg.type;
+                sent.content = text; sent.rawContent = text; sent.displayContent = text;
+                sent.timestamp = static_cast<int64_t>(std::time(nullptr)); sent.fromSelf = true;
+                jsMod.handleMessageSend(msg, sent);
+            };
+
             if (!reply.empty()) {
                 // Log the bot's OUTGOING reply too, so the dashboard log shows 收 + 发.
                 std::string where = (msg.type == dice::MessageType::kGroup && !msg.targetId.empty())
@@ -1210,7 +1246,10 @@ static int realMain(int argc, char* argv[]) {
                 // 普通消息「顺序」发，保证 A→B 阅读顺序一致。
                 bool quoteFirst = quote && segs.size() == 1;
                 auto sendSegs = [&](const auto& a) {
-                    if (wantForward && !fwdNodes.empty() && a->sendGroupForwardMsgFormatted(msg.targetId, fwdNodes, replyFormat)) return;
+                    if (wantForward && !fwdNodes.empty() && a->sendGroupForwardMsgFormatted(msg.targetId, fwdNodes, replyFormat)) {
+                        notifySent(a, reply, false);
+                        return;
+                    }
                     for (size_t k = 0; k < segs.size(); ++k) {
                         // 分段之间留几毫秒，避免同一适配器并发发消息导致客户端乱序。
                         if (k > 0) std::this_thread::sleep_for(std::chrono::milliseconds(30));
@@ -1219,6 +1258,7 @@ static int realMain(int argc, char* argv[]) {
                         // =对话对方，避免回复发给骰娘自己）。sendReply 亦用 targetId，一致。
                         else if (priv) a->sendPrivateMessageFormatted(msg.targetId, segs[k], replyFormat);
                         else a->sendGroupMessageFormatted(msg.targetId, segs[k], replyFormat);
+                        notifySent(a, segs[k], priv);
                     }
                 };
                 // 只通过消息来源的那个适配器回复，避免多账号/多适配器时串台。
@@ -1233,8 +1273,10 @@ static int realMain(int argc, char* argv[]) {
             // via the originating adapter (after the command reply).
             if (!broadcast.empty()) {
                 DICE_LOG_INFO("[\xe7\xbe\xa4 {}] \xf0\x9f\x93\xa2 \xe5\xb9\xbf\xe6\x92\xad: {}", msg.targetId, broadcast);  // 群 ... 📢 广播
-                if (auto a = adapterMgr.getAdapter(msg.adapterId))
+                if (auto a = adapterMgr.getAdapter(msg.adapterId)) {
                     a->sendGroupMessage(msg.targetId, "\xF0\x9F\x93\xA2 " + broadcast);  // 📢
+                    notifySent(a, "\xF0\x9F\x93\xA2 " + broadcast, false);
+                }
             }
         };
 
@@ -1431,6 +1473,8 @@ static int realMain(int argc, char* argv[]) {
         nlohmann::json cfgAll = configMgr.getAll();
         auto a = adapterMgr.getAdapter(e.adapterId);
         if (!a) return;
+        if (jsMod.ready()) jsMod.handleEvent(e);
+
         nlohmann::json diceSettings = dice::scoped_settings::resolveSection(
             cfgAll, "dice", a->platform(), e.adapterId);
         // 事件开关按帐号 > 适配器 > 全局解析。

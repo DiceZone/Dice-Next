@@ -102,6 +102,7 @@
     "coc": {
       "build": "**{nick}** 的調查員作成：{res}",
       "total": "共計",
+      "asset": "資產",
       "attr": {
         "str": "力量",
         "con": "體質",
@@ -208,7 +209,7 @@
     "ambiguous": "「{topic}」對應到多個幫助條目：{list}，請輸入更精確的名稱。",
     "topic": {
       "rdx": "雙十字 .rdx：舊版 Dice 相容別名，與 .dx 完全相同。例 .rdx 3c8。",
-      "r": "擲骰 .r [運算式] [原因]：擲骰。例 .r3d6+2 攻擊；.rh 暗骰；N#expr 連擲。",
+      "r": "擲骰 .r [運算式] [原因]：擲骰。例 .r3d6+2 攻擊；.rh 暗骰；N#expr 連擲。預設骰理由可不加空格，如 .rd測試。",
       "rh": "暗骰 .rh [表達式] [原因]：暗骰/暗檢定。結果以私聊發給你，群裡只提示「<名> 進行了暗骰」，他人看不到點數。暗檢定用 .rah / .rch（如 .rah 偵查 60），結果同樣私聊；房規(.setcoc)、獎懲骰等照常生效。",
       "ra": "檢定 .ra <技能|屬性> [成功率] [原因]：COC 檢定。省略成功率時讀人物卡。可用 .ra(出目)成功率 預覽指定成功等級的文案。例 .ra 偵查 / .ra 力量60 / .ra(1)1 / .ra(100)1",
       "rx": "心理學 .rx @調查員 [成功率]：心理學暗骰（守秘人用）。對被 @ 的調查員擲一次心理學檢定，含成功等級的詳細結果私聊發給你，群裡只出一句不劇透的回執。省略成功率時讀對方人物卡的「心理學」，預設 10。",
@@ -438,13 +439,20 @@
     "locked": "已鎖定當前人物卡（{key}）√",
     "unlocked": "已解鎖當前人物卡（{key}）√",
     "lock_already": "當前人物卡已有該鎖（{key}）。",
-    "unlock_missing": "當前人物卡沒有該鎖（{key}）。"
+    "unlock_missing": "當前人物卡沒有該鎖（{key}）。",
+    "copy_usage": "用法：.pc cpy <新卡名> [來源卡名]（省略來源卡時複製當前卡）",
+    "copied": "已將人物卡「{source}」複製為「{destination}」。",
+    "groups_empty": "尚無任何群組綁定人物卡。",
+    "groups": "人物卡群組綁定：\n{list}",
+    "private_scope": "私聊",
+    "templates": "可用人物卡生成模板：\n{list}"
   },
   "deck": {
     "usage": "指令 .draw 用法：.draw 牌堆名（可 .draw3 牌堆名 抽多張）",
     "no_deck": "沒有名為「{name}」的牌堆",
     "ambiguous": "「{name}」對應到多個牌堆：{list}，請輸入更精確的名稱。",
     "result": "{nick} 抽到：{res}",
+    "hidden": "{nick} 進行了一次暗抽，結果已私聊告知。",
     "list": "共 {count} 個牌堆：\n{list}",
     "empty": "還沒有任何牌堆，把牌堆 JSON 放進 decks/ 目錄即可",
     "default_set": "已將「{name}」設為本群預設牌堆，之後直接 .draw 即可抽取。",
@@ -460,7 +468,9 @@
     "temp_tag": "(臨時)"
   },
   "mod": {
-    "wip": "模組功能開發中……"
+    "info": "外掛 {name}（{kind}，{id}）：{state}",
+    "web_admin": "外掛更新、重載、刪除和重裝請在 WebUI 的外掛管理頁操作。",
+    "usage": "用法：.mod list / .mod on|off <外掛> / .mod info <外掛>"
   },
   "authorize": {
     "sent": "許可申請已傳送給 Master。"
@@ -575,6 +585,8 @@
     "me_global": "抱歉，已在全域關閉了該命令。",
     "cmd_global": "抱歉，{cmd} 已被全域停用。",
     "in_group": "抱歉，{cmd} 已在本群停用。",
+    "cmd_on": "已在本群啟用 {cmd}。",
+    "cmd_off": "已在本群停用 {cmd}。",
     "external_on": "已開啟外置模式：停用內置指令，僅保留自訂回覆（用「外置關」恢復）。",
     "external_off": "已關閉外置模式：內置指令已恢復。",
     "not_master": "抱歉，該指令僅限本骰 Master 使用。",
@@ -847,6 +859,28 @@
     "proxy_note": "【NPC：{name}】\n"
   },
   "system": {
+  "legacy_user": {
+    "usage": "用法：.user state | trust <使用者> [等級] | tojson [使用者] | diss <使用者> [原因]",
+    "state": "{user} 的使用者記錄\n信任等級：{trust}\n首次建檔：{created}\n指令次數：{commands}\n人物卡：{cards}\n最近指令：{last}",
+    "not_found": "沒有使用者 {user} 的記錄。",
+    "diss_usage": "用法：.user diss <使用者> [原因]",
+    "dissed": "已將使用者 {user} 加入本機黑名單；人物卡與檔案已保留，可撤銷。",
+    "already_dissed": "使用者 {user} 已在本機黑名單中。",
+    "destructive_web": "為防止聊天誤操作，使用者檔案/人物卡的刪除與批次清理只在 WebUI 資料管理中提供。"
+  },
+  "legacy_cloud": {
+    "usage": "用法：.cloud black | update",
+    "disabled": "雲黑同步未開啟或服務尚未初始化，請先在 WebUI 設定雲黑服務。",
+    "queued": "已在背景發起雲端黑名單同步；結果會寫入服務日誌。",
+    "update_web": "目前 DiceNext 版本：{version}。程式升級請使用 WebUI/發佈包；不支援聊天內下載並覆寫執行檔。"
+  },
+  "legacy_str": {
+    "unsupported": "舊文字鍵 {key} 與 DiceNext 沒有安全的一對一槽位，請在 WebUI 的「回覆文字」編輯對應的新模板。",
+    "show": "{key} → {mapped}\n{text}",
+    "set": "已透過 DiceNext 統一模板覆蓋層設定 {key}。",
+    "reset": "已重設 {key}，恢復目前語言的內建模板。",
+    "failed": "模板覆蓋儲存失敗。"
+  },
     "usage": "用法：.system info（系統資訊）/ .system stats（運行統計）",
     "unknown": "未知",
     "info": "系統資訊\nOS: {os}\nCPU: {cores} 核 · 佔用 {cpu}%\n記憶體: {memused}/{memtotal} MB（{memload}%）\n本行程記憶體: {proc} MB",

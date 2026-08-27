@@ -947,8 +947,8 @@ private:
         // Only explicit Markdown is rich text. Card mode can place literal text
         // in a Markdown container, but escapes it first so punctuation survives.
         const bool explicitMarkdown = format == ContentFormat::kMarkdown;
-        const bool useMarkdown = !forceTraditional && m.type != MessageType::kChannel &&
-                                 (effectiveCardMode() || explicitMarkdown);
+        const bool useMarkdown = !forceTraditional && effectiveCardMode() &&
+                                 m.type != MessageType::kChannel;
         std::string wireText = useMarkdown
             ? (explicitMarkdown ? text : markdown::escapeQQMarkdownLiteral(text))
             : (explicitMarkdown ? markdown::toPlainText(text) : text);
@@ -971,7 +971,7 @@ private:
             const auto eventId = takePassiveEvent(m.type, target);
             if (!eventId.empty()) body["event_id"] = eventId;
         }
-        request->setBody(body.dump());
+        request->setBody(dumpJsonUtf8Safe(body));
         client->sendRequest(request, [self = shared_from_this(), path, message = m, text, format, useMarkdown](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
             const bool httpRejected = response && response->statusCode() >= 300;
             if (useMarkdown && httpRejected) {

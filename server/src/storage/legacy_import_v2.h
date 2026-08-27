@@ -15,6 +15,7 @@
 
 #include "database.h"
 #include "legacy_dice2.h"
+#include "legacy_message_keys.h"
 #include "../config/config_manager.h"
 #include "../i18n/i18n.h"
 #include "../core/reply/reply_manager.h"
@@ -568,6 +569,10 @@ inline int importHelp(Database& db, I18n& i18n, const fs::path& confDir) {
     return imported;
 }
 
+// Definitions moved to legacy_message_keys.h so live `.strXXX` compatibility
+// and migration share one audited map. The former block remains excluded as
+// nearby rationale for mappings which intentionally have no one-to-one slot.
+#if 0
 // Original Dice!V2 GlobalMsg key (strXXX) → DiceNext i18n key. Only keys with a
 // clean equivalent; the rest have no 1:1 slot (different architecture).
 inline const std::map<std::string, std::string>& msgKeyMap() {
@@ -667,6 +672,7 @@ inline std::string v2KeyFor(const std::string& ourKey) {
     for (auto& [orig, our] : msgKeyMap()) if (our == ourKey) return orig;
     return "";
 }
+#endif
 
 // ── CustomMsg.json → i18n overrides (回执/投掷文本) ───────────
 // Mapped keys → their DiceNext i18n key (zh-Hans+zh-Hant). UNmapped keys are

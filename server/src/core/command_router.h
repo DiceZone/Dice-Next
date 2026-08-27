@@ -11,10 +11,12 @@
 #include "../adapter/adapter_interface.h"
 #include "../adapter/adapter_manager.h"
 #include "../core/dice/dice_engine.h"
+#include "../core/dice/roll_command_parser.h"
 #include "../core/dice/madness_data.h"
 #include "../core/reply/reply_manager.h"
 #include "character/card_store.h"
 #include "deck/card_deck.h"
+#include "../storage/legacy_message_keys.h"
 #include "../storage/database.h"
 #include "rules_lock.h"
 #include "check_roll_override.h"
@@ -305,6 +307,7 @@ public:
         if (auto r = tryHandleMaster(loc, msg, cmd))return *r;  // boton/botoff/blackqq/whitegroup… (须在 .bot 前)
         if (auto r = tryHandleBot(loc, msg, cmd))   return *r;  // .bot / .bot on/off (+账号定向)
         if (auto r = tryHandleSelfText(loc, msg, cmd)) return *r;  // .strSelfName/.strSelfCall (须在 .st 前)
+        if (auto r = tryHandleLegacyStr(loc, msg, cmd)) return *r; // .strXXX → 统一 i18n 覆盖层
         if (auto r = tryHandleST(loc, msg, cmd))    return *r;  // .st 人物卡 (改自己的卡，不代骰)
         if (auto r = RM(PX(tryHandleSC(loc, pmsg, cmd))))    return *r;  // .sc 理智检定
         if (auto r = RM(PX(tryHandleWW(loc, pmsg, cmd))))    return *r;  // .ww 骰池
@@ -341,7 +344,7 @@ public:
             static const char* kWordCmds[] = {   // 本段全部词指令，按长度降序排列
                 "helpdoc", "welcome", "dismiss", "ruleset",
                 "notice",
-                "alias", "trust", "admin", "rules", "group", "reply", "bind", "info",
+                "alias", "trust", "admin", "rules", "group", "reply", "cloud", "user", "bind", "info",
                 // “game”不做免空格前缀回退——.game xx 由 tryHandleGame 直达（带空格），
                 // 否则 .gameXXX 类 Lua 插件触发词会被拆成 game+XXX 吞掉。
                 "buff", "send", "help", "text", "link", "init", "lang", "rule",
@@ -367,6 +370,8 @@ public:
         if (cmdLower == "ai")      return handleAi(loc, args, msg);   // 本群 AI 开关
         if (cmdLower == "trust")   return handleTrust(loc, args, msg); // C：用户信任等级
         if (cmdLower == "admin")   return handleAdmin(loc, args, msg); // C：管理员授撤
+        if (cmdLower == "user")    return handleLegacyUser(loc, args, msg);
+        if (cmdLower == "cloud")   return handleLegacyCloud(loc, args, msg);
         if (cmdLower == "notice")  return handleNotice(loc, args, msg); // B：通知窗口注册
         if (cmdLower == "alias")   return handleAlias(loc, args, msg);  // C：账号别名（TinyList）
         if (cmdLower == "bind")    return handleIdentityBind(args, msg);
@@ -620,6 +625,15 @@ private:
         std::vector<int> individualResults;
     };
 
+    /// Legacy .rs only exposes the final value.  Keep richer output for engines
+    /// whose detail string has no conventional "=" boundary.
+    static std::string shortRollDetail(const RoutedExpressionResult& result) {
+        const size_t eq = result.detail.rfind('=');
+        if (eq == std::string::npos) return result.detail;
+        std::string tail = trim(result.detail.substr(eq + 1));
+        return tail.empty() ? result.detail : tail;
+    }
+
     static std::vector<std::string> normalizeExpressionOrder(const nlohmann::json& value) {
         static const std::array<std::string, 3> valid = {"dicenext", "onedice", "dicescript"};
         std::vector<std::string> order;
@@ -781,14 +795,17 @@ private:
     /// Returns nullopt if `cmd` is not a roll command (so other handlers run).
     std::optional<std::string> tryHandleRoll(Locale loc, const Message& msg,
                                              const std::string& cmd) {
-        if (cmd.empty() || (cmd[0] != 'r' && cmd[0] != 'R')) return std::nullopt;
+        if (cmd.empty()) return std::nullopt;
+        const bool legacyHidden = cmd[0] == 'h' || cmd[0] == 'H';
+        if (!legacyHidden && cmd[0] != 'r' && cmd[0] != 'R') return std::nullopt;
 
         // Parse flags after 'r': 's' (short) and 'h' (hidden), in any order.
         size_t j = 1;
-        bool hidden = false;
+        bool hidden = legacyHidden;
+        bool shortForm = false;
         while (j < cmd.size()) {
             char cj = static_cast<char>(std::tolower(static_cast<unsigned char>(cmd[j])));
-            if (cj == 's') { ++j; }            // short form — accepted (full detail for now)
+            if (cj == 's') { shortForm = true; ++j; }
             else if (cj == 'h') { hidden = true; ++j; }
             else break;
         }
@@ -802,27 +819,21 @@ private:
             if (!ok) return std::nullopt;
         }
 
-        std::string out = handleRoll(loc, msg, trim(cmd.substr(j)));
+        std::string out = handleRoll(loc, msg, trim(cmd.substr(j)), shortForm);
         if (hidden) { sendPrivate(msg, out); return i18n_.tr(loc, "dice.roll.hidden", {{"nick", displayName(msg)}}); }
         return out;
     }
 
-    std::string handleRoll(Locale loc, const Message& msg, const std::string& restRaw) {
+    std::string handleRoll(Locale loc, const Message& msg, const std::string& restRaw,
+                           bool shortForm = false) {
         std::string rest = substituteFormulaAttrs(restRaw, msg);   // 展开 +db 等公式属性
-        // Separate the leading dice expression from an optional reason.
-        std::string diceToken = readDiceToken(rest);
-        std::string expr, reason;
-        if (hasNonDigit(diceToken)) {
-            expr = diceToken;
-            reason = trim(rest.substr(diceToken.size()));
-        } else {
-            // Pure number or empty → not a dice expression; whole rest is the reason.
-            expr.clear();
-            reason = rest;
-        }
-        // 裸 d/D（无面数，如 .rd / .r d）视同「掷默认骰」，与 .r 一致——落入下方
-        // 默认骰逻辑（.set 默认骰 / 本群默认骰生效），否则引擎会把裸 d 当死板 d100。
-        if (expr == "d" || expr == "D") expr.clear();
+        // Split before selecting an expression engine. In particular, `.rd测试`
+        // is the historic compact spelling for default die + reason, not a
+        // Unicode DiceScript identifier.
+        auto parsedRoll = roll_command::parse(rest);
+        std::string expr = std::move(parsedRoll.expression);
+        std::string reason = std::move(parsedRoll.reason);
+
 
         // Multi-roll: "N#expr"
         int turns = 1;
@@ -887,7 +898,7 @@ private:
             if (!result.individualResults.empty())
                 recordSimpleDiceResult(expr, result.individualResults);
             return i18n_.tr(loc, reason.empty() ? "dice.roll.result" : "dice.roll.result_reason",
-                {{"nick", nick}, {"reason", reason}, {"res", result.detail}});
+                {{"nick", nick}, {"reason", reason}, {"res", shortForm ? shortRollDetail(result) : result.detail}});
         }
 
         // Multi-roll uses the same configured engine chain for every round.
@@ -898,74 +909,13 @@ private:
             if (!result.individualResults.empty())
                 recordSimpleDiceResult(expr, result.individualResults);
             if (i > 0) res << ", \n";
-            res << result.detail;
+            res << (shortForm ? shortRollDetail(result) : result.detail);
         }
         return i18n_.tr(loc, reason.empty() ? "dice.roll.multi" : "dice.roll.multi_reason",
             {{"nick", nick}, {"reason", reason},
              {"turn", std::to_string(turns)}, {"res", "\n" + res.str()}});
     }
 
-    /// Read the leading dice-expression token. Besides ASCII operators this
-    /// recognizes the small set of non-ASCII DiceScript operators explicitly,
-    /// while an arbitrary Chinese suffix still starts the roll reason.
-    static std::string readDiceToken(const std::string& s) {
-        // Let the full DiceScript parser find the longest expression prefix
-        // without evaluating it.  This keeps spaces inside arrays/dicts and
-        // method calls such as "[1, 2, 3].sum() + 2d6" intact while leaving
-        // the following text as the roll reason.  The legacy scanner below is
-        // retained for OneDice-only spellings outside DiceScript's grammar.
-        if (!s.empty()) {
-            dicescript_runtime_options options{};
-            dicescript_default_runtime_options(&options);
-            options.enable_dice_coc = 1;
-            options.enable_dice_fate = 1;
-            options.enable_dice_wod = 1;
-            options.enable_dice_double_cross = 1;
-            std::unique_ptr<dicescript_context,
-                decltype(&dicescript_context_destroy)> context(
-                    dicescript_context_create(&options),
-                    &dicescript_context_destroy);
-            dicescript_script_result parsed{};
-            if (context && dicescript_context_validate_expression_prefix(
-                    context.get(), s.c_str(), &parsed) &&
-                parsed.consumed_bytes != 0)
-                return std::string(parsed.matched);
-        }
-
-        static const std::array<std::string, 8> extendedTokens = {
-            "优势", "優勢", "劣势", "劣勢", "＋", "－", "＊", "／"
-        };
-        size_t i = 0;
-        while (i < s.size()) {
-            unsigned char c = static_cast<unsigned char>(s[i]);
-            bool ok = std::isalnum(c) ||
-                c=='+'||c=='-'||c=='*'||c=='/'||c=='^'||
-                c=='%'||c=='?'||c==':'||
-                c=='<'||c=='>'||c=='&'||c=='|'||c=='!'||
-                c=='('||c==')'||c=='['||c==']'||c==','||c=='#';
-            if (ok) {
-                ++i;
-                continue;
-            }
-            bool matched = false;
-            for (const auto& token : extendedTokens) {
-                if (s.compare(i, token.size(), token) == 0) {
-                    i += token.size();
-                    matched = true;
-                    break;
-                }
-            }
-            if (!matched) break;
-        }
-        return s.substr(0, i);
-    }
-
-    static bool hasNonDigit(const std::string& s) {
-        if (s.empty()) return false;
-        for (char c : s)
-            if (!std::isdigit(static_cast<unsigned char>(c))) return true;
-        return false;
-    }
 
     // ─── Skill-check success levels (faithful to original RollSuccessLevel) ──
 
@@ -2266,10 +2216,20 @@ private:
         std::string lc = toLower(cmd);
         if (lc.rfind("coc", 0) == 0) {
             std::string rest = trim(cmd.substr(3));
-            // Skip edition/silent markers (7/6/s); COC6 distinction is on the roadmap.
-            while (!rest.empty() && (rest[0]=='7'||rest[0]=='6'||rest[0]=='s'||rest[0]=='S'))
+            bool edition6 = false, detailed = false;
+            // Dice! spellings: coc/coc7, coc6, cocd/coc7d/coc6d.  The historical
+            // trailing "s" marker only affected column spacing and is accepted.
+            while (!rest.empty()) {
+                const char marker = static_cast<char>(std::tolower(static_cast<unsigned char>(rest[0])));
+                if (marker == '6') edition6 = true;
+                else if (marker == '7') edition6 = false;
+                else if (marker == 'd') detailed = true;
+                else if (marker != 's') break;
                 rest = trim(rest.substr(1));
-            return handleCOC(loc, msg, clampCount(parseIntOr(rest, 1)));
+            }
+            const int count = clampCount(parseIntOr(rest, 1));
+            if (detailed) return handleCOCDetailed(loc, msg, count, edition6);
+            return edition6 ? handleCOC6(loc, msg, count) : handleCOC(loc, msg, count);
         }
         if (lc.rfind("dnd", 0) == 0) {
             return handleDND(loc, msg, clampCount(parseIntOr(trim(cmd.substr(3)), 1)));
@@ -2308,6 +2268,114 @@ private:
         for (auto& b : blocks) res << "\n" << b;
         const std::string nick = displayName(msg);
         return i18n_.tr(loc, "dice.coc.build", {{"nick", nick}, {"res", res.str()}});
+    }
+    std::string handleCOC6(Locale loc, const Message& msg, int count) {
+        static const char* attrKeys[8] = {
+            "dice.coc.attr.str", "dice.coc.attr.con", "dice.coc.attr.siz",
+            "dice.coc.attr.dex", "dice.coc.attr.app", "dice.coc.attr.int",
+            "dice.coc.attr.pow", "dice.coc.attr.edu"
+        };
+        static const char* attrRolls[8] = {
+            "3d6", "3d6", "2d6+6", "3d6", "3d6", "2d6+6", "3d6", "3d6+3"
+        };
+        std::vector<std::string> blocks;
+        for (int c = 0; c < count; ++c) {
+            std::ostringstream b;
+            int total = 0;
+            for (int i = 0; i < 8; ++i) {
+                const int value = engine_.roll(attrRolls[i]).modifiedTotal;
+                b << i18n_.tr(loc, attrKeys[i]) << ":" << value << " ";
+                total += value;
+            }
+            const int asset = engine_.roll("1d10").modifiedTotal;
+            b << i18n_.tr(loc, "dice.coc.total") << ":" << total << " "
+              << i18n_.tr(loc, "dice.coc.asset") << ":" << asset;
+            blocks.push_back(b.str());
+        }
+        offerForward(msg, blocks);
+        std::ostringstream res;
+        for (const auto& block : blocks) res << "\n" << block;
+        return i18n_.tr(loc, "dice.coc.build",
+                        {{"nick", displayName(msg)}, {"res", res.str()}});
+    }
+
+    std::string handleCOCDetailed(Locale loc, const Message& msg, int count, bool edition6) {
+        static const char* attrKeys[9] = {
+            "dice.coc.attr.str", "dice.coc.attr.con", "dice.coc.attr.siz",
+            "dice.coc.attr.dex", "dice.coc.attr.app", "dice.coc.attr.int",
+            "dice.coc.attr.pow", "dice.coc.attr.edu", "dice.coc.attr.luck"
+        };
+        static const char* rolls7[9] = {
+            "3d6", "3d6", "2d6+6", "3d6", "3d6", "2d6+6", "3d6", "2d6+6", "3d6"
+        };
+        static const char* rolls6[8] = {
+            "3d6", "3d6", "2d6+6", "3d6", "3d6", "2d6+6", "3d6", "3d6+3"
+        };
+        std::vector<std::string> blocks;
+        for (int c = 0; c < count; ++c) {
+            std::ostringstream b;
+            if (!edition6) {
+                std::array<int, 9> value{};
+                int total = 0;
+                for (int i = 0; i < 9; ++i) {
+                    value[i] = engine_.roll(rolls7[i]).modifiedTotal * 5;
+                    b << i18n_.tr(loc, attrKeys[i]) << "=" << rolls7[i] << "*5="
+                      << value[i];
+                    if (i < 8) b << "/" << value[i] / 2 << "/" << value[i] / 5;
+                    b << "\n";
+                    total += value[i];
+                }
+                const int sum = value[0] + value[2];
+                std::string db; int build = 0;
+                if (sum <= 64) { db = "-2"; build = -2; }
+                else if (sum <= 84) { db = "-1"; build = -1; }
+                else if (sum <= 124) { db = "0"; build = 0; }
+                else if (sum <= 164) { db = "1D4"; build = 1; }
+                else { db = "1D6"; build = 2; }
+                const int mov = (value[3] < value[2] && value[0] < value[2]) ? 7
+                              : (value[3] > value[2] && value[0] > value[2]) ? 9 : 8;
+                b << i18n_.tr(loc, "dice.coc.total") << ":" << (total - value[8])
+                  << "/" << total
+                  << "\nSAN=POW=" << value[6]
+                  << "\nHP=(SIZ+CON)/10=" << (value[2] + value[1]) / 10
+                  << "\nMP=POW/5=" << value[6] / 5
+                  << "\nDB=" << db
+                  << "\nBUILD=" << build
+                  << "\nMOV=" << mov;
+            } else {
+                std::array<int, 8> value{};
+                int total = 0;
+                for (int i = 0; i < 8; ++i) {
+                    value[i] = engine_.roll(rolls6[i]).modifiedTotal;
+                    b << i18n_.tr(loc, attrKeys[i]) << "=" << rolls6[i] << "="
+                      << value[i] << "\n";
+                    total += value[i];
+                }
+                const int asset = engine_.roll("1d10").modifiedTotal;
+                const int sum = value[0] + value[2];
+                std::string db;
+                if (sum <= 12) db = "-1D6";
+                else if (sum <= 16) db = "-1D4";
+                else if (sum <= 24) db = "0";
+                else if (sum <= 32) db = "1D4";
+                else db = "1D6";
+                b << i18n_.tr(loc, "dice.coc.total") << ":" << total
+                  << "\nSAN=POW*5=" << value[6] * 5
+                  << "\nIDEA=INT*5=" << value[5] * 5
+                  << "\nLUCK=POW*5=" << value[6] * 5
+                  << "\nKNOW=EDU*5=" << value[7] * 5
+                  << "\nHP=(CON+SIZ)/2=" << (value[1] + value[2] + 1) / 2
+                  << "\nMP=POW=" << value[6]
+                  << "\nDB=" << db
+                  << "\n" << i18n_.tr(loc, "dice.coc.asset") << "=1D10=" << asset;
+            }
+            blocks.push_back(b.str());
+        }
+        offerForward(msg, blocks);
+        std::ostringstream res;
+        for (const auto& block : blocks) res << "\n" << block;
+        return i18n_.tr(loc, "dice.coc.build",
+                        {{"nick", displayName(msg)}, {"res", res.str()}});
     }
 
     std::string handleDND(Locale loc, const Message& msg, int count) {
@@ -3936,6 +4004,14 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
 
 private:
     std::string handleHelp(Locale loc, const std::string& args, const Message& msg) {
+        const std::string toggle = toLower(trim(args));
+        if (toggle == "on" || toggle == "off") {
+            if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "group.private");
+            if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
+            const bool enabled = toggle == "on";
+            setGroupCmdDisabled(msg, "help", !enabled);
+            return i18n_.tr(loc, enabled ? "gate.cmd_on" : "gate.cmd_off", {{"cmd", "help"}});
+        }
         std::string topic = toLower(trim(args));
         if (topic.empty()) return i18n_.tr(loc, "help.main");
         topic = toLower(trim(stripPrefix(topic)));   // 容忍 ".help .r"
@@ -5152,8 +5228,8 @@ private:
         if (head == "mrrp" || head == "zrrp") head = "jrrp";   // 同属 jrrp 家族
         static const std::set<std::string> kGated = {"jrrp", "draw", "deck", "send", "help", "me"};
         if (!kGated.count(head)) return std::nullopt;
-        // .me on/off 是开关子指令，须放行到 handler（群管门控），否则关掉后就再也开不回来。
-        if (head == "me") {
+        // 开关子指令必须放行到 handler，否则关掉后无法在群内恢复。
+        if (head == "me" || head == "jrrp" || head == "help") {
             std::string sub = trim(cmdL.substr((std::min)(cmdL.size(), cmdL.find(' ') == std::string::npos ? cmdL.size() : cmdL.find(' ') + 1)));
             if (sub == "on" || sub == "off") return std::nullopt;
         }
@@ -5543,6 +5619,148 @@ public:
             "\xe5\xb7\xb2\xe6\x94\xb6\xe5\x9b\x9e " + name + "(" + target + ") \xe7\x9a\x84\xe7\xae\xa1\xe7\x90\x86\xe6\x9d\x83\xe9\x99\x90",
             msg.platform, origin, "admin", msg.adapterId);
         return i18n_.tr(loc, "admin.removed", {{"user", name}});
+    }
+
+    // Original Dice! `.user` compatibility backed by DiceNext's unified
+    // profile and banlist. Irreversible record/card deletion remains a WebUI
+    // operation so an accidental chat command cannot erase user data.
+    std::string handleLegacyUser(Locale loc, const std::string& args, const Message& msg) {
+        auto [actionRaw, rest] = splitCommand(trim(args));
+        const std::string action = toLower(actionRaw);
+        if (action == "state") {
+            PlayerProfileRow row;
+            row.platform = msg.platform; row.userId = msg.senderId; row.nickname = msg.senderName;
+            if (auto* st = db_.getStorage()) try {
+                namespace orm = sqlite_orm;
+                auto rows = st->get_all<PlayerProfileRow>(orm::where(
+                    orm::c(&PlayerProfileRow::platform) == msg.platform and
+                    orm::c(&PlayerProfileRow::userId) == msg.senderId), orm::limit(1));
+                if (!rows.empty()) row = rows.front();
+            } catch (...) {}
+            return i18n_.tr(loc, "legacy_user.state", {
+                {"user", row.nickname.empty() ? msg.senderId : row.nickname + "(" + msg.senderId + ")"},
+                {"trust", std::to_string(trustOf(msg))},
+                {"created", row.createdAt.empty() ? "-" : row.createdAt},
+                {"commands", std::to_string(row.cmdCount)},
+                {"cards", std::to_string(cards_.listCards(msg.senderId).size())},
+                {"last", row.lastCmdAt.empty() ? "-" : row.lastCmdAt}
+            });
+        }
+        if (action == "trust") return handleTrust(loc, rest, msg);
+
+        if (action == "tojson") {
+            std::string target = atTarget(msg);
+            if (target.empty()) {
+                std::istringstream iss(rest); std::string token;
+                while (iss >> token) if (isAllDigits(token)) { target = token; break; }
+            }
+            if (target.empty()) target = msg.senderId;
+            if (target != msg.senderId && trustOf(msg) < kTrustAdmin)
+                return i18n_.tr(loc, "gate.not_admin");
+            auto* st = db_.getStorage();
+            if (!st) return i18n_.tr(loc, "legacy_user.not_found", {{"user", target}});
+            try {
+                namespace orm = sqlite_orm;
+                auto rows = st->get_all<PlayerProfileRow>(orm::where(
+                    orm::c(&PlayerProfileRow::platform) == msg.platform and
+                    orm::c(&PlayerProfileRow::userId) == target), orm::limit(1));
+                if (rows.empty()) return i18n_.tr(loc, "legacy_user.not_found", {{"user", target}});
+                const auto& r = rows.front();
+                return nlohmann::json{{"platform", r.platform}, {"userId", r.userId},
+                    {"nickname", r.nickname}, {"trustLevel", r.trustLevel},
+                    {"cmdCount", r.cmdCount}, {"groupCmdCount", r.groupCmdCount},
+                    {"favor", r.favor}, {"lastCmdAt", r.lastCmdAt},
+                    {"createdAt", r.createdAt}, {"cards", cards_.listCards(target)}}.dump();
+            } catch (...) {
+                return i18n_.tr(loc, "legacy_user.not_found", {{"user", target}});
+            }
+        }
+
+        if (action == "diss") {
+            const int mine = trustOf(msg);
+            if (mine < kTrustAdmin) return i18n_.tr(loc, "gate.not_admin");
+            std::string target = atTarget(msg), reason;
+            std::istringstream iss(rest); std::string token;
+            while (iss >> token) {
+                if (target.empty() && isAllDigits(token)) target = token;
+                else { if (!reason.empty()) reason += " "; reason += token; }
+            }
+            if (target.empty()) return i18n_.tr(loc, "legacy_user.diss_usage");
+            if (trustOf(msg.platform, target, msg.selfId) >= mine)
+                return i18n_.tr(loc, "trust.target_higher");
+            const bool fresh = !banlistHas(0, 0, target);
+            banlistAdd(0, 0, target, reason.empty() ? "local diss" : reason);
+            return i18n_.tr(loc, fresh ? "legacy_user.dissed" : "legacy_user.already_dissed",
+                            {{"user", target}});
+        }
+
+        if (action == "kill" || action == "clr")
+            return i18n_.tr(loc, "legacy_user.destructive_web");
+        return i18n_.tr(loc, "legacy_user.usage");
+    }
+
+    std::string handleLegacyCloud(Locale loc, const std::string& args, const Message& msg) {
+        if (!isMaster(msg)) return i18n_.tr(loc, "gate.not_master");
+        auto [actionRaw, rest] = splitCommand(trim(args));
+        const std::string action = toLower(actionRaw);
+        if (action == "black") return i18n_.tr(loc, "legacy_cloud.disabled");
+        if (action == "update")
+            return i18n_.tr(loc, "legacy_cloud.update_web", {{"version", dice::versionString()}});
+        (void)rest;
+        return i18n_.tr(loc, "legacy_cloud.usage");
+    }
+
+    // Original `.strXXX <text|show|reset|NULL>` writes the same override table
+    // used by the WebUI. Only audited one-to-one keys are accepted.
+    std::optional<std::string> tryHandleLegacyStr(Locale loc, const Message& msg,
+                                                   const std::string& cmd) {
+        auto [legacyKey, valueRaw] = splitCommand(cmd);
+        if (legacyKey.size() < 3 || toLower(legacyKey.substr(0, 3)) != "str") return std::nullopt;
+        std::string mapped, canonical;
+        const std::string wanted = toLower(legacyKey);
+        for (const auto& [oldKey, newKey] : legacyv2::msgKeyMap()) {
+            if (toLower(oldKey) == wanted) { canonical = oldKey; mapped = newKey; break; }
+        }
+        if (mapped.empty()) {
+            if (wanted == "str") return i18n_.tr(loc, "legacy_str.unsupported", {{"key", legacyKey}});
+            return std::nullopt;
+        }
+        if (!isMaster(msg)) return i18n_.tr(loc, "gate.not_master");
+
+        const std::string value = trim(valueRaw);
+        const std::string lower = toLower(value);
+        if (value.empty() || lower == "show")
+            return i18n_.tr(loc, "legacy_str.show", {{"key", canonical}, {"mapped", mapped},
+                                                     {"text", i18n_.tr(loc, mapped)}});
+
+        auto* st = db_.getStorage();
+        if (!st) return i18n_.tr(loc, "legacy_str.failed");
+        const std::string localeName = localeToString(loc);
+        try {
+            namespace orm = sqlite_orm;
+            if (lower == "reset") {
+                st->remove_all<I18nOverrideRow>(orm::where(
+                    orm::c(&I18nOverrideRow::locale) == localeName and
+                    orm::c(&I18nOverrideRow::key) == mapped));
+                i18n_.clearOverride(loc, mapped);
+                return i18n_.tr(loc, "legacy_str.reset", {{"key", canonical}});
+            }
+            const std::string normalized = lower == "null" ? std::string()
+                : legacyv2::normalizeLegacyTemplate(canonical, value);
+            auto rows = st->get_all<I18nOverrideRow>(orm::where(
+                orm::c(&I18nOverrideRow::locale) == localeName and
+                orm::c(&I18nOverrideRow::key) == mapped));
+            if (rows.empty()) {
+                I18nOverrideRow row; row.locale = localeName; row.key = mapped;
+                row.value = normalized; row.format = "plain"; st->insert(row);
+            } else {
+                auto row = rows.front(); row.value = normalized; row.format = "plain"; st->update(row);
+            }
+            i18n_.setOverride(loc, mapped, normalized, ContentFormat::kPlainText);
+            return i18n_.tr(loc, "legacy_str.set", {{"key", canonical}});
+        } catch (...) {
+            return i18n_.tr(loc, "legacy_str.failed");
+        }
     }
 
     /// B：便捷推送——把一条通知发给订阅了该级别的骰主通知窗口（供事件层/定时任务调用）。
@@ -8858,11 +9076,15 @@ private:
         return "{" + tok + "}";   // leave unrecognized tokens untouched
     }
 
-    std::string handleReply(Locale loc, const std::string& args, const Message&) {
-        auto lower = toLower(args);
-        if (lower == "on")  return i18n_.tr(loc, "reply.on");
-        if (lower == "off") return i18n_.tr(loc, "reply.off");
-        return i18n_.tr(loc, "reply.usage");
+    std::string handleReply(Locale loc, const std::string& args, const Message& msg) {
+        const std::string lower = toLower(trim(args));
+        if (lower != "on" && lower != "off") return i18n_.tr(loc, "reply.usage");
+        if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "group.private");
+        // Dice! allowed any trusted user or a room host to toggle custom replies.
+        if (senderTrust(msg) <= 0 && !senderIsGroupAdmin(msg))
+            return i18n_.tr(loc, "gate.no_perm");
+        setGroupSetting(msg, "replyDisabled", lower == "off" ? "1" : "0");
+        return i18n_.tr(loc, lower == "on" ? "reply.on" : "reply.off");
     }
 
     // ─── .pc — multi-card management (new/tag/list/del/show) ─────
@@ -8985,7 +9207,7 @@ private:
         if (sub == "list") return listMyCards(loc, msg);
 
         // ".pc rename <新名>"（重命名当前卡）或 ".pc rename <旧名> <新名>"。
-        if (sub == "rename" || sub == "rn") {
+        if (sub == "rename" || sub == "rn" || sub == "nn") {
             auto [a1, a2] = splitCommand(name);
             std::string oldName, newName;
             if (trim(a2).empty()) { oldName = cards_.boundCard(user, scope); newName = trim(a1); }
@@ -9031,12 +9253,72 @@ private:
             return i18n_.tr(loc, "pc.deleted", {{"nick", nick}, {"name", name}});
         }
 
-        if (sub == "show" || sub == "stat") {
+        if (sub == "show") {
             // ".pc show" / ".pc show @某人" → view current (or target) card.
             if (!target.empty()) return renderCard(loc, target, scope, personNameOf(msg, target));
             return renderCard(loc, user, scope, nick);
         }
+        if (sub == "stat") return handleHiy(loc, name, msg);
 
+        if (sub == "cpy" || sub == "copy") {
+            std::string destinationRaw, sourceRaw;
+            size_t separator = name.find('=');
+            size_t separatorLength = 1;
+            if (separator == std::string::npos) {
+                separator = name.find("\xef\xbc\x9d");  // full-width equals
+                separatorLength = 3;
+            }
+            if (separator != std::string::npos) {
+                destinationRaw = name.substr(0, separator);
+                sourceRaw = name.substr(separator + separatorLength);
+            } else {
+                auto parsed = splitCommand(name);
+                destinationRaw = std::move(parsed.first);
+                sourceRaw = std::move(parsed.second);
+            }
+            const std::string destination = trim(destinationRaw);
+            std::string source = trim(sourceRaw);
+            if (source.empty()) source = cards_.boundCard(user, scope);
+            if (destination.empty() || source.empty()) return i18n_.tr(loc, "pc.copy_usage");
+            if (!cards_.cardExists(user, source))
+                return i18n_.tr(loc, "pc.not_found", {{"name", source}});
+            if (cards_.cardExists(user, destination)
+                && cards_.cardLockedByName(user, destination, "w"))
+                return i18n_.tr(loc, "card.locked_w");
+            if (!cards_.copyCard(user, source, destination))
+                return i18n_.tr(loc, "pc.copy_usage");
+            return i18n_.tr(loc, "pc.copied", {{"source", source}, {"destination", destination}});
+        }
+        if (sub == "grp") {
+            auto bindings = cards_.listBindings(user);
+            if (bindings.empty()) return i18n_.tr(loc, "pc.groups_empty");
+            std::string list;
+            for (const auto& [group, card] : bindings) {
+                if (!list.empty()) list += "\n";
+                list += (group.empty() ? i18n_.tr(loc, "pc.private_scope") : group) + " -> " + card;
+            }
+            return i18n_.tr(loc, "pc.groups", {{"list", list}});
+        }
+        if (sub == "tojson") {
+            std::string card = name.empty() ? cards_.boundCard(user, scope) : name;
+            if (!cards_.cardExists(user, card))
+                return i18n_.tr(loc, "pc.not_found", {{"name", cardLabel(loc, card)}});
+            return cards_.exportCard(user, card).dump();
+        }
+        // DiceNext uses group rule systems instead of a second per-card template
+        // switch.  Route the legacy spelling into that single source of truth.
+        if (sub == "type") {
+            const std::string setCmd = name.empty() ? "set show" : ("set " + name);
+            return tryHandleSet(loc, msg, setCmd).value_or(i18n_.tr(loc, "fun.set.usage"));
+        }
+        if (sub == "temp") {
+            std::string list;
+            for (const auto& [preset, items] : cardPresets()) {
+                if (!list.empty()) list += "\n";
+                list += preset + " (" + std::to_string(items.size()) + ")";
+            }
+            return i18n_.tr(loc, "pc.templates", {{"list", list}});
+        }
         // ── 原版 CardTemp 移植：.pc build / redo（build/buildv）+ lock / unlock ──
         if (sub == "build") return pcBuild(loc, msg, name, false);
         if (sub == "redo")  return pcBuild(loc, msg, name, true);
@@ -9343,6 +9625,9 @@ private:
         loadRules();
         std::string a = trim(args);
         if (a.empty()) return i18n_.tr(loc, "rule.usage");
+        auto [legacySub, legacyArg] = splitCommand(a);
+        if (toLower(legacySub) == "set")
+            return handleRuleSet(loc, legacyArg, msg);
         if (ruleBooks_.empty()) return i18n_.tr(loc, "rule.no_books");
         // book:item 形式（支持全角冒号）。
         std::string book, item;
@@ -9380,8 +9665,8 @@ private:
             std::string cur = getGroupSetting(msg, "ruleBook");
             return cur.empty() ? i18n_.tr(loc, "rule.book_none") : i18n_.tr(loc, "rule.book_show", {{"book", cur}});
         }
-        if (al == "clr" || al == "clear") { setGroupSetting(msg, "ruleBook", ""); return i18n_.tr(loc, "rule.book_cleared"); }
         if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
+        if (al == "clr" || al == "clear") { setGroupSetting(msg, "ruleBook", ""); return i18n_.tr(loc, "rule.book_cleared"); }
         auto it = ruleAlias_.find(al);
         if (it == ruleAlias_.end()) return i18n_.tr(loc, "rule.book_unknown", {{"book", a}});
         setGroupSetting(msg, "ruleBook", it->second);
@@ -9427,7 +9712,15 @@ private:
 
     std::optional<std::string> tryHandleDraw(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("draw", 0) != 0) return std::nullopt;
-        std::string rest = trim(cmd.substr(4));
+        const bool hidden = cmd.size() > 4 && (cmd[4] == 'h' || cmd[4] == 'H');
+        std::string rest = trim(cmd.substr(hidden ? 5 : 4));
+        auto deliver = [&](const std::string& deckName, const std::string& value) {
+            std::string out = i18n_.tr(loc, "deck.result",
+                {{"nick", displayName(msg)}, {"name", deckName}, {"res", value}});
+            if (!hidden) return out;
+            sendPrivate(msg, out);
+            return i18n_.tr(loc, "deck.hidden", {{"nick", displayName(msg)}});
+        };
         // optional leading count: ".draw3 牌堆" or ".draw 牌堆"
         int times = 1;
         { size_t i = 0; std::string num; while (i < rest.size() && std::isdigit((unsigned char)rest[i])) num += rest[i++];
@@ -9442,8 +9735,7 @@ private:
             if (items.size() < 2) return i18n_.tr(loc, "deck.inline_usage");
             std::string res;
             for (int i = 0; i < times; ++i) { if (i) res += "\n"; res += pickChoice(items); }
-            return i18n_.tr(loc, "deck.result",
-                {{"nick", displayName(msg)}, {"name", i18n_.tr(loc, "deck.inline_name")}, {"res", res}});
+            return deliver(i18n_.tr(loc, "deck.inline_name"), res);
         }
 
         if (name.empty()) {   // 无牌堆名 → 用本群默认牌堆（.deck set 设定）
@@ -9459,7 +9751,7 @@ private:
                 for (auto& e : td[name]) if (e.is_string()) items.push_back(e.get<std::string>());
                 std::string res;
                 for (int i = 0; i < times; ++i) { if (i) res += "\n"; res += pickChoice(items); }
-                return i18n_.tr(loc, "deck.result", {{"nick", displayName(msg)}, {"name", name}, {"res", res}});
+                return deliver(name, res);
             }
         }
 
@@ -9488,7 +9780,7 @@ private:
                     for (auto& e : td[name]) if (e.is_string()) items.push_back(e.get<std::string>());
                     std::string res;
                     for (int i = 0; i < times; ++i) { if (i) res += "\n"; res += pickChoice(items); }
-                    return i18n_.tr(loc, "deck.result", {{"nick", displayName(msg)}, {"name", name}, {"res", res}});
+                    return deliver(name, res);
                 }
             }
         }
@@ -9499,8 +9791,7 @@ private:
             if (i) res += "\n";
             res += card.value_or("");
         }
-        const std::string nick = displayName(msg);
-        return i18n_.tr(loc, "deck.result", {{"nick", nick}, {"name", name}, {"res", res}});
+        return deliver(name, res);
     }
 
     std::optional<std::string> tryHandleDeck(Locale loc, const Message& msg, const std::string& cmd) {
@@ -9586,8 +9877,34 @@ private:
             {{"nick", displayName(msg)}, {"name", name}, {"res", card.value_or("")}});
     }
 
-    std::string handleMod(Locale loc, const std::string&, const Message&) {
-        return i18n_.tr(loc, "mod.wip");
+    std::string handleMod(Locale loc, const std::string& args, const Message& msg) {
+        std::string a = trim(args);
+        auto [subRaw, argRaw] = splitCommand(a);
+        std::string sub = toLower(trim(subRaw));
+        std::string arg = trim(argRaw);
+        if (sub.empty() || sub == "list")
+            return tryHandlePlugin(loc, msg, "plugin list").value_or(i18n_.tr(loc, "plugin.unavailable"));
+        if (sub == "on" || sub == "off")
+            return tryHandlePlugin(loc, msg, "plugin " + sub + " " + arg).value_or(i18n_.tr(loc, "plugin.unavailable"));
+        // Also accept the old ".mod <name> on/off" order.
+        auto [nameRaw, actionRaw] = splitCommand(a);
+        std::string action = toLower(trim(actionRaw));
+        if (action == "on" || action == "off")
+            return tryHandlePlugin(loc, msg, "plugin " + action + " " + trim(nameRaw)).value_or(i18n_.tr(loc, "plugin.unavailable"));
+        if (sub == "get" || sub == "info" || sub == "detail") {
+            if (arg.empty()) return tryHandlePlugin(loc, msg, "plugin list").value_or(i18n_.tr(loc, "plugin.unavailable"));
+            if (msg.type == MessageType::kPrivate || msg.targetId.empty()) return i18n_.tr(loc, "plugin.group_only");
+            if (!pluginProvider_) return i18n_.tr(loc, "plugin.unavailable");
+            auto plugins = pluginProvider_();
+            const PluginEntry* found = matchPlugin(plugins, arg);
+            if (!found) return i18n_.tr(loc, "plugin.not_found", {{"name", arg}});
+            const bool enabled = found->enabledGlobal && isPluginEnabledInGroup(msg.platform, msg.targetId, found->id, msg.adapterId);
+            return i18n_.tr(loc, "mod.info", {{"name", found->name}, {"id", found->id}, {"kind", found->kind},
+                {"state", i18n_.tr(loc, enabled ? "plugin.state.on" : "plugin.state.off")}});
+        }
+        if (sub == "update" || sub == "reload" || sub == "del" || sub == "delete" || sub == "reinstall")
+            return i18n_.tr(loc, "mod.web_admin");
+        return i18n_.tr(loc, "mod.usage");
     }
 
 
@@ -9895,11 +10212,21 @@ private:
     std::optional<std::string> tryHandleJrrp(Locale loc, const Message& msg, const std::string& cmd) {
         // .jrrp 今日人品 / .mrrp 明日人品 / .zrrp 昨日人品。
         // 三者机制相同（hash(QQ+日期)），只是「确定性日期」不同：今天 / 明天 / 昨天。
-        std::string lc = toLower(cmd);
+        std::string lc = toLower(trim(cmd));
+        auto [head, subRaw] = splitCommand(lc);
+        const std::string sub = toLower(trim(subRaw));
+        if (head == "jrrp" && (sub == "on" || sub == "off")) {
+            if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "group.private");
+            if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
+            const bool enabled = sub == "on";
+            setGroupCmdDisabled(msg, "jrrp", !enabled);
+            return i18n_.tr(loc, enabled ? "gate.cmd_on" : "gate.cmd_off", {{"cmd", "jrrp"}});
+        }
+        if (!sub.empty()) return std::nullopt;
         const char* key; long dayOffset;
-        if (lc == "jrrp")      { dayOffset = 0;      key = "fun.jrrp"; }
-        else if (lc == "mrrp") { dayOffset = 86400;  key = "fun.mrrp"; }   // 明日
-        else if (lc == "zrrp") { dayOffset = -86400; key = "fun.zrrp"; }   // 昨日
+        if (head == "jrrp")      { dayOffset = 0;      key = "fun.jrrp"; }
+        else if (head == "mrrp") { dayOffset = 86400;  key = "fun.mrrp"; }   // 明日
+        else if (head == "zrrp") { dayOffset = -86400; key = "fun.zrrp"; }   // 昨日
         else return std::nullopt;
         const char* fmt = "%Y%m%d";
 

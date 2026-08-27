@@ -1,4 +1,5 @@
 #include "core/mod/js_plugin_manager.h"
+#include "adapter/adapter_interface.h"
 #include "common/logger.h"
 #include "common/utils.h"
 
@@ -315,6 +316,7 @@ static JSValue jsExtNew(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
     JS_SetPropertyStr(ctx, ext, "author",  JS_NewString(ctx, argc > 1 ? toStr(ctx, argv[1]).c_str() : ""));
     JS_SetPropertyStr(ctx, ext, "version", JS_NewString(ctx, argc > 2 ? toStr(ctx, argv[2]).c_str() : ""));
     JS_SetPropertyStr(ctx, ext, "cmdMap",  JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, ext, "isLoaded", JS_NewBool(ctx, 0));
     JS_SetPropertyStr(ctx, ext, "storageSet", JS_NewCFunction(ctx, jsStorageSet, "storageSet", 2));
     JS_SetPropertyStr(ctx, ext, "storageGet", JS_NewCFunction(ctx, jsStorageGet, "storageGet", 1));
     return ext;
@@ -1471,6 +1473,24 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
         loadingFile_.clear();
     }
 
+    // SealDice marks extensions loaded only after every script has evaluated,
+    // preserving cross-plugin lookup/order semantics for onLoad().
+    for (auto& e : exts_) {
+        JS_SetPropertyStr(ctx_, e.first, "isLoaded", JS_NewBool(ctx_, 1));
+        JSValue fn = JS_GetPropertyStr(ctx_, e.first, "onLoad");
+        if (JS_IsFunction(ctx_, fn)) {
+            JSValue r = JS_Call(ctx_, fn, e.first, 0, nullptr);
+            if (JS_IsException(r)) {
+                JSValue exc = JS_GetException(ctx_);
+                DICE_LOG_ERROR("[js] onLoad error: {}", toStr(ctx_, exc));
+                JS_FreeValue(ctx_, exc);
+            }
+            JS_FreeValue(ctx_, r);
+        }
+        JS_FreeValue(ctx_, fn);
+    }
+    drainJobs();
+
     // eval 后 rulePluginFiles_ 已填好 → 标记规则类，并把仍在主目录的规则类插件
     // 迁移到 data/mod（已加载在内存，移动文件不影响本次运行；下次 reload 从 mod 加载）。
     for (auto& p : plugins_) if (rulePluginFiles_.count(p.file)) p.ruleCompat = true;
@@ -1833,11 +1853,25 @@ std::vector<JsPluginManager::PluginMeta> JsPluginManager::plugins() const {
     return plugins_;
 }
 
-void JsPluginManager::buildCtxMsg(const std::string& platform, const std::string& userId,
-                                  const std::string& nickname, const std::string& groupId, const std::string& incomingCard,
-                                  bool isPrivate, const std::string& fullMsg, int privilege,
-                                  const std::vector<std::string>& atList,
+void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
                                   JSValue& outCtx, JSValue& outMsg) {
+    const std::string& platform = message.platform;
+    const std::string& userId = message.senderId;
+    const std::string nickname = message.senderName.empty() ? message.senderId : message.senderName;
+    const bool isPrivate = message.type == MessageType::kPrivate;
+    const std::string groupId = isPrivate ? std::string() : message.targetId;
+    const std::string fullMsg = message.rawContent.empty() ? message.content : message.rawContent;
+    const std::vector<std::string>& atList = message.atList;
+    const std::string incomingCard = message.extra.is_object()
+        ? message.extra.value("card", std::string()) : std::string();
+    auto extraString = [&](const char* key) -> std::string {
+        if (!message.extra.is_object() || !message.extra.contains(key)) return {};
+        const auto& value = message.extra[key];
+        if (value.is_string()) return value.get<std::string>();
+        if (value.is_number_integer()) return std::to_string(value.get<int64_t>());
+        if (value.is_number_unsigned()) return std::to_string(value.get<uint64_t>());
+        return {};
+    };
     JSValue jctx = JS_NewObject(ctx_);
     JSValue player = JS_NewObject(ctx_);
     // 群名片（沿用 SealDice 语义：player.name = 群名片/显示名，非群或无名片时回退 QQ 昵称）。
@@ -1875,7 +1909,8 @@ void JsPluginManager::buildCtxMsg(const std::string& platform, const std::string
     JSValue endPoint = JS_NewObject(ctx_);
     JS_SetPropertyStr(ctx_, endPoint, "platform", JS_NewString(ctx_, platform.c_str()));
     // 海豹 EndPointInfo 常用字段（插件读 endPoint.userId 判「是否 @ 骰子自己」等，缺则 undefined）。
-    JS_SetPropertyStr(ctx_, endPoint, "id",       JS_NewString(ctx_, platform.c_str()));
+    const std::string endpointId = message.adapterId.empty() ? platform : message.adapterId;
+    JS_SetPropertyStr(ctx_, endPoint, "id",       JS_NewString(ctx_, endpointId.c_str()));
     JS_SetPropertyStr(ctx_, endPoint, "userId",   JS_NewString(ctx_, selfId_.c_str()));
     JS_SetPropertyStr(ctx_, endPoint, "nickname", JS_NewString(ctx_, selfNick_.c_str()));
     JS_SetPropertyStr(ctx_, endPoint, "state",    JS_NewInt32(ctx_, 1));
@@ -1887,11 +1922,34 @@ void JsPluginManager::buildCtxMsg(const std::string& platform, const std::string
     JS_SetPropertyStr(ctx_, jmsg, "platform", JS_NewString(ctx_, platform.c_str()));
     JS_SetPropertyStr(ctx_, jmsg, "messageType", JS_NewString(ctx_, isPrivate ? "private" : "group"));
     JS_SetPropertyStr(ctx_, jmsg, "groupId", JS_NewString(ctx_, groupId.c_str()));
-    JS_SetPropertyStr(ctx_, jmsg, "rawId", JS_NewString(ctx_, ""));
-    JS_SetPropertyStr(ctx_, jmsg, "guildId", JS_NewString(ctx_, ""));
-    JS_SetPropertyStr(ctx_, jmsg, "channelId", JS_NewString(ctx_, ""));        // SealDice 字段
-    JS_SetPropertyStr(ctx_, jmsg, "time", JS_NewInt64(ctx_, (int64_t)std::time(nullptr)));
-    JS_SetPropertyStr(ctx_, jmsg, "segment", JS_NewArray(ctx_));               // 防插件读 .segment.forEach 崩
+    JS_SetPropertyStr(ctx_, jmsg, "rawId", JS_NewString(ctx_, message.id.c_str()));
+    const std::string guildId = extraString("guild_id");
+    std::string channelId = extraString("channel_id");
+    if (channelId.empty() && message.type == MessageType::kChannel) channelId = message.targetId;
+    JS_SetPropertyStr(ctx_, jmsg, "guildId", JS_NewString(ctx_, guildId.c_str()));
+    JS_SetPropertyStr(ctx_, jmsg, "channelId", JS_NewString(ctx_, channelId.c_str()));
+    JS_SetPropertyStr(ctx_, jmsg, "time", JS_NewInt64(ctx_, message.timestamp > 0
+        ? message.timestamp : static_cast<int64_t>(std::time(nullptr))));
+    // OneBot array messages are retained in extra.raw.message. Other adapters
+    // may expose normalized segments/msg_elements directly.
+    json segments = json::array();
+    if (message.extra.is_object()) {
+        if (message.extra.contains("segments") && message.extra["segments"].is_array())
+            segments = message.extra["segments"];
+        else if (message.extra.contains("raw") && message.extra["raw"].is_object()
+                 && message.extra["raw"].contains("message")
+                 && message.extra["raw"]["message"].is_array())
+            segments = message.extra["raw"]["message"];
+        else if (message.extra.contains("msg_elements") && message.extra["msg_elements"].is_array())
+            segments = message.extra["msg_elements"];
+    }
+    const std::string segmentsJson = segments.dump();
+    JSValue jsegments = JS_ParseJSON(ctx_, segmentsJson.c_str(), segmentsJson.size(), "<message.segment>");
+    if (JS_IsException(jsegments)) {
+        JSValue exc = JS_GetException(ctx_); JS_FreeValue(ctx_, exc);
+        jsegments = JS_NewArray(ctx_);
+    }
+    JS_SetPropertyStr(ctx_, jmsg, "segment", jsegments);
     JSValue sender = JS_NewObject(ctx_);
     JS_SetPropertyStr(ctx_, sender, "userId", JS_NewString(ctx_, userId.c_str()));
     JS_SetPropertyStr(ctx_, sender, "nickname", JS_NewString(ctx_, nickname.c_str()));
@@ -1899,33 +1957,138 @@ void JsPluginManager::buildCtxMsg(const std::string& platform, const std::string
     JS_SetPropertyStr(ctx_, jmsg, "sender", sender);
     outCtx = jctx; outMsg = jmsg;
 }
+JSValue JsPluginManager::buildCmdArgs(const Message& message, const std::string& cmdLine,
+                                      const std::string& command, const std::string& rest) {
+    JSValue jargs = JS_NewObject(ctx_);
+    JS_SetPropertyStr(ctx_, jargs, "command", JS_NewString(ctx_, command.c_str()));
+    JS_SetPropertyStr(ctx_, jargs, "rawArgs", JS_NewString(ctx_, rest.c_str()));
+    JS_SetPropertyStr(ctx_, jargs, "cleanArgs", JS_NewString(ctx_, rest.c_str()));
+    const std::string rawText = !message.rawContent.empty() ? message.rawContent
+                              : !message.content.empty() ? message.content : cmdLine;
+    JS_SetPropertyStr(ctx_, jargs, "rawText", JS_NewString(ctx_, rawText.c_str()));
+
+    int execTimes = 1;
+    if (const size_t h = rest.find('#'); h != std::string::npos && h > 0 && h <= 3) {
+        bool allDigit = true;
+        for (size_t i = 0; i < h; ++i)
+            if (!std::isdigit(static_cast<unsigned char>(rest[i]))) { allDigit = false; break; }
+        if (allDigit) {
+            const int n = std::atoi(rest.substr(0, h).c_str());
+            if (n >= 1 && n <= 99) execTimes = n;
+        }
+    }
+    JS_SetPropertyStr(ctx_, jargs, "specialExecuteTimes", JS_NewInt32(ctx_, execTimes));
+
+    JSValue arr = JS_NewArray(ctx_);
+    { std::istringstream iss(rest); std::string token; uint32_t i = 0;
+      while (iss >> token) JS_SetPropertyUint32(ctx_, arr, i++, JS_NewString(ctx_, token.c_str())); }
+    JS_SetPropertyStr(ctx_, jargs, "_args", JS_DupValue(ctx_, arr));
+    JS_SetPropertyStr(ctx_, jargs, "args", arr);
+
+    JSValue atArr = JS_NewArray(ctx_);
+    for (uint32_t i = 0; i < message.atList.size(); ++i) {
+        JSValue o = JS_NewObject(ctx_);
+        JS_SetPropertyStr(ctx_, o, "userId", JS_NewString(ctx_, message.atList[i].c_str()));
+        JS_SetPropertyUint32(ctx_, atArr, i, o);
+    }
+    JS_SetPropertyStr(ctx_, jargs, "at", atArr);
+
+    JSValue kwArr = JS_NewArray(ctx_);
+    { std::istringstream iss(rest); std::string token; uint32_t i = 0;
+      while (iss >> token) {
+          if (token.rfind("--", 0) != 0) continue;
+          std::string body = token.substr(2), key = body, value; bool hasValue = false;
+          if (const auto eq = body.find('='); eq != std::string::npos) {
+              key = body.substr(0, eq); value = body.substr(eq + 1); hasValue = true;
+          }
+          if (key.empty()) continue;
+          JSValue o = JS_NewObject(ctx_);
+          JS_SetPropertyStr(ctx_, o, "name", JS_NewString(ctx_, key.c_str()));
+          JS_SetPropertyStr(ctx_, o, "value", JS_NewString(ctx_, value.c_str()));
+          JS_SetPropertyStr(ctx_, o, "valueExists", JS_NewBool(ctx_, hasValue));
+          JS_SetPropertyUint32(ctx_, kwArr, i++, o);
+      } }
+    JS_SetPropertyStr(ctx_, jargs, "kwargs", kwArr);
+
+    const std::string self = message.selfId.empty() ? selfId_ : message.selfId;
+    const bool mentioned = !self.empty()
+        && std::find(message.atList.begin(), message.atList.end(), self) != message.atList.end();
+    const bool mentionedFirst = mentioned && !message.atList.empty() && message.atList.front() == self;
+    JS_SetPropertyStr(ctx_, jargs, "amIBeMentioned", JS_NewBool(ctx_, mentioned));
+    JS_SetPropertyStr(ctx_, jargs, "amIBeMentionedFirst", JS_NewBool(ctx_, mentionedFirst));
+    JS_SetPropertyStr(ctx_, jargs, "getArgN", JS_NewCFunction(ctx_, jsCmdArgsGetArgN, "getArgN", 1));
+    JS_SetPropertyStr(ctx_, jargs, "getRestArgsFrom", JS_NewCFunction(ctx_, jsCmdArgsGetRestArgsFrom, "getRestArgsFrom", 1));
+    JS_SetPropertyStr(ctx_, jargs, "isArgEqual", JS_NewCFunction(ctx_, jsCmdArgsIsArgEqual, "isArgEqual", 1));
+    JS_SetPropertyStr(ctx_, jargs, "chopPrefixToArgsWith", JS_NewCFunction(ctx_, jsChopPrefix, "chopPrefixToArgsWith", 1));
+    JS_SetPropertyStr(ctx_, jargs, "eatPrefixWith", JS_NewCFunction(ctx_, jsEatPrefix, "eatPrefixWith", 1));
+    JS_SetPropertyStr(ctx_, jargs, "getKwarg", JS_NewCFunction(ctx_, jsGetKwarg, "getKwarg", 1));
+    JS_SetPropertyStr(ctx_, jargs, "getKwargs", JS_NewCFunction(ctx_, jsGetKwarg, "getKwargs", 1));
+    return jargs;
+}
+
+void JsPluginManager::dispatchCommandHookLocked(const Message& message, JSValueConst jctx,
+                                                 JSValueConst jmsg, JSValueConst jargs) {
+    JSValueConst args[3] = { jctx, jmsg, jargs };
+    const std::string groupId = message.type == MessageType::kPrivate ? std::string() : message.targetId;
+    for (auto& e : exts_) {
+        if (groupGate_ && !groupId.empty() && !e.second.empty()
+            && !groupGate_(message.platform, groupId, "js:" + e.second)) continue;
+        JSValue hook = JS_GetPropertyStr(ctx_, e.first, "onCommandReceived");
+        if (JS_IsFunction(ctx_, hook)) {
+            JSValue result = JS_Call(ctx_, hook, e.first, 3, args);
+            if (JS_IsException(result)) {
+                JSValue exc = JS_GetException(ctx_);
+                DICE_LOG_ERROR("[js] onCommandReceived error: {}", toStr(ctx_, exc));
+                JS_FreeValue(ctx_, exc);
+            }
+            JS_FreeValue(ctx_, result);
+        }
+        JS_FreeValue(ctx_, hook);
+    }
+}
 
 JsPluginManager::Result JsPluginManager::handleNonCommand(const std::string& platform, const std::string& userId,
                                                            const std::string& nickname, const std::string& groupId,
                                                            const std::string& groupCard, bool isPrivate, const std::string& fullText, int privilege,
                                                           const std::vector<std::string>& atList) {
+    Message message;
+    message.platform = platform; message.senderId = userId; message.senderName = nickname;
+    message.targetId = isPrivate ? userId : groupId;
+    message.type = isPrivate ? MessageType::kPrivate : MessageType::kGroup;
+    message.content = fullText; message.rawContent = fullText; message.atList = atList;
+    message.extra = json{{"card", groupCard}};
+    return handleNonCommand(message, privilege);
+}
+
+JsPluginManager::Result JsPluginManager::dispatchMessageHook(
+        const Message& message, int privilege, const char* hook) {
     Result res;
     if (!ctx_ || exts_.empty()) return res;
     std::lock_guard<std::mutex> lk(mutex_);
-    JS_UpdateStackTop(rt_);   // re-baseline stack check for this (adapter) thread
+    JS_UpdateStackTop(rt_);
     JSValue jctx, jmsg;
-    buildCtxMsg(platform, userId, nickname, groupId, groupCard, isPrivate, fullText, privilege, atList, jctx, jmsg);
+    buildCtxMsg(message, privilege, jctx, jmsg);
     pendingReply_.clear();
     sideEffectReply_ = false;
-    capturing_ = true;   // in a message turn → replyToSender accumulates (returned below)
+    capturing_ = true;
     JSValueConst args[2] = { jctx, jmsg };
+    const std::string groupId = message.type == MessageType::kPrivate ? std::string() : message.targetId;
     for (auto& e : exts_) {
-        for (const char* hook : {"onNotCommandReceived", "onMessageReceived"}) {
-            JSValue fn = JS_GetPropertyStr(ctx_, e.first, hook);
-            if (JS_IsFunction(ctx_, fn)) {
-                JSValue r = JS_Call(ctx_, fn, e.first, 2, args);
-                if (JS_IsException(r)) { JSValue exc = JS_GetException(ctx_); DICE_LOG_ERROR("[js] {} error: {}", hook, toStr(ctx_, exc)); JS_FreeValue(ctx_, exc); }
-                JS_FreeValue(ctx_, r);
+        if (groupGate_ && !groupId.empty() && !e.second.empty()
+            && !groupGate_(message.platform, groupId, "js:" + e.second)) continue;
+        JSValue fn = JS_GetPropertyStr(ctx_, e.first, hook);
+        if (JS_IsFunction(ctx_, fn)) {
+            JSValue r = JS_Call(ctx_, fn, e.first, 2, args);
+            if (JS_IsException(r)) {
+                JSValue exc = JS_GetException(ctx_);
+                DICE_LOG_ERROR("[js] {} error: {}", hook, toStr(ctx_, exc));
+                JS_FreeValue(ctx_, exc);
             }
-            JS_FreeValue(ctx_, fn);
+            JS_FreeValue(ctx_, r);
         }
+        JS_FreeValue(ctx_, fn);
     }
-    drainJobs();   // let async hooks (awaited fetch) finish before reading replies
+    drainJobs();
     capturing_ = false;
     res.reply = pendingReply_;
     res.matched = !pendingReply_.empty() || sideEffectReply_;
@@ -1933,10 +2096,208 @@ JsPluginManager::Result JsPluginManager::handleNonCommand(const std::string& pla
     return res;
 }
 
+JsPluginManager::Result JsPluginManager::handleNonCommand(const Message& message, int privilege) {
+    return dispatchMessageHook(message, privilege, "onNotCommandReceived");
+}
+
+JsPluginManager::Result JsPluginManager::handleMessageReceived(const Message& message, int privilege) {
+    return dispatchMessageHook(message, privilege, "onMessageReceived");
+}
+
+void JsPluginManager::handleMessageSend(const Message& contextMessage,
+                                        const Message& sentMessage,
+                                        const std::string& flag, int privilege) {
+    if (!ctx_ || exts_.empty()) return;
+    std::lock_guard<std::mutex> lk(mutex_);
+    JS_UpdateStackTop(rt_);
+
+    JSValue jctx, unusedIncoming;
+    buildCtxMsg(contextMessage, privilege, jctx, unusedIncoming);
+    JS_FreeValue(ctx_, unusedIncoming);
+    JSValue unusedOutgoingCtx, jmsg;
+    buildCtxMsg(sentMessage, privilege, unusedOutgoingCtx, jmsg);
+    JS_FreeValue(ctx_, unusedOutgoingCtx);
+    JSValue jflag = JS_NewString(ctx_, flag.c_str());
+    JSValueConst args[3] = {jctx, jmsg, jflag};
+
+    pendingReply_.clear();
+    sideEffectReply_ = false;
+    const bool previousCapture = capturing_;
+    // onMessageSend is observational and runs after delivery. Replies made by
+    // the hook are new outbound messages, not part of the completed reply.
+    capturing_ = false;
+    const std::string groupId = sentMessage.type == MessageType::kPrivate
+        ? std::string() : sentMessage.targetId;
+    for (auto& e : exts_) {
+        if (groupGate_ && !groupId.empty() && !e.second.empty()
+            && !groupGate_(sentMessage.platform, groupId, "js:" + e.second)) continue;
+        JSValue fn = JS_GetPropertyStr(ctx_, e.first, "onMessageSend");
+        if (JS_IsFunction(ctx_, fn)) {
+            JSValue rv = JS_Call(ctx_, fn, e.first, 3, args);
+            if (JS_IsException(rv)) {
+                JSValue exc = JS_GetException(ctx_);
+                DICE_LOG_ERROR("[js] onMessageSend error: {}", toStr(ctx_, exc));
+                JS_FreeValue(ctx_, exc);
+            }
+            JS_FreeValue(ctx_, rv);
+        }
+        JS_FreeValue(ctx_, fn);
+    }
+    drainJobs();
+    capturing_ = previousCapture;
+    JS_FreeValue(ctx_, jflag); JS_FreeValue(ctx_, jctx); JS_FreeValue(ctx_, jmsg);
+}
+JsPluginManager::Result JsPluginManager::handleCommandReceived(
+        const Message& message, const std::string& cmdLine, int privilege) {
+    Result res;
+    if (!ctx_ || exts_.empty()) return res;
+    std::string line = cmdLine;
+    line.erase(0, line.find_first_not_of(" \t"));
+    const size_t split = line.find_first_of(" \t");
+    const std::string command = split == std::string::npos ? line : line.substr(0, split);
+    const std::string rest = split == std::string::npos ? std::string() : line.substr(split + 1);
+    if (command.empty()) return res;
+
+    std::lock_guard<std::mutex> lk(mutex_);
+    JS_UpdateStackTop(rt_);
+    JSValue jctx, jmsg;
+    buildCtxMsg(message, privilege, jctx, jmsg);
+    JSValue jargs = buildCmdArgs(message, cmdLine, command, rest);
+    pendingReply_.clear();
+    sideEffectReply_ = false;
+    capturing_ = true;
+    dispatchCommandHookLocked(message, jctx, jmsg, jargs);
+    drainJobs();
+    capturing_ = false;
+    res.reply = pendingReply_;
+    res.matched = !pendingReply_.empty() || sideEffectReply_;
+    JS_FreeValue(ctx_, jctx);
+    JS_FreeValue(ctx_, jmsg);
+    JS_FreeValue(ctx_, jargs);
+    return res;
+}
+void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
+    if (!ctx_ || exts_.empty()) return;
+
+    const auto extraId = [&](const char* key) -> std::string {
+        if (!event.extra.is_object() || !event.extra.contains(key)) return {};
+        const auto& v = event.extra[key];
+        if (v.is_string()) return v.get<std::string>();
+        if (v.is_number_integer()) return std::to_string(v.get<int64_t>());
+        if (v.is_number_unsigned()) return std::to_string(v.get<uint64_t>());
+        return {};
+    };
+
+    Message message;
+    message.platform = event.platform;
+    message.adapterId = event.adapterId;
+    message.selfId = event.selfId;
+    message.timestamp = event.timestamp;
+    message.extra = event.extra.is_object() ? event.extra : json::object();
+    message.targetId = event.groupId.empty() ? event.userId : event.groupId;
+    message.type = event.groupId.empty() ? MessageType::kPrivate : MessageType::kGroup;
+
+    const char* hook = nullptr;
+    bool usePokeEvent = false;
+    bool useLeaveEvent = false;
+    switch (event.type) {
+    case EventType::kGroupIncrease:
+        if (event.userId == event.selfId) {
+            message.senderId = event.operatorId.empty() ? event.userId : event.operatorId;
+            hook = extraId("guild_id").empty() ? "onGroupJoined" : "onGuildJoined";
+        } else {
+            message.senderId = event.userId;
+            hook = "onGroupMemberJoined";
+        }
+        break;
+    case EventType::kFriendAdd:
+        message.senderId = event.userId;
+        hook = "onBecomeFriend";
+        break;
+    case EventType::kGroupRecall:
+        message.senderId = event.userId.empty() ? event.operatorId : event.userId;
+        message.id = extraId("message_id");
+        hook = "onMessageDeleted";
+        break;
+    case EventType::kPoke:
+        message.senderId = event.operatorId.empty() ? event.userId : event.operatorId;
+        usePokeEvent = true;
+        hook = "onPoke";
+        break;
+    case EventType::kGroupDecrease:
+        message.senderId = event.operatorId.empty() ? event.userId : event.operatorId;
+        useLeaveEvent = true;
+        hook = "onGroupLeave";
+        break;
+    default:
+        return;
+    }
+
+    std::lock_guard<std::mutex> lk(mutex_);
+    JS_UpdateStackTop(rt_);
+    JSValue jctx, jmsg;
+    buildCtxMsg(message, privilege, jctx, jmsg);
+    JSValue hookArg = JS_DupValue(ctx_, jmsg);
+    if (usePokeEvent) {
+        JS_FreeValue(ctx_, hookArg);
+        hookArg = JS_NewObject(ctx_);
+        JS_SetPropertyStr(ctx_, hookArg, "groupId", JS_NewString(ctx_, event.groupId.c_str()));
+        const std::string senderId = event.operatorId.empty() ? event.userId : event.operatorId;
+        JS_SetPropertyStr(ctx_, hookArg, "senderId", JS_NewString(ctx_, senderId.c_str()));
+        JS_SetPropertyStr(ctx_, hookArg, "targetId", JS_NewString(ctx_, event.userId.c_str()));
+        JS_SetPropertyStr(ctx_, hookArg, "isPrivate", JS_NewBool(ctx_, event.groupId.empty()));
+    } else if (useLeaveEvent) {
+        JS_FreeValue(ctx_, hookArg);
+        hookArg = JS_NewObject(ctx_);
+        JS_SetPropertyStr(ctx_, hookArg, "groupId", JS_NewString(ctx_, event.groupId.c_str()));
+        JS_SetPropertyStr(ctx_, hookArg, "userId", JS_NewString(ctx_, event.userId.c_str()));
+        JS_SetPropertyStr(ctx_, hookArg, "operatorId", JS_NewString(ctx_, event.operatorId.c_str()));
+    }
+
+    // Event hooks are outside a command turn. replyToSender therefore routes
+    // immediately through the injected adapter sender, matching SealDice.
+    const bool previousCapture = capturing_;
+    capturing_ = false;
+    JSValueConst args[2] = { jctx, hookArg };
+    for (auto& e : exts_) {
+        if (groupGate_ && !event.groupId.empty() && !e.second.empty()
+            && !groupGate_(event.platform, event.groupId, "js:" + e.second)) continue;
+        JSValue fn = JS_GetPropertyStr(ctx_, e.first, hook);
+        if (JS_IsFunction(ctx_, fn)) {
+            JSValue rv = JS_Call(ctx_, fn, e.first, 2, args);
+            if (JS_IsException(rv)) {
+                JSValue exc = JS_GetException(ctx_);
+                DICE_LOG_ERROR("[js] {} error: {}", hook, toStr(ctx_, exc));
+                JS_FreeValue(ctx_, exc);
+            }
+            JS_FreeValue(ctx_, rv);
+        }
+        JS_FreeValue(ctx_, fn);
+    }
+    drainJobs();
+    capturing_ = previousCapture;
+    JS_FreeValue(ctx_, hookArg);
+    JS_FreeValue(ctx_, jctx);
+    JS_FreeValue(ctx_, jmsg);
+}
+
 JsPluginManager::Result JsPluginManager::handle(const std::string& platform, const std::string& userId,
                                                  const std::string& nickname, const std::string& groupId,
                                                  const std::string& groupCard, bool isPrivate, const std::string& cmdLine, int privilege,
                                                 const std::vector<std::string>& atList) {
+    Message message;
+    message.platform = platform; message.senderId = userId; message.senderName = nickname;
+    message.targetId = isPrivate ? userId : groupId;
+    message.type = isPrivate ? MessageType::kPrivate : MessageType::kGroup;
+    message.content = cmdLine; message.rawContent = cmdLine; message.atList = atList;
+    message.extra = json{{"card", groupCard}};
+    return handle(message, cmdLine, privilege);
+}
+
+JsPluginManager::Result JsPluginManager::handle(const Message& message,
+                                                 const std::string& cmdLine, int privilege) {
+    const std::string& platform = message.platform;
+    const std::string groupId = message.type == MessageType::kPrivate ? std::string() : message.targetId;
     Result res;
     if (!ctx_) return res;
     std::lock_guard<std::mutex> lk(mutex_);
@@ -1978,85 +2339,54 @@ JsPluginManager::Result JsPluginManager::handle(const std::string& platform, con
         }
         JS_FreeValue(ctx_, cmdMap);
     }
-    if (!JS_IsObject(cmd)) return res;
+    if (!JS_IsObject(cmd)) {
+        JSValue jctx, jmsg;
+        buildCtxMsg(message, privilege, jctx, jmsg);
+        JSValue jargs = buildCmdArgs(message, cmdLine, matchedWord, rest);
+        pendingReply_.clear();
+        sideEffectReply_ = false;
+        capturing_ = true;
+        dispatchCommandHookLocked(message, jctx, jmsg, jargs);
+        drainJobs();
+        capturing_ = false;
+        res.reply = pendingReply_;
+        res.matched = !pendingReply_.empty() || sideEffectReply_;
+        JS_FreeValue(ctx_, jctx);
+        JS_FreeValue(ctx_, jmsg);
+        JS_FreeValue(ctx_, jargs);
+        return res;
+    }
 
     JSValue solve = JS_GetPropertyStr(ctx_, cmd, "solve");
-    if (!JS_IsFunction(ctx_, solve)) { JS_FreeValue(ctx_, solve); JS_FreeValue(ctx_, cmd); res.matched = true; return res; }
 
     JSValue jctx, jmsg;
-    buildCtxMsg(platform, userId, nickname, groupId, groupCard, isPrivate, cmdLine, privilege, atList, jctx, jmsg);
+    buildCtxMsg(message, privilege, jctx, jmsg);
 
-    JSValue jargs = JS_NewObject(ctx_);
-    JS_SetPropertyStr(ctx_, jargs, "command", JS_NewString(ctx_, matchedWord.c_str()));
-    JS_SetPropertyStr(ctx_, jargs, "rawArgs", JS_NewString(ctx_, rest.c_str()));
-    JS_SetPropertyStr(ctx_, jargs, "cleanArgs", JS_NewString(ctx_, rest.c_str()));
-    JS_SetPropertyStr(ctx_, jargs, "rawText", JS_NewString(ctx_, cmdLine.c_str()));   // 海豹：原始整条命令
-    // specialExecuteTimes：连骰「N#」前缀（海豹 cmd_parse.go），如 ".r 3# 1d6"。
-    int execTimes = 1;
-    { size_t h = rest.find('#');
-      if (h != std::string::npos && h > 0 && h <= 3) {
-          bool allDigit = true; for (size_t j = 0; j < h; ++j) if (!isdigit((unsigned char)rest[j])) { allDigit = false; break; }
-          if (allDigit) { int n = atoi(rest.substr(0, h).c_str()); if (n >= 1 && n <= 99) execTimes = n; }
-      } }
-    JS_SetPropertyStr(ctx_, jargs, "specialExecuteTimes", JS_NewInt32(ctx_, execTimes));
-    JSValue arr = JS_NewArray(ctx_);
-    { std::istringstream iss(rest); std::string t; uint32_t i = 0;
-      while (iss >> t) JS_SetPropertyUint32(ctx_, arr, i++, JS_NewString(ctx_, t.c_str())); }
-    JS_SetPropertyStr(ctx_, jargs, "_args", JS_DupValue(ctx_, arr));
-    JS_SetPropertyStr(ctx_, jargs, "args", arr);
-    // at: 数组，每项 {userId}（海豹插件用 cmdArgs.at[i].userId 做 @目标/代骰）。
-    JSValue atArr = JS_NewArray(ctx_);
-    for (uint32_t i = 0; i < atList.size(); ++i) {
-        JSValue o = JS_NewObject(ctx_);
-        JS_SetPropertyStr(ctx_, o, "userId", JS_NewString(ctx_, atList[i].c_str()));
-        JS_SetPropertyUint32(ctx_, atArr, i, o);
-    }
-    JS_SetPropertyStr(ctx_, jargs, "at", atArr);
-    // kwargs: 数组，解析 rawArgs 里所有 --name / --name=value（海豹 cmdArgs.kwargs）。
-    JSValue kwArr = JS_NewArray(ctx_);
-    { std::istringstream kss(rest); std::string tok; uint32_t ki = 0;
-      while (kss >> tok) {
-          if (tok.rfind("--", 0) != 0) continue;
-          std::string body = tok.substr(2), k = body, v; bool has = false;
-          if (auto eq = body.find('='); eq != std::string::npos) { k = body.substr(0, eq); v = body.substr(eq + 1); has = true; }
-          if (k.empty()) continue;
-          JSValue o = JS_NewObject(ctx_);
-          JS_SetPropertyStr(ctx_, o, "name", JS_NewString(ctx_, k.c_str()));
-          JS_SetPropertyStr(ctx_, o, "value", JS_NewString(ctx_, v.c_str()));
-          JS_SetPropertyStr(ctx_, o, "valueExists", JS_NewBool(ctx_, has));
-          JS_SetPropertyUint32(ctx_, kwArr, ki++, o);
-      } }
-    JS_SetPropertyStr(ctx_, jargs, "kwargs", kwArr);
-    JS_SetPropertyStr(ctx_, jargs, "amIBeMentioned", JS_NewBool(ctx_, 0));       // SealDice 字段（默认否）
-    JS_SetPropertyStr(ctx_, jargs, "amIBeMentionedFirst", JS_NewBool(ctx_, 0));
-    JS_SetPropertyStr(ctx_, jargs, "getArgN", JS_NewCFunction(ctx_, jsCmdArgsGetArgN, "getArgN", 1));
-    JS_SetPropertyStr(ctx_, jargs, "getRestArgsFrom", JS_NewCFunction(ctx_, jsCmdArgsGetRestArgsFrom, "getRestArgsFrom", 1));
-    JS_SetPropertyStr(ctx_, jargs, "isArgEqual", JS_NewCFunction(ctx_, jsCmdArgsIsArgEqual, "isArgEqual", 1));
-    JS_SetPropertyStr(ctx_, jargs, "chopPrefixToArgsWith", JS_NewCFunction(ctx_, jsChopPrefix, "chopPrefixToArgsWith", 1));
-    JS_SetPropertyStr(ctx_, jargs, "eatPrefixWith", JS_NewCFunction(ctx_, jsEatPrefix, "eatPrefixWith", 1));
-    JS_SetPropertyStr(ctx_, jargs, "getKwarg", JS_NewCFunction(ctx_, jsGetKwarg, "getKwarg", 1));
-    JS_SetPropertyStr(ctx_, jargs, "getKwargs", JS_NewCFunction(ctx_, jsGetKwarg, "getKwargs", 1));
-
+    JSValue jargs = buildCmdArgs(message, cmdLine, matchedWord, rest);
     pendingReply_.clear();
     sideEffectReply_ = false;
-    capturing_ = true;   // in a message turn → replyToSender accumulates (returned below)
     JSValueConst callArgs[3] = { jctx, jmsg, jargs };
-    JSValue rv = JS_Call(ctx_, solve, cmd, 3, callArgs);
-    if (JS_IsException(rv)) {
-        JSValue exc = JS_GetException(ctx_);
-        DICE_LOG_ERROR("[js] command '{}' error: {}", word, toStr(ctx_, exc));
-        JS_FreeValue(ctx_, exc);
-    } else if (JS_IsObject(rv)) {
-        JSValue sh = JS_GetPropertyStr(ctx_, rv, "showHelp");
-        if (JS_ToBool(ctx_, sh)) {
-            std::string help = getStrProp(ctx_, cmd, "help");
-            if (!help.empty()) appendReply(help);
+    capturing_ = true;   // solve and post-command hook replies belong to this turn
+    JSValue rv = JS_UNDEFINED;
+    if (JS_IsFunction(ctx_, solve)) {
+        rv = JS_Call(ctx_, solve, cmd, 3, callArgs);
+        if (JS_IsException(rv)) {
+            JSValue exc = JS_GetException(ctx_);
+            DICE_LOG_ERROR("[js] command '{}' error: {}", word, toStr(ctx_, exc));
+            JS_FreeValue(ctx_, exc);
+        } else if (JS_IsObject(rv)) {
+            JSValue sh = JS_GetPropertyStr(ctx_, rv, "showHelp");
+            if (JS_ToBool(ctx_, sh)) {
+                std::string help = getStrProp(ctx_, cmd, "help");
+                if (!help.empty()) appendReply(help);
+            }
+            JS_FreeValue(ctx_, sh);
         }
-        JS_FreeValue(ctx_, sh);
-    }
 
-    // Run any queued promise jobs so an async solve() (using awaited fetch, which
-    // we resolve synchronously) completes and its replyToSender calls land here.
+        // Complete async solve() before the post-command hook, matching SealDice.
+        drainJobs();
+    }
+    dispatchCommandHookLocked(message, jctx, jmsg, jargs);
     drainJobs();
     capturing_ = false;
 

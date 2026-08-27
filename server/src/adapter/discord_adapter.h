@@ -125,7 +125,7 @@ public:
         sendGroupMessageFormatted(channelId, text, ContentFormat::kPlainText);
     }
     void sendGroupMessageFormatted(const std::string& channelId, const std::string& text, ContentFormat format) override {
-        const std::string wire = format == ContentFormat::kMarkdown ? text : markdown::escapeLiteral(text);
+        const std::string wire = outboundText(text, format);
         postChannelMessage(nativeId(channelId, identity::Kind::Group), wire);
     }
     void sendPrivateMessage(const std::string& userId, const std::string& text) override {
@@ -133,7 +133,7 @@ public:
     }
     void sendPrivateMessageFormatted(const std::string& userId, const std::string& text, ContentFormat format) override {
         const std::string native = nativeId(userId, identity::Kind::User);
-        const std::string wire = format == ContentFormat::kMarkdown ? text : markdown::escapeLiteral(text);
+        const std::string wire = outboundText(text, format);
         // 需要先建 DM 频道（有缓存则直发）。
         {
             std::lock_guard lock(dmMutex_);
@@ -151,6 +151,12 @@ public:
     }
 
 private:
+    std::string outboundText(const std::string& text, ContentFormat format) const {
+        if (format == ContentFormat::kMarkdown)
+            return effectiveCardMode() ? text : markdown::toPlainText(text);
+        return markdown::escapeLiteral(text);
+    }
+
     static std::string runCmdCapture(const std::string& cmd, size_t maxBytes = 2 * 1024 * 1024) {
 #if defined(_WIN32)
         FILE* p = _popen(cmd.c_str(), "r");
@@ -447,7 +453,7 @@ private:
         if (m.extra.is_object()) channel = m.extra.value("channel_id", std::string());   // 入站原生频道
         if (channel.empty() && m.type == MessageType::kPrivate) { sendPrivateMessageFormatted(m.targetId, text, format); return; }
         if (channel.empty()) channel = nativeId(m.targetId, identity::Kind::Group);
-        postChannelMessage(channel, format == ContentFormat::kMarkdown ? text : markdown::escapeLiteral(text));
+        postChannelMessage(channel, outboundText(text, format));
     }
 
     void fail(const std::string& e) {

@@ -514,5 +514,32 @@ int CharacterCardStore::attrCount(const std::string& user, const std::string& na
     std::lock_guard<std::mutex> lock(mutex_);
     return static_cast<int>(attrsOf(user, name).size());
 }
+bool CharacterCardStore::copyCard(const std::string& user, const std::string& source,
+                                  const std::string& destination) {
+    if (destination.empty() || !cardExists(user, source)) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    saveRawCardJson(user, destination, rawCardJson(user, source));
+    return true;
+}
+
+std::map<std::string, std::string> CharacterCardStore::listBindings(
+        const std::string& user) const {
+    std::map<std::string, std::string> out;
+    auto* st = db_.getStorage();
+    if (!st) return out;
+    try {
+        auto rows = st->get_all<UserSettingRow>(
+            orm::where(orm::c(&UserSettingRow::userId) == user
+                       and orm::c(&UserSettingRow::key) == std::string("cardBind")));
+        for (const auto& row : rows) if (!row.value.empty()) out[row.groupId] = row.value;
+    } catch (...) {}
+    return out;
+}
+
+nlohmann::json CharacterCardStore::exportCard(const std::string& user,
+                                               const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return nlohmann::json{{"name", name}, {"data", rawCardJson(user, name)}};
+}
 
 }  // namespace dice

@@ -96,6 +96,7 @@
     "coc": {
       "build": "**{nick}**'s investigator:{res}",
       "total": "Total",
+      "asset": "Assets",
       "attr": {
         "str": "STR",
         "con": "CON",
@@ -202,7 +203,7 @@
     "ambiguous": "\"{topic}\" matches several help topics: {list}. Please be more specific.",
     "topic": {
       "rdx": "Double-cross .rdx: legacy Dice compatibility alias, identical to .dx. e.g. .rdx 3c8.",
-      "r": "Roll .r [expr] [reason]: roll dice. e.g. .r3d6+2 attack; .rh hidden; N#expr repeat.",
+      "r": "Roll .r [expr] [reason]: roll dice. e.g. .r3d6+2 attack; .rh hidden; N#expr repeat. A non-ASCII default-die reason may be attached, e.g. .rd测试.",
       "rh": "Hidden .rh [expr] [reason]: hidden roll / hidden check. The result is DM'd to you; the group only sees \"<name> made a hidden roll\". Hidden checks use .rah / .rch (e.g. .rah Spot 60). House rules (.setcoc) and bonus/penalty dice still apply.",
       "ra": "Check .ra <skill|attr> [rate] [reason]: COC check. Reads the card if rate omitted. Use .ra(outcome)rate to preview a specific result level. e.g. .ra spot / .ra str60 / .ra(1)1 / .ra(100)1",
       "rx": "Psychology .rx @investigator [rate]: hidden Psychology roll (for Keepers). Rolls a Psychology check against the @'d investigator; the detailed result with success level is DM'd to you, while the group only sees a non-spoiler receipt. Reads the target card's Psychology if rate omitted, default 10.",
@@ -432,13 +433,20 @@
     "locked": "Current card locked ({key}) √",
     "unlocked": "Current card unlocked ({key}) √",
     "lock_already": "The current card already has that lock ({key}).",
-    "unlock_missing": "The current card doesn't have that lock ({key})."
+    "unlock_missing": "The current card doesn't have that lock ({key}).",
+    "copy_usage": "Usage: .pc cpy <new-card> [source-card] (defaults to the current card)",
+    "copied": "Copied character card “{source}” to “{destination}”.",
+    "groups_empty": "No group has an explicitly bound character card.",
+    "groups": "Character-card bindings:\n{list}",
+    "private_scope": "Private",
+    "templates": "Available character-card build presets:\n{list}"
   },
   "deck": {
     "usage": "Command .draw usage: .draw <deck> (or .draw3 <deck> for multiple)",
     "no_deck": "No deck named \"{name}\"",
     "ambiguous": "\"{name}\" matches several decks: {list}. Please be more specific.",
     "result": "{nick} drew: {res}",
+    "hidden": "{nick} made a hidden draw; the result was sent privately.",
     "list": "{count} decks:\n{list}",
     "empty": "No decks yet — drop deck JSON files into the decks/ folder",
     "default_set": "Set \"{name}\" as this group's default deck; now just use .draw to draw from it.",
@@ -454,7 +462,9 @@
     "temp_tag": "(temp)"
   },
   "mod": {
-    "wip": "Module feature is under development..."
+    "info": "Plugin {name} ({kind}, {id}): {state}",
+    "web_admin": "Use the WebUI plugin manager to update, reload, delete, or reinstall plugins.",
+    "usage": "Usage: .mod list / .mod on|off <plugin> / .mod info <plugin>"
   },
   "authorize": {
     "sent": "Authorization request sent to the Master."
@@ -569,6 +579,8 @@
     "me_global": "Sorry, this command has been disabled globally.",
     "cmd_global": "Sorry, {cmd} has been disabled globally.",
     "in_group": "Sorry, {cmd} is disabled in this group.",
+    "cmd_on": "{cmd} is now enabled in this group.",
+    "cmd_off": "{cmd} is now disabled in this group.",
     "external_on": "External mode ON: built-in commands disabled, only custom replies remain (use 外置关 to restore).",
     "external_off": "External mode OFF: built-in commands restored.",
     "not_master": "Sorry, this command is for the bot's Master only.",
@@ -841,6 +853,28 @@
     "proxy_note": "[NPC: {name}]\n"
   },
   "system": {
+  "legacy_user": {
+    "usage": "Usage: .user state | trust <user> [level] | tojson [user] | diss <user> [reason]",
+    "state": "User record for {user}\nTrust level: {trust}\nCreated: {created}\nCommands: {commands}\nCharacter cards: {cards}\nLast command: {last}",
+    "not_found": "No user record exists for {user}.",
+    "diss_usage": "Usage: .user diss <user> [reason]",
+    "dissed": "User {user} was added to the local blacklist. Their profile and cards were preserved for recovery.",
+    "already_dissed": "User {user} is already on the local blacklist.",
+    "destructive_web": "To prevent accidental chat deletion, profile/card deletion and bulk cleanup are available only in WebUI data management."
+  },
+  "legacy_cloud": {
+    "usage": "Usage: .cloud black | update",
+    "disabled": "Cloud-ban sync is disabled or not initialized. Configure it in WebUI first.",
+    "queued": "Cloud-ban synchronization was started in the background; its result is written to the service log.",
+    "update_web": "Current DiceNext version: {version}. Upgrade through WebUI or a release package; chat-based executable replacement is not supported."
+  },
+  "legacy_str": {
+    "unsupported": "Legacy text key {key} has no safe one-to-one DiceNext slot. Edit its replacement in WebUI Reply Text.",
+    "show": "{key} → {mapped}\n{text}",
+    "set": "Set {key} through DiceNext's unified template override layer.",
+    "reset": "Reset {key} to the built-in template for the current language.",
+    "failed": "Failed to save the template override."
+  },
     "usage": "Usage: .system info (system info) / .system stats (runtime stats)",
     "unknown": "unknown",
     "info": "System info\nOS: {os}\nCPU: {cores} cores · {cpu}% used\nMemory: {memused}/{memtotal} MB ({memload}%)\nProcess memory: {proc} MB",
