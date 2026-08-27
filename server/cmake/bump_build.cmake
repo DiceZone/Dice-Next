@@ -1,16 +1,30 @@
 # Build-number preparation and commit helper.
 #
 # Rule:
-#   - The counter stores the last successfully linked build number.
-#   - PREPARE generates counter + 1 without changing the counter file.
-#   - COMMIT writes the prepared number only after the executable links.
-#   - It RESETS to 1 when the major.minor changes (e.g. 3.0.x → 3.1.0).
-#   - A patch bump (3.0.0 → 3.0.1) does NOT reset it.
-# The counter file stores "<major>.<minor>:<number>".
+#   - PREPARE takes the greatest number recorded for this release line and adds
+#     one, without writing either counter.
+#   - COMMIT stores that number only after the executable links, and writes it
+#     to the BUILD DIRECTORY counter only.
+#   - It RESETS to 1 when the major.minor changes (e.g. 3.0.x -> 3.1.0).
+#   - A patch bump (3.0.0 -> 3.0.1) does NOT reset it.
+# Both counter files store "<major>.<minor>:<number>".
+#
+# Two counters, on purpose:
+#   COUNTER       server/build_counter.txt, tracked by git. It records what CI
+#                 last released and is READ-ONLY here; only the release workflow
+#                 writes it.
+#   LOCAL_COUNTER <build dir>/generated/build_counter.txt, untracked. Ordinary
+#                 builds bump this one.
+# The split exists because the tracked file used to be rewritten by every local
+# link. A dirty tracked file makes git refuse to merge the commit CI pushes for
+# the same file, and the merge driver declared in .gitattributes never gets to
+# run -- it only arbitrates committed content. Keeping build output out of the
+# working tree removes the conflict at the source.
 #
 # Args:
 #   -DMODE=PREPARE|COMMIT -DVERSION=<x.y.z> -DOUT=<version_build.cpp>
-#   -DOUTHDR=<version_build.h> -DCOUNTER=<counter file> -DPENDING=<pending file>
+#   -DOUTHDR=<version_build.h> -DCOUNTER=<tracked counter>
+#   -DLOCAL_COUNTER=<build dir counter> -DPENDING=<pending file>
 #   -P bump_build.cmake
 #
 # OUTHDR receives the same number as plain macros so the Windows VERSIONINFO
@@ -29,16 +43,24 @@ string(REGEX MATCH "^([0-9]+)\\.([0-9]+)" _ignore "${VERSION}")
 set(KEY "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}")
 
 if(MODE STREQUAL "PREPARE")
-  set(NUM 1)
-  if(EXISTS "${COUNTER}")
-    file(READ "${COUNTER}" _c)
+  # Highest of the two wins, so a local build is always numbered above the last
+  # release even right after pulling a newer tracked counter.
+  set(NUM 0)
+  foreach(SOURCE "${COUNTER}" "${LOCAL_COUNTER}")
+    if(NOT SOURCE OR NOT EXISTS "${SOURCE}")
+      continue()
+    endif()
+    file(READ "${SOURCE}" _c)
     string(STRIP "${_c}" _c)
     if(_c MATCHES "^([0-9]+\\.[0-9]+):([0-9]+)$")
-      if("${CMAKE_MATCH_1}" STREQUAL "${KEY}")
-        math(EXPR NUM "${CMAKE_MATCH_2} + 1")
+      set(_key "${CMAKE_MATCH_1}")
+      set(_num "${CMAKE_MATCH_2}")
+      if("${_key}" STREQUAL "${KEY}" AND _num GREATER NUM)
+        set(NUM "${_num}")
       endif()
     endif()
-  endif()
+  endforeach()
+  math(EXPR NUM "${NUM} + 1")
 
   string(TIMESTAMP TS "%Y-%m-%d %H:%M:%S")
   file(WRITE "${OUT}"
@@ -46,7 +68,7 @@ if(MODE STREQUAL "PREPARE")
   file(WRITE "${PENDING}" "${KEY}:${NUM}\n")
 
   if(DEFINED OUTHDR)
-    string(REGEX MATCH "^([0-9]+)\.([0-9]+)\.([0-9]+)" _ignore "${VERSION}")
+    string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)" _ignore "${VERSION}")
     set(V_MAJOR "${CMAKE_MATCH_1}")
     set(V_MINOR "${CMAKE_MATCH_2}")
     set(V_PATCH "${CMAKE_MATCH_3}")
@@ -64,12 +86,16 @@ elseif(MODE STREQUAL "COMMIT")
   if(NOT EXISTS "${PENDING}")
     message(FATAL_ERROR "Missing pending build number: ${PENDING}")
   endif()
+  if(NOT LOCAL_COUNTER)
+    message(FATAL_ERROR "COMMIT needs -DLOCAL_COUNTER=<build dir counter>")
+  endif()
   file(READ "${PENDING}" _pending)
   string(STRIP "${_pending}" _pending)
   if(NOT _pending MATCHES "^${KEY}:([0-9]+)$")
     message(FATAL_ERROR "Invalid pending build number: ${_pending}")
   endif()
-  file(WRITE "${COUNTER}" "${_pending}\n")
+  # Never the tracked counter: that one belongs to the release workflow.
+  file(WRITE "${LOCAL_COUNTER}" "${_pending}\n")
   file(REMOVE "${PENDING}")
 else()
   message(FATAL_ERROR "Unsupported build-number mode: ${MODE}")

@@ -544,6 +544,12 @@ jobs:
           printf '%s\n' "$desired_counter" > server/build_counter.txt
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # .gitattributes routes the counter through a merge driver that keeps the
+          # greatest value. The driver has to be registered in this checkout too, or
+          # the rebase below falls back to a line-wise merge and conflicts every time
+          # main moved while the platform builds were running.
+          git config merge.dicenext-build-counter.name 'Dice!Next monotonic build counter'
+          git config merge.dicenext-build-counter.driver             'cmake -DANCESTOR=%O -DCURRENT=%A -DINCOMING=%B -P server/cmake/merge_build_counter.cmake'
           git add server/build_counter.txt
           git commit -m "chore: record successful build ${BUILD_NUMBER}"
 

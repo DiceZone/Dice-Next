@@ -106,41 +106,40 @@ static inline std::string dnx_u8str(const std::filesystem::path& p) {
     return std::string(u.begin(), u.end());
 }
 
-// Exit code understood by dice-next.exe.  The manager restarts the core only
-// after its process and port have fully exited.
-constexpr int kManagedRestartExitCode = 42;
-std::atomic<int> g_requestedExitCode{0};
-
-/// Request a restart.  A package managed by dice-next.exe lets that manager
-/// perform the restart; direct legacy launches retain the old self-relaunch.
+/// Request a restart.  dice-next.exe waits for this process to disappear — the
+/// port and the single-instance lock are only free then — applies anything
+/// staged under updates/pending, starts the new core and exits again.  A build
+/// run straight out of the build tree has no launcher beside it and re-launches
+/// itself with the same handshake.  Neither path goes through a shell.
 inline void relaunchSelf() {
 #if defined(_WIN32) || defined(_WIN64)
-    wchar_t managed[8]{};
-    if (GetEnvironmentVariableW(L"DICENEXT_MANAGED", managed, static_cast<DWORD>(std::size(managed))) > 0 &&
-        std::wstring_view(managed) == L"1") {
-        g_requestedExitCode.store(kManagedRestartExitCode);
-        std::thread([] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
-            drogon::app().quit();
-        }).detach();
-        return;
-    }
     wchar_t exePath[MAX_PATH] = {0};
     if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) > 0) {
-        std::wstring cmd = L"cmd.exe /c timeout /t 2 /nobreak >nul & start \"\" \"";
-        cmd += exePath; cmd += L"\"";
+        namespace fs = std::filesystem;
+        const fs::path self(exePath);
+        std::error_code ec;
+        // Packaged layout: <root>\dice-next.exe starts <root>\app\dice-next-core.exe.
+        fs::path target = self.parent_path().parent_path() / L"dice-next.exe";
+        if (!fs::is_regular_file(target, ec)) target = self;
+
+        std::wstring cmd = L'"' + target.wstring() + L'"' + L" --after " +
+                           std::to_wstring(GetCurrentProcessId());
+        std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(0);
+        const std::wstring workingDir = target.parent_path().wstring();
         STARTUPINFOW si{}; si.cb = sizeof(si);
         PROCESS_INFORMATION pi{};
-        std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(0);
-        if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE,
-                           CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
+        // A fresh console, matching what the old `start ""` produced: this
+        // process still owns the current one and is about to close it.
+        if (CreateProcessW(target.c_str(), buf.data(), nullptr, nullptr, FALSE,
+                           CREATE_NEW_CONSOLE, nullptr,
+                           workingDir.empty() ? nullptr : workingDir.c_str(), &si, &pi)) {
             CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
         }
     }
 #endif
     std::thread([] {
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        drogon::app().quit();   // 解阻塞 app.run() → 进程退出 → 重启脚本随后拉起新实例
+        drogon::app().quit();   // 解阻塞 app.run() → 进程退出 → 启动器随后拉起新实例
     }).detach();
 }
 
@@ -305,8 +304,23 @@ static int realMain(int argc, char* argv[]) {
     // ── 3. Load configuration ────────────────────────────────
     dice::crashdiag::setPhase("config");
     std::string configPath = "config";
-    if (argc > 1) {
-        configPath = argv[1];
+    int argIndex = 1;
+#if defined(_WIN32) || defined(_WIN64)
+    // Handed over by the previous instance when no launcher sits beside this
+    // executable (a build tree): wait for it to disappear before claiming the
+    // port or the single-instance lock.  In a package dice-next.exe consumes
+    // this argument itself and never forwards it.
+    if (argc > argIndex + 1 && std::string(argv[argIndex]) == "--after") {
+        const DWORD previousId = static_cast<DWORD>(std::strtoul(argv[argIndex + 1], nullptr, 10));
+        if (HANDLE previous = OpenProcess(SYNCHRONIZE, FALSE, previousId)) {
+            WaitForSingleObject(previous, 30000);
+            CloseHandle(previous);
+        }
+        argIndex += 2;
+    }
+#endif
+    if (argc > argIndex) {
+        configPath = argv[argIndex];
     }
 
     dice::ConfigManager configMgr(configPath);
@@ -3876,7 +3890,7 @@ static int realMain(int argc, char* argv[]) {
     db.close();
     DICE_LOG_INFO("Dice!Next stopped. Goodbye!");
 
-    return g_requestedExitCode.load();
+    return 0;
 }
 
 // ── 崩溃诊断：main 整体包裹——未捕获 C++ 异常在此直接拿到 what() 落盘

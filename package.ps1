@@ -69,7 +69,8 @@ $ver = '3.0.0'
 $cmake = Get-Content (Join-Path $server 'CMakeLists.txt') -Raw
 if ($cmake -match 'project\(dice-next-server\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') { $ver = $Matches[1] }
 $build = '000'
-$counter = Join-Path $server 'build_counter.txt'
+# 构建目录里的计数，不是被 git 跟踪的那个：编译不再写工作区，避免脏文件挡住 CI 推来的同名提交。
+$counter = Join-Path $server "$buildDir\generated\build_counter.txt"
 if (Test-Path $counter) {
     $c = (Get-Content $counter -Raw).Trim()       # 形如 "3.0:64"
     if ($c -match ':\s*([0-9]+)') {
@@ -94,17 +95,12 @@ Write-Host "打包 $name ..." -ForegroundColor Cyan
 # Windows 会在进入 main() 前加载依赖 DLL，不能由主程序在运行后再设置
 # DLL 搜索路径。因此顶层管理器先设置 PATH，再拉起 app/ 内的核心程序。
 Copy-Item $launcher (Join-Path $stage 'dice-next.exe')
-# 在线升级时替换 dice-next.exe 的维护进程不能从该路径运行，因此随包发出一份
-# 独立的固定命名副本。运行期不再复制自身：把可执行文件复制成新名字再立刻拉起
-# 是投放器（dropper）的典型行为，会被信誉类杀毒引擎判为恶意。
-Copy-Item $launcher (Join-Path $stage 'dice-next-maintenance.exe')
 $appStage = Join-Path $stage 'app'
 New-Item -ItemType Directory -Force -Path $appStage | Out-Null
 Copy-Item $exe (Join-Path $appStage 'dice-next-core.exe')
-$libStage = Join-Path $stage 'lib'
-New-Item -ItemType Directory -Force -Path $libStage | Out-Null
-Get-ChildItem (Join-Path $relDir '*.dll') | Copy-Item -Destination $libStage
-$dllCount = (Get-ChildItem (Join-Path $libStage '*.dll') | Measure-Object).Count
+# 依赖 DLL 与 core 同目录。exe 所在目录是 Windows 解析静态导入的第一顺位，放这里
+# 就不需要任何 PATH 设置——启动器因此不必常驻，拉起 core 后即可退出。
+Get-ChildItem (Join-Path $relDir '*.dll') | Copy-Item -Destination $appStage
 
 # MSVC 运行库必须与 core 程序同目录（app\），放 lib\ 是无效的：Windows 解析 exe 的
 # 静态导入时先搜 exe 所在目录，再搜 System32，最后才轮到 PATH——而管理器只把 lib\
@@ -113,7 +109,7 @@ $dllCount = (Get-ChildItem (Join-Path $libStage '*.dll') | Measure-Object).Count
 # 兼容；用户机器上的旧运行库正是崩溃报告里 MSVCP140 读空指针的来源。放进 app\ 后
 # exe 目录优先，随包发出的这份稳定胜出。
 #
-# 顶层 dice-next.exe 与 dice-next-maintenance.exe 是静态链接（/MT），不需要这些。
+# 顶层 dice-next.exe 是静态链接（/MT），不依赖这些运行库，所以能在 core 之前跑起来。
 $runtimeDirs = @()
 $redistArch = if ($Architecture -eq 'arm64') { 'arm64' } else { 'x64' }
 foreach ($vsRoot in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
@@ -140,6 +136,7 @@ foreach ($d in 'vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll') {
     }
     if (-not $copied) { Fail "缺少 MSVC 运行库 $d（$Architecture）；请安装 VS 2022 生成工具的 C++ 重发行包" }
 }
+$dllCount = (Get-ChildItem (Join-Path $appStage '*.dll') | Measure-Object).Count
 
 # ── 2. i18n / 内建内容资源 / 前端 ────────────────────────────
 # 不再打包配置文件 — 首次运行会自动生成，避免升级覆盖用户自定义内容
@@ -197,10 +194,10 @@ QQ 官方机器人 2.0：
 
 【说明】
   - 首次运行会自动生成 config\ 目录，各功能区分别保存在 server.json、adapters.json 等文件中。
-  - 升级时解压完整覆盖所有文件即可，dice-next.exe / dice-next-maintenance.exe / app\ / lib\ / i18n / web\dist\ / data\ 都需要更新。你的 config\ 目录在解压包之外，不会丢失。
+  - 升级时解压完整覆盖所有文件即可，dice-next.exe / app\ / i18n / web\dist\ / data\ 都需要更新。你的 config\ 目录在解压包之外，不会丢失。
   - 端口 $port，可在 config\server.json 的 port 修改；若该端口被占用会自动顺延到下一个可用端口并写回配置（可右键托盘图标→打开网页面板，自动用正确端口）。
   - 同一套数据（同一安装目录）只能运行一个进程，重复启动会自动退出，避免数据冲突。
-  - 仅支持 64 位 Windows 10/11。dice-next.exe 是管理器，负责启动 app\dice-next-core.exe；dice-next-maintenance.exe 与它内容相同，只在应用在线升级时被拉起，用来替换正在运行的管理器本身；第三方依赖收纳在 lib\，MSVC 运行库随 app\ 一同发出，通常无需额外安装。
+  - 仅支持 64 位 Windows 10/11。dice-next.exe 是启动器：处理待应用的升级/还原，拉起 app\dice-next-core.exe 后就退出，常驻的只有 core 一个进程。所有依赖与运行库都在 app\ 内，通常无需额外安装。
   - 托管面板可设置系统环境变量 DICENEXT_UPDATE_RESTART=NO：管理器在应用在线升级后只退出，不会自行重启 core，避免与面板的进程守护逻辑冲突。
   - 当前处于公测阶段。建议优先通过 GitHub Issues 反馈问题，也欢迎加入 QQ 群 933145116 交流。
 

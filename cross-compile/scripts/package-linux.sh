@@ -44,7 +44,9 @@ done
 
 BUILD=$(sed -nE 's/.*buildNumber\(\) \{ return ([0-9]+); \}.*/\1/p' "$VERSION_SOURCE" | head -n1)
 [[ -n "$BUILD" ]] || { echo "Cannot read compiled build number" >&2; exit 1; }
-COUNTER=$(sed -nE 's/.*:[[:space:]]*([0-9]+).*/\1/p' "$SERVER_DIR/build_counter.txt" | head -n1)
+# Build-directory counter, not the git-tracked one: compiling must not dirty
+# the working tree (see server/cmake/bump_build.cmake).
+COUNTER=$(sed -nE 's/.*:[[:space:]]*([0-9]+).*/\1/p' "$SERVER_DIR/$BUILD_DIR/generated/build_counter.txt" | head -n1)
 [[ "$COUNTER" == "$BUILD" ]] || { echo "Build counter ($COUNTER) does not match compiled build ($BUILD)" >&2; exit 1; }
 
 VERSION=$(sed -nE 's/project\(dice-next-server VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' "$SERVER_DIR/CMakeLists.txt" | head -n1)

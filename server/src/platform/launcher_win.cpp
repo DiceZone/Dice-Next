@@ -14,15 +14,6 @@
 namespace fs = std::filesystem;
 namespace {
 
-constexpr DWORD kManagedRestartExitCode = 42;
-
-// The update maintenance helper replaces dice-next.exe, so it cannot run from
-// that path.  It ships in the package under its own fixed name and runs from
-// where it was installed: copying an executable to a freshly named file and
-// immediately launching the copy is a dropper pattern, and reputation-based
-// scanners score unsigned binaries that do it as malware.
-constexpr const wchar_t* kMaintenanceExe = L"dice-next-maintenance.exe";
-
 std::wstring executableDirectory() {
     std::vector<wchar_t> buffer(32768);
     const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -269,46 +260,13 @@ bool applyUpdate(const fs::path& root, const fs::path& stage) {
         }
     }
 
-    // The helper is replaced last because this process is running from it, so
-    // its rename is the one move that can fail with everything else already in
-    // place.  A stale helper still does its job — wait, move files, relaunch —
-    // so this is best effort and never rolls the update back.
-    if (fs::exists(stage / kMaintenanceExe, ec)) {
-        std::wstring helperError;
-        if (!moveTree(stage / kMaintenanceExe, root / kMaintenanceExe,
-                      rollback / kMaintenanceExe, helperError)) {
-            std::wcerr << L"Dice!Next kept the previous " << kMaintenanceExe << L": "
-                       << helperError << L"\n";
-        }
-    }
-
     fs::remove_all(stage, ec);
     std::wcout << L"Dice!Next update applied. Rollback: " << rollback.wstring() << L"\n";
     return true;
 }
 
-bool startMaintenance(const fs::path& root, const fs::path& stage) {
-    std::error_code ec;
-    const fs::path helper = root / kMaintenanceExe;
-    if (!fs::is_regular_file(helper, ec)) {
-        std::wcerr << L"Dice!Next could not start the update: " << helper.wstring()
-                   << L" is missing. Re-extract the package to restore it.\n";
-        return false;
-    }
-    std::wstring commandLine = quoteArg(helper.wstring()) + L" --maintenance " + quoteArg(root.wstring()) +
-        L" " + quoteArg(stage.wstring()) + L" " + std::to_wstring(GetCurrentProcessId());
-    std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end()); mutableCommand.push_back(L'\0');
-    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(helper.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE, 0, nullptr, root.c_str(), &startup, &process)) {
-        std::wcerr << L"Dice!Next could not start update maintenance helper (Win32 error " << GetLastError() << L").\n";
-        return false;
-    }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    return true;
-}
-
+// Waits until a process is really gone.  The port and the single-instance lock
+// are released only then, so a restart has to hold off until it happens.
 void waitForProcessExit(DWORD processId) {
     HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, processId);
     if (!process) return;
@@ -316,95 +274,62 @@ void waitForProcessExit(DWORD processId) {
     CloseHandle(process);
 }
 
-int launchUpdatedManager(const fs::path& root) {
-    const fs::path manager = root / L"dice-next.exe";
-    std::wstring commandLine = quoteArg(manager.wstring());
-    std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end()); mutableCommand.push_back(L'\0');
-    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(manager.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE, 0, nullptr, root.c_str(), &startup, &process)) {
-        std::wcerr << L"Dice!Next could not start updated manager (Win32 error " << GetLastError() << L").\n";
-        return 1;
-    }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    return 0;
-}
-
-int runMaintenance(const fs::path& root, const fs::path& stage, DWORD parentProcessId) {
-    const std::string metadata = readUpdateMetadata(stage);
-    waitForProcessExit(parentProcessId);
-    const bool applied = applyUpdate(root, stage);
-    writeUpdateResult(root, metadata, applied,
-        applied ? "更新文件已成功应用" : "更新文件应用失败，已尝试回滚到原版本");
-    if (noRestartRequested()) {
-        std::wcout << L"Dice!Next update finished; DICENEXT_UPDATE_RESTART=NO prevents core restart.\n";
-        return applied ? 0 : 1;
-    }
-    // A failed apply rolls back the old files. Relaunch that version as well so
-    // it can report the failure through the configured notice windows.
-    return launchUpdatedManager(root);
-}
-
-DWORD launchCore(const fs::path& root, const std::vector<std::wstring>& args) {
+// Starts the core and returns immediately.  This program is a launcher, not a
+// supervisor: it prepares the directory, hands off and exits, so Dice!Next
+// leaves exactly one process resident.  Every dependency now sits next to the
+// core inside app\, the first directory Windows searches for an executable's
+// imports, so there is no DLL search path to arrange here either.
+bool launchCore(const fs::path& root, const std::vector<std::wstring>& args) {
     const fs::path core = root / L"app" / L"dice-next-core.exe";
     if (!fs::is_regular_file(core)) {
         std::wcerr << L"Dice!Next core is missing: " << core.wstring() << L"\n";
-        return ERROR_FILE_NOT_FOUND;
+        return false;
     }
-    const std::wstring originalPath = pathValue(L"PATH");
-    SetEnvironmentVariableW(L"PATH", (root / L"lib").wstring().append(L";").append(originalPath).c_str());
+    // The core reads this to decide whether a staged update can be applied.
     SetEnvironmentVariableW(L"DICENEXT_MANAGED", L"1");
     SetCurrentDirectoryW(root.c_str());
 
     std::wstring commandLine = quoteArg(core.wstring());
     for (const auto& arg : args) commandLine += L" " + quoteArg(arg);
-    std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end()); mutableCommand.push_back(L'\0');
+    std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
+    mutableCommand.push_back(L'\0');
     STARTUPINFOW startup{}; startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
-    if (!CreateProcessW(core.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE, 0, nullptr, root.c_str(), &startup, &process)) {
-        const DWORD code = GetLastError();
-        std::wcerr << L"Dice!Next could not start core (Win32 error " << code << L").\n";
-        return code;
+    if (!CreateProcessW(core.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE, 0, nullptr,
+                        root.c_str(), &startup, &process)) {
+        std::wcerr << L"Dice!Next could not start core (Win32 error " << GetLastError() << L").\n";
+        return false;
     }
     CloseHandle(process.hThread);
-    WaitForSingleObject(process.hProcess, INFINITE);
-    DWORD result = 1; GetExitCodeProcess(process.hProcess, &result); CloseHandle(process.hProcess);
-    return result;
+    CloseHandle(process.hProcess);
+    return true;
 }
 
-// Packages built before the helper shipped as its own file have no copy of it
-// at the package root.  Restore it once, at start-up, so an in-place upgrade
-// from such a package can still run its next update.
-void ensureMaintenanceHelper(const fs::path& root) {
+// Applies a staged update if one is waiting.  It runs here, in the launcher,
+// with no core alive and nothing to co-ordinate with, so every file can be
+// replaced — dice-next.exe included: Windows refuses to overwrite a running
+// image but allows renaming it, which is what moveTree does.
+// Returns whether an update was present.
+bool applyPendingUpdate(const fs::path& root) {
+    const fs::path stage = root / L"updates" / L"pending";
     std::error_code ec;
-    const fs::path helper = root / kMaintenanceExe;
-    if (fs::is_regular_file(helper, ec)) return;
-    const fs::path manager = root / L"dice-next.exe";
-    if (!fs::is_regular_file(manager, ec)) return;
-    fs::copy_file(manager, helper, fs::copy_options::overwrite_existing, ec);
-    if (ec) {
-        std::wcerr << L"Dice!Next could not restore " << kMaintenanceExe << L": "
-                   << wideError(ec) << L"\n";
-    }
+    if (!fs::is_directory(stage, ec)) return false;
+    const std::string metadata = readUpdateMetadata(stage);
+    const bool applied = applyUpdate(root, stage);
+    writeUpdateResult(root, metadata, applied,
+        applied ? "更新文件已成功应用" : "更新文件应用失败，已尝试回滚到原版本");
+    return true;
 }
 
-int runManager(const fs::path& root, const std::vector<std::wstring>& args) {
+int runLauncher(const fs::path& root, const std::vector<std::wstring>& args, DWORD waitFor) {
+    if (waitFor != 0) waitForProcessExit(waitFor);
     if (!applyPendingRestore(root)) return 1;
-    ensureMaintenanceHelper(root);
-    for (;;) {
-        const DWORD result = launchCore(root, args);
-        if (result != kManagedRestartExitCode) return static_cast<int>(result);
-        const fs::path pendingUpdate = root / L"updates" / L"pending";
-        const bool hasPendingUpdate = fs::is_directory(pendingUpdate);
-        if (hasPendingUpdate) {
-            if (startMaintenance(root, pendingUpdate)) return 0;
-            writeUpdateResult(root, readUpdateMetadata(pendingUpdate), false,
-                "无法启动更新维护进程，已重新启动原版本");
-            continue;
-        }
-        if (!applyPendingRestore(root)) return 1;
+    const bool updated = applyPendingUpdate(root);
+    if (updated && noRestartRequested()) {
+        std::wcout << L"Dice!Next update finished; DICENEXT_UPDATE_RESTART=NO prevents core start.\n";
+        return 0;
     }
+    return launchCore(root, args) ? 0 : 1;
 }
 
 } // namespace
@@ -419,11 +344,17 @@ int wmain() {
 
     const fs::path root = executableDirectory();
     if (root.empty()) return 1;
-    if (args.size() == 4 && args[0] == L"--maintenance") {
-        return runMaintenance(fs::path(args[1]), fs::path(args[2]), static_cast<DWORD>(std::stoul(args[3])));
+
+    // "--after <pid>": the core is shutting down for a restart, or to let a
+    // staged update be applied.  Anything else is forwarded to the core.
+    DWORD waitFor = 0;
+    if (args.size() >= 2 && args[0] == L"--after") {
+        try {
+            waitFor = static_cast<DWORD>(std::stoul(args[1]));
+        } catch (...) {
+            waitFor = 0;
+        }
+        args.erase(args.begin(), args.begin() + 2);
     }
-    if (args.size() == 2 && args[0] == L"--apply-update") {
-        return startMaintenance(root, fs::path(args[1])) ? 0 : 1;
-    }
-    return runManager(root, args);
+    return runLauncher(root, args, waitFor);
 }

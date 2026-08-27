@@ -107,7 +107,11 @@ set(VERSION_BUILD_SOURCE ${CMAKE_BINARY_DIR}/generated/version_build.cpp)
 # The same number, as plain macros, for the Windows VERSIONINFO resources.
 set(VERSION_BUILD_HEADER ${CMAKE_BINARY_DIR}/generated/version_build.h)
 set(VERSION_BUILD_PENDING ${CMAKE_BINARY_DIR}/generated/version_build.pending)
+# Tracked, written by the release workflow only: it records the last published
+# build.  Ordinary builds bump the untracked one in the build directory, so
+# compiling never dirties a tracked file (see cmake/bump_build.cmake).
 set(VERSION_COUNTER_FILE ${CMAKE_CURRENT_SOURCE_DIR}/build_counter.txt)
+set(VERSION_LOCAL_COUNTER ${CMAKE_BINARY_DIR}/generated/build_counter.txt)
 set(BUMP_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bump_build.cmake)
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 set_source_files_properties(${VERSION_BUILD_SOURCE} PROPERTIES GENERATED TRUE)
@@ -119,8 +123,10 @@ add_custom_target(prepare_version ALL
     COMMAND ${CMAKE_COMMAND}
     -DMODE=PREPARE -DVERSION=${PROJECT_VERSION} -DOUT=${VERSION_BUILD_SOURCE}
     -DOUTHDR=${VERSION_BUILD_HEADER} -DPENDING=${VERSION_BUILD_PENDING}
-    -DCOUNTER=${VERSION_COUNTER_FILE} -P ${BUMP_SCRIPT}
+    -DCOUNTER=${VERSION_COUNTER_FILE} -DLOCAL_COUNTER=${VERSION_LOCAL_COUNTER}
+    -P ${BUMP_SCRIPT}
     BYPRODUCTS ${VERSION_BUILD_SOURCE} ${VERSION_BUILD_HEADER} ${VERSION_BUILD_PENDING}
+               ${VERSION_LOCAL_COUNTER}
     COMMENT "Preparing Dice!Next build number")
 
 # ─── Executable Target ───────────────────────────────────────
@@ -134,7 +140,8 @@ add_dependencies(dice-next-server prepare_version)
 add_custom_command(TARGET dice-next-server POST_BUILD
     COMMAND ${CMAKE_COMMAND}
         -DMODE=COMMIT -DVERSION=${PROJECT_VERSION}
-        -DCOUNTER=${VERSION_COUNTER_FILE} -DPENDING=${VERSION_BUILD_PENDING}
+        -DCOUNTER=${VERSION_COUNTER_FILE} -DLOCAL_COUNTER=${VERSION_LOCAL_COUNTER}
+        -DPENDING=${VERSION_BUILD_PENDING}
         -P ${BUMP_SCRIPT}
     COMMENT "Recording successful Dice!Next build number")
 
