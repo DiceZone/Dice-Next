@@ -51,7 +51,7 @@ VERSION=$(sed -nE 's/project\(dice-next-server VERSION ([0-9]+\.[0-9]+\.[0-9]+).
 VERSION=${VERSION:-3.0.0}
 BUILD_PADDED=$(printf '%03d' "$BUILD")
 TIMESTAMP=$(date +%Y-%m-%d-%H%M%S)
-PACKAGE_NAME="DiceNext-beta-${VERSION}(${BUILD_PADDED})-linux-${ARCH}-${TIMESTAMP}"
+PACKAGE_NAME="DiceNext-beta-${VERSION}-${BUILD_PADDED}-linux-${ARCH}-${TIMESTAMP}"
 STAGE_NAME="DiceNext-beta"
 STAGING_DIR="$RELEASE_DIR/$STAGE_NAME"
 ARCHIVE="$RELEASE_DIR/$PACKAGE_NAME.tar.gz"
@@ -62,6 +62,9 @@ echo "Packaging $PACKAGE_NAME ..."
 
 install -m 0755 "$SERVER_BIN" "$STAGING_DIR/dice-next-server"
 cp -a "$SERVER_DIR/i18n" "$STAGING_DIR/i18n"
+# Update mirrors ship as package data rather than string literals in the
+# binary, so they can be edited without a rebuild.
+cp -a "$SERVER_DIR/resources/update-mirrors.json" "$STAGING_DIR/update-mirrors.json"
 
 # Bundled defaults come only from the tracked resources tree. Never package
 # server/data: it is ignored runtime state and may contain private user data.

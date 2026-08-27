@@ -2550,7 +2550,13 @@ static int realMain(int argc, char* argv[]) {
     };
 
     // GitHub Release 更新服务：复用 Windows 管理器的退出码与 pending 目录。
-    dice::update::UpdateService updateService(configMgr, [] { relaunchSelf(); });
+    dice::update::UpdateService updateService(
+        configMgr, [] { relaunchSelf(); },
+        [&configMgr, &adapterMgr](const std::string& event, const std::string& message) {
+            const int level = event == "update_error"
+                ? dice::notice::kError : dice::notice::kImportant;
+            dice::notice::notify(configMgr, adapterMgr, level, message, "", "", event);
+        });
 
     // ── Register real REST API endpoints ─────────────────────
     dice::utils::setStartupEpoch();
@@ -3101,7 +3107,8 @@ static int realMain(int argc, char* argv[]) {
 
 
                     fs::create_directories(tmpDir, ec);
-                    if (ec || std::system(dice::backup::archiveExtractCommand(zipPath, tmpDir).c_str()) != 0) {
+                    if (ec || dice::backup::runArchive(
+                                  dice::backup::archiveExtractCommand(zipPath, tmpDir)).exitCode != 0) {
                         fail("规则包解压失败"); return;
                     }
                     fs::remove(zipPath, ec); zipPath.clear();

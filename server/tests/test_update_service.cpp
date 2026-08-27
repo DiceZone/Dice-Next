@@ -101,6 +101,19 @@ TEST(UpdateMirror, PrefixesFullGithubUrl) {
     ASSERT_EQ(buildMirroredUrl(original, "https://ghproxy.example/"),
         std::string("https://ghproxy.example/") + original);
 }
+
+TEST(UpdateAssetName, RecoversGithubNormalizedLegacyParentheses) {
+    const auto legacy = githubAssetNameCandidates(
+        "DiceNext-beta-3.0.0(873)-windows-amd64.zip");
+    ASSERT_EQ(legacy.size(), static_cast<std::size_t>(2));
+    ASSERT_EQ(legacy[0], std::string("DiceNext-beta-3.0.0(873)-windows-amd64.zip"));
+    ASSERT_EQ(legacy[1], std::string("DiceNext-beta-3.0.0.873.-windows-amd64.zip"));
+
+    const auto safe = githubAssetNameCandidates(
+        "DiceNext-beta-3.0.0-874-windows-amd64.zip");
+    ASSERT_EQ(safe.size(), static_cast<std::size_t>(1));
+    ASSERT_EQ(safe[0], std::string("DiceNext-beta-3.0.0-874-windows-amd64.zip"));
+}
 TEST(UpdateService, PortableWorkerStartsAndStopsCleanly) {
     namespace fs = std::filesystem;
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();

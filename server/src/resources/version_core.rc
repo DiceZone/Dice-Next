@@ -1,0 +1,38 @@
+// Version resource for the Dice!Next core executable.
+//
+// The numbers come from generated/version_build.h, which bump_build.cmake
+// rewrites before every build, so the metadata Windows shows in the file
+// properties always matches the build number printed in the .bot banner.
+// Keep this file pure ASCII: rc.exe is not compiled with /utf-8.
+
+#include <winresrc.h>
+#include "version_build.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    DICE_VER_MAJOR,DICE_VER_MINOR,DICE_VER_PATCH,DICE_VER_BUILD
+ PRODUCTVERSION DICE_VER_MAJOR,DICE_VER_MINOR,DICE_VER_PATCH,DICE_VER_BUILD
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "DiceZone"
+            VALUE "FileDescription",  "Dice!Next Core"
+            VALUE "FileVersion",      DICE_VER_STRING
+            VALUE "InternalName",     "dice-next-core"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 DiceZone / Shia. Licensed under AGPL-3.0-or-later."
+            VALUE "OriginalFilename", "dice-next-core.exe"
+            VALUE "ProductName",      "Dice!Next"
+            VALUE "ProductVersion",   DICE_PRODUCT_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

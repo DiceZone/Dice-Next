@@ -16,6 +16,7 @@
 #include <mutex>
 #include <drogon/WebSocketClient.h>
 #include <drogon/HttpRequest.h>
+#include "common/subprocess.h"
 
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -606,13 +607,12 @@ static std::string jsTsToJs(const std::string& src, const std::string& file) {
         const fs::path tmpJs = tmpDir / ("dn_ts_" + tag + ".js");
         if (!ec) {
             { std::ofstream f(tmpTs, std::ios::binary); f << src; }
-            std::string cmd = "esbuild \"" + tmpTs.string() + "\" --loader=ts --format=cjs --outfile=\"" + tmpJs.string() + "\"";
-#if defined(_WIN32)
-            cmd += " >nul 2>&1";
-#else
-            cmd += " >/dev/null 2>&1";
-#endif
-            std::system(cmd.c_str());
+            // Capturing the output replaces the >nul / >/dev/null tail, which
+            // was the only reason this needed a shell.
+            dice::proc::runPaths("esbuild",
+                                 {tmpTs, "--loader=ts", "--format=cjs",
+                                  "--outfile=" + tmpJs.string()},
+                                 4096, true);
             std::string out;
             if (fs::is_regular_file(tmpJs, ec)) {
                 std::ifstream f(tmpJs, std::ios::binary);

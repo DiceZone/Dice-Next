@@ -501,6 +501,10 @@ jobs:
             local file="${files[0]}"
             local name sha size
             name=$(basename "$file")
+            if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "Release asset name contains characters GitHub may rewrite: $name" >&2
+              exit 1
+            fi
             sha=$(sha256sum "$file" | awk '{print $1}')
             size=$(stat -c '%s' "$file")
             assets=$(jq -c \

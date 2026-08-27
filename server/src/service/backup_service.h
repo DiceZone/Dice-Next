@@ -6,6 +6,7 @@
 
 #include "../storage/database.h"
 #include "../common/utils.h"
+#include "../common/subprocess.h"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
@@ -220,8 +221,6 @@ inline bool copyFlatFiles(const fs::path& from, const fs::path& to, std::string&
     return true;
 }
 
-inline std::string runCapture(const std::string& command, int& code);
-
 /// Serialize manual and scheduled backups: two concurrent createArchive calls
 /// would race on the same archive store (one may copy an archive the other is
 /// still writing, producing exactly the Windows sharing-violation above).
@@ -243,42 +242,58 @@ inline bool isSafeArchiveName(const std::string& name) {
            (name.rfind("dicenext_bak_", 0) == 0 || name.rfind("DiceNext-", 0) == 0);
 }
 
-inline std::string archiveListCommand(const fs::path& archive) {
+/// An archive tool invocation: a program and its arguments, started directly.
+/// Building a command string meant a shell had to take it apart again, which on
+/// Windows put cmd.exe in the process tree of every backup and restore.
+struct ArchiveCommand {
+    std::string program;
+    std::vector<fs::path> args;
+    fs::path workingDirectory;   ///< empty inherits the caller's
+};
+
+inline dice::proc::Result runArchive(const ArchiveCommand& command, std::size_t outputLimit = 0) {
+    return dice::proc::runPaths(command.program, command.args, outputLimit, false,
+                                command.workingDirectory);
+}
+
+inline ArchiveCommand archiveListCommand(const fs::path& archive) {
 #ifdef _WIN32
-    return "tar -tf " + quote(archive);
+    return {dice::proc::systemTool("tar.exe"), {"-tf", archive}, {}};
 #else
-    return "unzip -Z1 " + quote(archive);
+    return {"unzip", {"-Z1", archive}, {}};
 #endif
 }
 
-inline std::string archiveCreateCommand(const fs::path& stage, const fs::path& archive) {
+inline ArchiveCommand archiveCreateCommand(const fs::path& stage, const fs::path& archive) {
 #ifdef _WIN32
-    return "tar -a -cf " + quote(archive) + " -C " + quote(stage) + " manifest.json config data";
+    return {dice::proc::systemTool("tar.exe"),
+            {"-a", "-cf", archive, "-C", stage, "manifest.json", "config", "data"}, {}};
 #else
-    return "cd " + quote(stage) + " && zip -qr " + quote(fs::absolute(archive)) + " manifest.json config data";
+    // Starting the child in the stage directory replaces the old "cd ... && zip",
+    // the one command here that genuinely needed a shell.
+    return {"zip", {"-qr", fs::absolute(archive), "manifest.json", "config", "data"}, stage};
 #endif
 }
 
-inline std::string archiveExtractCommand(const fs::path& archive, const fs::path& destination) {
+inline ArchiveCommand archiveExtractCommand(const fs::path& archive, const fs::path& destination) {
 #ifdef _WIN32
-    return "tar -xf " + quote(archive) + " -C " + quote(destination);
+    return {dice::proc::systemTool("tar.exe"), {"-xf", archive, "-C", destination}, {}};
 #else
-    return "unzip -q " + quote(archive) + " -d " + quote(destination);
+    return {"unzip", {"-q", archive, "-d", destination}, {}};
 #endif
 }
 
-inline std::string archiveManifestCommand(const fs::path& archive) {
+inline ArchiveCommand archiveManifestCommand(const fs::path& archive) {
 #ifdef _WIN32
-    return "tar -xOf " + quote(archive) + " manifest.json";
+    return {dice::proc::systemTool("tar.exe"), {"-xOf", archive, "manifest.json"}, {}};
 #else
-    return "unzip -p " + quote(archive) + " manifest.json";
+    return {"unzip", {"-p", archive, "manifest.json"}, {}};
 #endif
 }
 
 inline bool validateArchiveFile(const fs::path& archive, std::string& error) {
-    int rc = 0;
-    const std::string entries = runCapture(archiveListCommand(archive), rc);
-    if (rc != 0 || entries.find("manifest.json") == std::string::npos) {
+    const dice::proc::Result listed = runArchive(archiveListCommand(archive));
+    if (listed.exitCode != 0 || listed.output.find("manifest.json") == std::string::npos) {
         error = "备份压缩包校验失败";
         return false;
     }
@@ -357,8 +372,8 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
     if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
     archive = backupDir / ("dicenext_bak_" + stamp() + ".zip");
     if (fs::exists(archive, ec)) { error = "同一秒内已有备份，请稍后重试"; fs::remove_all(stage, ec); return false; }
-    std::string cmd = archiveCreateCommand(stage, archive);
-    if (std::system(cmd.c_str()) != 0 || !fs::is_regular_file(archive, ec) || !validateArchiveFile(archive, error)) {
+    if (runArchive(archiveCreateCommand(stage, archive)).exitCode != 0 ||
+        !fs::is_regular_file(archive, ec) || !validateArchiveFile(archive, error)) {
         if (error.empty()) error = "无法创建备份压缩包（需要系统 ZIP 工具）";
         fs::remove_all(stage, ec); return false;
     }
@@ -371,28 +386,10 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
     return createArchive(db, configPath, archive, error, Selection::full(), automatic);
 }
 
-inline std::string runCapture(const std::string& command, int& code) {
-    std::string out;
-#ifdef _WIN32
-    FILE* pipe = _popen(command.c_str(), "r");
-#else
-    FILE* pipe = popen(command.c_str(), "r");
-#endif
-    if (!pipe) { code = -1; return {}; }
-    char buf[4096]; while (std::fgets(buf, sizeof(buf), pipe)) out += buf;
-#ifdef _WIN32
-    code = _pclose(pipe);
-#else
-    code = pclose(pipe);
-#endif
-    return out;
-}
-
 inline bool archiveIsAutomatic(const fs::path& archive, bool fallback) {
-    int rc = 0;
     try {
-        const std::string content = runCapture(archiveManifestCommand(archive), rc);
-        if (rc == 0) return json::parse(content).value("automatic", fallback);
+        const dice::proc::Result manifest = runArchive(archiveManifestCommand(archive));
+        if (manifest.exitCode == 0) return json::parse(manifest.output).value("automatic", fallback);
     } catch (...) {}
     return fallback;
 }
@@ -457,9 +454,9 @@ inline bool allowedArchivePath(const std::string& name) {
 inline bool stageRestoreArchive(const fs::path& archive, std::string& error) {
     std::error_code ec;
     if (!fs::is_regular_file(archive, ec)) { error = "备份文件不存在"; return false; }
-    int rc = 0; std::string entries = runCapture(archiveListCommand(archive), rc);
-    if (rc != 0) { error = "不是有效的 Dice!Next 备份压缩包"; return false; }
-    std::istringstream lines(entries); std::string line; bool manifestSeen = false;
+    const dice::proc::Result listed = runArchive(archiveListCommand(archive));
+    if (listed.exitCode != 0) { error = "不是有效的 Dice!Next 备份压缩包"; return false; }
+    std::istringstream lines(listed.output); std::string line; bool manifestSeen = false;
     while (std::getline(lines, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (!allowedArchivePath(line)) { error = "备份包含不允许的文件路径"; return false; }
@@ -468,7 +465,7 @@ inline bool stageRestoreArchive(const fs::path& archive, std::string& error) {
     if (!manifestSeen) { error = "备份缺少 manifest.json"; return false; }
     fs::path stage = "restore-pending"; fs::remove_all(stage, ec); fs::create_directories(stage, ec);
     if (ec) { error = ec.message(); return false; }
-    if (std::system(archiveExtractCommand(archive, stage).c_str()) != 0) {
+    if (runArchive(archiveExtractCommand(archive, stage)).exitCode != 0) {
         error = "无法解压备份文件"; fs::remove_all(stage, ec); return false;
     }
     // M4: 解压后二次校验——落盘真实路径必须位于暂存目录内（防 zip-slip 绕过字符串校验）。

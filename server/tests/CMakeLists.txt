@@ -39,6 +39,7 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/config/config_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/logger.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/version.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/subprocess.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_service.cpp
     ${VERSION_BUILD_SOURCE}
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/markdown.cpp
@@ -83,6 +84,7 @@ add_executable(dice-next-lua-tests
     test_lua_plugin_compat.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/mod/lua_plugin_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/logger.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/subprocess.cpp
 )
 target_include_directories(dice-next-lua-tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..

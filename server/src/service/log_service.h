@@ -17,6 +17,7 @@
 #include "../config/config_manager.h"
 #include "../common/logger.h"
 #include "../common/utils.h"
+#include "../common/subprocess.h"
 #include "image_host.h"   // 图片占位符替换为稳定图床 URL
 #include "parquet_writer.h"   // 日志导出为 Parquet（zstd）
 
@@ -179,26 +180,6 @@ inline std::string makeUniformId(const std::string& groupId) {
     return groupId + ":" + std::to_string((long long)std::time(nullptr));
 }
 
-/// Run a shell command and capture stdout. (Used for the curl upload.)
-inline std::string runCapture(const std::string& cmd) {
-#if defined(_WIN32)
-    FILE* pipe = _popen(cmd.c_str(), "r");
-#else
-    FILE* pipe = popen(cmd.c_str(), "r");
-#endif
-    if (!pipe) return "";
-    std::string out;
-    std::array<char, 4096> buf;
-    size_t n;
-    while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) out.append(buf.data(), n);
-#if defined(_WIN32)
-    _pclose(pipe);
-#else
-    pclose(pipe);
-#endif
-    return out;
-}
-
 /// 把日志渲染成 SealDice 标准 items 数组（海豹染色器/日志站可解析）。
 /// 与 sealdice-core model/log.go 的 LogOneItem json tag 逐字段对齐。
 /// @p selfId 骰娘账号，用于标注 isDice（骰娘消息染色）。
@@ -271,15 +252,14 @@ inline void uploadSeal(const std::string& fullUrl, const std::string& name,
             if (z.empty()) throw std::runtime_error("zlib compress failed");
             { std::ofstream f(binPath, std::ios::binary); f.write(z.data(), (std::streamsize)z.size()); }
             { std::ofstream f(namePath, std::ios::binary); f << name; }   // value-from-file 免转义
-            std::string cmd =
-                "curl -s -S -X PUT "
-                "-F \"name=<" + namePath.string() + "\" "
-                "-F \"uniform_id=QQ-Group:" + groupId + "\" "
-                "-F \"client=SealDice\" "
-                "-F \"version=101\" "
-                "-F \"file=@" + binPath.string() + ";filename=log-zlib-compressed\" "
-                "\"" + fullUrl + "\"";
-            std::string out = runCapture(cmd);
+            std::string out = dice::proc::curl({
+                "-s", "-S", "-X", "PUT",
+                "-F", "name=<" + namePath.string(),
+                "-F", "uniform_id=QQ-Group:" + groupId,
+                "-F", "client=SealDice",
+                "-F", "version=101",
+                "-F", "file=@" + binPath.string() + ";filename=log-zlib-compressed",
+                fullUrl}).output;
             try {
                 auto j = json::parse(out);
                 std::string url = j.value("url", std::string());
@@ -348,15 +328,14 @@ inline void uploadSealV105(const std::string& fullUrl, const std::string& name,
             if (parquetBytes.empty()) throw std::runtime_error("empty parquet");
             { std::ofstream f(binPath, std::ios::binary); f.write(parquetBytes.data(), (std::streamsize)parquetBytes.size()); }
             { std::ofstream f(namePath, std::ios::binary); f << name; }   // value-from-file 免转义
-            std::string cmd =
-                "curl -s -S -X PUT "
-                "-F \"name=<" + namePath.string() + "\" "
-                "-F \"uniform_id=QQ-Group:" + groupId + "\" "
-                "-F \"client=Parquet\" "
-                "-F \"version=105\" "
-                "-F \"file=@" + binPath.string() + ";filename=log-zlib-compressed\" "
-                "\"" + fullUrl + "\"";
-            std::string out = runCapture(cmd);
+            std::string out = dice::proc::curl({
+                "-s", "-S", "-X", "PUT",
+                "-F", "name=<" + namePath.string(),
+                "-F", "uniform_id=QQ-Group:" + groupId,
+                "-F", "client=Parquet",
+                "-F", "version=105",
+                "-F", "file=@" + binPath.string() + ";filename=log-zlib-compressed",
+                fullUrl}).output;
             try {
                 auto j = json::parse(out);
                 std::string url = j.value("url", std::string());
@@ -405,14 +384,13 @@ inline void uploadDiceNext(const std::string& fullUrl, const std::string& name,
             if (zdata.empty()) throw std::runtime_error("empty data");
             { std::ofstream f(binPath, std::ios::binary); f.write(zdata.data(), (std::streamsize)zdata.size()); }
             { std::ofstream f(namePath, std::ios::binary); f << name; }
-            std::string cmd =
-                "curl -s -S -X PUT "
-                "-F \"name=<" + namePath.string() + "\" "
-                "-F \"uniform_id=QQ-Group:" + groupId + "\" "
-                "-F \"client=DiceNext\" "
-                "-F \"file=@" + binPath.string() + ";filename=log-zstd-json\" "
-                "\"" + fullUrl + "\"";
-            std::string out = runCapture(cmd);
+            std::string out = dice::proc::curl({
+                "-s", "-S", "-X", "PUT",
+                "-F", "name=<" + namePath.string(),
+                "-F", "uniform_id=QQ-Group:" + groupId,
+                "-F", "client=DiceNext",
+                "-F", "file=@" + binPath.string() + ";filename=log-zstd-json",
+                fullUrl}).output;
             try {
                 auto j = json::parse(out);
                 std::string url = j.value("url", std::string());
@@ -446,13 +424,12 @@ inline void upload(const std::string& fullUrl, const std::string& name,
             { std::ofstream f(namePath, std::ios::binary); f << name; }   // value-from-file avoids quoting issues
             // curl reads the `name` field value from a file (-F "name=<path"),
             // so arbitrary names (Chinese/spaces) need no shell escaping.
-            std::string cmd =
-                "curl -s -S -X POST "
-                "-F \"name=<" + namePath.string() + "\" "
-                "-F \"uniform_id=" + uniformId + "\" "
-                "-F \"file=@" + txtPath.string() + ";type=text/plain\" "
-                "\"" + fullUrl + "\"";
-            std::string out = runCapture(cmd);
+            std::string out = dice::proc::curl({
+                "-s", "-S", "-X", "POST",
+                "-F", "name=<" + namePath.string(),
+                "-F", "uniform_id=" + uniformId,
+                "-F", "file=@" + txtPath.string() + ";type=text/plain",
+                fullUrl}).output;
             try {
                 auto j = json::parse(out);
                 if (j.value("success", true) != false && j.contains("url")) {

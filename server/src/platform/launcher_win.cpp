@@ -16,6 +16,13 @@ namespace {
 
 constexpr DWORD kManagedRestartExitCode = 42;
 
+// The update maintenance helper replaces dice-next.exe, so it cannot run from
+// that path.  It ships in the package under its own fixed name and runs from
+// where it was installed: copying an executable to a freshly named file and
+// immediately launching the copy is a dropper pattern, and reputation-based
+// scanners score unsigned binaries that do it as malware.
+constexpr const wchar_t* kMaintenanceExe = L"dice-next-maintenance.exe";
+
 std::wstring executableDirectory() {
     std::vector<wchar_t> buffer(32768);
     const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -88,6 +95,57 @@ std::wstring timestamp() {
     wchar_t out[32]{};
     swprintf_s(out, L"%04u%02u%02u-%02u%02u%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
     return out;
+}
+
+std::string readUpdateMetadata(const fs::path& stage) {
+    std::ifstream input(stage / L"update.json", std::ios::binary);
+    if (!input) return "{}";
+    std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    if (text.empty() || text.size() > 64 * 1024 ||
+        text.find('{') == std::string::npos || text.rfind('}') == std::string::npos) {
+        return "{}";
+    }
+    return text;
+}
+
+std::string jsonEscape(const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (unsigned char ch : value) {
+        if (ch == '"' || ch == '\\') {
+            out.push_back('\\');
+            out.push_back(static_cast<char>(ch));
+        } else if (ch == '\n') {
+            out += "\\n";
+        } else if (ch == '\r') {
+            out += "\\r";
+        } else if (ch >= 0x20) {
+            out.push_back(static_cast<char>(ch));
+        }
+    }
+    return out;
+}
+
+void writeUpdateResult(const fs::path& root, const std::string& metadata,
+                       bool success, const std::string& message) {
+    const fs::path updates = root / L"updates";
+    const fs::path result = updates / L"last-result.json";
+    const fs::path temporary = updates / L"last-result.tmp";
+    std::error_code ec;
+    fs::create_directories(updates, ec);
+    if (ec) return;
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) return;
+        output << "{\"schema\":1,\"success\":" << (success ? "true" : "false")
+               << ",\"metadata\":" << (metadata.empty() ? "{}" : metadata)
+               << ",\"message\":\"" << jsonEscape(message) << "\"}\n";
+        if (!output) return;
+    }
+    fs::remove(result, ec);
+    ec.clear();
+    fs::rename(temporary, result, ec);
+    if (ec) fs::remove(temporary, ec);
 }
 
 bool applyPendingRestore(const fs::path& root) {
@@ -183,7 +241,8 @@ bool applyUpdate(const fs::path& root, const fs::path& stage) {
             L"app", L"lib", L"i18n", L"web", L"docs", L"decks", L"card-templates"}) {
         if (!replace(stage / item, root / item, rollback / item)) return fail(item);
     }
-    for (const wchar_t* file : {L"dice-next.exe", L"使用说明.txt"}) {
+    for (const wchar_t* file : {L"dice-next.exe", L"update-mirrors.json",
+                                L"使用说明.txt"}) {
         if (!replace(stage / file, root / file, rollback / file)) return fail(file);
     }
 
@@ -210,6 +269,19 @@ bool applyUpdate(const fs::path& root, const fs::path& stage) {
         }
     }
 
+    // The helper is replaced last because this process is running from it, so
+    // its rename is the one move that can fail with everything else already in
+    // place.  A stale helper still does its job — wait, move files, relaunch —
+    // so this is best effort and never rolls the update back.
+    if (fs::exists(stage / kMaintenanceExe, ec)) {
+        std::wstring helperError;
+        if (!moveTree(stage / kMaintenanceExe, root / kMaintenanceExe,
+                      rollback / kMaintenanceExe, helperError)) {
+            std::wcerr << L"Dice!Next kept the previous " << kMaintenanceExe << L": "
+                       << helperError << L"\n";
+        }
+    }
+
     fs::remove_all(stage, ec);
     std::wcout << L"Dice!Next update applied. Rollback: " << rollback.wstring() << L"\n";
     return true;
@@ -217,12 +289,10 @@ bool applyUpdate(const fs::path& root, const fs::path& stage) {
 
 bool startMaintenance(const fs::path& root, const fs::path& stage) {
     std::error_code ec;
-    const fs::path updates = root / L"updates";
-    fs::create_directories(updates, ec);
-    const fs::path helper = updates / (L"dice-next-maintenance-" + timestamp() + L".exe");
-    fs::copy_file(root / L"dice-next.exe", helper, fs::copy_options::overwrite_existing, ec);
-    if (ec) {
-        std::wcerr << L"Dice!Next could not prepare update maintenance helper: " << wideError(ec) << L"\n";
+    const fs::path helper = root / kMaintenanceExe;
+    if (!fs::is_regular_file(helper, ec)) {
+        std::wcerr << L"Dice!Next could not start the update: " << helper.wstring()
+                   << L" is missing. Re-extract the package to restore it.\n";
         return false;
     }
     std::wstring commandLine = quoteArg(helper.wstring()) + L" --maintenance " + quoteArg(root.wstring()) +
@@ -262,12 +332,17 @@ int launchUpdatedManager(const fs::path& root) {
 }
 
 int runMaintenance(const fs::path& root, const fs::path& stage, DWORD parentProcessId) {
+    const std::string metadata = readUpdateMetadata(stage);
     waitForProcessExit(parentProcessId);
-    if (!applyUpdate(root, stage)) return 1;
+    const bool applied = applyUpdate(root, stage);
+    writeUpdateResult(root, metadata, applied,
+        applied ? "更新文件已成功应用" : "更新文件应用失败，已尝试回滚到原版本");
     if (noRestartRequested()) {
         std::wcout << L"Dice!Next update finished; DICENEXT_UPDATE_RESTART=NO prevents core restart.\n";
-        return 0;
+        return applied ? 0 : 1;
     }
+    // A failed apply rolls back the old files. Relaunch that version as well so
+    // it can report the failure through the configured notice windows.
     return launchUpdatedManager(root);
 }
 
@@ -298,14 +373,36 @@ DWORD launchCore(const fs::path& root, const std::vector<std::wstring>& args) {
     return result;
 }
 
+// Packages built before the helper shipped as its own file have no copy of it
+// at the package root.  Restore it once, at start-up, so an in-place upgrade
+// from such a package can still run its next update.
+void ensureMaintenanceHelper(const fs::path& root) {
+    std::error_code ec;
+    const fs::path helper = root / kMaintenanceExe;
+    if (fs::is_regular_file(helper, ec)) return;
+    const fs::path manager = root / L"dice-next.exe";
+    if (!fs::is_regular_file(manager, ec)) return;
+    fs::copy_file(manager, helper, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        std::wcerr << L"Dice!Next could not restore " << kMaintenanceExe << L": "
+                   << wideError(ec) << L"\n";
+    }
+}
+
 int runManager(const fs::path& root, const std::vector<std::wstring>& args) {
     if (!applyPendingRestore(root)) return 1;
+    ensureMaintenanceHelper(root);
     for (;;) {
         const DWORD result = launchCore(root, args);
         if (result != kManagedRestartExitCode) return static_cast<int>(result);
         const fs::path pendingUpdate = root / L"updates" / L"pending";
         const bool hasPendingUpdate = fs::is_directory(pendingUpdate);
-        if (hasPendingUpdate) return startMaintenance(root, pendingUpdate) ? 0 : 1;
+        if (hasPendingUpdate) {
+            if (startMaintenance(root, pendingUpdate)) return 0;
+            writeUpdateResult(root, readUpdateMetadata(pendingUpdate), false,
+                "无法启动更新维护进程，已重新启动原版本");
+            continue;
+        }
         if (!applyPendingRestore(root)) return 1;
     }
 }

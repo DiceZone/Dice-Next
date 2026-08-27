@@ -717,9 +717,9 @@ TEST(BackupRestore, ArchivesStagesAndAppliesAtStartup) {
     ASSERT_TRUE(fs::is_regular_file(archive));
     ASSERT_TRUE(archive.filename().string().rfind("dicenext_bak_", 0) == 0);
     ASSERT_TRUE(archive.extension() == ".zip");
-    int listRc = 0;
-    ASSERT_TRUE(backup::runCapture(backup::archiveListCommand(archive), listRc).find("data/backups/") == std::string::npos);
-    ASSERT_EQ(listRc, 0);
+    const dice::proc::Result listed = backup::runArchive(backup::archiveListCommand(archive));
+    ASSERT_TRUE(listed.output.find("data/backups/") == std::string::npos);
+    ASSERT_EQ(listed.exitCode, 0);
     std::ifstream backupFile(archive, std::ios::binary);
     std::string bytes((std::istreambuf_iterator<char>(backupFile)), std::istreambuf_iterator<char>());
     backupFile.close();

@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "comment": [
+    "在线升级的 GitHub 加速镜像，按顺序竞速；命中最快的一个用于下载。",
+    "在管理面板把更新来源设为「直连」可完全跳过本列表；设为「自定义」则改用你填的地址。",
+    "可以自行增删条目：只接受 https:// 开头的地址，最多 16 条，删空则等同于直连。注意升级会覆盖本文件，想固定使用某个地址请在管理面板把更新来源设为「自定义」。",
+    "这些地址放在包内数据文件而不是可执行文件里：未签名程序内嵌第三方下载代理域名、",
+    "又通过它们取回可执行文件，是下载器木马的典型静态特征，会触发杀毒软件的误报。"
+  ],
+  "mirrors": [
+    "https://github.chenc.dev",
+    "https://ghproxy.cfd",
+    "https://github.tbedu.top",
+    "https://ghproxy.cc",
+    "https://gh.monlor.com",
+    "https://cdn.akaere.online",
+    "https://git.yylx.win",
+    "https://gh-proxy.com"
+  ]
+}

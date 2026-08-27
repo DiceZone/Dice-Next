@@ -2,8 +2,9 @@
 // ─── Dice!Next — Windows system tray icon ─────────────────────
 // A native tray icon with a right-click menu: open app folder, show/hide the
 // console window, open the web panel, and quit. Runs on its own thread with a
-// hidden message-only window + message pump (Shell_NotifyIcon). Windows-only;
-// a no-op stub elsewhere.
+// hidden top-level window + message pump (Shell_NotifyIcon). The window is not
+// message-only because it has to receive the shell's "TaskbarCreated" broadcast.
+// Windows-only; a no-op stub elsewhere.
 
 #include <cstdint>
 #include <functional>
@@ -29,7 +30,20 @@ namespace tray_detail {
     constexpr UINT WM_TRAY = WM_USER + 1;
     enum { ID_DIR = 1, ID_CONSOLE, ID_WEB, ID_AUTOSTART, ID_EXIT };
 
+    // Explorer drops every tray icon when it restarts — after a shell crash, an
+    // update, or a DPI change — and asks each owner to put its own back by
+    // broadcasting the registered "TaskbarCreated" message.  Without answering
+    // it the icon is gone for good while the server keeps running, which looks
+    // exactly like the program died.  The icon data is kept here so the window
+    // procedure can re-add it.
+    inline UINT g_taskbarCreated = 0;
+    inline NOTIFYICONDATAW g_nid{};
+
     inline LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (g_taskbarCreated != 0 && msg == g_taskbarCreated) {
+            Shell_NotifyIconW(NIM_ADD, &g_nid);   // already present: returns FALSE, harmless
+            return 0;
+        }
         if (msg == WM_TRAY) {
             if (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP) {
                 POINT pt; GetCursorPos(&pt);
@@ -92,11 +106,21 @@ inline void startSystemTray(uint16_t port, std::function<void()> onExit, bool st
         wc.hInstance = inst;
         wc.lpszClassName = L"DiceNextTray";
         RegisterClassW(&wc);
-        HWND hWnd = CreateWindowW(wc.lpszClassName, L"DiceNext", 0, 0, 0, 0, 0,
-                                  HWND_MESSAGE, nullptr, inst, nullptr);   // message-only window
+        // Registered before the window exists so no broadcast can be missed, and
+        // the value is the same for every process that asks.
+        tray_detail::g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
+        // A top-level window, never shown.  It cannot be message-only (HWND_MESSAGE):
+        // those are excluded from broadcasts, and "TaskbarCreated" is broadcast, so
+        // the icon would never come back.  WS_EX_TOOLWINDOW keeps it off the taskbar
+        // and it is never made visible, so nothing appears on screen.
+        HWND hWnd = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"DiceNext",
+                                    WS_OVERLAPPED, 0, 0, 0, 0,
+                                    nullptr, nullptr, inst, nullptr);
         if (!hWnd) return;
 
-        NOTIFYICONDATAW nid = {};
+        NOTIFYICONDATAW& nid = tray_detail::g_nid;
+        nid = {};
         nid.cbSize = sizeof(nid);
         nid.hWnd = hWnd;
         nid.uID = 1;

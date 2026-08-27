@@ -74,6 +74,7 @@ set(SOURCES
     src/common/markdown.cpp
     src/common/markdown_md4c.cpp
     src/common/hot_reload.cpp
+    src/common/subprocess.cpp
     src/service/update_service.cpp
     src/config/config_manager.cpp
     src/storage/database.cpp
@@ -103,20 +104,23 @@ set(SOURCES
 # The source counter is committed only after the executable links successfully.
 
 set(VERSION_BUILD_SOURCE ${CMAKE_BINARY_DIR}/generated/version_build.cpp)
+# The same number, as plain macros, for the Windows VERSIONINFO resources.
+set(VERSION_BUILD_HEADER ${CMAKE_BINARY_DIR}/generated/version_build.h)
 set(VERSION_BUILD_PENDING ${CMAKE_BINARY_DIR}/generated/version_build.pending)
 set(VERSION_COUNTER_FILE ${CMAKE_CURRENT_SOURCE_DIR}/build_counter.txt)
 set(BUMP_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bump_build.cmake)
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 set_source_files_properties(${VERSION_BUILD_SOURCE} PROPERTIES GENERATED TRUE)
+set_source_files_properties(${VERSION_BUILD_HEADER} PROPERTIES GENERATED TRUE)
 
 # Generate the tentative next number before every build without changing the
 # persistent counter. A failed compile therefore does not consume a number.
 add_custom_target(prepare_version ALL
     COMMAND ${CMAKE_COMMAND}
     -DMODE=PREPARE -DVERSION=${PROJECT_VERSION} -DOUT=${VERSION_BUILD_SOURCE}
-    -DPENDING=${VERSION_BUILD_PENDING}
+    -DOUTHDR=${VERSION_BUILD_HEADER} -DPENDING=${VERSION_BUILD_PENDING}
     -DCOUNTER=${VERSION_COUNTER_FILE} -P ${BUMP_SCRIPT}
-    BYPRODUCTS ${VERSION_BUILD_SOURCE} ${VERSION_BUILD_PENDING}
+    BYPRODUCTS ${VERSION_BUILD_SOURCE} ${VERSION_BUILD_HEADER} ${VERSION_BUILD_PENDING}
     COMMENT "Preparing Dice!Next build number")
 
 # ─── Executable Target ───────────────────────────────────────
@@ -174,7 +178,14 @@ if(WIN32)
     set_property(TARGET dice-next-launcher PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     target_link_libraries(dice-next-launcher PRIVATE shell32)
     target_compile_options(dice-next-launcher PRIVATE /W4 /utf-8)
-    target_sources(dice-next-launcher PRIVATE src/resources/app.rc)
+    # Icon plus VERSIONINFO. Without version metadata Windows shows the manager
+    # as an unnamed publisher-less binary, which reputation-based scanners treat
+    # as a risk signal on top of the package being unsigned.
+    target_sources(dice-next-launcher PRIVATE
+        src/resources/app.rc
+        src/resources/version_launcher.rc)
+    add_dependencies(dice-next-launcher prepare_version)
+    target_include_directories(dice-next-launcher PRIVATE ${CMAKE_BINARY_DIR}/generated)
 
     # Windows: link additional system libraries for ReadDirectoryChangesW
     target_link_libraries(dice-next-server PRIVATE
@@ -192,7 +203,9 @@ if(WIN32)
     # re-copies when DICE_EDITION changes.
     configure_file("${_dice_ico}" "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/app.ico" COPYONLY)
     message(STATUS "Dice!Next edition: ${DICE_EDITION} (icon: ${_dice_ico})")
-    target_sources(dice-next-server PRIVATE src/resources/app.rc)
+    target_sources(dice-next-server PRIVATE
+        src/resources/app.rc
+        src/resources/version_core.rc)
 endif()
 
 if(UNIX AND NOT APPLE)

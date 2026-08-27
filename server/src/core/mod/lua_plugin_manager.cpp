@@ -1,6 +1,7 @@
 #include "core/mod/lua_plugin_manager.h"
 #include "common/logger.h"
 #include "common/utils.h"
+#include "common/subprocess.h"
 
 #include <nlohmann/json.hpp>
 #include <yaml-cpp/yaml.h>
@@ -1930,11 +1931,10 @@ bool LuaPluginManager::importUpload(const std::string& filename, const std::stri
     if (!writeFile(zipPath, bytes)) return fail("write failed: " + zipPath.string());
     fs::create_directories(tmpDir, ec); ec.clear();
 #if defined(_WIN32)
-    std::string cmd = "tar -xf \"" + zipPath.string() + "\" -C \"" + tmpDir.string() + "\"";
+    dice::proc::runPaths(dice::proc::systemTool("tar.exe"), {"-xf", zipPath, "-C", tmpDir});
 #else
-    std::string cmd = "unzip -o -q \"" + zipPath.string() + "\" -d \"" + tmpDir.string() + "\"";
+    dice::proc::runPaths("unzip", {"-o", "-q", zipPath, "-d", tmpDir});
 #endif
-    std::system(cmd.c_str());
     if (dryRun) {
         // 只解析：权限声明 + 风险扫描，不落盘。
         if (permissions) {

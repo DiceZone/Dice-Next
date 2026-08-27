@@ -4,6 +4,7 @@
 // Provides full CRUD for adapters, replies, dice rules, and system status.
 
 #include "../storage/database.h"
+#include "../common/subprocess.h"
 #include "../storage/group_account_settings.h"
 #include "../config/config_manager.h"
 #include "../config/scoped_settings.h"
@@ -5090,7 +5091,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 cf << "url = \"" << esc(url) << "\"\noutput = \"" << esc(tmp) << "\"\n"
                    << "location\nsilent\nmax-time = 300\n";
                 cf.close();
-                logsvc::runCapture("curl -K \"" + cfgPath + "\"");
+                dice::proc::curlConfig(cfgPath);
                 std::error_code ec; fs::remove(cfgPath, ec);
             }
             std::error_code ec;

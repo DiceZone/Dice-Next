@@ -14,6 +14,7 @@
 
 #include "../config/config_manager.h"
 #include "../config/scoped_settings.h"
+#include "../common/subprocess.h"
 #include <nlohmann/json.hpp>
 #include <string>
 #include <optional>
@@ -63,23 +64,6 @@ inline std::string resolveRef(ConfigManager& cfg, const std::string& ref,
     return publicUrlFor(cfg, ref, platform, adapterId);
 }
 
-inline std::string runCapture(const std::string& cmd) {
-#if defined(_WIN32)
-    FILE* pipe = _popen(cmd.c_str(), "r");
-#else
-    FILE* pipe = popen(cmd.c_str(), "r");
-#endif
-    if (!pipe) return "";
-    std::string out; std::array<char, 4096> buf; size_t n;
-    while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) out.append(buf.data(), n);
-#if defined(_WIN32)
-    _pclose(pipe);
-#else
-    pclose(pipe);
-#endif
-    return out;
-}
-
 // 沿点路径取 JSON 值（"data.links.url"）→ 字符串。
 inline std::string jsonByPath(const json& j, const std::string& path) {
     const json* cur = &j;
@@ -98,7 +82,7 @@ inline std::string jsonByPath(const json& j, const std::string& path) {
 }
 
 // generic 模式：curl multipart 上传本地图片 → 稳定 url（失败返回 nullopt）。
-// 值来自骰主自配（半可信），用引号传参；本地路径由我们生成（可信）。
+// 值来自骰主自配（半可信）：逐个作为参数传给 curl，不拼命令行，也就没有转义问题。
 inline std::optional<std::string> uploadGeneric(ConfigManager& cfg, const std::string& localPath,
                                                 const std::string& platform = {}, const std::string& adapterId = {}) {
     auto c = conf(cfg, platform, adapterId);
@@ -106,14 +90,16 @@ inline std::optional<std::string> uploadGeneric(ConfigManager& cfg, const std::s
     if (url.empty()) return std::nullopt;
     std::string field = c.value("file_field", std::string("file"));
     std::string resultPath = c.value("result_path", std::string("data.url"));
-    std::string cmd = "curl -s -S --max-time 30 -X POST";
+    std::vector<std::string> args{"-s", "-S", "--max-time", "30", "-X", "POST"};
     if (c.contains("headers") && c["headers"].is_array())
-        for (auto& h : c["headers"]) if (h.is_string()) cmd += " -H \"" + h.get<std::string>() + "\"";
+        for (auto& h : c["headers"]) if (h.is_string()) { args.push_back("-H"); args.push_back(h.get<std::string>()); }
     if (c.contains("extra_fields") && c["extra_fields"].is_object())
         for (auto it = c["extra_fields"].begin(); it != c["extra_fields"].end(); ++it)
-            if (it.value().is_string()) cmd += " -F \"" + it.key() + "=" + it.value().get<std::string>() + "\"";
-    cmd += " -F \"" + field + "=@" + localPath + "\" \"" + url + "\"";
-    std::string out = runCapture(cmd);
+            if (it.value().is_string()) { args.push_back("-F"); args.push_back(it.key() + "=" + it.value().get<std::string>()); }
+    args.push_back("-F");
+    args.push_back(field + "=@" + localPath);
+    args.push_back(url);
+    std::string out = dice::proc::curl(args).output;
     if (out.empty()) return std::nullopt;
     try { auto j = json::parse(out); std::string u = jsonByPath(j, resultPath); if (!u.empty()) return u; }
     catch (...) {}

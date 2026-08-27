@@ -9,6 +9,7 @@
 // tr(locale, key, args). No hardcoded natural-language strings here.
 
 #include "../adapter/adapter_interface.h"
+#include "../common/subprocess.h"
 #include "../adapter/adapter_manager.h"
 #include "../core/dice/dice_engine.h"
 #include "../core/dice/roll_command_parser.h"
@@ -8483,27 +8484,11 @@ private:
         }
         return true;
     }
-    static std::string runCmdCapture(const std::string& cmd, size_t maxBytes = 65536) {
-#if defined(_WIN32)
-        FILE* p = _popen(cmd.c_str(), "r");
-#else
-        FILE* p = popen(cmd.c_str(), "r");
-#endif
-        if (!p) return "";
-        std::string out; char buf[4096]; size_t n;
-        while ((n = std::fread(buf, 1, sizeof(buf), p)) > 0) { out.append(buf, n); if (out.size() > maxBytes) break; }
-#if defined(_WIN32)
-        _pclose(p);
-#else
-        pclose(p);
-#endif
-        return out;
-    }
     std::string fetchApi(const std::string& url) {
         if (!apiEnabled() || !isApiUrlAllowed(url)) return "";
-        std::string cmd = "curl -s --max-time " + std::to_string(apiTimeout()) +
-                          " --max-filesize 65536 --proto =http,https \"" + url + "\"";
-        std::string out = trim(runCmdCapture(cmd));
+        std::string out = trim(dice::proc::curl({"-s", "--max-time", std::to_string(apiTimeout()),
+                                                 "--max-filesize", "65536",
+                                                 "--proto", "=http,https", url}, 65536).output);
         // 裁剪：按码点近似截断到 ~600 字（避免刷屏）。
         if (out.size() > 600) { size_t cut = 600; while (cut < out.size() && (out[cut] & 0xC0) == 0x80) ++cut; out = out.substr(0, cut) + "\xe2\x80\xa6"; }
         return out;
@@ -8620,7 +8605,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
             }
         } catch (...) { fs::remove(cfgF, ec); fs::remove(bodyF, ec); return ""; }
 
-        std::string out = runCmdCapture("curl -K \"" + cfgF.string() + "\"", 2 * 1024 * 1024);
+        std::string out = dice::proc::curlConfig(cfgF, 2 * 1024 * 1024).output;
         fs::remove(cfgF, ec); fs::remove(bodyF, ec);
 
         auto nl = out.find_last_of('\n');                // split off the trailing status line
@@ -8637,9 +8622,11 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     std::string fetchPluginUrl(const std::string& url, int& status) {
         status = 0;
         if (!isHostSafe(url)) return "";
-        std::string out = runCmdCapture(
-            "curl -sSL --max-time 15 --max-filesize 2097152 --proto \"=http,https\" "
-            "-w \"\\n%{http_code}\" \"" + url + "\"", 2 * 1024 * 1024);
+        std::string out = dice::proc::curl({"-sSL", "--max-time", "15",
+                                            "--max-filesize", "2097152",
+                                            "--proto", "=http,https",
+                                            "-w", "\\n%{http_code}", url},
+                                           2 * 1024 * 1024).output;
         auto nl = out.find_last_of('\n');
         if (nl != std::string::npos) { status = std::atoi(out.c_str() + nl + 1); out.erase(nl); }
         return out;
@@ -8715,8 +8702,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         { std::ofstream cf(cfgPath, std::ios::binary);
           cf << "url = \"" << curlCfgEscape(url) << "\"\noutput = \"" << curlCfgEscape(outPath) << "\"\n"
              << "--max-time 8\n--connect-timeout 4\n--silent\n--fail\n--location\n"; }
-        std::string cmd = "curl -K \"" + cfgPath + "\"";
-        int rc = std::system(cmd.c_str());
+        const int rc = dice::proc::curlConfig(cfgPath).exitCode;
         std::error_code ec; std::filesystem::remove(cfgPath, ec);
         if (rc != 0) { std::filesystem::remove(outPath, ec); return false; }
         return std::filesystem::exists(outPath, ec);

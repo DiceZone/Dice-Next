@@ -42,14 +42,17 @@ const ReleaseAsset* selectAsset(const ReleaseManifest& manifest,
                                 const std::string& os, const std::string& arch);
 bool archiveEntrySafe(const std::string& entry);
 std::string buildMirroredUrl(const std::string& originalUrl, const std::string& mirror);
+std::vector<std::string> githubAssetNameCandidates(const std::string& manifestName);
 std::string currentOs();
 std::string currentArch();
 
 class UpdateService {
 public:
     using Json = nlohmann::json;
+    using NotifyCallback = std::function<void(const std::string& event, const std::string& message)>;
 
-    UpdateService(ConfigManager& config, std::function<void()> restart);
+    UpdateService(ConfigManager& config, std::function<void()> restart,
+                  NotifyCallback notify = {});
     ~UpdateService();
 
     UpdateService(const UpdateService&) = delete;
@@ -94,6 +97,8 @@ private:
     void doCheck(bool force);
     void doDownload();
     void doInstall();
+    void processInstallResult();
+    void emitNotification(const std::string& event, const std::string& message) const;
 
     std::vector<Source> configuredSources(const Settings& settings) const;
     ProbeResult probeManifest(const Source& source) const;
@@ -112,6 +117,7 @@ private:
 
     ConfigManager& config_;
     std::function<void()> restart_;
+    NotifyCallback notify_;
 
     mutable std::mutex mutex_;
     std::condition_variable wake_;
@@ -128,6 +134,8 @@ private:
     std::int64_t checkedAt_ = 0;
     bool hasLatest_ = false;
     bool updateAvailable_ = false;
+    bool automaticDownload_ = false;
+    bool installResultProcessed_ = false;
     ReleaseManifest latest_;
     std::vector<Source> sourceOrder_;
     std::int64_t sourceCacheUntil_ = 0;

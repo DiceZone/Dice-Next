@@ -10,6 +10,7 @@
 // 本地黑名单 CRUD 经 init() 注入的回调转发到 CommandRouter（避免 header 互相包含）。
 
 #include "../common/logger.h"
+#include "../common/subprocess.h"
 #include "../config/config_manager.h"
 #include "../storage/database.h"   // BanlistRow
 #include "ai_gateway.h"            // dice::ai::httpPostJson —— curl 配置文件出站模板
@@ -63,22 +64,8 @@ inline std::string httpGetJson(const std::string& url, int timeoutSec, int& stat
         cf << "write-out = \"\\n%{http_code}\"\n";
     } catch (...) { fs::remove(cfgF, ec); return ""; }
 
-    std::string cmd = "curl -K \"" + cfgF.string() + "\"";
-    std::string out;
-#if defined(_WIN32)
-    FILE* pipe = _popen(cmd.c_str(), "r");
-#else
-    FILE* pipe = popen(cmd.c_str(), "r");
-#endif
-    if (pipe) {
-        std::array<char, 8192> buf; size_t n;
-        while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) out.append(buf.data(), n);
-#if defined(_WIN32)
-        _pclose(pipe);
-#else
-        pclose(pipe);
-#endif
-    }
+    // curl runs directly, never through a shell: see common/subprocess.h.
+    std::string out = dice::proc::curlConfig(cfgF).output;
     fs::remove(cfgF, ec);
     auto nl = out.find_last_of('\n');
     if (nl != std::string::npos) { status = std::atoi(out.c_str() + nl + 1); out.erase(nl); }

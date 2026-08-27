@@ -12,6 +12,7 @@
 //                     smtp: { enabled, host, port, ssl, user, pass, from, to, level_mask } }
 
 #include "../config/config_manager.h"
+#include "../common/subprocess.h"
 #include "../adapter/adapter_manager.h"
 #include "../adapter/adapter_interface.h"
 #include <nlohmann/json.hpp>
@@ -46,8 +47,9 @@ inline const std::vector<std::pair<std::string, int>>& eventCatalog() {
         {"leave", kImportant}, {"dismiss", kImportant}, {"group_left", kImportant},
         {"blacklist_leave", kImportant}, {"nonfriend_leave", kImportant}, {"keyword_leave", kImportant},
         {"schedule", kImportant}, {"global", kImportant},
+        {"update_available", kImportant}, {"update_result", kImportant},
         {"admin", kCritical}, {"blacklist", kCritical},
-        {"error", kError},
+        {"error", kError}, {"update_error", kError},
     };
     return v;
 }
@@ -149,8 +151,7 @@ inline void webhookPostAsync(const std::string& url, const std::string& body) {
                << "header = \"Content-Type: application/json\"\n"
                << "data-binary = \"@" << curlEsc(bodyF.string()) << "\"\n";
         } catch (...) { fs::remove(cfgF, ec); fs::remove(bodyF, ec); return; }
-        std::string cmd = "curl -K \"" + cfgF.string() + "\"";
-        std::system(cmd.c_str());
+        dice::proc::curlConfig(cfgF);
         fs::remove(cfgF, ec); fs::remove(bodyF, ec);
     }).detach();
 }
@@ -210,8 +211,7 @@ inline void smtpSendAsync(const json& s, const std::string& subject, const std::
                 if (!ssl) cf << "ssl\n";   // STARTTLS（尽力）
                 cf << "upload-file = \"" << curlEsc(msgF.string()) << "\"\nmax-time = 20\nsilent\n";
             }
-            std::string cmd = "curl -K \"" + cfgF.string() + "\"";
-            std::system(cmd.c_str());
+            dice::proc::curlConfig(cfgF);
             fs::remove(cfgF, ec); fs::remove(msgF, ec);
         } catch (...) {}
     }).detach();
@@ -228,7 +228,8 @@ inline void notify(ConfigManager& cfg, AdapterManager& adapters, int level, cons
     for (auto& w : windows(cfg)) {
         // 帐号窗口只收该帐号来源的通知；全局窗口（adapter_id 空）收所有帐号。
         // 测试通知（op=="test"）不受来源限制，逐窗口验证链路。
-        if (op != "test" && !w.adapterId.empty() && w.adapterId != originAdapterId) continue;
+        if (op != "test" && !w.adapterId.empty() && !originAdapterId.empty() &&
+            w.adapterId != originAdapterId) continue;
         bool hit = (op == "test")   // 测试通知不受订阅过滤（骰主手动触发验证链路）
             || (!w.events.empty()
                 ? (std::find(w.events.begin(), w.events.end(), op) != w.events.end())
@@ -251,8 +252,10 @@ inline void notify(ConfigManager& cfg, AdapterManager& adapters, int level, cons
             } catch (...) { return false; }
         };
         bool sent = false;
-        if (!originAdapterId.empty()) {
-            auto src = adapters.getAdapter(originAdapterId);
+        const std::string preferredAdapterId =
+            !originAdapterId.empty() ? originAdapterId : w.adapterId;
+        if (!preferredAdapterId.empty()) {
+            auto src = adapters.getAdapter(preferredAdapterId);
             if (src && src->isConnected()
                 && (w.platform.empty() || src->platform() == w.platform))
                 sent = trySend(src);

@@ -11,6 +11,7 @@
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
 #include "../common/markdown.h"
+#include "../common/subprocess.h"
 
 #include <drogon/HttpClient.h>
 
@@ -160,23 +161,6 @@ private:
         return markdown::escapeLiteral(text);
     }
 
-    static std::string runCmdCapture(const std::string& cmd, size_t maxBytes = 2 * 1024 * 1024) {
-#if defined(_WIN32)
-        FILE* p = _popen(cmd.c_str(), "r");
-#else
-        FILE* p = popen(cmd.c_str(), "r");
-#endif
-        if (!p) return "";
-        std::string out; char buf[4096]; size_t n;
-        while ((n = std::fread(buf, 1, sizeof(buf), p)) > 0) { out.append(buf, n); if (out.size() > maxBytes) break; }
-#if defined(_WIN32)
-        _pclose(p);
-#else
-        pclose(p);
-#endif
-        return out;
-    }
-
     /// REST 调用（discord.com），走 curl 子进程 + 独立线程。回调只在 2xx 且 JSON
     /// 解析成功时收到对象。⚠️ 不能用 drogon HttpClient：discord.com 在 Cloudflare
     /// 后（TLS 强制校验 SNI，裸 IP 被拒），而 drogon 的 c-ares 解析器在部分
@@ -216,7 +200,7 @@ private:
                         cf << "data-binary = \"@" << esc(bodyF.string()) << "\"\n";
                     }
                 }
-                out = runCmdCapture("curl -K \"" + cfgF.string() + "\"");
+                out = dice::proc::curlConfig(cfgF, 2 * 1024 * 1024).output;
             } catch (...) {}
             fs::remove(cfgF, ec); fs::remove(bodyF, ec);
 

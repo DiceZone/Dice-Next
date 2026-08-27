@@ -12,6 +12,8 @@
 #include <fstream>
 #include <ctime>
 #include <cstdlib>
+
+#include "../common/subprocess.h"
 #include <cctype>
 #include <random>
 
@@ -69,8 +71,8 @@ inline bool download(const std::string& url, const std::string& outPath) {
     { std::ofstream cf(cfgPath, std::ios::binary);
       cf << "url = \"" << url << "\"\noutput = \"" << outPath << "\"\n"
          << "--max-time 6\n--connect-timeout 3\n--silent\n--fail\n--location\n"; }
-    std::string cmd = "curl -K \"" + cfgPath + "\"";
-    int rc = std::system(cmd.c_str());
+    // curl runs directly, never through a shell: see common/subprocess.h.
+    const int rc = dice::proc::curlConfig(cfgPath).exitCode;
     std::error_code ec; std::filesystem::remove(cfgPath, ec);
     if (rc != 0) { std::filesystem::remove(outPath, ec); return false; }
     return std::filesystem::exists(outPath, ec);
