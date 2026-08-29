@@ -136,6 +136,15 @@ foreach ($d in 'vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll') {
     }
     if (-not $copied) { Fail "缺少 MSVC 运行库 $d（$Architecture）；请安装 VS 2022 生成工具的 C++ 重发行包" }
 }
+# Builds up to 883 require a lib\ directory before they will stage an update.
+# Keep a non-empty compatibility marker so those installed updaters can cross
+# the layout transition; all real runtime DLLs remain correctly beside core.
+$legacyLibStage = Join-Path $stage 'lib'
+New-Item -ItemType Directory -Force -Path $legacyLibStage | Out-Null
+[IO.File]::WriteAllText(
+    (Join-Path $legacyLibStage 'README.txt'),
+    "Compatibility directory for Dice!Next build 883 updater. Runtime DLLs are in app\.",
+    $utf8)
 $dllCount = (Get-ChildItem (Join-Path $appStage '*.dll') | Measure-Object).Count
 
 # ── 2. i18n / 内建内容资源 / 前端 ────────────────────────────
@@ -161,6 +170,20 @@ foreach ($docFile in 'roadmap.md','commands.json') {
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'web') | Out-Null
 Copy-Item $webDist (Join-Path $stage 'web\dist') -Recurse
+
+# Keep this in sync with the updater's package validation. Dependencies moved
+# from lib\ to app\ in the self-contained Windows layout. Newly built packages
+# must contain the three bundled MSVC runtime DLLs beside the core executable.
+foreach ($requiredPath in 'dice-next.exe','app\dice-next-core.exe','lib\README.txt','i18n','web\dist\index.html','docs\roadmap.md') {
+    if (-not (Test-Path (Join-Path $stage $requiredPath))) {
+        Fail "Windows 更新包缺少必需路径：$requiredPath"
+    }
+}
+foreach ($runtimeDll in 'msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll') {
+    if (-not (Test-Path (Join-Path $appStage $runtimeDll))) {
+        Fail "Windows 更新包缺少运行库：app\$runtimeDll"
+    }
+}
 
 # ── 3. 使用说明（中文，UTF-8 no BOM） ────────────────────────
 $port = 18088 # 默认端口，与 config\server.json 保持一致

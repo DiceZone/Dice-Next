@@ -41,6 +41,8 @@ int compareRelease(const std::string& leftVersion, int leftBuild,
 const ReleaseAsset* selectAsset(const ReleaseManifest& manifest,
                                 const std::string& os, const std::string& arch);
 bool archiveEntrySafe(const std::string& entry);
+std::vector<std::string> missingWindowsPackageComponents(
+    const std::filesystem::path& packageRoot);
 std::string buildMirroredUrl(const std::string& originalUrl, const std::string& mirror);
 std::vector<std::string> githubAssetNameCandidates(const std::string& manifestName);
 std::string currentOs();

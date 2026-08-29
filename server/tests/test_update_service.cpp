@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 
 using namespace dice::update;
 
@@ -90,6 +91,35 @@ TEST(UpdateArchive, RejectsAbsoluteAndTraversalEntries) {
     ASSERT_FALSE(archiveEntrySafe("C:/Windows/System32/file.dll"));
     ASSERT_FALSE(archiveEntrySafe("/absolute/path"));
     ASSERT_FALSE(archiveEntrySafe("DiceNext-beta\\..\\outside.exe"));
+}
+
+TEST(UpdateArchive, AcceptsCurrentAppRuntimeAndLegacyLibLayouts) {
+    namespace fs = std::filesystem;
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path root = fs::temp_directory_path() /
+        ("dice_next_update_package_" + std::to_string(nonce));
+    const auto touch = [&](const fs::path& relative) {
+        fs::create_directories((root / relative).parent_path());
+        std::ofstream(root / relative, std::ios::binary) << 'x';
+    };
+
+    touch("dice-next.exe");
+    touch(fs::path("app") / "dice-next-core.exe");
+    touch(fs::path("web") / "dist" / "index.html");
+    touch(fs::path("docs") / "roadmap.md");
+    fs::create_directories(root / "i18n");
+    touch(fs::path("app") / "msvcp140.dll");
+    touch(fs::path("app") / "vcruntime140.dll");
+    touch(fs::path("app") / "vcruntime140_1.dll");
+    ASSERT_TRUE(missingWindowsPackageComponents(root).empty());
+
+    fs::remove(root / "app" / "msvcp140.dll");
+    ASSERT_FALSE(missingWindowsPackageComponents(root).empty());
+    fs::create_directories(root / "lib");
+    ASSERT_TRUE(missingWindowsPackageComponents(root).empty());
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
 }
 
 TEST(UpdateMirror, PrefixesFullGithubUrl) {

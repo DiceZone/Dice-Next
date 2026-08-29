@@ -263,6 +263,41 @@ bool archiveEntrySafe(const std::string& rawEntry) {
     return true;
 }
 
+std::vector<std::string> missingWindowsPackageComponents(const fs::path& packageRoot) {
+    std::vector<std::string> missing;
+    std::error_code ec;
+    const auto requireFile = [&](const fs::path& relative) {
+        ec.clear();
+        if (!fs::is_regular_file(packageRoot / relative, ec))
+            missing.push_back(relative.generic_string());
+    };
+    const auto requireDirectory = [&](const fs::path& relative) {
+        ec.clear();
+        if (!fs::is_directory(packageRoot / relative, ec))
+            missing.push_back(relative.generic_string() + "/");
+    };
+
+    requireFile("dice-next.exe");
+    requireFile(fs::path("app") / "dice-next-core.exe");
+    requireDirectory("i18n");
+    requireFile(fs::path("web") / "dist" / "index.html");
+    requireFile(fs::path("docs") / "roadmap.md");
+
+    // Packages through build 883 kept dependencies in lib/. New packages put
+    // them beside the core executable so Windows can resolve imports before
+    // main() starts. Accept both layouts during the transition.
+    ec.clear();
+    const bool legacyRuntime = fs::is_directory(packageRoot / "lib", ec);
+    ec.clear();
+    const bool appRuntime =
+        fs::is_regular_file(packageRoot / "app" / "msvcp140.dll", ec) &&
+        fs::is_regular_file(packageRoot / "app" / "vcruntime140.dll", ec) &&
+        fs::is_regular_file(packageRoot / "app" / "vcruntime140_1.dll", ec);
+    if (!legacyRuntime && !appRuntime)
+        missing.push_back("app/MSVC runtime DLLs (or legacy lib/)");
+    return missing;
+}
+
 std::string buildMirroredUrl(const std::string& originalUrl, const std::string& mirror) {
     if (mirror.empty()) return originalUrl;
     return mirror.back() == '/' ? mirror + originalUrl : mirror + "/" + originalUrl;
@@ -1144,18 +1179,20 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
         }
     }
 
-    const bool packageValid = !packageRoot.empty() &&
-        fs::is_regular_file(packageRoot / "dice-next.exe", ec) &&
-        fs::is_directory(packageRoot / "lib", ec) &&
-        fs::is_directory(packageRoot / "i18n", ec) &&
-        fs::is_regular_file(packageRoot / "web" / "dist" / "index.html", ec) &&
-        fs::is_regular_file(packageRoot / "docs" / "roadmap.md", ec);
-    if (!packageValid) {
-        error = "downloaded archive is not a complete Dice!Next Windows package";
+    const auto missing = packageRoot.empty()
+        ? std::vector<std::string>{"package root"}
+        : missingWindowsPackageComponents(packageRoot);
+    if (!missing.empty()) {
+        std::ostringstream details;
+        for (std::size_t i = 0; i < missing.size(); ++i) {
+            if (i) details << ", ";
+            details << missing[i];
+        }
+        error = "downloaded archive is not a complete Dice!Next Windows package; missing: " +
+            details.str();
         fs::remove_all(extractRoot, ec);
         return false;
     }
-
     {
         nlohmann::json metadata{
             {"schema", 1},
