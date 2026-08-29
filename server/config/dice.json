@@ -5,6 +5,10 @@
   "message_format": "traditional",
   "blacklist_quit_level": "member",
   "respond_self": false,
+  "censor": {
+    "enabled": false,
+    "words": {}
+  },
   "console_start_hidden": true,
   "rules": {
     "coc_enabled": true,

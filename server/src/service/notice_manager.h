@@ -47,6 +47,7 @@ inline const std::vector<std::pair<std::string, int>>& eventCatalog() {
         {"leave", kImportant}, {"dismiss", kImportant}, {"group_left", kImportant},
         {"blacklist_leave", kImportant}, {"nonfriend_leave", kImportant}, {"keyword_leave", kImportant},
         {"schedule", kImportant}, {"global", kImportant},
+        {"censor", kImportant},
         {"update_available", kImportant}, {"update_result", kImportant},
         {"admin", kCritical}, {"blacklist", kCritical},
         {"error", kError}, {"update_error", kError},

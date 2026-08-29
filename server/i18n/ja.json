@@ -268,7 +268,7 @@
     "target_higher": "相手の信頼レベルが自分未満ではないため変更できません。"
   },
   "admin": {
-    "usage": "用法：.admin add/del <@ユーザー/QQ> で管理者を付与/剥奪；.admin list で一覧；.admin clock + <タスク名> HH:MM で Lua 定時タスクを追加、- <タスク名> で削除。マスターのみ。",
+    "usage": "用法：.admin add/del <@ユーザー/QQ> で管理者を付与/剥奪；.admin list で一覧；.admin clock + <タスク名> HH:MM で Lua 定時タスクを追加、- <タスク名> で削除；.admin censor でセンシティブワードを管理。マスターのみ。",
     "added": "{user} に管理権限を付与しました √",
     "removed": "{user} の管理権限を剥奪しました √",
     "not_admin": "そのユーザーに管理権限はありません。",
@@ -285,6 +285,23 @@
     "notice_usage": "用法：.admin notice group/QQ <ID> +<レベル> または -<レベル>。",
     "notice_send_usage": "用法：.send notice <レベル> <メッセージ>。"
 
+  },
+  "censor": {
+    "state_on": "有効",
+    "state_off": "無効",
+    "status": "センシティブワード遮断：{state}、カスタムルール {count} 件。WebUI または .admin censor +Danger=単語 / .admin censor -単語 で管理できます。",
+    "enabled": "センシティブワード遮断を有効にしました√",
+    "disabled": "センシティブワード遮断を無効にしました√",
+    "added": "{level} レベルのルールを {count} 件追加しました√",
+    "removed": "ルールを {count} 件削除しました√",
+    "no_valid_words": "追加できる有効な単語がないか、5000 件の上限に達しています。",
+    "none_removed": "削除対象のルールが見つかりません。",
+    "save_failed": "センシティブワード設定の保存に失敗しました。",
+    "admin_usage": "使い方：.admin censor on/off/status；.admin censor +[Ignore|Notice|Caution|Warning|Danger]=単語0|単語1；.admin censor -単語0|単語1。マスター専用です。",
+    "caution": "注意：{nick}のコマンドにセンシティブワードが含まれています。{self}が報告しました。",
+    "warning": "警告：{nick}のコマンドにセンシティブワードが含まれています。{self}が記録・報告しました。",
+    "danger": "警告：{nick}のコマンドにセンシティブワードが含まれています。{self}がコマンドを拒否し、報告しました。",
+    "owner_notice": "センシティブワードルール検出：ユーザー {user}、ウィンドウ {target}、レベル {level}、{count} 件一致。詳細はローカルログのみに記録されます。"
   },
   "notice": {
     "usage": "用法：.notice on/off でこのウィンドウの通知を切替；.notice level <1-15> で購読レベル設定(1定例/2重要/4重大/8エラー、加算可、15全部)。マスターのみ。",

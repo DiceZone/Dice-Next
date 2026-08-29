@@ -7,6 +7,7 @@
 //   user/UserConf.dat       → player_profiles (nickname / trust / favor)
 //   conf/BlackList.json     → banlist (offenders → user blacklist)
 //   conf/CustomMsgReply.json→ reply_rules (multi-condition engine)
+//   conf/CustomCensor.json  → dice.censor (sensitive command rules)
 //   conf/CustomHelp.json    → i18n overrides (help.topic.*)
 //   conf/Console.xml        → dice.masters (config)
 //   mod/                    → data/mod/   (Lua 规则/功能 mod — 子系统已兼容)
@@ -21,6 +22,7 @@
 #include "../core/reply/reply_manager.h"
 #include "../common/utils.h"
 #include "../common/logger.h"
+#include "../service/sensitive_word_filter.h"
 
 #include <nlohmann/json.hpp>
 #include <sqlite_orm/sqlite_orm.h>
@@ -998,6 +1000,37 @@ inline int importNotices(ConfigManager& cfg, const fs::path& confDir) {
     return imported;
 }
 
+// ── conf/CustomCensor.json → dice/censor ──────────────────────
+// Original values are integer levels 0..5. Existing Dice!Next entries win so a
+// repeat migration never overwrites edits already made in the WebUI.
+inline int importCensorWords(ConfigManager& cfg, const fs::path& confDir) {
+    json old = json::parse(sanitizeJsonControls(readFile(confDir / "CustomCensor.json")),
+                           nullptr, false);
+    if (!old.is_object()) return 0;
+    json current = cfg.get<json>("dice/censor",
+        json{{"enabled", false}, {"words", json::object()}});
+    if (!current.is_object()) current = json::object();
+    if (!current.contains("words") || !current["words"].is_object())
+        current["words"] = json::object();
+
+    int imported = 0;
+    for (const auto& [word, value] : old.items()) {
+        if (!censor::validRuleWord(word) || current["words"].contains(word)) continue;
+        int level = static_cast<int>(censor::Level::Warning);
+        if (value.is_number_integer()) level = value.get<int>();
+        else if (value.is_string())
+            level = static_cast<int>(censor::parseLevel(value.get<std::string>()));
+        current["words"][word] = censor::clampLevel(level);
+        ++imported;
+    }
+    if (imported) {
+        current["enabled"] = true;
+        cfg.set("dice/censor", current);
+        cfg.save();
+    }
+    return imported;
+}
+
 // ── <root>/PublicDeck/ → data/decks/（外置牌堆）─────────────────────
 // Enhanced with ImportResult return + ImportOptions + JSON format validation.
 // Non-.json files are marked as skipped in the result.
@@ -1469,6 +1502,7 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
     int masters = timed("masters", [&] { return importMasters(cfg, confDir); });
     int links = timed("links", [&] { return importLinks(cfg, confDir); });
     int notices = timed("notices", [&] { return importNotices(cfg, confDir); });
+    int censorWords = timed("censor words", [&] { return importCensorWords(cfg, confDir); });
 
     // Structured deck/mod/plugin import results.  Old `plugin/` is distinct
     // from `mod/` and must not be silently ignored.
@@ -1496,8 +1530,8 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
     const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - importStarted).count();
 
-    DICE_LOG_INFO("LegacyImport: cards={} (users={}) profiles={} black={} replies={} help={} msgs={} orphans={} masters={} links={} notices={} decks(s/f/sk={}/{}/{}) mods(s/f/sk={}/{}/{}) plugins(s/f/sk={}/{}/{}) sessions={} logs={} logMessages={} chatGroups={} chatSettings={}",
-                  cards, users, profiles, black, replies, help, msgs, orphans, masters, links, notices,
+    DICE_LOG_INFO("LegacyImport: cards={} (users={}) profiles={} black={} replies={} help={} msgs={} orphans={} masters={} links={} notices={} censorWords={} decks(s/f/sk={}/{}/{}) mods(s/f/sk={}/{}/{}) plugins(s/f/sk={}/{}/{}) sessions={} logs={} logMessages={} chatGroups={} chatSettings={}",
+                  cards, users, profiles, black, replies, help, msgs, orphans, masters, links, notices, censorWords,
                   deckResult.success, deckResult.failed, deckResult.skipped,
                   modResult.success, modResult.failed, modResult.skipped,
                   pluginResult.success, pluginResult.failed, pluginResult.skipped,
@@ -1508,7 +1542,7 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
         {"ok", true},
         {"cards", cards}, {"cardUsers", users}, {"profiles", profiles},
         {"blacklist", black}, {"replies", replies}, {"help", help}, {"msgs", msgs},
-        {"orphans", orphans}, {"masters", masters}, {"links", links}, {"notices", notices},
+        {"orphans", orphans}, {"masters", masters}, {"links", links}, {"notices", notices}, {"censorWords", censorWords},
         {"decks", deckResult.toJSON()}, {"mods", modResult.toJSON()}, {"plugins", pluginResult.toJSON()},
         {"sessions", sessions}, {"logs", logs}, {"logMessages", logMessages},
         {"chatGroups", chatGroups}, {"chatSettings", chatSettings},

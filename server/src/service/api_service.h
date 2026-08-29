@@ -321,7 +321,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                               JsPluginManager& jsMod, LuaPluginManager& luaMod,
                               CausalRuleManager& causalMgr, CooldownManager& cooldownMgr,
                               CounterStore& counterStore, PersonaManager& personaMgr,
-                              update::UpdateService& updateService) {
+                              update::UpdateService& updateService, CommandRouter& cmdRouter) {
     auto& app = drogon::app();
     auto* st = db.getStorage();
     auto* lst = db.getLogStorage();   // game_logs / game_log_messages live in logs.db
@@ -1763,7 +1763,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // Import a legacy Dice! V2 [DiceData] folder.  POST {dir, overwrite?}.
     // Enhanced — passes CardDeck/LuaPluginManager for reload, accepts overwrite option,
     // returns structured ImportResult for decks and mods.
-    app.registerHandler("/api/legacy/import", [&db, &cfg, &i18n, &replyMgr, &cardDeck, &luaMod](Req req, CB&& cb) {
+    app.registerHandler("/api/legacy/import", [&db, &cfg, &i18n, &replyMgr, &cardDeck, &luaMod, &cmdRouter](Req req, CB&& cb) {
         try {
             auto j = J::parse(req->body());
             std::string dir = j.value("dir", "");
@@ -1772,6 +1772,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             opts.overwrite = j.value("overwrite", false);
             J report = legacyv2::runImport(db, cfg, i18n, replyMgr, dir, &cardDeck, &luaMod, opts);
             if (report.value("ok", false)) {
+                cmdRouter.reloadSensitiveWordRules();
                 if (j.value("remove_marker_on_success", false)) {
                     std::error_code markerError;
                     const auto marker = std::filesystem::path(dir) / ".bdc-import-pending";
@@ -2012,6 +2013,74 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             {"hot_reload", cfg.get<bool>("hot_reload/enabled",true)}
         }), std::move(cb));
     }, {drogon::Get});
+
+    // Original Dice! compatible sensitive-word command filtering.
+    // GET returns the editable custom rules, PUT atomically replaces them, and
+    // POST tests text with the same server-side normalizer used by live traffic.
+    app.registerHandler("/api/system/censor", [&cfg, &cmdRouter](Req req, CB&& cb) {
+        try {
+            if (req->method() == drogon::Post) {
+                const auto body = J::parse(req->body(), nullptr, false);
+                if (!body.is_object() || !body.contains("text") || !body["text"].is_string()) {
+                    jsonReply(fail("text must be a string"), std::move(cb)); return;
+                }
+                const std::string text = body["text"].get<std::string>();
+                if (text.empty() || text.size() > 4096) {
+                    jsonReply(fail("text must contain 1-4096 bytes"), std::move(cb)); return;
+                }
+                auto settings = censor::load(cfg);
+                settings.enabled = true;  // allow testing rules before enabling live interception
+                const auto match = censor::search(settings, text);
+                jsonReply(ok(J{{"matched", match.found()},
+                               {"level", static_cast<int>(match.level)},
+                               {"level_name", censor::levelName(match.level)},
+                               {"count", match.words.size()}}), std::move(cb));
+                return;
+            }
+
+            if (req->method() == drogon::Put) {
+                const auto body = J::parse(req->body(), nullptr, false);
+                if (!body.is_object() || !body.contains("enabled") || !body["enabled"].is_boolean() ||
+                    !body.contains("rules") || !body["rules"].is_array()) {
+                    jsonReply(fail("enabled(bool) and rules(array) required"), std::move(cb)); return;
+                }
+                if (body["rules"].size() > 5000) {
+                    jsonReply(fail("at most 5000 rules are allowed"), std::move(cb)); return;
+                }
+                J words = J::object();
+                std::set<std::string> normalized;
+                for (const auto& rule : body["rules"]) {
+                    if (!rule.is_object() || !rule.contains("word") || !rule["word"].is_string() ||
+                        !rule.contains("level") || !rule["level"].is_number_integer()) {
+                        jsonReply(fail("each rule requires word(string) and level(integer)"),
+                                  std::move(cb)); return;
+                    }
+                    const std::string word = rule["word"].get<std::string>();
+                    const int level = rule["level"].get<int>();
+                    const std::string key = censor::normalize(word);
+                    if (!censor::validRuleWord(word) || level < 0 || level > 5 || !normalized.insert(key).second) {
+                        jsonReply(fail("invalid or duplicate rule"), std::move(cb)); return;
+                    }
+                    words[word] = level;
+                }
+                cfg.set("dice/censor", J{{"enabled", body["enabled"].get<bool>()}, {"words", words}});
+                if (!cfg.save()) {
+                    jsonReply(fail("failed to save censor settings"), std::move(cb)); return;
+                }
+                cmdRouter.reloadSensitiveWordRules();
+            }
+
+            const auto settings = censor::load(cfg);
+            J rules = J::array();
+            for (const auto& rule : settings.rules)
+                rules.push_back(J{{"word", rule.word}, {"level", static_cast<int>(rule.level)},
+                                  {"level_name", censor::levelName(rule.level)}});
+            jsonReply(ok(J{{"enabled", settings.enabled}, {"rules", rules},
+                           {"max_rules", 5000}}), std::move(cb));
+        } catch (const std::exception& e) {
+            jsonReply(fail(e.what()), std::move(cb));
+        }
+    }, {drogon::Get, drogon::Put, drogon::Post});
 
     // 统一时区：server/timezone_minutes（相对 UTC 的分钟偏移，东为正；
     // null = 跟随系统本地时区）。日志上传/展示、审计、备份名、定时任务等

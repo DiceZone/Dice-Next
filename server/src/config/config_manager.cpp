@@ -42,6 +42,7 @@ static json makeDefaultConfig() {
             {"leave_black_qq", false},
             {"listen_at_when_off", true},
             {"respond_self", false},             // 自响应：用骰娘账号自身消息自控（默认关）
+            {"censor", {{"enabled", false}, {"words", json::object()}}}, // 原版敏感词：仅检查指令；无内置词库
             {"user_group", ""},
             {"user_group_enforce", false},
             {"user_group_invite", true},

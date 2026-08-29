@@ -273,7 +273,7 @@
     "target_higher": "對方的信任等級不低於你，無法修改。"
   },
   "admin": {
-    "usage": "用法：.admin add/del <@某人/QQ號> 授予/撤銷管理員；.admin list 列出管理員；.admin clock + <任務名> HH:MM 新增 Lua 定時任務，- <任務名> 刪除。僅骰主可用。",
+    "usage": "用法：.admin add/del <@某人/QQ號> 授予/撤銷管理員；.admin list 列出管理員；.admin clock + <任務名> HH:MM 新增 Lua 定時任務，- <任務名> 刪除；.admin censor 管理敏感詞。僅骰主可用。",
     "added": "已添加 {user} 的管理權限√",
     "removed": "已收回 {user} 的管理權限√",
     "not_admin": "該用戶沒有管理權限。",
@@ -290,6 +290,23 @@
     "notice_usage": "用法：.admin notice group/QQ <號碼> +<級別> 或 -<級別>。",
     "notice_send_usage": "用法：.send notice <級別> <訊息>。"
 
+  },
+  "censor": {
+    "state_on": "已啟用",
+    "state_off": "已停用",
+    "status": "敏感詞攔截：{state}，自訂規則 {count} 條。請在 WebUI 管理，或使用 .admin censor +Danger=詞語 / .admin censor -詞語。",
+    "enabled": "敏感詞攔截已啟用√",
+    "disabled": "敏感詞攔截已停用√",
+    "added": "已新增 {count} 條 {level} 級敏感詞規則√",
+    "removed": "已移除 {count} 條敏感詞規則√",
+    "no_valid_words": "沒有可新增的有效詞語，或規則已達 5000 條上限。",
+    "none_removed": "找不到要移除的敏感詞規則。",
+    "save_failed": "儲存敏感詞設定失敗。",
+    "admin_usage": "用法：.admin censor on/off/status；.admin censor +[Ignore|Notice|Caution|Warning|Danger]=詞0|詞1；.admin censor -詞0|詞1。僅骰主可用。",
+    "caution": "提醒：{nick}的指令包含敏感詞，{self}已上報。",
+    "warning": "警告：{nick}的指令包含敏感詞，{self}已記錄並上報！",
+    "danger": "警告：{nick}的指令包含敏感詞，{self}拒絕指令並已上報！",
+    "owner_notice": "敏感詞規則觸發：使用者 {user}，視窗 {target}，等級 {level}，命中 {count} 條。詳細內容僅記錄於本機日誌。"
   },
   "notice": {
     "usage": "用法：.notice on/off 開關本視窗通知；.notice level <1-15> 設訂閱級別(1例行/2重要/4關鍵/8錯誤，可疊加，15全部)。僅骰主可用。",

@@ -267,7 +267,7 @@
     "target_higher": "That user's trust level is not below yours; cannot modify."
   },
   "admin": {
-    "usage": "Usage: .admin add/del <@user/QQ> to grant/revoke admin; .admin list to list admins; .admin clock + <task> HH:MM to add a Lua task, - <task> to remove it. Master only.",
+    "usage": "Usage: .admin add/del <@user/QQ> to grant/revoke admin; .admin list to list admins; .admin clock + <task> HH:MM to add a Lua task, - <task> to remove it; .admin censor manages sensitive words. Master only.",
     "added": "Granted admin to {user} √",
     "removed": "Revoked admin from {user} √",
     "not_admin": "That user has no admin permission.",
@@ -284,6 +284,23 @@
     "notice_usage": "Usage: .admin notice group/QQ <id> +<level> or -<level>.",
     "notice_send_usage": "Usage: .send notice <level> <message>."
 
+  },
+  "censor": {
+    "state_on": "enabled",
+    "state_off": "disabled",
+    "status": "Sensitive-word filtering is {state}, with {count} custom rules. Manage rules in the WebUI or use .admin censor +Danger=word / .admin censor -word.",
+    "enabled": "Sensitive-word filtering enabled √",
+    "disabled": "Sensitive-word filtering disabled √",
+    "added": "Added {count} {level} sensitive-word rules √",
+    "removed": "Removed {count} sensitive-word rules √",
+    "no_valid_words": "No valid words to add, or the 5000-rule limit was reached.",
+    "none_removed": "No matching sensitive-word rule was found.",
+    "save_failed": "Failed to save sensitive-word settings.",
+    "admin_usage": "Usage: .admin censor on/off/status; .admin censor +[Ignore|Notice|Caution|Warning|Danger]=word0|word1; .admin censor -word0|word1. Master only.",
+    "caution": "Notice: {nick}'s command contains a sensitive word. {self} has reported it.",
+    "warning": "Warning: {nick}'s command contains a sensitive word. {self} recorded and reported it.",
+    "danger": "Warning: {nick}'s command contains a sensitive word. {self} rejected and reported it.",
+    "owner_notice": "Sensitive-word rule triggered: user {user}, window {target}, level {level}, {count} match(es). Details are kept in the local log only."
   },
   "notice": {
     "usage": "Usage: .notice on/off to toggle notices here; .notice level <1-15> to set subscription (1 routine / 2 important / 4 critical / 8 errors, combinable, 15 all). Master only.",

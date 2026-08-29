@@ -241,6 +241,33 @@ TEST(SanitizeJson, HandlesEscapedQuotes) {
     EXPECT_TRUE(output.find("\\\"quotes\\\"") != std::string::npos);
 }
 
+static fs::path makeTempDir(const std::string& name);
+static void cleanupTempDir(const fs::path& p);
+
+TEST(ImportCensorWords, ImportsLegacyLevelsAndEnablesFilter) {
+    fs::path root = makeTempDir("censor_words");
+    fs::create_directories(root / "conf");
+    {
+        std::ofstream out(root / "conf" / "CustomCensor.json", std::ios::binary);
+        out << R"({"alpha":1,"测试词":4})";
+    }
+    dice::ConfigManager cfg((root / "config").string());
+    ASSERT_TRUE(cfg.load());
+    ASSERT_EQ(importCensorWords(cfg, root / "conf"), 2);
+    auto current = cfg.get<json>("dice/censor", json::object());
+    ASSERT_TRUE(current.value("enabled", false));
+    ASSERT_EQ(current["words"]["alpha"].get<int>(), 1);
+    ASSERT_EQ(current["words"]["测试词"].get<int>(), 4);
+
+    // Re-importing is idempotent and preserves WebUI edits.
+    current["words"]["alpha"] = 3;
+    cfg.set("dice/censor", current);
+    ASSERT_TRUE(cfg.save());
+    ASSERT_EQ(importCensorWords(cfg, root / "conf"), 0);
+    ASSERT_EQ(cfg.get<json>("dice/censor", json::object())["words"]["alpha"].get<int>(), 3);
+    cleanupTempDir(root);
+}
+
 // ─── importDecks Integration Tests (Filesystem) ───────────────
 // These tests create temporary directories and files.
 

@@ -24,6 +24,7 @@
 #include "master_delivery.h"
 #include "command_prefix_policy.h"
 #include "../service/notice_manager.h"   // B：通知系统（权限变更等推送给骰主）
+#include "../service/sensitive_word_filter.h"
 
 #include <sqlite_orm/sqlite_orm.h>
 #include <ctime>
@@ -88,7 +89,14 @@ public:
                   I18n& i18n, LocaleResolver& resolver, CharacterCardStore& cards,
                   CardDeck& deck, AdapterManager& adapters)
         : db_(db), cfg_(cfg), engine_(engine), i18n_(i18n), resolver_(resolver),
-          cards_(cards), deck_(deck), adapters_(adapters) {}
+          cards_(cards), deck_(deck), adapters_(adapters) {
+        reloadSensitiveWordRules();
+        cfg_.onConfigChanged([this] { reloadSensitiveWordRules(); });
+    }
+
+    void reloadSensitiveWordRules() {
+        sensitiveWordMatcher_.replace(censor::load(cfg_));
+    }
 
     /// Set the PersonaManager (called after construction from main.cpp).
     void setPersonaManager(PersonaManager* pm) { personaMgr_ = pm; }
@@ -238,6 +246,8 @@ public:
         if (isGroupDisabled(msg) && !isAtSelf(msg) && toLower(cmd).rfind("bot", 0) != 0) {
             return "";
         }
+
+        if (auto censored = filterSensitiveCommand(loc, msg, text)) return *censored;
 
         std::string cmdL0 = toLower(cmd);
         // ── 规则包指令层：本群激活规则的 别名重写 + 自定义指令 + 屏蔽 ──
@@ -5609,11 +5619,127 @@ public:
         return i18n_.tr(loc, "trust.set", {{"user", name}, {"level", std::to_string(nl)}});
     }
 
+    std::optional<std::string> filterSensitiveCommand(Locale loc, const Message& msg,
+                                                       const std::string& text) {
+        if (msg.fromSelf || isMaster(msg)) return std::nullopt;
+        const int trust = senderTrust(msg);
+        if (trust >= kTrustAdmin) return std::nullopt;
+        const auto match = sensitiveWordMatcher_.searchText(text);
+        if (!match.found()) return std::nullopt;
+
+        std::string matched;
+        for (const auto& word : match.words) {
+            if (!matched.empty()) matched += "|";
+            matched += word;
+            if (matched.size() > 512) { matched.resize(512); matched += "..."; break; }
+        }
+        DICE_LOG_WARN("censor: level={} sender={} target={} rules={}",
+                      censor::levelName(match.level), msg.senderId, msg.targetId, matched);
+
+        const std::string origin = msg.type == MessageType::kGroup ? msg.targetId : msg.senderId;
+        dice::notice::notify(cfg_, adapters_, censor::noticeMask(match.level),
+            i18n_.tr(loc, "censor.owner_notice", {
+                {"user", msg.senderId},
+                {"target", origin}, {"level", censor::levelName(match.level)},
+                {"count", std::to_string(match.words.size())}
+            }), msg.platform, origin, "censor", msg.adapterId);
+
+        if (!censor::blocks(match.level, trust)) return std::nullopt;
+        const char* key = match.level == censor::Level::Caution ? "censor.caution"
+                        : match.level == censor::Level::Warning ? "censor.warning"
+                        : "censor.danger";
+        return i18n_.tr(loc, key, {{"nick", displayName(msg)}});
+    }
+
+    std::string handleSensitiveWordAdmin(Locale loc, const std::string& args,
+                                         const Message& msg) {
+        (void)msg;
+        nlohmann::json config = cfg_.get<nlohmann::json>(
+            "dice/censor", nlohmann::json{{"enabled", false}, {"words", nlohmann::json::object()}});
+        if (!config.is_object()) config = nlohmann::json::object();
+        if (!config.contains("words") || !config["words"].is_object())
+            config["words"] = nlohmann::json::object();
+        auto& words = config["words"];
+
+        const std::string lowered = toLower(trim(args));
+        if (lowered.empty() || lowered == "status" || lowered == "list") {
+            return i18n_.tr(loc, "censor.status", {
+                {"state", i18n_.tr(loc, config.value("enabled", false)
+                    ? "censor.state_on" : "censor.state_off")},
+                {"count", std::to_string(words.size())}
+            });
+        }
+        if (lowered == "on" || lowered == "off") {
+            config["enabled"] = lowered == "on";
+            cfg_.set("dice/censor", config);
+            if (!cfg_.save()) return i18n_.tr(loc, "censor.save_failed");
+            reloadSensitiveWordRules();
+            return i18n_.tr(loc, lowered == "on" ? "censor.enabled" : "censor.disabled");
+        }
+
+        if (args[0] == '+') {
+            const size_t eq = args.find('=');
+            if (eq == std::string::npos || eq + 1 >= args.size())
+                return i18n_.tr(loc, "censor.admin_usage");
+            const auto level = censor::parseLevel(args.substr(1, eq - 1), censor::Level::Warning);
+            size_t added = 0, start = eq + 1;
+            while (start <= args.size()) {
+                const size_t bar = args.find('|', start);
+                const std::string word = trim(args.substr(start,
+                    bar == std::string::npos ? std::string::npos : bar - start));
+                if (censor::validRuleWord(word) && words.size() < 5000) {
+                    words[word] = static_cast<int>(level);
+                    ++added;
+                }
+                if (bar == std::string::npos) break;
+                start = bar + 1;
+            }
+            if (!added) return i18n_.tr(loc, "censor.no_valid_words");
+            config["enabled"] = true;
+            cfg_.set("dice/censor", config);
+            if (!cfg_.save()) return i18n_.tr(loc, "censor.save_failed");
+            reloadSensitiveWordRules();
+            return i18n_.tr(loc, "censor.added", {
+                {"count", std::to_string(added)}, {"level", censor::levelName(level)}
+            });
+        }
+
+        if (args[0] == '-') {
+            size_t removed = 0, start = 1;
+            while (start <= args.size()) {
+                const size_t bar = args.find('|', start);
+                const std::string wanted = trim(args.substr(start,
+                    bar == std::string::npos ? std::string::npos : bar - start));
+                const std::string normalized = censor::normalize(wanted);
+                std::vector<std::string> eraseKeys;
+                for (const auto& [word, ignored] : words.items()) {
+                    (void)ignored;
+                    if (!normalized.empty() && censor::normalize(word) == normalized)
+                        eraseKeys.push_back(word);
+                }
+                for (const auto& word : eraseKeys) { words.erase(word); ++removed; }
+                if (bar == std::string::npos) break;
+                start = bar + 1;
+            }
+            if (!removed) return i18n_.tr(loc, "censor.none_removed");
+            cfg_.set("dice/censor", config);
+            if (!cfg_.save()) return i18n_.tr(loc, "censor.save_failed");
+            reloadSensitiveWordRules();
+            return i18n_.tr(loc, "censor.removed", {{"count", std::to_string(removed)}});
+        }
+        return i18n_.tr(loc, "censor.admin_usage");
+    }
+
     // .admin add/del/list <@/QQ> —— 授予/撤销管理员(=trust 4) / 列出管理员。需 Master。
     std::string handleAdmin(Locale loc, const std::string& args, const Message& msg) {
         if (!isMaster(msg)) return i18n_.tr(loc, "gate.not_master");
         std::istringstream iss(args); std::string act; iss >> act; act = toLower(act);
         std::string origin = (msg.type == MessageType::kGroup) ? msg.targetId : msg.senderId;
+        if (act == "censor") {
+            std::string censorArgs;
+            std::getline(iss, censorArgs);
+            return handleSensitiveWordAdmin(loc, trim(censorArgs), msg);
+        }
         if (act == "clock") {
             std::string clockArgs;
             std::getline(iss, clockArgs);
@@ -10799,6 +10925,7 @@ private:
     CharacterCardStore& cards_;
     CardDeck& deck_;
     AdapterManager& adapters_;
+    censor::Matcher sensitiveWordMatcher_;
     PersonaManager* personaMgr_ = nullptr;  // set via setPersonaManager()
     LuaTaskExistsFn luaTaskExists_;
     LuaTaskRunFn luaTaskRun_;

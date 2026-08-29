@@ -2608,7 +2608,7 @@ static int realMain(int argc, char* argv[]) {
     // ── Register real REST API endpoints ─────────────────────
     dice::utils::setStartupEpoch();
     dice::api::registerApiRoutes(db, configMgr, adapterMgr, engine, cardDeck, replyManager, i18n, jsMod, luaMod,
-                                 causalMgr, cooldownMgr, counterStore, personaMgr, updateService);
+                                 causalMgr, cooldownMgr, counterStore, personaMgr, updateService, cmdRouter);
     DICE_LOG_INFO("REST API routes registered");
 
     // ── Playground test harness ──────────────────────────────
