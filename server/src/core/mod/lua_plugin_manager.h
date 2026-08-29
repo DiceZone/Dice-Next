@@ -18,6 +18,9 @@
 #include <tuple>
 #include <mutex>
 #include <functional>
+#include <unordered_map>
+#include <cstdint>
+#include <atomic>
 #include <filesystem>
 #include <nlohmann/json_fwd.hpp>
 
@@ -195,6 +198,18 @@ public:
     using EventFn = std::function<void(const std::string& text, const std::string& gid, const std::string& uid)>;
     void setEventMsg(EventFn f) { eventMsg_ = std::move(f); }
 
+    // 旧 Dice! sleepTime(ms)：在 Lua 协程让出后由宿主事件循环续跑，避免阻塞消息线程。
+    using ScheduleFn = std::function<void(double seconds, std::function<void()> callback)>;
+    using AsyncReplyFn = std::function<void(const std::string& platform, const std::string& gid,
+                                             const std::string& uid, const std::string& text)>;
+    void setScheduler(ScheduleFn f) { scheduler_ = std::move(f); }
+    void setAsyncReply(AsyncReplyFn f) { asyncReply_ = std::move(f); }
+
+    // 单文件插件 task_call{name="globalFunction"} 兼容桥。
+    std::vector<std::string> taskNames() const;
+    bool hasTask(const std::string& name) const;
+    bool runTask(const std::string& name, std::string* error = nullptr);
+
     // http.get/post → 受控 fetch（外置API开关 + SSRF 黑名单）。method/url/headerLines/body → body，写 status。
     using HttpFetchFn = std::function<std::string(const std::string& method, const std::string& url,
                                                   const std::string& headerLines, const std::string& body, int& status)>;
@@ -214,6 +229,8 @@ public:
     DeckDrawFn  deckDraw_;
     SendFn      sender_;
     EventFn     eventMsg_;
+    ScheduleFn  scheduler_;
+    AsyncReplyFn asyncReply_;
     HttpFetchFn httpFetch_;
     GroupGateFn groupGate_;   // 分群启停 gate（地基）
     CardLockFn  cardLockFn_;  // 卡片锁定桥接（真人物卡）
@@ -248,7 +265,24 @@ private:
         bool groupOnly = false;              // limit.grp_id → 仅群聊
         int  echoRef = 0;                    // echo 为函数时的 registry 引用
         std::string echoScript;              // echo={lua="name"} 时的脚本名（跑 script/<name>.lua）
+        bool maySleep = false;                // 单文件源码使用 sleepTime → 以协程调用
     };
+
+    struct LegacyTask {
+        std::string name, modName, modDir;
+        int functionRef = 0;
+    };
+    struct PendingCoroutine {
+        uint64_t generation = 0;
+        int threadRef = 0;
+        int messageRef = 0;
+        std::string ruleName, modDir, platform, gid, uid;
+        std::map<std::string, std::string> vars;
+    };
+    void scheduleCoroutineResume(int threadRef, double delaySeconds);
+    void resumeCoroutine(int threadRef);
+    std::string finishCoroutine(PendingCoroutine& pending, lua_State* coroutine, int resultCount);
+    static double yieldedDelaySeconds(lua_State* coroutine, int resultCount);
 
     lua_State* state_ = nullptr;
     mutable std::recursive_mutex mutex_;
@@ -257,6 +291,9 @@ private:
     std::vector<LuaMod> mods_;
     std::map<std::string, std::string> speech_;   // 全局 speech 词条（各 mod 合并）
     std::vector<ReplyRule> replyRules_;
+    std::map<std::string, LegacyTask> taskCalls_;
+    std::unordered_map<int, PendingCoroutine> pendingCoroutines_;
+    std::atomic<uint64_t> runtimeGeneration_{0};
     std::string selfName_ = "\xe9\xaa\xb0\xe5\xa8\x98";   // 骰娘（默认自称，main 注入覆盖）
     std::string botId_;                                   // 机器人账号（getDiceQQ）
 

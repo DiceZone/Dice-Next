@@ -61,6 +61,19 @@ TEST(RollCommandParser, EnhancedDiceScriptPrefixesRemainIntact) {
     ASSERT_EQ(parsed.reason, std::string("检定"));
 }
 
+TEST(RollCommandParser, MultiRollPrefixKeepsFollowingDiceExpression) {
+    auto parsed = roll_command::parse("2#d100");
+    ASSERT_EQ(parsed.expression, std::string("2#d100"));
+    ASSERT_TRUE(parsed.reason.empty());
+
+    parsed = roll_command::parse("12#d6 attack");
+    ASSERT_EQ(parsed.expression, std::string("12#d6"));
+    ASSERT_EQ(parsed.reason, std::string("attack"));
+
+    parsed = roll_command::parse("2# d100测试");
+    ASSERT_EQ(parsed.expression, std::string("2#d100"));
+    ASSERT_EQ(parsed.reason, std::string("测试"));
+}
 TEST(RollCommandParser, NativeLexerReturnsValidUtf8ForUnicodeError) {
     DiceExpression expression([](int) { return 1; });
     const DiceResult result = expression.evaluate("d测试");

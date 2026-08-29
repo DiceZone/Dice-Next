@@ -231,9 +231,10 @@ inline void notify(ConfigManager& cfg, AdapterManager& adapters, int level, cons
         if (op != "test" && !w.adapterId.empty() && !originAdapterId.empty() &&
             w.adapterId != originAdapterId) continue;
         bool hit = (op == "test")   // 测试通知不受订阅过滤（骰主手动触发验证链路）
-            || (!w.events.empty()
-                ? (std::find(w.events.begin(), w.events.end(), op) != w.events.end())
-                : ((w.mask & level) != 0));
+            || (op.empty() ? ((w.mask & level) != 0)
+                : (!w.events.empty()
+                    ? (std::find(w.events.begin(), w.events.end(), op) != w.events.end())
+                    : ((w.mask & level) != 0)));
         if (!hit) continue;
         if (!originChat.empty() && w.platform == originPlatform && w.chatId == originChat) continue;  // 不回推来源
         // 哪里来的就发给谁：帐号来源的通知先由来源适配器发；发送失败（例如

@@ -15,7 +15,12 @@
 #include <ctime>
 #include <algorithm>
 #include <array>
-
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 extern "C" {
 #include <lua.h>
 #include <lauxlib.h>
@@ -49,6 +54,94 @@ static inline bool dnx_readFile(const std::filesystem::path& p, std::string& out
     out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     return true;
 }
+
+static size_t dnx_utf8SequenceLength(const std::string& s, size_t i) {
+    if (i >= s.size()) return 0;
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c < 0x80) return 1;
+    int len = 0;
+    uint32_t code = 0;
+    if (c >= 0xC2 && c <= 0xDF) { len = 2; code = c & 0x1F; }
+    else if (c >= 0xE0 && c <= 0xEF) { len = 3; code = c & 0x0F; }
+    else if (c >= 0xF0 && c <= 0xF4) { len = 4; code = c & 0x07; }
+    else return 0;
+    if (i + static_cast<size_t>(len) > s.size()) return 0;
+    for (int k = 1; k < len; ++k) {
+        const unsigned char cc = static_cast<unsigned char>(s[i + static_cast<size_t>(k)]);
+        if ((cc & 0xC0) != 0x80) return 0;
+        code = (code << 6) | (cc & 0x3F);
+    }
+    const uint32_t minimum = len == 2 ? 0x80u : len == 3 ? 0x800u : 0x10000u;
+    if (code < minimum || (code >= 0xD800 && code <= 0xDFFF) || code > 0x10FFFF) return 0;
+    return static_cast<size_t>(len);
+}
+
+static bool dnx_validUtf8(const std::string& s) {
+    for (size_t i = 0; i < s.size();) {
+        const size_t len = dnx_utf8SequenceLength(s, i);
+        if (len == 0) return false;
+        i += len;
+    }
+    return true;
+}
+
+#ifdef _WIN32
+static bool dnx_appendCp936(const char* bytes, int byteCount, std::string& out) {
+    const int wideLen = MultiByteToWideChar(936, MB_ERR_INVALID_CHARS, bytes, byteCount, nullptr, 0);
+    if (wideLen <= 0) return false;
+    std::wstring wide(static_cast<size_t>(wideLen), L'\0');
+    if (MultiByteToWideChar(936, MB_ERR_INVALID_CHARS, bytes, byteCount,
+                            wide.data(), wideLen) != wideLen) return false;
+    const int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wide.data(), wideLen,
+                                            nullptr, 0, nullptr, nullptr);
+    if (utf8Len <= 0) return false;
+    const size_t offset = out.size();
+    out.resize(offset + static_cast<size_t>(utf8Len));
+    if (WideCharToMultiByte(CP_UTF8, 0, wide.data(), wideLen, out.data() + offset,
+                            utf8Len, nullptr, nullptr) != utf8Len) {
+        out.resize(offset);
+        return false;
+    }
+    return true;
+}
+
+static std::string dnx_cp936SourceToUtf8(const std::string& s) {
+    std::string out;
+    if (s.empty() || !dnx_appendCp936(s.data(), static_cast<int>(s.size()), out)) return {};
+    return dnx_validUtf8(out) ? out : std::string();
+}
+#endif
+
+// Runtime strings can combine UTF-8 literals with bytes read from an old CP936
+// data file. Preserve already-valid UTF-8 spans and convert only invalid legacy
+// byte pairs; this avoids fixing one half of a mixed reply while corrupting the other.
+static std::string dnx_normalizeLuaText(const std::string& s) {
+    if (dnx_validUtf8(s)) return s;
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        const size_t utf8Len = dnx_utf8SequenceLength(s, i);
+        if (utf8Len != 0) {
+            out.append(s, i, utf8Len);
+            i += utf8Len;
+            continue;
+        }
+#ifdef _WIN32
+        const unsigned char lead = static_cast<unsigned char>(s[i]);
+        if (lead >= 0x81 && lead <= 0xFE && i + 1 < s.size()) {
+            const unsigned char trail = static_cast<unsigned char>(s[i + 1]);
+            if (trail >= 0x40 && trail <= 0xFE && trail != 0x7F &&
+                dnx_appendCp936(s.data() + i, 2, out)) {
+                i += 2;
+                continue;
+            }
+        }
+#endif
+        out.append("\xEF\xBF\xBD");
+        ++i;
+    }
+    return out;
+}
 // luaL_dofile 的宽路径安全替代：读文本 + loadbuffer（chunkname 用 UTF-8 文件名）+ pcall。
 // 复刻 lua loadfile 的头部处理：剥 UTF-8 BOM（EF BB BF）与 shebang 行（loadbuffer 不做，
 // 不剥则带 BOM 的社区插件全部报 unexpected symbol near '<\239>'）。
@@ -58,6 +151,12 @@ static inline int dnx_dofile(lua_State* L, const std::filesystem::path& p) {
         lua_pushfstring(L, "cannot open %s", dnx_u8str(p.filename()).c_str());
         return LUA_ERRFILE;
     }
+#ifdef _WIN32
+    if (!dnx_validUtf8(src)) {
+        const std::string converted = dnx_cp936SourceToUtf8(src);
+        src = converted.empty() ? dnx_normalizeLuaText(src) : converted;
+    }
+#endif
     size_t off = 0;
     if (src.size() >= 3 && (unsigned char)src[0] == 0xEF && (unsigned char)src[1] == 0xBB
         && (unsigned char)src[2] == 0xBF) off = 3;                        // UTF-8 BOM
@@ -526,7 +625,15 @@ static int l_mkDirs(lua_State* L) {
     std::error_code ec; fs::create_directories(argStr(L, 1), ec);
     lua_pushboolean(L, !ec); return 1;
 }
-static int l_sleepTime(lua_State*) { return 0; }   // 原版阻塞计时；这里空操作（避免卡住消息回合）
+static int l_sleepTime(lua_State* L) {
+    const double milliseconds = luaL_optnumber(L, 1, 0.0);
+    if (!(milliseconds > 0.0)) return 0;
+    // dispatch 会把含 sleepTime 的旧式 msg_order 函数放进协程。其它调用栈
+    // 不可 yield 时维持旧有“立即返回”行为，绝不阻塞适配器事件线程。
+    if (!lua_isyieldable(L)) return 0;
+    lua_pushnumber(L, milliseconds / 1000.0);
+    return lua_yield(L, 1);
+}
 static int l_drawDeck(lua_State* L) {
     auto* m = mgrOf(L);
     // 原版 drawDeck(fromGID, fromUID, deckName) 三参（DiceLua.cpp 1027）；牌名是最后一个参数。
@@ -549,8 +656,15 @@ static int l_audit(lua_State* L) {
 // sendMsg(text, groupId, userId)：插件主动发消息（经注入的 sender 路由适配器）。
 static int l_sendMsg(lua_State* L) {
     auto* m = mgrOf(L);
-    std::string text = argStr(L, 1), gid = argStr(L, 2), uid = argStr(L, 3);
-    if (m && m->sender_ && !text.empty()) { luaAudit(luaAuditMod(m), "sendMsg", "gid=" + gid + " uid=" + uid + " len=" + std::to_string(text.size())); m->sender_(text, gid, uid); }
+    std::string text = dnx_normalizeLuaText(argStr(L, 1));
+    std::string gid = dnx_normalizeLuaText(argStr(L, 2));
+    std::string uid = dnx_normalizeLuaText(argStr(L, 3));
+    if (m && m->sender_ && !text.empty()) {
+        luaAudit(luaAuditMod(m), "sendMsg", "gid=" + gid + " uid=" + uid + " len=" + std::to_string(text.size()));
+        try { m->sender_(text, gid, uid); }
+        catch (const std::exception& e) { DICE_LOG_ERROR("[lua] sendMsg host callback failed: {}", e.what()); }
+        catch (...) { DICE_LOG_ERROR("[lua] sendMsg host callback failed with unknown error"); }
+    }
     return 0;
 }
 // eventMsg(text|table, gid, uid)：把 text 当作消息跑完整回复管线（原版 virtualCall）。
@@ -566,15 +680,20 @@ static int l_eventMsg(lua_State* L) {
     } else {
         text = argStr(L, 1); gid = argStr(L, 2); uid = argStr(L, 3);
     }
+    text = dnx_normalizeLuaText(text);
+    gid = dnx_normalizeLuaText(gid);
+    uid = dnx_normalizeLuaText(uid);
     if (gid == "0") gid.clear();   // 原版 0=非群（私聊/系统）
     if (text.empty()) return 0;
-    m->eventMsg_(text, gid, uid);
+    try { m->eventMsg_(text, gid, uid); }
+    catch (const std::exception& e) { DICE_LOG_ERROR("[lua] eventMsg host callback failed: {}", e.what()); }
+    catch (...) { DICE_LOG_ERROR("[lua] eventMsg host callback failed with unknown error"); }
     return 0;
 }
 
 // ── json 模块（require("json") + 全局 json）：encode/decode，backed nlohmann ──
 static int l_jsonEncode(lua_State* L) {
-    try { std::string s = luaToJson(L, 1).dump(); lua_pushlstring(L, s.data(), s.size()); }
+    try { std::string s = luaToJson(L, 1).dump(-1, ' ', false, json::error_handler_t::replace); lua_pushlstring(L, s.data(), s.size()); }
     catch (...) { lua_pushnil(L); }
     return 1;
 }
@@ -853,6 +972,7 @@ bool LuaPluginManager::init() {
     if (state_) return true;
     state_ = luaL_newstate();
     if (!state_) { DICE_LOG_ERROR("[lua] luaL_newstate failed"); return false; }
+    ++runtimeGeneration_;
     luaL_openlibs(state_);
     lua_pushlightuserdata(state_, this);
     lua_setfield(state_, LUA_REGISTRYINDEX, "DiceMgr");
@@ -1116,6 +1236,9 @@ end
 
 void LuaPluginManager::freeRuntime() {
     std::lock_guard<std::recursive_mutex> lk(mutex_);
+    ++runtimeGeneration_;                    // 让已经排队的续跑回调自动失效
+    pendingCoroutines_.clear();
+    taskCalls_.clear();
     if (state_) { lua_close(state_); state_ = nullptr; }
 }
 
@@ -1427,6 +1550,8 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
     mods_.clear();
     speech_.clear();
     replyRules_.clear();   // echo refs 随旧 state 关闭已失效
+    taskCalls_.clear();
+    pendingCoroutines_.clear();
     std::error_code ec;
     int n = 0;
 
@@ -1711,7 +1836,11 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     if (!enabled) { mods_.push_back(std::move(m)); return; }
 
     loadingModDir_ = path.parent_path().string();
+    std::string pluginSource;
+    dnx_readFile(path, pluginSource);
+    const bool maySleep = pluginSource.find("sleepTime") != std::string::npos;
     lua_newtable(state_); lua_setglobal(state_, "msg_order");
+    lua_newtable(state_); lua_setglobal(state_, "task_call");
     if (dnx_dofile(state_, path) != LUA_OK) {
         DICE_LOG_ERROR("[lua] plugin '{}' load error: {}", m.name, argStr(state_, -1));
         lua_pop(state_, 1); loadingModDir_.clear(); mods_.push_back(std::move(m)); return;
@@ -1729,6 +1858,32 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
         }
     }
     lua_pop(state_, 1);   // msg_order
+
+    // 原版单文件插件的定时入口：task_call[任务名]="全局函数名"。
+    lua_getglobal(state_, "task_call");
+    if (lua_istable(state_, -1)) {
+        lua_pushnil(state_);
+        while (lua_next(state_, -2)) {
+            lua_pushvalue(state_, -2);
+            const std::string taskName = dnx_normalizeLuaText(argStr(state_, -1));
+            lua_pop(state_, 1);
+            const std::string functionName = argStr(state_, -1);
+            if (!taskName.empty() && !functionName.empty()) {
+                lua_getglobal(state_, functionName.c_str());
+                if (lua_isfunction(state_, -1)) {
+                    if (auto old = taskCalls_.find(taskName); old != taskCalls_.end())
+                        luaL_unref(state_, LUA_REGISTRYINDEX, old->second.functionRef);
+                    LegacyTask task;
+                    task.name = taskName; task.modName = m.name; task.modDir = m.dir;
+                    task.functionRef = luaL_ref(state_, LUA_REGISTRYINDEX);
+                    taskCalls_[taskName] = std::move(task);
+                } else lua_pop(state_, 1);
+            }
+            lua_pop(state_, 1);
+        }
+    }
+    lua_pop(state_, 1);   // task_call
+
     std::sort(orders.begin(), orders.end(),
               [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
     for (auto& [key, func] : orders) {
@@ -1738,6 +1893,7 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
         rule.name = m.name + ":" + key; rule.modName = m.name; rule.modDir = m.dir;
         rule.prefixPatterns.push_back(key);
         rule.echoRef = luaL_ref(state_, LUA_REGISTRYINDEX);   // 捕获该函数（弹出）
+        rule.maySleep = maySleep;
         replyRules_.push_back(std::move(rule));
         ++m.replies;
     }
@@ -1766,23 +1922,45 @@ std::vector<LuaPluginManager::LuaMod> LuaPluginManager::mods() const {
     return mods_;
 }
 
-// 清洗成合法 UTF-8（个别社区 mod 关键词含 GBK 残留字节，否则 nlohmann 序列化抛 type_error.316）。
-// 非法字节序列替换为 '?'，保证 JSON 可输出。
-static std::string scrubUtf8(const std::string& s) {
-    std::string out; out.reserve(s.size());
-    size_t i = 0, n = s.size();
-    while (i < n) {
-        unsigned char c = (unsigned char)s[i];
-        int len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
-        if (len == 0) { out.push_back('?'); ++i; continue; }
-        if (i + len > n) { out.push_back('?'); ++i; continue; }
-        bool ok = true;
-        for (int k = 1; k < len; ++k) if (((unsigned char)s[i + k] >> 6) != 0x2) { ok = false; break; }
-        if (!ok) { out.push_back('?'); ++i; continue; }
-        out.append(s, i, len); i += len;
-    }
+std::vector<std::string> LuaPluginManager::taskNames() const {
+    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::vector<std::string> out;
+    out.reserve(taskCalls_.size());
+    for (const auto& [name, task] : taskCalls_) out.push_back(name);
     return out;
 }
+
+bool LuaPluginManager::hasTask(const std::string& name) const {
+    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    return state_ && taskCalls_.find(name) != taskCalls_.end();
+}
+
+bool LuaPluginManager::runTask(const std::string& name, std::string* error) {
+    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    const auto it = taskCalls_.find(name);
+    if (!state_ || it == taskCalls_.end()) {
+        if (error) *error = "Lua task not found: " + name;
+        return false;
+    }
+    const int base = lua_gettop(state_);
+    const std::string previousDir = loadingModDir_;
+    loadingModDir_ = it->second.modDir;
+    lua_rawgeti(state_, LUA_REGISTRYINDEX, it->second.functionRef);
+    const int status = lua_pcall(state_, 0, LUA_MULTRET, 0);
+    loadingModDir_ = previousDir;
+    if (status != LUA_OK) {
+        const std::string message = dnx_normalizeLuaText(argStr(state_, -1));
+        if (error) *error = message;
+        DICE_LOG_ERROR("[lua] scheduled task '{}' failed: {}", name, message);
+        lua_settop(state_, base);
+        return false;
+    }
+    lua_settop(state_, base);
+    return true;
+}
+
+// 插件管理 API 也必须只输出合法 UTF-8。旧 GBK 文本优先转码，失败才替换。
+static std::string scrubUtf8(const std::string& s) { return dnx_normalizeLuaText(s); }
 
 std::vector<LuaPluginManager::ModCommand> LuaPluginManager::commandsOf(const std::string& modName) const {
     std::lock_guard<std::recursive_mutex> lk(mutex_);
@@ -2076,6 +2254,109 @@ std::string LuaPluginManager::resolveAmp(const std::string& key) const {
     return valueOf(key, {}, 0);
 }
 
+double LuaPluginManager::yieldedDelaySeconds(lua_State* coroutine, int resultCount) {
+    double delay = 0.0;
+    if (resultCount > 0 && lua_isnumber(coroutine, -1)) delay = lua_tonumber(coroutine, -1);
+    lua_settop(coroutine, 0);   // 移除 yield 给宿主的值，保留 Lua 内部调用帧
+    if (delay < 0.0) delay = 0.0;
+    if (delay > 7.0 * 24.0 * 3600.0) delay = 7.0 * 24.0 * 3600.0;
+    return delay;
+}
+
+void LuaPluginManager::scheduleCoroutineResume(int threadRef, double delaySeconds) {
+    if (!scheduler_) return;
+    const uint64_t generation = runtimeGeneration_;
+    try {
+        scheduler_(delaySeconds, [this, threadRef, generation]() {
+            if (generation != runtimeGeneration_) return;
+            resumeCoroutine(threadRef);
+        });
+    } catch (const std::exception& e) {
+        DICE_LOG_ERROR("[lua] failed to schedule sleepTime continuation: {}", e.what());
+    } catch (...) {
+        DICE_LOG_ERROR("[lua] failed to schedule sleepTime continuation");
+    }
+}
+
+std::string LuaPluginManager::finishCoroutine(PendingCoroutine& pending, lua_State* coroutine,
+                                               int resultCount) {
+    std::string result;
+    if (resultCount > 0) {
+        const int firstResult = lua_gettop(coroutine) - resultCount + 1;
+        result = dnx_normalizeLuaText(argStr(coroutine, firstResult));
+    }
+    lua_rawgeti(state_, LUA_REGISTRYINDEX, pending.messageRef);
+    if (lua_istable(state_, -1)) {
+        lua_pushnil(state_);
+        while (lua_next(state_, -2)) {
+            lua_pushvalue(state_, -2);
+            const std::string key = dnx_normalizeLuaText(argStr(state_, -1));
+            lua_pop(state_, 1);
+            const std::string value = dnx_normalizeLuaText(argStr(state_, -1));
+            if (!key.empty()) pending.vars[key] = value;
+            lua_pop(state_, 1);
+        }
+    }
+    lua_pop(state_, 1);
+    return dnx_normalizeLuaText(formatTemplate(result, pending.vars));
+}
+
+void LuaPluginManager::resumeCoroutine(int threadRef) {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    auto it = pendingCoroutines_.find(threadRef);
+    if (!state_ || it == pendingCoroutines_.end()) return;
+    PendingCoroutine& pending = it->second;
+    if (pending.generation != runtimeGeneration_) {
+        pendingCoroutines_.erase(it);
+        return;
+    }
+    lua_rawgeti(state_, LUA_REGISTRYINDEX, threadRef);
+    lua_State* coroutine = lua_tothread(state_, -1);
+    lua_pop(state_, 1);
+    if (!coroutine) {
+        luaL_unref(state_, LUA_REGISTRYINDEX, pending.messageRef);
+        luaL_unref(state_, LUA_REGISTRYINDEX, threadRef);
+        pendingCoroutines_.erase(it);
+        return;
+    }
+    lua_rawgeti(state_, LUA_REGISTRYINDEX, pending.messageRef);
+    lua_setglobal(state_, "msg");
+    const std::string oldPlatform = activePlatform_;
+    const std::string oldDir = loadingModDir_;
+    activePlatform_ = pending.platform;
+    loadingModDir_ = pending.modDir;
+    int resultCount = 0;
+    const int status = lua_resume(coroutine, state_, 0, &resultCount);
+    activePlatform_ = oldPlatform;
+    loadingModDir_ = oldDir;
+    if (status == LUA_YIELD) {
+        const double delay = yieldedDelaySeconds(coroutine, resultCount);
+        scheduleCoroutineResume(threadRef, delay);
+        return;
+    }
+    std::string reply;
+    std::string error;
+    if (status == LUA_OK) reply = finishCoroutine(pending, coroutine, resultCount);
+    else error = dnx_normalizeLuaText(argStr(coroutine, -1));
+    const std::string platform = pending.platform;
+    const std::string gid = pending.gid;
+    const std::string uid = pending.uid;
+    const std::string ruleName = pending.ruleName;
+    luaL_unref(state_, LUA_REGISTRYINDEX, pending.messageRef);
+    luaL_unref(state_, LUA_REGISTRYINDEX, threadRef);
+    pendingCoroutines_.erase(it);
+    const auto sender = asyncReply_;
+    lock.unlock();
+    if (!error.empty()) {
+        DICE_LOG_ERROR("[lua] async reply '{}' failed: {}", ruleName, error);
+        return;
+    }
+    if (!reply.empty() && sender) {
+        try { sender(platform, gid, uid, reply); }
+        catch (const std::exception& e) { DICE_LOG_ERROR("[lua] async reply host callback failed: {}", e.what()); }
+        catch (...) { DICE_LOG_ERROR("[lua] async reply host callback failed"); }
+    }
+}
 LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         const std::string& text, const std::string& uid, const std::string& gid,
         const std::string& nick, const std::string& groupCard, bool isPrivate, int trust, const std::string& platform) {
@@ -2139,31 +2420,80 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         } else lua_pop(state_, 1);
         lua_setglobal(state_, "msg");
 
-        // 运行 echo：函数 ref 或 {lua="name"} 脚本。
+        // 运行 echo：函数 ref 或 {lua="name"} 脚本。含 sleepTime 的旧式
+        // msg_order 函数放到协程；普通插件继续走原同步路径，避免改变既有语义。
         loadingModDir_ = rule.modDir;
         int sbase = lua_gettop(state_);
         const std::string previousPlatform = activePlatform_;
         activePlatform_ = platform;
-        bool callOk;
+        bool callOk = false;
+        bool usedCoroutine = false;
+        std::string callError;
+        std::string tmpl;
         if (!rule.echoScript.empty()) {
-            std::string erel = rule.echoScript; for (auto& c : erel) if (c == '.') c = '/';   // 点分命名空间→子目录
+            std::string erel = rule.echoScript; for (auto& c : erel) if (c == '.') c = '/';
             fs::path sp = fs::path(rule.modDir) / "script" / (erel + ".lua");
             callOk = (dnx_dofile(state_, sp) == LUA_OK);
+        } else if (rule.maySleep && scheduler_) {
+            usedCoroutine = true;
+            lua_getglobal(state_, "msg");
+            const int messageRef = luaL_ref(state_, LUA_REGISTRYINDEX);
+            lua_State* coroutine = lua_newthread(state_);
+            const int threadRef = luaL_ref(state_, LUA_REGISTRYINDEX);
+            lua_rawgeti(state_, LUA_REGISTRYINDEX, rule.echoRef);
+            lua_xmove(state_, coroutine, 1);
+            lua_rawgeti(state_, LUA_REGISTRYINDEX, messageRef);
+            lua_xmove(state_, coroutine, 1);
+            int resultCount = 0;
+            const int status = lua_resume(coroutine, state_, 1, &resultCount);
+            if (status == LUA_YIELD) {
+                PendingCoroutine pending;
+                pending.generation = runtimeGeneration_;
+                pending.threadRef = threadRef;
+                pending.messageRef = messageRef;
+                pending.ruleName = rule.name; pending.modDir = rule.modDir;
+                pending.platform = platform; pending.gid = gid; pending.uid = uid;
+                pending.vars = base;
+                pendingCoroutines_[threadRef] = std::move(pending);
+                const double delay = yieldedDelaySeconds(coroutine, resultCount);
+                scheduleCoroutineResume(threadRef, delay);
+                lua_rawgeti(state_, LUA_REGISTRYINDEX, messageRef);
+                lua_setglobal(state_, "msg");
+                activePlatform_ = previousPlatform;
+                loadingModDir_.clear();
+                lua_settop(state_, sbase);
+                res.matched = true;
+                if (rule.cdUser > 0) confSet("cd:" + rule.name, "u:" + uid, std::to_string(now));
+                if (rule.cdGrp > 0 && !gid.empty()) confSet("cd:" + rule.name, "g:" + gid, std::to_string(now));
+                return res;
+            }
+            if (status == LUA_OK) {
+                if (resultCount > 0) {
+                    const int firstResult = lua_gettop(coroutine) - resultCount + 1;
+                    tmpl = dnx_normalizeLuaText(argStr(coroutine, firstResult));
+                }
+                callOk = true;
+            } else callError = dnx_normalizeLuaText(argStr(coroutine, -1));
+            lua_rawgeti(state_, LUA_REGISTRYINDEX, messageRef);
+            lua_setglobal(state_, "msg");
+            luaL_unref(state_, LUA_REGISTRYINDEX, messageRef);
+            luaL_unref(state_, LUA_REGISTRYINDEX, threadRef);
         } else {
             lua_rawgeti(state_, LUA_REGISTRYINDEX, rule.echoRef);
-            lua_getglobal(state_, "msg");   // 作参数传入（msg_order 函数读 msg 参数；msg_reply echo 忽略多余参数）
+            lua_getglobal(state_, "msg");
             callOk = (lua_pcall(state_, 1, LUA_MULTRET, 0) == LUA_OK);
         }
         activePlatform_ = previousPlatform;
         loadingModDir_.clear();
         if (!callOk) {
-            DICE_LOG_ERROR("[lua] reply '{}' echo error: {}", rule.name, argStr(state_, -1));
+            if (callError.empty()) callError = dnx_normalizeLuaText(argStr(state_, -1));
+            DICE_LOG_ERROR("[lua] reply '{}' echo error: {}", rule.name, callError);
             lua_settop(state_, sbase); res.matched = true; return res;
         }
-        // 取「第一个」返回值作回复（msg_order 函数常 return reply, "" 两值；echo 单值）。
-        std::string tmpl = (lua_gettop(state_) > sbase) ? argStr(state_, sbase + 1) : "";
+        // 取第一个返回值作回复（msg_order 常 return reply, "" 两值）。
+        if (!usedCoroutine)
+            tmpl = (lua_gettop(state_) > sbase) ? dnx_normalizeLuaText(argStr(state_, sbase + 1)) : "";
         lua_settop(state_, sbase);
-
         // 读回 msg 表里 echo 设置的字段（msg.favor 等）→ 合入 vars。
         std::map<std::string, std::string> vars = base;
         lua_getglobal(state_, "msg");
@@ -2171,8 +2501,8 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
             lua_pushnil(state_);
             while (lua_next(state_, -2)) {
                 lua_pushvalue(state_, -2);                     // 复制 key
-                std::string k = argStr(state_, -1); lua_pop(state_, 1);
-                std::string v = argStr(state_, -1);
+                std::string k = dnx_normalizeLuaText(argStr(state_, -1)); lua_pop(state_, 1);
+                std::string v = dnx_normalizeLuaText(argStr(state_, -1));
                 if (!k.empty()) vars[k] = v;
                 lua_pop(state_, 1);
             }
@@ -2180,7 +2510,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         lua_pop(state_, 1);
 
         res.matched = true;
-        res.reply = formatTemplate(tmpl, vars);
+        res.reply = dnx_normalizeLuaText(formatTemplate(tmpl, vars));
         if (rule.cdUser > 0) confSet("cd:" + rule.name, "u:" + uid, std::to_string(now));
         if (rule.cdGrp > 0 && !gid.empty()) confSet("cd:" + rule.name, "g:" + gid, std::to_string(now));
         return res;

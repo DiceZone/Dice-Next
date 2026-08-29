@@ -109,6 +109,31 @@ inline bool hasNonDigit(const std::string& input) {
 /// runs before expression-engine selection, so switching modes cannot change the
 /// compact-reason interpretation.
 inline ParsedInput parse(const std::string& input) {
+    // Dice! multi-roll syntax is a command-level prefix, not an expression
+    // operator. Parse it before DiceScript can stop at `N#` and misclassify
+    // the following dice expression as the reason.
+    size_t countEnd = 0;
+    while (countEnd < input.size() &&
+           std::isdigit(static_cast<unsigned char>(input[countEnd])))
+        ++countEnd;
+    if (countEnd > 0 && countEnd < input.size() && input[countEnd] == '#') {
+        size_t expressionBegin = countEnd + 1;
+        while (expressionBegin < input.size() &&
+               std::isspace(static_cast<unsigned char>(input[expressionBegin])))
+            ++expressionBegin;
+        const std::string tail = input.substr(expressionBegin);
+        const std::string tailToken = readDiceToken(tail);
+        ParsedInput result;
+        result.expression = input.substr(0, countEnd + 1);
+        if (hasNonDigit(tailToken)) {
+            result.expression += tailToken;
+            result.reason = trimAsciiWhitespace(tail.substr(tailToken.size()));
+        } else {
+            result.reason = trimAsciiWhitespace(tail);
+        }
+        return result;
+    }
+
     const std::string diceToken = readDiceToken(input);
     ParsedInput result;
     if (hasNonDigit(diceToken)) {

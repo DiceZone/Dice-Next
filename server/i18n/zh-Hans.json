@@ -1,4 +1,4 @@
-﻿{
+{
   "_meta": {
     "name": "简体中文",
     "keywords": [
@@ -274,12 +274,23 @@
     "target_higher": "对方的信任等级不低于你，无法修改。"
   },
   "admin": {
-    "usage": "用法：.admin add/del <@某人/QQ号> 授予/撤销管理员；.admin list 列出管理员。仅骰主可用。",
+    "usage": "用法：.admin add/del <@某人/QQ号> 授予/撤销管理员；.admin list 列出管理员；.admin clock + <任务名> HH:MM 添加 Lua 定时任务，- <任务名> 删除。仅骰主可用。",
     "added": "已添加 {user} 的管理权限√",
     "removed": "已收回 {user} 的管理权限√",
     "not_admin": "该用户没有管理权限。",
     "list": "管理员列表：\n{list}",
-    "none": "（暂无）"
+    "none": "（暂无）",
+    "clock_usage": "用法：.admin clock + <任务名> HH:MM；.admin clock - <任务名>；.admin clock list。",
+    "clock_added": "已添加 Lua 定时任务 {task}，每天 {time} 执行√",
+    "clock_removed": "已删除 Lua 定时任务 {task}√",
+    "clock_not_found": "Lua 插件没有注册任务：{task}",
+    "clock_bad_time": "时刻格式无效，请使用 H:MM 或 HH:MM（0:00–23:59）。",
+    "clock_list": "Lua 定时任务：\n{list}",
+    "clock_none": "（暂无 Lua 定时任务）",
+    "clock_error": "保存 Lua 定时任务失败。",
+    "notice_usage": "用法：.admin notice group/QQ <号码> +<级别> 或 -<级别>。",
+    "notice_send_usage": "用法：.send notice <级别> <消息>。"
+
   },
   "notice": {
     "usage": "用法：.notice on/off 开关本窗口通知；.notice level <1-15> 设订阅级别(1例行/2重要/4关键/8错误，可叠加，15全部)。仅骰主可用。",

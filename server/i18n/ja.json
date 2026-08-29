@@ -1,4 +1,4 @@
-﻿{
+{
   "_meta": {
     "name": "日本語",
     "keywords": [
@@ -268,12 +268,23 @@
     "target_higher": "相手の信頼レベルが自分未満ではないため変更できません。"
   },
   "admin": {
-    "usage": "用法：.admin add/del <@ユーザー/QQ> で管理者を付与/剥奪；.admin list で一覧。マスターのみ。",
+    "usage": "用法：.admin add/del <@ユーザー/QQ> で管理者を付与/剥奪；.admin list で一覧；.admin clock + <タスク名> HH:MM で Lua 定時タスクを追加、- <タスク名> で削除。マスターのみ。",
     "added": "{user} に管理権限を付与しました √",
     "removed": "{user} の管理権限を剥奪しました √",
     "not_admin": "そのユーザーに管理権限はありません。",
     "list": "管理者一覧：\n{list}",
-    "none": "（なし）"
+    "none": "（なし）",
+    "clock_usage": "用法：.admin clock + <タスク名> HH:MM；.admin clock - <タスク名>；.admin clock list。",
+    "clock_added": "Lua タスク {task} を毎日 {time} に実行します √",
+    "clock_removed": "Lua タスク {task} を削除しました √",
+    "clock_not_found": "Lua プラグインにタスクが登録されていません：{task}",
+    "clock_bad_time": "時刻が不正です。H:MM または HH:MM（0:00–23:59）を使用してください。",
+    "clock_list": "Lua 定時タスク：\n{list}",
+    "clock_none": "（Lua 定時タスクなし）",
+    "clock_error": "Lua 定時タスクの保存に失敗しました。",
+    "notice_usage": "用法：.admin notice group/QQ <ID> +<レベル> または -<レベル>。",
+    "notice_send_usage": "用法：.send notice <レベル> <メッセージ>。"
+
   },
   "notice": {
     "usage": "用法：.notice on/off でこのウィンドウの通知を切替；.notice level <1-15> で購読レベル設定(1定例/2重要/4重大/8エラー、加算可、15全部)。マスターのみ。",

@@ -93,6 +93,28 @@ public:
     /// Set the PersonaManager (called after construction from main.cpp).
     void setPersonaManager(PersonaManager* pm) { personaMgr_ = pm; }
 
+    using LuaTaskExistsFn = std::function<bool(const std::string& name)>;
+    using LuaTaskRunFn = std::function<bool(const std::string& name, std::string* error)>;
+    void setLuaTaskBridge(LuaTaskExistsFn exists, LuaTaskRunFn run) {
+        luaTaskExists_ = std::move(exists);
+        luaTaskRun_ = std::move(run);
+    }
+    // Narrow compatibility bridge for trusted Lua code. Only the two legacy
+    // notice commands used by DailyNews are handled here; no general admin
+    // privilege is granted to eventMsg or to other plugin-generated commands.
+    bool handleLegacyLuaNoticeEvent(const std::string& text, const std::string& platform,
+                                    const std::string& adapterId) {
+        const std::string body = trim(text);
+        const std::string lower = toLower(body);
+        constexpr const char* adminPrefix = ".admin notice ";
+        constexpr const char* sendPrefix = ".send notice ";
+        if (lower.rfind(adminPrefix, 0) == 0)
+            return updateLegacyNoticeWindow(body.substr(std::char_traits<char>::length(adminPrefix)),
+                                            platform, adapterId);
+        if (lower.rfind(sendPrefix, 0) == 0)
+            return sendLegacyNotice(body.substr(std::char_traits<char>::length(sendPrefix)), adapterId);
+        return false;
+    }
     /// 智能化阶段D（工具调用）：按发送者的人物卡读取一个属性值（含关联属性/衍生值回退）。
     /// 供 AI function-calling 的 get_attr 工具使用。无卡/无此属性返回 nullopt。
     std::optional<int> aiGetAttr(const Message& msg, const std::string& name) {
@@ -5592,6 +5614,22 @@ public:
         if (!isMaster(msg)) return i18n_.tr(loc, "gate.not_master");
         std::istringstream iss(args); std::string act; iss >> act; act = toLower(act);
         std::string origin = (msg.type == MessageType::kGroup) ? msg.targetId : msg.senderId;
+        if (act == "clock") {
+            std::string clockArgs;
+            std::getline(iss, clockArgs);
+            return handleLegacyLuaClock(loc, trim(clockArgs), msg);
+        }
+        if (act == "notice") {
+            std::string noticeArgs;
+            std::getline(iss, noticeArgs);
+            noticeArgs = trim(noticeArgs);
+            if (!updateLegacyNoticeWindow(noticeArgs, msg.platform, msg.adapterId))
+                return i18n_.tr(loc, "admin.notice_usage");
+            const size_t sign = noticeArgs.find_last_of("+-");
+            return sign != std::string::npos && noticeArgs[sign] == '-'
+                ? i18n_.tr(loc, "notice.removed")
+                : i18n_.tr(loc, "notice.set", {{"level", sign == std::string::npos ? "" : noticeArgs.substr(sign + 1)}});
+        }
         if (act == "list") {
             std::string out; auto* st = db_.getStorage();
             if (st) try {
@@ -5622,6 +5660,147 @@ public:
         return i18n_.tr(loc, "admin.removed", {{"user", name}});
     }
 
+    std::string handleLegacyLuaClock(Locale loc, const std::string& args, const Message& msg) {
+        auto* st = db_.getStorage();
+        if (!st) return i18n_.tr(loc, "admin.clock_error");
+        std::istringstream in(args);
+        std::string op, taskName, clockTime;
+        in >> op;
+        op = toLower(op);
+        if (op.empty() || op == "list") {
+            std::string list;
+            try {
+                for (const auto& row : st->get_all<ScheduledTaskRow>()) {
+                    if (row.action != "lua") continue;
+                    const std::string line = row.content + " " + row.cronTime
+                        + (row.enabled ? "" : " [off]");
+                    list += (list.empty() ? "" : "\n") + line;
+                }
+            } catch (...) {}
+            return i18n_.tr(loc, "admin.clock_list", {{"list", list.empty()
+                ? i18n_.tr(loc, "admin.clock_none") : list}});
+        }
+        in >> taskName;
+        if (taskName.empty()) return i18n_.tr(loc, "admin.clock_usage");
+        if (op == "+" || op == "add") {
+            in >> clockTime;
+            auto normalizeTime = [](const std::string& value) -> std::optional<std::string> {
+                const size_t colon = value.find(':');
+                if (colon == std::string::npos || colon < 1 || colon > 2 ||
+                    value.size() - colon - 1 != 2) return std::nullopt;
+                for (size_t i = 0; i < value.size(); ++i)
+                    if (i != colon && !std::isdigit(static_cast<unsigned char>(value[i])))
+                        return std::nullopt;
+                int hour = 0;
+                for (size_t i = 0; i < colon; ++i) hour = hour * 10 + value[i] - '0';
+                const int minute = (value[colon + 1] - '0') * 10 + value[colon + 2] - '0';
+                if (hour >= 24 || minute >= 60) return std::nullopt;
+                return (hour < 10 ? "0" : "") + std::to_string(hour) + ":" + value.substr(colon + 1);
+            };
+            const auto normalizedTime = normalizeTime(clockTime);
+            if (!normalizedTime) return i18n_.tr(loc, "admin.clock_bad_time");
+            clockTime = *normalizedTime;
+            if (!luaTaskExists_ || !luaTaskExists_(taskName))
+                return i18n_.tr(loc, "admin.clock_not_found", {{"task", taskName}});
+            try {
+                ScheduledTaskRow row;
+                bool updating = false;
+                for (const auto& existing : st->get_all<ScheduledTaskRow>()) {
+                    if (existing.action == "lua" && existing.content == taskName) {
+                        row = existing; updating = true; break;
+                    }
+                }
+                row.name = "Lua: " + taskName;
+                row.adapterId = msg.adapterId;
+                row.platform = msg.platform;
+                row.targetType = "private";
+                row.targetId = msg.senderId.empty() ? "lua" : msg.senderId;
+                row.cronTime = clockTime;
+                row.days.clear(); row.content = taskName; row.enabled = 1;
+                row.action = "lua"; row.condition.clear(); row.triggerType.clear();
+                row.intervalMin = 0; row.onceDate.clear(); row.createdAt = nowIso();
+                const std::time_t current = std::time(nullptr);
+                const std::string hm = utils::formatTimeInTimezone(current, "%H:%M");
+                row.lastRun = clockTime <= hm
+                    ? utils::formatTimeInTimezone(current, "%Y-%m-%d") : std::string();
+                if (updating) st->update(row); else st->insert(row);
+                return i18n_.tr(loc, "admin.clock_added", {{"task", taskName}, {"time", clockTime}});
+            } catch (const std::exception& e) {
+                DICE_LOG_ERROR("failed to save legacy Lua clock '{}': {}", taskName, e.what());
+                return i18n_.tr(loc, "admin.clock_error");
+            }
+        }
+        if (op == "-" || op == "del" || op == "remove") {
+            int removed = 0;
+            try {
+                for (const auto& row : st->get_all<ScheduledTaskRow>()) {
+                    if (row.action == "lua" && row.content == taskName) {
+                        st->remove<ScheduledTaskRow>(row.id); ++removed;
+                    }
+                }
+            } catch (...) { return i18n_.tr(loc, "admin.clock_error"); }
+            return removed ? i18n_.tr(loc, "admin.clock_removed", {{"task", taskName}})
+                           : i18n_.tr(loc, "admin.clock_not_found", {{"task", taskName}});
+        }
+        return i18n_.tr(loc, "admin.clock_usage");
+    }
+    bool updateLegacyNoticeWindow(const std::string& args, const std::string& platform,
+                                  const std::string& adapterId) {
+        std::istringstream in(args);
+        std::string kind, chatId, change;
+        in >> kind >> chatId >> change;
+        kind = toLower(kind);
+        const bool isGroup = kind == "group" || kind == "grp";
+        const bool isPrivate = kind == "qq" || kind == "user" || kind == "private";
+        if ((!isGroup && !isPrivate) || chatId.empty() || change.size() < 2 ||
+            (change[0] != '+' && change[0] != '-') || !isAllDigits(change.substr(1))) return false;
+        const int mask = parseIntOr(change.substr(1), 0);
+        if (mask <= 0 || mask > 0xFFFF) return false;
+        try {
+            using J = nlohmann::json;
+            J nc = cfg_.get<J>("dice/notice", J::object());
+            if (!nc.is_object()) nc = J::object();
+            J wins = nc.contains("windows") && nc["windows"].is_array()
+                ? nc["windows"] : J::array();
+            int idx = -1, globalFallback = -1;
+            for (int i = 0; i < static_cast<int>(wins.size()); ++i) {
+                if (!wins[i].is_object() ||
+                    wins[i].value("platform", std::string()) != platform ||
+                    wins[i].value("chat_id", std::string()) != chatId ||
+                    wins[i].value("is_group", true) != isGroup) continue;
+                const std::string rowAdapter = wins[i].value("adapter_id", std::string());
+                if (rowAdapter == adapterId) { idx = i; break; }
+                if (rowAdapter.empty()) globalFallback = i;
+            }
+            if (idx < 0) idx = globalFallback;
+            if (change[0] == '+') {
+                const int combined = (idx >= 0 ? wins[idx].value("level_mask", 0) : 0) | mask;
+                if (idx < 0) {
+                    wins.push_back(J{{"platform", platform}, {"adapter_id", adapterId},
+                        {"chat_id", chatId}, {"is_group", isGroup},
+                        {"level_mask", combined}, {"events", J::array()}});
+                } else wins[idx]["level_mask"] = combined;
+            } else if (idx >= 0) {
+                const int remaining = wins[idx].value("level_mask", 0) & ~mask;
+                if (remaining > 0) wins[idx]["level_mask"] = remaining;
+                else wins.erase(wins.begin() + idx);
+            }
+            nc["windows"] = wins; cfg_.set<J>("dice/notice", nc); cfg_.save();
+            return true;
+        } catch (const std::exception& e) {
+            DICE_LOG_ERROR("failed to update legacy Lua notice window: {}", e.what());
+            return false;
+        }
+    }
+
+    bool sendLegacyNotice(const std::string& args, const std::string& adapterId) {
+        auto [maskText, text] = splitCommand(args);
+        if (!isAllDigits(maskText) || trim(text).empty()) return false;
+        const int mask = parseIntOr(maskText, 0);
+        if (mask <= 0 || mask > 0xFFFF) return false;
+        dice::notice::notify(cfg_, adapters_, mask, trim(text), "", "", "", adapterId);
+        return true;
+    }
     // Original Dice! `.user` compatibility backed by DiceNext's unified
     // profile and banlist. Irreversible record/card deletion remains a WebUI
     // operation so an accidental chat command cannot erase user data.
@@ -6056,6 +6235,12 @@ private:
         if (isMaster(msg)) {
             auto [kw, rest] = splitCommand(body);
             std::string kwl = toLower(kw);
+            if (kwl == "notice") {
+                if (!sendLegacyNotice(rest, msg.adapterId))
+                    return i18n_.tr(loc, "admin.notice_send_usage");
+                auto [maskText, ignored] = splitCommand(rest);
+                return i18n_.tr(loc, "send.master_done", {{"target", "notice " + maskText}});
+            }
             if (kwl == "group" || kwl == "user") {
                 auto [tgt, text] = splitCommand(rest);
                 if (tgt.empty() || trim(text).empty())
@@ -9079,6 +9264,13 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     ///          "*" 任务任何时候都尊重条件——强制对所有群退群等于自毁，不提供。
     int execScheduledAction(const ScheduledTaskRow& tk, bool force) {
         const std::string action = tk.action.empty() ? "send" : tk.action;
+        if (action == "lua") {
+            if (!luaTaskRun_) return 0;
+            std::string error;
+            const bool ok = luaTaskRun_(tk.content, &error);
+            if (!ok) DICE_LOG_ERROR("scheduled Lua task '{}' failed: {}", tk.content, error);
+            return ok ? 1 : 0;
+        }
         if (tk.targetId == "*" && tk.targetType != "private") {
             int done = 0;
             if (!tk.adapterId.empty()) {
@@ -10608,6 +10800,8 @@ private:
     CardDeck& deck_;
     AdapterManager& adapters_;
     PersonaManager* personaMgr_ = nullptr;  // set via setPersonaManager()
+    LuaTaskExistsFn luaTaskExists_;
+    LuaTaskRunFn luaTaskRun_;
     // 卡片模板（原版 CardTemp）：JS 求值钩子（main.cpp 注入 jsMod.evalString）+ preset 注册表缓存。
     std::function<std::optional<std::string>(const std::string&)> jsEval_;
     mutable std::map<std::string, std::vector<CardPresetItem>> cardPresets_;

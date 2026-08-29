@@ -701,6 +701,9 @@ static int realMain(int argc, char* argv[]) {
     dice::LuaPluginManager luaMod;
     dice::LuaPluginManager::setCpathStrict(configMgr.get<bool>("dice/lua_cpath_strict", false));   // 兼容优先默认关
     luaMod.init();
+    luaMod.setScheduler([](double seconds, std::function<void()> callback) {
+        drogon::app().getLoop()->runAfter(seconds, std::move(callback));
+    });
     luaMod.setDeckDraw([&cardDeck](const std::string& name) -> std::string {
         return cardDeck.has(name) ? cardDeck.drawFromDeck(name).value_or("") : std::string();
     });
@@ -855,6 +858,17 @@ static int realMain(int argc, char* argv[]) {
                 if (a->isConnected() && a->platform() == plat) { send(a); return; }
         for (auto& a : adapterMgr.allAdapters())
             if (a->isConnected()) { send(a); return; }
+    });    // sleepTime 协程结束后的 return 值发回原会话；优先保持触发平台。
+    luaMod.setAsyncReply([&adapterMgr](const std::string& platform, const std::string& gid,
+                                       const std::string& uid, const std::string& text) {
+        auto send = [&](const dice::AdapterPtr& adapter) {
+            if (!gid.empty()) adapter->sendGroupMessage(gid, text);
+            else if (!uid.empty()) adapter->sendPrivateMessage(uid, text);
+        };
+        for (auto& adapter : adapterMgr.allAdapters())
+            if (adapter->isConnected() && adapter->platform() == platform) { send(adapter); return; }
+        for (auto& adapter : adapterMgr.allAdapters())
+            if (adapter->isConnected()) { send(adapter); return; }
     });
     // ── 统一回复兜底链 ───────────────────────────────────────
     // JS插件指令 → Lua因果 → C++因果规则 → 自定义回复 → JS非指令钩子。
@@ -942,6 +956,14 @@ static int realMain(int argc, char* argv[]) {
         pm.platform = platform;
         pm.senderId = uid;
         pm.senderName = cmdRouter.lookupNick(platform, uid);
+        for (auto& a : adapterMgr.allAdapters()) {
+            if (!a || !a->isConnected()) continue;
+            if (!platform.empty() && a->platform() != platform) continue;
+            pm.adapterId = a->id();
+            pm.selfId = a->getLoginId();
+            break;
+        }
+        if (cmdRouter.handleLegacyLuaNoticeEvent(text, platform, pm.adapterId)) return;
         pm.content = text; pm.rawContent = text; pm.displayContent = text;
         bool pv = gid.empty();
         pm.type = pv ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
@@ -968,6 +990,9 @@ static int realMain(int argc, char* argv[]) {
     { std::vector<std::string> luaDirs, jsDirs; dice::CommandRouter::packPluginDirs(luaDirs, jsDirs); luaMod.setExtraDirs(luaDirs); }   // 规则包 lua 附加加载
     dice::crashdiag::setPhase("lua-mods");
     luaMod.loadDir("data/mod");   // 与 JS 规则插件共用 data/mod（Lua mod=目录，JS=文件）
+    cmdRouter.setLuaTaskBridge(
+        [&luaMod](const std::string& name) { return luaMod.hasTask(name); },
+        [&luaMod](const std::string& name, std::string* error) { return luaMod.runTask(name, error); });
 
     // 把 JS 插件 cmd.help + Lua mod descriptor.helpdoc 喂给 .help 帮助系统
     //（解耦：router 不直接依赖各引擎）。
@@ -2424,10 +2449,18 @@ static int realMain(int argc, char* argv[]) {
                     configMgr.set<std::string>("webui/password", dice::WebAuth::instance().hashPassword(pw));
                     configMgr.save();
                     dice::WebAuth::instance().setPassword(pw);
+                    const bool trustDevice = j.value("trust_device", false);
+                    bool trustedPersisted = true;
+                    const std::string token = dice::WebAuth::instance().issueToken(trustDevice, &trustedPersisted);
+                    if (!trustedPersisted) {
+                        cb(jResp({{"code", 1}, {"message", "无法保存可信设备会话，请检查 config 目录的写入权限"}}, drogon::k500InternalServerError));
+                        return;
+                    }
                     auto resp = jResp({{"code", 0}, {"message", "ok"}, {"data", {{"authed", true}}}});
-                    drogon::Cookie ck("dice_session", dice::WebAuth::instance().issueToken(false));
+                    drogon::Cookie ck("dice_session", token);
                     ck.setPath("/"); ck.setHttpOnly(true);
                     ck.setSameSite(drogon::Cookie::SameSite::kLax);
+                    if (trustDevice) ck.setMaxAge(30 * 24 * 3600);
                     resp->addCookie(ck);
                     cb(resp);
                 } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }

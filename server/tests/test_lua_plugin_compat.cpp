@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <functional>
+#include <nlohmann/json.hpp>
 
 using namespace dice;
 namespace fs = std::filesystem;
@@ -145,6 +147,118 @@ msg_order["60s"] = "dailynews"
     }
 }
 
+TEST(LuaPluginCompat, LegacyTaskCallRegistersAndRuns) {
+    TempWorkspace workspace("dice_next_lua_task_");
+    const fs::path pluginDir = workspace.root() / "data" / "plugin";
+    writeText(pluginDir / "task.lua", R"LUA(
+task_call = { news = "run_news" }
+msg_order = {}
+function run_news()
+    eventMsg("task fired", "g", "u")
+end
+)LUA");
+
+    LuaPluginManager manager;
+    std::string fired;
+    manager.setEventMsg([&](const std::string& text, const std::string&, const std::string&) {
+        fired = text;
+    });
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    ASSERT_TRUE(manager.hasTask("news"));
+    ASSERT_EQ(manager.taskNames().size(), static_cast<size_t>(1));
+    std::string error;
+    ASSERT_TRUE(manager.runTask("news", &error));
+    ASSERT_EQ(fired, std::string("task fired"));
+}
+
+TEST(LuaPluginCompat, SleepTimeYieldsAndRepliesWithoutBlockingDispatch) {
+    TempWorkspace workspace("dice_next_lua_sleep_");
+    const fs::path pluginDir = workspace.root() / "data" / "plugin";
+    writeText(pluginDir / "timer.lua", R"LUA(
+msg_order = { [".clock"] = "clock" }
+function clock(msg)
+    sleepTime(250)
+    return "{nick}:done"
+end
+)LUA");
+
+    LuaPluginManager manager;
+    std::function<void()> continuation;
+    double scheduledSeconds = -1.0;
+    std::string asyncReply, asyncPlatform, asyncGroup, asyncUser;
+    manager.setScheduler([&](double seconds, std::function<void()> callback) {
+        scheduledSeconds = seconds;
+        continuation = std::move(callback);
+    });
+    manager.setAsyncReply([&](const std::string& platform, const std::string& group,
+                              const std::string& user, const std::string& text) {
+        asyncPlatform = platform; asyncGroup = group; asyncUser = user; asyncReply = text;
+    });
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    const auto result = manager.dispatch(
+        ".clock 1", "u1", "g1", "Tester", "", false, 0, "onebot_v11");
+    ASSERT_TRUE(result.matched);
+    ASSERT_TRUE(result.reply.empty());
+    ASSERT_TRUE(static_cast<bool>(continuation));
+    ASSERT_TRUE(scheduledSeconds >= 0.249 && scheduledSeconds <= 0.251);
+    continuation();
+    ASSERT_EQ(asyncReply, std::string("Tester:done"));
+    ASSERT_EQ(asyncPlatform, std::string("onebot_v11"));
+    ASSERT_EQ(asyncGroup, std::string("g1"));
+    ASSERT_EQ(asyncUser, std::string("u1"));
+}
+
+TEST(LuaPluginCompat, MalformedLegacyTextCannotEscapeAsInvalidUtf8OrThrowAcrossHostBoundary) {
+    TempWorkspace workspace("dice_next_lua_encoding_");
+    const fs::path pluginDir = workspace.root() / "data" / "plugin";
+    std::string source = "msg_order = { [\"bad\"] = \"bad\" }\nfunction bad(msg) sendMsg(\"";
+    source.push_back(static_cast<char>(0xBA));
+    source.push_back(static_cast<char>(0xC3));  // GBK: 好
+    source += "\", msg.fromGroup, msg.fromQQ); return \"";
+    source.push_back(static_cast<char>(0xBA));
+    source.push_back(static_cast<char>(0xC3));
+    source += "\" end\n";
+    writeText(pluginDir / "gbk.lua", source);
+
+    LuaPluginManager manager;
+    manager.setSender([](const std::string&, const std::string&, const std::string&) {
+        throw std::runtime_error("adapter test failure");
+    });
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    const auto result = manager.dispatch("bad", "u", "g", "n", "", false, 0, "onebot");
+    ASSERT_TRUE(result.matched);
+    ASSERT_TRUE(!result.reply.empty());
+    const std::string encoded = nlohmann::json(result.reply).dump();
+    ASSERT_TRUE(!encoded.empty());
+#ifdef _WIN32
+    ASSERT_EQ(result.reply, std::string("好"));
+#endif
+}
+TEST(LuaPluginCompat, MixedUtf8AndCp936ReplyPreservesBothParts) {
+    TempWorkspace workspace("dice_next_lua_mixed_encoding_");
+    const fs::path pluginDir = workspace.root() / "data" / "plugin";
+    writeText(pluginDir / "mixed.lua", R"LUA(
+msg_order = { mixed = "mixed" }
+function mixed(msg)
+    return "前缀:" .. string.char(0xBA, 0xC3)
+end
+)LUA");
+
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    const auto result = manager.dispatch("mixed", "u", "g", "n", "", false, 0, "onebot");
+    ASSERT_TRUE(result.matched);
+#ifdef _WIN32
+    ASSERT_EQ(result.reply, std::string("前缀:好"));
+#else
+    ASSERT_EQ(result.reply, std::string("前缀:��"));
+#endif
+    ASSERT_TRUE(!nlohmann::json(result.reply).dump().empty());
+}
 TEST(LuaPluginCompat, ExternalLegacyFortuneCorpusWhenProvided) {
     const char* corpusValue = std::getenv("DICENEXT_LEGACY_FORTUNE_PLUGIN");
     if (!corpusValue || !*corpusValue) return;  // CI uses the self-contained fixture above.

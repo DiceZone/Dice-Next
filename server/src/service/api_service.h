@@ -3418,7 +3418,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         if (ttype == "once" && !validYMD(r.onceDate)) return "onceDate must be YYYY-MM-DD";
         if (r.targetType != "group" && r.targetType != "private") return "targetType must be group|private";
         if (r.targetId == "*" && r.targetType != "group") return "targetId=* (all groups) requires targetType=group";
-        if (!r.action.empty() && r.action != "send" && r.action != "leave") return "action must be send|leave";
+        if (!r.action.empty() && r.action != "send" && r.action != "leave" && r.action != "lua") return "action must be send|leave|lua";
         if (r.action == "leave" && r.targetType != "group") return "action=leave requires a group target";
         if (r.action != "leave" && r.content.empty()) return "content required";
         if (!CommandRouter::isValidScheduledCondition(r.condition))
