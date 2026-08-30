@@ -4360,35 +4360,213 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Delete});
 
     // ── Local aggregate statistics ─────────────────────────────
-    app.registerHandler("/api/statistics/overview", [st, &adapterMgr](Req, CB&& cb) {
+    app.registerHandler("/api/statistics/overview", [st, &adapterMgr](Req req, CB&& cb) {
         try {
-            long long totalCommands = 0;
-            std::map<std::string, PlayerProfileRow> players;
-            for (const auto& row : st->get_all<PlayerProfileRow>()) {
-                totalCommands += row.cmdCount;
-                auto it = players.find(row.userId);
-                if (it == players.end()) players.emplace(row.userId, row);
-                else {
-                    it->second.cmdCount += row.cmdCount;
-                    if (it->second.nickname.empty() && !row.nickname.empty()) it->second.nickname = row.nickname;
-                    if (row.lastCmdAt > it->second.lastCmdAt) it->second.lastCmdAt = row.lastCmdAt;
+            int days = 30;
+            try {
+                const std::string raw = req->getParameter("days");
+                if (!raw.empty()) days = std::stoi(raw);
+            } catch (...) {}
+            if (days != 7 && days != 30 && days != 90) days = 30;
+            const std::string platformFilter = req->getParameter("platform");
+            const std::string adapterFilter = req->getParameter("adapter");
+            std::string onlineGranularity = req->getParameter("granularity");
+            if (onlineGranularity != "5m" && onlineGranularity != "1h"
+                && onlineGranularity != "6h" && onlineGranularity != "1d")
+                onlineGranularity = "1h";
+            if (days > 7 && onlineGranularity == "5m") onlineGranularity = "1h";
+            const int onlineBucketMinutes = onlineGranularity == "5m" ? 5
+                : onlineGranularity == "1h" ? 60 : onlineGranularity == "6h" ? 360 : 1440;
+            const bool scopedFilter = !platformFilter.empty() || !adapterFilter.empty();
+            auto matchesScope = [&](const std::string& platform, const std::string& adapterId) {
+                return (platformFilter.empty() || platform == platformFilter)
+                    && (adapterFilter.empty() || adapterId == adapterFilter);
+            };
+
+            std::vector<std::string> dates;
+            dates.reserve(static_cast<std::size_t>(days));
+            const std::time_t now = std::time(nullptr);
+            for (int offset = days - 1; offset >= 0; --offset)
+                dates.push_back(utils::formatTimeInTimezone(
+                    now - static_cast<std::time_t>(offset) * 24 * 60 * 60, "%Y-%m-%d"));
+            const std::string firstDay = dates.front();
+            const std::string sampleCutoff = firstDay + "T00:00:00Z";
+
+            struct DailyCount { long long commands = 0; long long rolls = 0; };
+            std::map<std::string, DailyCount> daily;
+            for (const auto& day : dates) daily[day];
+            std::array<long long, 24> commandHours{};
+            std::array<long long, 24> rollHours{};
+
+            struct UserAggregate {
+                std::string nickname;
+                std::string userId;
+                std::string platform;
+                long long commands = 0;
+                std::string lastDay;
+                int lastHour = 0;
+            };
+            struct GroupAggregate {
+                std::string groupId;
+                std::string platform;
+                long long commands = 0;
+                long long rolls = 0;
+                std::set<std::string> users;
+                std::string lastDay;
+                int lastHour = 0;
+            };
+            std::map<std::string, UserAggregate> userAggregates;
+            std::map<std::string, GroupAggregate> groupAggregates;
+            std::map<std::string, long long> commandCounts;
+            std::map<std::string, DailyCount> platformTotals;
+            std::map<std::string, DailyCount> adapterTotals;
+            std::map<int, std::map<int, long long>> faceCounts;
+            J checkResults{{"crit", 0LL}, {"extreme", 0LL}, {"hard", 0LL},
+                           {"regular", 0LL}, {"fail", 0LL}, {"fumble", 0LL}};
+
+            auto scopedRows = st->get_all<UsageScopeRow>(orm::where(
+                orm::c(&UsageScopeRow::day) >= firstDay));
+            const bool scopedCollectionStarted = st->count<UsageScopeRow>() > 0;
+            const bool scopedFaceCollectionStarted = st->count<ScopedDiceFaceStatRow>() > 0;
+            std::set<std::string> knownPlatforms;
+            for (const auto& row : scopedRows) {
+                if (!row.platform.empty()) knownPlatforms.insert(row.platform);
+                if (!matchesScope(row.platform, row.adapterId)) continue;
+                platformTotals[row.platform].commands += row.commandCount;
+                platformTotals[row.platform].rolls += row.rollCount;
+                adapterTotals[row.adapterId].commands += row.commandCount;
+                adapterTotals[row.adapterId].rolls += row.rollCount;
+                if (scopedFilter && row.day >= firstDay && daily.count(row.day)) {
+                    daily[row.day].commands += row.commandCount;
+                    daily[row.day].rolls += row.rollCount;
+                    if (row.hour >= 0 && row.hour < 24) {
+                        commandHours[static_cast<std::size_t>(row.hour)] += row.commandCount;
+                        rollHours[static_cast<std::size_t>(row.hour)] += row.rollCount;
+                    }
+                }
+                if (row.commandCount > 0 && !row.userId.empty()) {
+                    const std::string key = row.platform + "\x1f" + row.userId;
+                    auto& user = userAggregates[key];
+                    user.userId = row.userId; user.platform = row.platform;
+                    if (!row.userName.empty()) user.nickname = row.userName;
+                    user.commands += row.commandCount;
+                    if (row.day > user.lastDay || (row.day == user.lastDay && row.hour > user.lastHour)) {
+                        user.lastDay = row.day; user.lastHour = row.hour;
+                    }
+                }
+                if (!row.groupId.empty() && (row.commandCount > 0 || row.rollCount > 0)) {
+                    const std::string key = row.platform + "\x1f" + row.groupId;
+                    auto& group = groupAggregates[key];
+                    group.groupId = row.groupId; group.platform = row.platform;
+                    group.commands += row.commandCount; group.rolls += row.rollCount;
+                    if (row.commandCount > 0 && !row.userId.empty()) group.users.insert(row.userId);
+                    if (row.day > group.lastDay || (row.day == group.lastDay && row.hour > group.lastHour)) {
+                        group.lastDay = row.day; group.lastHour = row.hour;
+                    }
+                }
+                if (row.commandCount > 0)
+                    commandCounts[row.command.empty() ? std::string("other") : row.command] += row.commandCount;
+                checkResults["crit"] = checkResults["crit"].get<long long>() + row.crit;
+                checkResults["extreme"] = checkResults["extreme"].get<long long>() + row.extreme;
+                checkResults["hard"] = checkResults["hard"].get<long long>() + row.hard;
+                checkResults["regular"] = checkResults["regular"].get<long long>() + row.regular;
+                checkResults["fail"] = checkResults["fail"].get<long long>() + row.fail;
+                checkResults["fumble"] = checkResults["fumble"].get<long long>() + row.fumble;
+            }
+
+            // The original global hourly table contains historical data from
+            // before scoped collection existed. Use it only for the all-platform
+            // view, avoiding double-counting the new scoped rows.
+            if (!scopedFilter) {
+                for (const auto& row : st->get_all<UsageHourRow>(orm::where(
+                         orm::c(&UsageHourRow::day) >= firstDay))) {
+                    if (!daily.count(row.day) || row.hour < 0 || row.hour > 23) continue;
+                    daily[row.day].commands += row.commandCount;
+                    daily[row.day].rolls += row.rollCount;
+                    commandHours[static_cast<std::size_t>(row.hour)] += row.commandCount;
+                    rollHours[static_cast<std::size_t>(row.hour)] += row.rollCount;
                 }
             }
 
-            std::array<long long, 24> commandHours{};
-            std::array<long long, 24> rollHours{};
-            long long totalRolls = 0;
-            for (const auto& row : st->get_all<UsageHourRow>()) {
-                if (row.hour < 0 || row.hour > 23) continue;
-                commandHours[static_cast<std::size_t>(row.hour)] += row.commandCount;
-                rollHours[static_cast<std::size_t>(row.hour)] += row.rollCount;
-                totalRolls += row.rollCount;
+            auto scopedFaces = st->get_all<ScopedDiceFaceStatRow>(orm::where(
+                orm::c(&ScopedDiceFaceStatRow::day) >= firstDay));
+            for (const auto& row : scopedFaces)
+                if (matchesScope(row.platform, row.adapterId) && row.sides >= 2
+                    && row.face >= 1 && row.face <= row.sides)
+                    faceCounts[row.sides][row.face] += row.count;
+            if (faceCounts.empty() && !scopedFilter && !scopedFaceCollectionStarted) {
+                for (const auto& row : st->get_all<DiceFaceStatRow>())
+                    if (row.sides >= 2 && row.face >= 1 && row.face <= row.sides)
+                        faceCounts[row.sides][row.face] += row.count;
             }
 
-            std::map<int, std::map<int, long long>> faceCounts;
-            for (const auto& row : st->get_all<DiceFaceStatRow>())
-                if (row.sides >= 2 && row.face >= 1 && row.face <= row.sides)
-                    faceCounts[row.sides][row.face] += row.count;
+            // Legacy check totals are cumulative and unscoped. Keep them as the
+            // all-platform fallback until scoped rows have accumulated.
+            if (!scopedCollectionStarted && !scopedFilter) {
+                for (const auto& row : st->get_all<RollStatRow>()) {
+                    checkResults["crit"] = checkResults["crit"].get<long long>() + row.crit;
+                    checkResults["extreme"] = checkResults["extreme"].get<long long>() + row.extreme;
+                    checkResults["hard"] = checkResults["hard"].get<long long>() + row.hard;
+                    checkResults["regular"] = checkResults["regular"].get<long long>() + row.regular;
+                    checkResults["fail"] = checkResults["fail"].get<long long>() + row.fail;
+                    checkResults["fumble"] = checkResults["fumble"].get<long long>() + row.fumble;
+                }
+            }
+
+            std::map<std::string, std::string> groupNames;
+            for (const auto& row : st->get_all<GroupSettingRow>())
+                if (row.key == "name" && !row.value.empty())
+                    groupNames[row.platform + "\x1f" + row.groupId] = row.value;
+
+            std::vector<UserAggregate> rankedUsers;
+            for (const auto& [_, user] : userAggregates) rankedUsers.push_back(user);
+            if (rankedUsers.empty() && !scopedFilter && !scopedCollectionStarted) {
+                std::map<std::string, UserAggregate> legacyUsers;
+                for (const auto& row : st->get_all<PlayerProfileRow>()) {
+                    auto& user = legacyUsers[row.platform + "\x1f" + row.userId];
+                    user.userId = row.userId; user.platform = row.platform;
+                    if (!row.nickname.empty()) user.nickname = row.nickname;
+                    user.commands += row.cmdCount;
+                    if (row.lastCmdAt > user.lastDay) user.lastDay = row.lastCmdAt;
+                }
+                for (const auto& [_, user] : legacyUsers)
+                    if (user.commands > 0) rankedUsers.push_back(user);
+            }
+            std::sort(rankedUsers.begin(), rankedUsers.end(), [](const auto& a, const auto& b) {
+                return a.commands > b.commands;
+            });
+            J topUsers = J::array();
+            for (std::size_t i = 0; i < rankedUsers.size() && i < 10; ++i) {
+                const auto& user = rankedUsers[i];
+                topUsers.push_back(J{{"nickname", user.nickname}, {"user_id", user.userId},
+                    {"platform", user.platform}, {"command_count", user.commands},
+                    {"last_command_at", user.lastDay}});
+            }
+
+            std::vector<GroupAggregate> rankedGroups;
+            for (const auto& [_, group] : groupAggregates) rankedGroups.push_back(group);
+            std::sort(rankedGroups.begin(), rankedGroups.end(), [](const auto& a, const auto& b) {
+                return a.commands > b.commands;
+            });
+            J topGroups = J::array();
+            for (std::size_t i = 0; i < rankedGroups.size() && i < 10; ++i) {
+                const auto& group = rankedGroups[i];
+                const std::string key = group.platform + "\x1f" + group.groupId;
+                topGroups.push_back(J{{"name", groupNames.count(key) ? groupNames[key] : group.groupId},
+                    {"group_id", group.groupId}, {"platform", group.platform},
+                    {"command_count", group.commands}, {"roll_count", group.rolls},
+                    {"active_users", group.users.size()}, {"last_command_at", group.lastDay}});
+            }
+
+            std::vector<std::pair<std::string, long long>> rankedCommands(
+                commandCounts.begin(), commandCounts.end());
+            std::sort(rankedCommands.begin(), rankedCommands.end(), [](const auto& a, const auto& b) {
+                return a.second > b.second;
+            });
+            J commandDistribution = J::array();
+            for (std::size_t i = 0; i < rankedCommands.size() && i < 10; ++i)
+                commandDistribution.push_back(J{{"command", rankedCommands[i].first},
+                                                {"count", rankedCommands[i].second}});
 
             J diceFaces = J::array();
             for (const auto& [sides, faces] : faceCounts) {
@@ -4401,59 +4579,174 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 diceFaces.push_back(J{{"sides", sides}, {"total", subtotal}, {"faces", faceArray}});
             }
 
-            J checkResults{{"crit", 0LL}, {"extreme", 0LL}, {"hard", 0LL},
-                           {"regular", 0LL}, {"fail", 0LL}, {"fumble", 0LL}};
-            for (const auto& row : st->get_all<RollStatRow>()) {
-                checkResults["crit"] = checkResults["crit"].get<long long>() + row.crit;
-                checkResults["extreme"] = checkResults["extreme"].get<long long>() + row.extreme;
-                checkResults["hard"] = checkResults["hard"].get<long long>() + row.hard;
-                checkResults["regular"] = checkResults["regular"].get<long long>() + row.regular;
-                checkResults["fail"] = checkResults["fail"].get<long long>() + row.fail;
-                checkResults["fumble"] = checkResults["fumble"].get<long long>() + row.fumble;
-            }
-
-            std::vector<PlayerProfileRow> ranked;
-            for (const auto& [_, player] : players) if (player.cmdCount > 0) ranked.push_back(player);
-            std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
-                return a.cmdCount > b.cmdCount;
-            });
-            J topUsers = J::array();
-            for (std::size_t i = 0; i < ranked.size() && i < 10; ++i)
-                topUsers.push_back(J{{"nickname", ranked[i].nickname}, {"user_id", ranked[i].userId},
-                                     {"command_count", ranked[i].cmdCount}, {"last_command_at", ranked[i].lastCmdAt}});
-
-            auto samples = st->get_all<OnlineSampleRow>(orm::order_by(&OnlineSampleRow::sampledAt).desc(),
-                                                        orm::limit(2016));
-            std::reverse(samples.begin(), samples.end());
-            J onlineHistory = J::array();
-            for (const auto& row : samples)
-                onlineHistory.push_back(J{{"sampled_at", row.sampledAt},
-                                          {"online_count", row.onlineCount},
-                                          {"total_count", row.totalCount}});
-
-            int adapterTotal = 0, adapterOnline = 0;
-            for (const auto& adapter : adapterMgr.allAdapters()) {
-                ++adapterTotal;
-                if (adapter->isConnected()) ++adapterOnline;
+            J dailyUsage = J::array();
+            long long totalCommands = 0, totalRolls = 0;
+            for (const auto& day : dates) {
+                const auto value = daily[day];
+                totalCommands += value.commands; totalRolls += value.rolls;
+                dailyUsage.push_back(J{{"date", day}, {"commands", value.commands}, {"rolls", value.rolls}});
             }
             J hours = J::array();
             for (int hour = 0; hour < 24; ++hour)
-                hours.push_back(J{{"hour", hour}, {"commands", commandHours[hour]}, {"rolls", rollHours[hour]}});
+                hours.push_back(J{{"hour", hour}, {"commands", commandHours[hour]},
+                                  {"rolls", rollHours[hour]}});
+
+            J adapterOptions = J::array();
+            std::map<std::string, AdapterPtr> runtimeAdapters;
+            int adapterTotal = 0, adapterOnline = 0;
+            for (const auto& adapter : adapterMgr.allAdapters()) {
+                runtimeAdapters[adapter->id()] = adapter;
+                knownPlatforms.insert(adapter->platform());
+                adapterOptions.push_back(J{{"id", adapter->id()}, {"name", adapter->name()},
+                    {"platform", adapter->platform()}, {"connected", adapter->isConnected()}});
+                if (matchesScope(adapter->platform(), adapter->id())) {
+                    ++adapterTotal;
+                    if (adapter->isConnected()) ++adapterOnline;
+                }
+            }
+            J platformOptions = J::array();
+            for (const auto& platform : knownPlatforms) platformOptions.push_back(platform);
+
+            struct ScopeComparisonRow {
+                std::string id;
+                std::string name;
+                std::string platform;
+                long long commands = 0;
+                long long rolls = 0;
+            };
+            std::vector<ScopeComparisonRow> comparisonRows;
+            if (!scopedFilter) {
+                for (const auto& [platform, totals] : platformTotals)
+                    if (!platform.empty()) comparisonRows.push_back(
+                        {platform, platform, platform, totals.commands, totals.rolls});
+            } else {
+                for (const auto& [adapterId, totals] : adapterTotals) {
+                    auto it = runtimeAdapters.find(adapterId);
+                    const std::string platform = it == runtimeAdapters.end() ? platformFilter : it->second->platform();
+                    const std::string name = it == runtimeAdapters.end() ? adapterId : it->second->name();
+                    comparisonRows.push_back({adapterId, name, platform, totals.commands, totals.rolls});
+                }
+            }
+            std::sort(comparisonRows.begin(), comparisonRows.end(), [](const auto& a, const auto& b) {
+                return a.commands > b.commands;
+            });
+            J scopeComparison = J::array();
+            for (const auto& row : comparisonRows)
+                scopeComparison.push_back(J{{"id", row.id}, {"name", row.name}, {"platform", row.platform},
+                    {"commands", row.commands}, {"rolls", row.rolls}});
+
+            std::map<std::string, std::pair<long long, long long>> adapterSamples;
+            std::map<std::string, std::pair<int, int>> scopedOnlineSamples;
+            for (const auto& row : st->get_all<AdapterOnlineSampleRow>(orm::where(
+                     orm::c(&AdapterOnlineSampleRow::sampledAt) >= sampleCutoff))) {
+                if (!matchesScope(row.platform, row.adapterId)) continue;
+                auto& aggregate = adapterSamples[row.adapterId];
+                aggregate.first += row.connected ? 1 : 0;
+                ++aggregate.second;
+                auto& sample = scopedOnlineSamples[row.sampledAt];
+                sample.first += row.connected ? 1 : 0;
+                ++sample.second;
+            }
+
+            J availability = J::array();
+            long long availabilityOnline = 0, availabilityTotal = 0;
+            for (const auto& [id, adapter] : runtimeAdapters) {
+                if (!matchesScope(adapter->platform(), id)) continue;
+                const auto sample = adapterSamples[id];
+                const double rate = sample.second > 0
+                    ? static_cast<double>(sample.first) * 100.0 / static_cast<double>(sample.second)
+                    : (adapter->isConnected() ? 100.0 : 0.0);
+                if (scopedFilter) {
+                    availabilityOnline += sample.first;
+                    availabilityTotal += sample.second;
+                }
+                availability.push_back(J{{"id", id}, {"name", adapter->name()},
+                    {"platform", adapter->platform()}, {"connected", adapter->isConnected()},
+                    {"uptime_percent", rate}, {"samples", sample.second}});
+            }
+
+            struct OnlineBucket {
+                int onlineCount = 0;
+                int totalCount = 0;
+                bool initialized = false;
+            };
+            auto onlineBucketKey = [&](const std::string& sampledAt) {
+                if (sampledAt.size() < 16 || sampledAt[4] != '-' || sampledAt[7] != '-'
+                    || sampledAt[10] != 'T' || sampledAt[13] != ':'
+                    || !std::isdigit(static_cast<unsigned char>(sampledAt[11]))
+                    || !std::isdigit(static_cast<unsigned char>(sampledAt[12]))
+                    || !std::isdigit(static_cast<unsigned char>(sampledAt[14]))
+                    || !std::isdigit(static_cast<unsigned char>(sampledAt[15]))) return sampledAt;
+                const std::string day = sampledAt.substr(0, 10);
+                if (onlineBucketMinutes >= 1440) return day + "T00:00:00Z";
+                const int hour = (sampledAt[11] - '0') * 10 + (sampledAt[12] - '0');
+                const int minute = (sampledAt[14] - '0') * 10 + (sampledAt[15] - '0');
+                const int bucket = ((hour * 60 + minute) / onlineBucketMinutes) * onlineBucketMinutes;
+                auto twoDigits = [](int value) {
+                    return std::string(value < 10 ? "0" : "") + std::to_string(value);
+                };
+                return day + "T" + twoDigits(bucket / 60) + ":" + twoDigits(bucket % 60) + ":00Z";
+            };
+            std::map<std::string, OnlineBucket> onlineBuckets;
+            auto addOnlineSample = [&](const std::string& sampledAt, int onlineCount, int totalCount) {
+                auto& bucket = onlineBuckets[onlineBucketKey(sampledAt)];
+                if (!bucket.initialized) {
+                    bucket.onlineCount = onlineCount;
+                    bucket.totalCount = totalCount;
+                    bucket.initialized = true;
+                } else {
+                    // A larger bucket keeps its worst observed state so a short
+                    // outage is still visible instead of being averaged away.
+                    if (onlineCount < bucket.onlineCount) bucket.onlineCount = onlineCount;
+                    if (totalCount > bucket.totalCount) bucket.totalCount = totalCount;
+                }
+            };
+
+            if (scopedFilter) {
+                for (const auto& [sampledAt, value] : scopedOnlineSamples)
+                    addOnlineSample(sampledAt, value.first, value.second);
+            } else {
+                auto samples = st->get_all<OnlineSampleRow>(
+                    orm::where(orm::c(&OnlineSampleRow::sampledAt) >= sampleCutoff),
+                    orm::order_by(&OnlineSampleRow::sampledAt).desc());
+                std::reverse(samples.begin(), samples.end());
+                for (const auto& row : samples) {
+                    addOnlineSample(row.sampledAt, row.onlineCount, row.totalCount);
+                    availabilityOnline += row.onlineCount;
+                    availabilityTotal += row.totalCount;
+                }
+            }
+            J onlineHistory = J::array();
+            for (const auto& [sampledAt, bucket] : onlineBuckets)
+                onlineHistory.push_back(J{{"sampled_at", sampledAt},
+                    {"online_count", bucket.onlineCount}, {"total_count", bucket.totalCount}});
+            const double availabilityRate = availabilityTotal > 0
+                ? static_cast<double>(availabilityOnline) * 100.0 / static_cast<double>(availabilityTotal)
+                : (adapterTotal > 0 ? static_cast<double>(adapterOnline) * 100.0 / adapterTotal : 0.0);
 
             jsonReply(ok(J{
                 {"summary", J{{"total_commands", totalCommands}, {"total_rolls", totalRolls},
-                               {"total_players", ranked.size()}, {"adapter_online", adapterOnline},
-                               {"adapter_total", adapterTotal},
-                               {"uptime_seconds", static_cast<long long>(std::time(nullptr) - utils::getStartupEpoch())}}},
+                    {"total_players", rankedUsers.size()}, {"active_groups", groupAggregates.size()},
+                    {"adapter_online", adapterOnline}, {"adapter_total", adapterTotal},
+                    {"availability_rate", availabilityRate},
+                    {"uptime_seconds", static_cast<long long>(std::time(nullptr) - utils::getStartupEpoch())}}},
+                {"filters", J{{"days", days}, {"platform", platformFilter}, {"adapter", adapterFilter},
+                    {"platforms", platformOptions}, {"adapters", adapterOptions},
+                    {"granularity", onlineGranularity}}},
+                {"daily_usage", dailyUsage},
                 {"usage_by_hour", hours},
                 {"dice_faces", diceFaces},
                 {"check_results", checkResults},
+                {"command_distribution", commandDistribution},
+                {"scope_comparison", scopeComparison},
+                {"top_groups", topGroups},
                 {"top_users", topUsers},
+                {"adapter_availability", availability},
                 {"online_history", onlineHistory},
+                {"scoped_data_available", scopedCollectionStarted},
             }), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
-
     // ── Players (auto-built profiles) ─────────────────────────
     // GET /api/players — list profiles (信任等级/QQ/昵称/上次指令/总指令数).
     app.registerHandler("/api/players", [st](Req, CB&& cb) {

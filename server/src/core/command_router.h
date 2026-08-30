@@ -917,7 +917,7 @@ private:
             if (le.size() > 1 && le[0] == 'd' && le.find_first_not_of("0123456789", 1) == std::string::npos) {
                 int face = parseIntOr(le.substr(1), 0);
                 if (face > 0) if (auto rv = rouletteDraw(msg, face)) {
-                    recordDiceSamples(face, {*rv});
+                    recordDiceSamples(msg, face, {*rv});
                     std::string res = "1D" + std::to_string(face) + "=" + std::to_string(*rv);
                     return i18n_.tr(loc, reason.empty() ? "dice.roll.result" : "dice.roll.result_reason",
                         {{"nick", nick}, {"reason", reason}, {"res", res}});
@@ -929,7 +929,7 @@ private:
             auto result = evaluateExpression(msg, expr);
             if (!result.ok) return i18n_.tr(loc, "dice.error.roll", {{"error", result.error}});
             if (!result.individualResults.empty())
-                recordSimpleDiceResult(expr, result.individualResults);
+                recordSimpleDiceResult(msg, expr, result.individualResults);
             return i18n_.tr(loc, reason.empty() ? "dice.roll.result" : "dice.roll.result_reason",
                 {{"nick", nick}, {"reason", reason}, {"res", shortForm ? shortRollDetail(result) : result.detail}});
         }
@@ -940,7 +940,7 @@ private:
             auto result = evaluateExpression(msg, expr);
             if (!result.ok) return i18n_.tr(loc, "dice.error.roll", {{"error", result.error}});
             if (!result.individualResults.empty())
-                recordSimpleDiceResult(expr, result.individualResults);
+                recordSimpleDiceResult(msg, expr, result.individualResults);
             if (i > 0) res << ", \n";
             res << (shortForm ? shortRollDetail(result) : result.detail);
         }
@@ -1513,7 +1513,7 @@ private:
         SuccessLevel lv = rollSuccessLevel(rollValue, rate, getCocRule(msg));
         if (recordStats) {
             recordRollStat(msg, attr, lv);   // accumulate per-skill for .hiy 统计
-            recordDiceSamples(100, {rollValue});
+            recordDiceSamples(msg, 100, {rollValue});
         }
         const std::string nick = displayName(msg);
         return i18n_.tr(loc, reason.empty() ? "dice.check.result" : "dice.check.result_reason",
@@ -1815,6 +1815,7 @@ private:
                 case SuccessLevel::kFumble:   r.fumble++; break;
             }
             if (rows.empty()) st->insert(r); else st->update(r);
+            recordScopedUsage(msg, 0, 0, "", static_cast<int>(lv));
         } catch (...) {}
     }
 
@@ -9136,7 +9137,10 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                 }
                 st->update(r);
             }
-            if (didCommand) recordUsageHour(1, 0);
+            if (didCommand) {
+                recordUsageHour(1, 0);
+                recordScopedUsage(msg, 1, 0, statisticsCommandKey(msg));
+            }
         } catch (...) {}
     }
 
@@ -9182,39 +9186,126 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         } catch (...) {}
     }
 
-    void recordDiceSamples(int sides, const std::vector<int>& values) {
+    std::string statisticsCommandKey(const Message& msg) const {
+        auto body = commandBody(msg.content);
+        if (!body) return "other";
+        std::string head = toLower(trim(*body));
+        const auto space = head.find_first_of(" \t\r\n");
+        if (space != std::string::npos) head.resize(space);
+        if (head.empty()) return "other";
+        const auto starts = [&](const char* prefix) { return head.rfind(prefix, 0) == 0; };
+        if (starts("rav") || starts("rcv") || starts("bav") || starts("ra")
+            || starts("rc") || starts("rb") || starts("rp") || starts("rx")
+            || starts("ba") || starts("sc")) return "check";
+        if (starts("st") || starts("pc") || starts("coc") || starts("dnd")) return "card";
+        if (starts("log")) return "log";
+        if (starts("draw") || starts("deck")) return "deck";
+        if (head[0] == 'r') return "roll";
+        if (head.size() > 48) return "other";
+        return head;
+    }
+
+    void recordScopedUsage(const Message& msg, long long commands, long long rolls,
+                           const std::string& command, int checkBucket = -1) {
+        if (commands == 0 && rolls == 0 && checkBucket < 0) return;
+        auto* st = db_.getStorage();
+        if (!st) return;
+        const std::time_t now = std::time(nullptr);
+        const std::string day = utils::formatTimeInTimezone(now, "%Y-%m-%d");
+        const int hour = utils::timezoneTm(now).tm_hour;
+        const std::string groupId = msg.type == MessageType::kPrivate ? std::string() : msg.targetId;
+        const bool fallbackName = msg.extra.is_object()
+            && msg.extra.value("__sender_name_fallback", false);
+        const std::string userName = fallbackName ? std::string() : msg.senderName;
+        try {
+            namespace orm = sqlite_orm;
+            auto rows = st->get_all<UsageScopeRow>(orm::where(
+                orm::c(&UsageScopeRow::day) == day
+                and orm::c(&UsageScopeRow::hour) == hour
+                and orm::c(&UsageScopeRow::platform) == msg.platform
+                and orm::c(&UsageScopeRow::adapterId) == msg.adapterId
+                and orm::c(&UsageScopeRow::groupId) == groupId
+                and orm::c(&UsageScopeRow::userId) == msg.senderId
+                and orm::c(&UsageScopeRow::command) == command), orm::limit(1));
+            UsageScopeRow row = rows.empty() ? UsageScopeRow{} : rows.front();
+            if (rows.empty()) {
+                row.day = day; row.hour = hour; row.platform = msg.platform;
+                row.adapterId = msg.adapterId; row.groupId = groupId;
+                row.userId = msg.senderId; row.userName = userName; row.command = command;
+            } else if (!userName.empty()) {
+                row.userName = userName;
+            }
+            row.commandCount += commands;
+            row.rollCount += rolls;
+            switch (checkBucket) {
+                case static_cast<int>(SuccessLevel::kCritical): ++row.crit; break;
+                case static_cast<int>(SuccessLevel::kExtreme):  ++row.extreme; break;
+                case static_cast<int>(SuccessLevel::kHard):     ++row.hard; break;
+                case static_cast<int>(SuccessLevel::kRegular):  ++row.regular; break;
+                case static_cast<int>(SuccessLevel::kFailure):  ++row.fail; break;
+                case static_cast<int>(SuccessLevel::kFumble):   ++row.fumble; break;
+                default: break;
+            }
+            if (rows.empty()) st->insert(row); else st->update(row);
+        } catch (...) {}
+    }
+
+    void recordDiceSamples(const Message& msg, int sides, const std::vector<int>& values) {
         if (sides < 2 || sides > 1000 || values.empty()) return;
         auto* st = db_.getStorage();
         if (!st) return;
+        std::map<int, long long> deltas;
+        for (int value : values)
+            if (value >= 1 && value <= sides) ++deltas[value];
+        if (deltas.empty()) return;
+        const std::time_t now = std::time(nullptr);
+        const std::string day = utils::formatTimeInTimezone(now, "%Y-%m-%d");
+        const std::string groupId = msg.type == MessageType::kPrivate ? std::string() : msg.targetId;
         try {
             namespace orm = sqlite_orm;
-            for (int value : values) {
-                if (value < 1 || value > sides) continue;
+            for (const auto& [value, delta] : deltas) {
                 auto rows = st->get_all<DiceFaceStatRow>(orm::where(
                     orm::c(&DiceFaceStatRow::sides) == sides
-                    and orm::c(&DiceFaceStatRow::face) == value));
+                    and orm::c(&DiceFaceStatRow::face) == value), orm::limit(1));
                 if (rows.empty()) {
                     DiceFaceStatRow row;
-                    row.sides = sides;
-                    row.face = value;
-                    row.count = 1;
+                    row.sides = sides; row.face = value; row.count = delta;
                     st->insert(row);
                 } else {
                     auto row = rows.front();
-                    ++row.count;
+                    row.count += delta;
+                    st->update(row);
+                }
+                auto scoped = st->get_all<ScopedDiceFaceStatRow>(orm::where(
+                    orm::c(&ScopedDiceFaceStatRow::day) == day
+                    and orm::c(&ScopedDiceFaceStatRow::platform) == msg.platform
+                    and orm::c(&ScopedDiceFaceStatRow::adapterId) == msg.adapterId
+                    and orm::c(&ScopedDiceFaceStatRow::groupId) == groupId
+                    and orm::c(&ScopedDiceFaceStatRow::sides) == sides
+                    and orm::c(&ScopedDiceFaceStatRow::face) == value), orm::limit(1));
+                if (scoped.empty()) {
+                    ScopedDiceFaceStatRow row;
+                    row.day = day; row.platform = msg.platform; row.adapterId = msg.adapterId;
+                    row.groupId = groupId; row.sides = sides; row.face = value; row.count = delta;
+                    st->insert(row);
+                } else {
+                    auto row = scoped.front();
+                    row.count += delta;
                     st->update(row);
                 }
             }
             recordUsageHour(0, static_cast<long long>(values.size()));
+            recordScopedUsage(msg, 0, static_cast<long long>(values.size()), "");
         } catch (...) {}
     }
 
-    void recordSimpleDiceResult(const std::string& expression, const std::vector<int>& values) {
+    void recordSimpleDiceResult(const Message& msg, const std::string& expression,
+                                const std::vector<int>& values) {
         std::smatch match;
         static const std::regex simpleDice(R"(^\s*(\d*)[dD](\d+)\s*$)");
         if (!std::regex_match(expression, match, simpleDice)) return;
         int sides = parseIntOr(match[2].str(), 0);
-        recordDiceSamples(sides, values);
+        recordDiceSamples(msg, sides, values);
     }
 
     // ─── 调度 (#48 定时任务 / #47 不活跃自动退群) ─────────────

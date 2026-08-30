@@ -284,6 +284,51 @@ struct UsageHourRow {
     long long rollCount = 0;
 };
 
+/// Scoped usage aggregate used by the statistics dashboard. One row is kept
+/// per local hour, source, user and command so dashboards can filter without
+/// retaining message content.
+struct UsageScopeRow {
+    int id = 0;
+    std::string day;
+    int hour = 0;
+    std::string platform;
+    std::string adapterId;
+    std::string groupId;
+    std::string userId;
+    std::string userName;
+    std::string command;
+    long long commandCount = 0;
+    long long rollCount = 0;
+    long long crit = 0;
+    long long extreme = 0;
+    long long hard = 0;
+    long long regular = 0;
+    long long fail = 0;
+    long long fumble = 0;
+};
+
+/// Scoped raw dice faces. The legacy DiceFaceStatRow remains the cumulative
+/// all-platform total, while these rows power date and adapter filters.
+struct ScopedDiceFaceStatRow {
+    int id = 0;
+    std::string day;
+    std::string platform;
+    std::string adapterId;
+    std::string groupId;
+    int sides = 0;
+    int face = 0;
+    long long count = 0;
+};
+
+/// Per-adapter availability sample retained for dashboard filtering.
+struct AdapterOnlineSampleRow {
+    int id = 0;
+    std::string sampledAt;
+    std::string adapterId;
+    std::string platform;
+    int connected = 0;
+};
+
 /// Distribution of raw faces from simple NdM rolls.
 struct DiceFaceStatRow {
     int id = 0;
@@ -597,6 +642,37 @@ private:
             orm::make_column("command_count", &UsageHourRow::commandCount),
             orm::make_column("roll_count", &UsageHourRow::rollCount)
         ),
+        orm::make_table("usage_scopes",
+            orm::make_column("id", &UsageScopeRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("day", &UsageScopeRow::day),
+            orm::make_column("hour", &UsageScopeRow::hour),
+            orm::make_column("platform", &UsageScopeRow::platform),
+            orm::make_column("adapter_id", &UsageScopeRow::adapterId),
+            orm::make_column("group_id", &UsageScopeRow::groupId),
+            orm::make_column("user_id", &UsageScopeRow::userId),
+            orm::make_column("user_name", &UsageScopeRow::userName),
+            orm::make_column("command", &UsageScopeRow::command),
+            orm::make_column("command_count", &UsageScopeRow::commandCount),
+            orm::make_column("roll_count", &UsageScopeRow::rollCount),
+            orm::make_column("crit", &UsageScopeRow::crit),
+            orm::make_column("extreme", &UsageScopeRow::extreme),
+            orm::make_column("hard", &UsageScopeRow::hard),
+            orm::make_column("regular", &UsageScopeRow::regular),
+            orm::make_column("fail", &UsageScopeRow::fail),
+            orm::make_column("fumble", &UsageScopeRow::fumble)
+        ),
+        orm::make_table("scoped_dice_face_stats",
+            orm::make_column("id", &ScopedDiceFaceStatRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("day", &ScopedDiceFaceStatRow::day),
+            orm::make_column("platform", &ScopedDiceFaceStatRow::platform),
+            orm::make_column("adapter_id", &ScopedDiceFaceStatRow::adapterId),
+            orm::make_column("group_id", &ScopedDiceFaceStatRow::groupId),
+            orm::make_column("sides", &ScopedDiceFaceStatRow::sides),
+            orm::make_column("face", &ScopedDiceFaceStatRow::face),
+            orm::make_column("count", &ScopedDiceFaceStatRow::count)
+        ),
         orm::make_table("dice_face_stats",
             orm::make_column("id", &DiceFaceStatRow::id,
                 orm::primary_key().autoincrement()),
@@ -610,6 +686,14 @@ private:
             orm::make_column("sampled_at", &OnlineSampleRow::sampledAt),
             orm::make_column("online_count", &OnlineSampleRow::onlineCount),
             orm::make_column("total_count", &OnlineSampleRow::totalCount)
+        ),
+        orm::make_table("adapter_online_samples",
+            orm::make_column("id", &AdapterOnlineSampleRow::id,
+                orm::primary_key().autoincrement()),
+            orm::make_column("sampled_at", &AdapterOnlineSampleRow::sampledAt),
+            orm::make_column("adapter_id", &AdapterOnlineSampleRow::adapterId),
+            orm::make_column("platform", &AdapterOnlineSampleRow::platform),
+            orm::make_column("connected", &AdapterOnlineSampleRow::connected)
         ),
         orm::make_table("scheduled_tasks",
             orm::make_column("id", &ScheduledTaskRow::id,

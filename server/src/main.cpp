@@ -3889,6 +3889,12 @@ static int realMain(int argc, char* argv[]) {
             for (const auto& adapter : adapterMgr.allAdapters()) {
                 ++sample.totalCount;
                 if (adapter->isConnected()) ++sample.onlineCount;
+                dice::AdapterOnlineSampleRow adapterSample;
+                adapterSample.sampledAt = sample.sampledAt;
+                adapterSample.adapterId = adapter->id();
+                adapterSample.platform = adapter->platform();
+                adapterSample.connected = adapter->isConnected() ? 1 : 0;
+                st->insert(adapterSample);
             }
             st->insert(sample);
             const std::time_t cutoff = std::time(nullptr) - 90LL * 24 * 60 * 60;
@@ -3902,6 +3908,8 @@ static int realMain(int argc, char* argv[]) {
             std::strftime(cutoffIso, sizeof(cutoffIso), "%Y-%m-%dT%H:%M:%SZ", &utc);
             st->remove_all<dice::OnlineSampleRow>(sqlite_orm::where(
                 sqlite_orm::c(&dice::OnlineSampleRow::sampledAt) < std::string(cutoffIso)));
+            st->remove_all<dice::AdapterOnlineSampleRow>(sqlite_orm::where(
+                sqlite_orm::c(&dice::AdapterOnlineSampleRow::sampledAt) < std::string(cutoffIso)));
         } catch (const std::exception& e) {
             DICE_LOG_DEBUG("online statistics sample failed: {}", e.what());
         }
