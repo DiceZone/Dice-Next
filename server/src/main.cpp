@@ -2386,7 +2386,7 @@ static int realMain(int argc, char* argv[]) {
             }, {drogon::Get});
         // 登录：校验口令 → 颁发 token，写 Cookie。
         app.registerHandler("/api/auth/login",
-            [jResp](const drogon::HttpRequestPtr& req,
+            [jResp, &configMgr](const drogon::HttpRequestPtr& req,
                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 try {
                     // M1: 登录限速（同一 IP 60 秒内最多 5 次失败）。
@@ -2411,6 +2411,26 @@ static int realMain(int argc, char* argv[]) {
                         }
                         if (dice::WebAuth::instance().checkPassword(pw)) {
                             { std::lock_guard<std::mutex> lk(sLoginMu); sLoginFails.erase(ip); }
+                            if (!dice::WebAuth::isValidNewPassword(pw)) {
+                                const std::string newPassword = j.value("new_password", std::string());
+                                if (!dice::WebAuth::isValidNewPassword(newPassword)) {
+                                    cb(jResp({{"code", 409}, {"message", "旧口令不符合当前安全规则，必须修改"},
+                                              {"data", {{"must_change_password", true}}}},
+                                             drogon::k409Conflict));
+                                    return;
+                                }
+                                const std::string previousStoredPassword =
+                                    configMgr.get<std::string>("webui/password", "");
+                                configMgr.set<std::string>("webui/password",
+                                    dice::WebAuth::instance().hashPassword(newPassword));
+                                if (!configMgr.save()) {
+                                    configMgr.set<std::string>("webui/password", previousStoredPassword);
+                                    cb(jResp({{"code", 1}, {"message", "无法保存新口令，请检查 config 目录写入权限"}},
+                                             drogon::k500InternalServerError));
+                                    return;
+                                }
+                                dice::WebAuth::instance().setPassword(newPassword);
+                            }
                             const bool trustDevice = j.value("trust_device", false);
                             bool trustedPersisted = true;
                             std::string token = dice::WebAuth::instance().issueToken(trustDevice, &trustedPersisted);
@@ -2445,7 +2465,7 @@ static int realMain(int argc, char* argv[]) {
                     }
                     auto j = nlohmann::json::parse(req->getBody());
                     std::string pw = j.value("password", "");
-                    if (pw.size() < 4) { cb(jResp({{"code", 400}, {"message", "口令至少 4 位"}}, drogon::k400BadRequest)); return; }
+                    if (!dice::WebAuth::isValidNewPassword(pw)) { cb(jResp({{"code", 400}, {"message", "口令须为 8-64 位，且必须包含大写字母、小写字母、数字和半角特殊符号"}}, drogon::k400BadRequest)); return; }
                     configMgr.set<std::string>("webui/password", dice::WebAuth::instance().hashPassword(pw));
                     configMgr.save();
                     dice::WebAuth::instance().setPassword(pw);
@@ -2481,6 +2501,10 @@ static int realMain(int argc, char* argv[]) {
                     if (req->method() == drogon::Put) {
                         auto j = nlohmann::json::parse(req->getBody());
                         std::string pw = j.value("password", "");
+                        if (!dice::WebAuth::isValidNewPassword(pw, true)) {
+                            cb(jResp({{"code", 400}, {"message", "口令须为空，或为 8-64 位且包含大写字母、小写字母、数字和半角特殊符号"}}, drogon::k400BadRequest));
+                            return;
+                        }
                         configMgr.set<std::string>("webui/password", dice::WebAuth::instance().hashPassword(pw));
                         configMgr.save();
                         dice::WebAuth::instance().setPassword(pw);

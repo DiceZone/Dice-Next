@@ -67,6 +67,20 @@ TEST(ConfigManager, ObsoleteDefaultConfigIsDiscardedWithoutCreatingDefaults) {
     fs::remove_all(root, ec);
 }
 
+TEST(WebAuth, NewPasswordPolicyRequiresAllCharacterClasses) {
+    ASSERT_TRUE(WebAuth::isValidNewPassword("Dice@2026!"));
+    ASSERT_TRUE(WebAuth::isValidNewPassword("", true));
+    ASSERT_FALSE(WebAuth::isValidNewPassword(""));
+    ASSERT_FALSE(WebAuth::isValidNewPassword("Aa1!aaa"));
+    ASSERT_FALSE(WebAuth::isValidNewPassword("dice@2026"));
+    ASSERT_FALSE(WebAuth::isValidNewPassword("DICE@2026"));
+    ASSERT_FALSE(WebAuth::isValidNewPassword("Dice@Test"));
+    ASSERT_FALSE(WebAuth::isValidNewPassword("Dice2026"));
+    ASSERT_FALSE(WebAuth::isValidNewPassword("Dice 2026!"));
+    ASSERT_FALSE(WebAuth::isValidNewPassword("密码Dice@2026"));
+    ASSERT_FALSE(WebAuth::isValidNewPassword(std::string(65, 'A') + "a1!"));
+}
+
 TEST(WebAuth, TrustedDeviceSessionSurvivesReconfigure) {
     const fs::path root = temporaryConfigRoot("web_auth");
     const fs::path sessions = root / "config" / "webui_sessions.json";

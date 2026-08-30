@@ -24,6 +24,24 @@ class WebAuth {
 public:
     static WebAuth& instance() { static WebAuth a; return a; }
 
+    // New passwords are deliberately portable across keyboard layouts and
+    // config tooling. Login remains unrestricted so legacy passwords continue
+    // to work until the owner changes them.
+    static bool isValidNewPassword(const std::string& password,
+                                   bool allowEmpty = false) noexcept {
+        if (password.empty()) return allowEmpty;
+        if (password.size() < 8 || password.size() > 64) return false;
+        bool hasUpper = false, hasLower = false, hasDigit = false, hasSpecial = false;
+        for (const unsigned char c : password) {
+            if (c < 0x21 || c > 0x7E) return false;
+            if (c >= 'A' && c <= 'Z') hasUpper = true;
+            else if (c >= 'a' && c <= 'z') hasLower = true;
+            else if (c >= '0' && c <= '9') hasDigit = true;
+            else hasSpecial = true;
+        }
+        return hasUpper && hasLower && hasDigit && hasSpecial;
+    }
+
     void configure(const std::string& password, const std::filesystem::path& sessionsPath,
                    const std::string& apiKey = std::string()) {
         std::lock_guard<std::mutex> lk(m_);
