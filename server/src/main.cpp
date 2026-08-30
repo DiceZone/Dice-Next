@@ -993,6 +993,78 @@ static int realMain(int argc, char* argv[]) {
     cmdRouter.setLuaTaskBridge(
         [&luaMod](const std::string& name) { return luaMod.hasTask(name); },
         [&luaMod](const std::string& name, std::string* error) { return luaMod.runTask(name, error); });
+    // WebUI 定时任务的「执行插件指令」：构造一个最低权限的虚拟消息，
+    // 只进入 JS/Lua 插件指令层，不把定时任务扩大成内置管理指令后门。
+    cmdRouter.setScheduledPluginCommandBridge(
+        [&adapterMgr, &cmdRouter, &jsMod, &luaMod](
+            const std::string& adapterId, const std::string& platform,
+            const std::string& targetType, const std::string& targetId,
+            const std::string& command, std::string* error) -> bool {
+            dice::AdapterPtr adapter;
+            if (!adapterId.empty()) {
+                auto candidate = adapterMgr.getAdapter(adapterId);
+                if (candidate && candidate->isConnected()) adapter = candidate;
+            } else {
+                for (auto& candidate : adapterMgr.allAdapters()) {
+                    if (!candidate || !candidate->isConnected()) continue;
+                    if (platform.empty() || candidate->platform() == platform) { adapter = candidate; break; }
+                }
+            }
+            if (!adapter || targetId.empty()) {
+                if (error) *error = "target adapter is not connected or target is empty";
+                return false;
+            }
+
+            dice::Message message;
+            message.platform = adapter->platform();
+            message.adapterId = adapter->id();
+            message.selfId = adapter->getLoginId();
+            message.senderId = !message.selfId.empty() ? message.selfId
+                : (targetType == "private" ? targetId : std::string("0"));
+            message.senderName = adapter->getLoginName();
+            if (message.senderName.empty()) message.senderName = message.senderId;
+            message.targetId = targetId;
+            message.type = targetType == "private"
+                ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
+            message.content = command;
+            message.rawContent = command;
+            message.displayContent = command;
+
+            bool matched = false;
+            std::string reply;
+            if (jsMod.ready()) {
+                if (auto body = cmdRouter.commandBody(command); body && !body->empty()) {
+                    auto result = jsMod.handle(message, *body, 0);
+                    matched = result.matched;
+                    reply = result.reply;
+                }
+            }
+            if (!matched && luaMod.ready()) {
+                const bool isPrivate = message.type == dice::MessageType::kPrivate;
+                auto result = luaMod.dispatch(command, message.senderId,
+                    isPrivate ? "" : targetId, message.senderName, "", isPrivate, 0, message.platform);
+                if (!result.matched) {
+                    if (auto body = cmdRouter.commandBody(command); body && !body->empty()) {
+                        const std::string legacy = "." + *body;
+                        if (legacy != command)
+                            result = luaMod.dispatch(legacy, message.senderId,
+                                isPrivate ? "" : targetId, message.senderName, "", isPrivate, 0, message.platform);
+                    }
+                }
+                matched = result.matched;
+                reply = result.reply;
+            }
+            if (!matched) {
+                if (error) *error = "no enabled JS/Lua plugin matched the command";
+                return false;
+            }
+            if (!reply.empty()) {
+                reply = cmdRouter.applySelf(message, reply);
+                if (targetType == "private") adapter->sendPrivateMessage(targetId, reply);
+                else adapter->sendGroupMessageCQ(targetId, reply);
+            }
+            return true;
+        });
 
     // 把 JS 插件 cmd.help + Lua mod descriptor.helpdoc 喂给 .help 帮助系统
     //（解耦：router 不直接依赖各引擎）。

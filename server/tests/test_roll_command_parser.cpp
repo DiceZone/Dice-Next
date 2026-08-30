@@ -74,6 +74,32 @@ TEST(RollCommandParser, MultiRollPrefixKeepsFollowingDiceExpression) {
     ASSERT_EQ(parsed.expression, std::string("2#d100"));
     ASSERT_EQ(parsed.reason, std::string("测试"));
 }
+TEST(RollCommandParser, PoolCommandsKeepCompactAndSpacedReasons) {
+    auto parsed = roll_command::parsePoolInput("5c10测试");
+    ASSERT_EQ(parsed.expression, std::string("5c10"));
+    ASSERT_EQ(parsed.reason, std::string("测试"));
+
+    parsed = roll_command::parsePoolInput("5c10 测试");
+    ASSERT_EQ(parsed.expression, std::string("5c10"));
+    ASSERT_EQ(parsed.reason, std::string("测试"));
+
+    parsed = roll_command::parsePoolInput("10a8c7+2 attack");
+    ASSERT_EQ(parsed.expression, std::string("10a8c7+2"));
+    ASSERT_EQ(parsed.reason, std::string("attack"));
+
+    parsed = roll_command::parsePoolInput("10 attack");
+    ASSERT_EQ(parsed.expression, std::string("10"));
+    ASSERT_EQ(parsed.reason, std::string("attack"));
+
+    parsed = roll_command::parsePoolInput("10 8 reason");
+    ASSERT_EQ(parsed.expression, std::string("10 8"));
+    ASSERT_EQ(parsed.reason, std::string("reason"));
+
+    parsed = roll_command::parsePoolInput("10测试");
+    ASSERT_EQ(parsed.expression, std::string("10"));
+    ASSERT_EQ(parsed.reason, std::string("测试"));
+}
+
 TEST(RollCommandParser, NativeLexerReturnsValidUtf8ForUnicodeError) {
     DiceExpression expression([](int) { return 1; });
     const DiceResult result = expression.evaluate("d测试");

@@ -259,6 +259,76 @@ end
 #endif
     ASSERT_TRUE(!nlohmann::json(result.reply).dump().empty());
 }
+TEST(LuaPluginCompat, InvalidLegacyAuditPathIsRemappedWithoutCrashing) {
+    TempWorkspace workspace("dice_next_lua_resource_path_");
+    const fs::path pluginDir = workspace.root() / "data" / "plugin";
+    std::error_code ec;
+    fs::create_directories(pluginDir / "QQBot" / "feat", ec);
+    ASSERT_FALSE(static_cast<bool>(ec));
+    writeText(pluginDir / "QQBot" / "feat" / "resource.txt", "detail-ok\n");
+    writeText(pluginDir / "resource.lua", R"LUA(
+msg_order = { [".detail"] = "detail" }
+function detail(msg)
+    -- The invalid CP936 prefix reproduces the path that used to make the JSON
+    -- audit writer throw through the Lua C boundary. The plugin/ tail is the
+    -- stale absolute-cache layout used by ResourceSearchEngine.lua.
+    local stale = string.char(0xBA, 0xC3) .. "D:/old/Dice/plugin/QQBot/feat/resource.txt"
+    local file = io.open(stale, "r")
+    if file == nil then return "missing" end
+    local value = file:read("*l")
+    file:close()
+    return value
+end
+)LUA");
+
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    const auto result = manager.dispatch(
+        ".detail", "u", "g", "n", "", false, 0, "onebot");
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.reply, std::string("detail-ok"));
+
+    std::ifstream audit(workspace.root() / "data" / "audit" / "lua_audit.jsonl");
+    std::string line;
+    int records = 0;
+    while (std::getline(audit, line)) {
+        ASSERT_TRUE(nlohmann::json::parse(line).is_object());
+        ++records;
+    }
+    ASSERT_TRUE(records >= 2);
+}
+
+TEST(LuaPluginCompat, ExternalLegacyResourceCorpusWhenProvided) {
+    const char* entryValue = std::getenv("DICENEXT_LEGACY_RESOURCE_PLUGIN");
+    if (!entryValue || !*entryValue) return;  // CI uses the self-contained fixture above.
+
+    const fs::path sourceEntry(entryValue);
+    const fs::path sourcePluginRoot = sourceEntry.parent_path();
+    const fs::path sourceData = sourcePluginRoot / "QQBot";
+    ASSERT_TRUE(fs::is_regular_file(sourceEntry));
+    ASSERT_TRUE(fs::is_directory(sourceData));
+
+    TempWorkspace workspace("dice_next_lua_resource_corpus_");
+    const fs::path pluginDir = workspace.root() / "data" / "plugin";
+    std::error_code ec;
+    fs::copy_file(sourceEntry, pluginDir / "ResourceSearchEngine.lua",
+                  fs::copy_options::overwrite_existing, ec);
+    ASSERT_FALSE(static_cast<bool>(ec));
+    fs::copy(sourceData, pluginDir / "QQBot",
+             fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    ASSERT_FALSE(static_cast<bool>(ec));
+
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    const auto result = manager.dispatch(
+        ".专长 星质形 ASTRAL_AQUAN", "10001", "20002", "Tester", "", false, 0, "onebot");
+    ASSERT_TRUE(result.matched);
+    ASSERT_TRUE(!result.reply.empty());
+    ASSERT_TRUE(result.reply.find("星质形态") != std::string::npos);
+}
+
 TEST(LuaPluginCompat, ExternalLegacyFortuneCorpusWhenProvided) {
     const char* corpusValue = std::getenv("DICENEXT_LEGACY_FORTUNE_PLUGIN");
     if (!corpusValue || !*corpusValue) return;  // CI uses the self-contained fixture above.

@@ -27,6 +27,7 @@ set(TEST_SOURCES
     test_markdown.cpp
     test_heart_debounce.cpp
     test_command_prefix_policy.cpp
+    test_legacy_clock_command.cpp
     test_friend_approval_policy.cpp
     test_sensitive_word_filter.cpp
 

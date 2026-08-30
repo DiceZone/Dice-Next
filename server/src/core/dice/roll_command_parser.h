@@ -98,6 +98,59 @@ inline std::string trimAsciiWhitespace(const std::string& input) {
     return input.substr(begin, end - begin);
 }
 
+/// Split the compact leading syntax used by .ww/.dx from an optional reason.
+/// Named parts (a/c/+) are consumed only when followed by a number, so a reason
+/// such as "attack" is not mistaken for an `a` modifier.
+inline ParsedInput parsePoolInput(const std::string& input) {
+    ParsedInput result;
+    size_t pos = 0;
+    while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos]))) ++pos;
+    const size_t poolBegin = pos;
+    while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) ++pos;
+    if (pos == poolBegin) {
+        result.reason = trimAsciiWhitespace(input);
+        return result;
+    }
+    result.expression = input.substr(poolBegin, pos - poolBegin);
+    bool hasNamedPart = false;
+    bool hasLegacyLine = false;
+    while (pos < input.size()) {
+        const size_t checkpoint = pos;
+        while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos]))) ++pos;
+        if (pos >= input.size()) break;
+
+        const unsigned char current = static_cast<unsigned char>(input[pos]);
+        const char part = static_cast<char>(std::tolower(current));
+        if (part == 'a' || part == 'c' || part == '+') {
+            size_t number = pos + 1;
+            while (number < input.size() && std::isspace(static_cast<unsigned char>(input[number]))) ++number;
+            const size_t digits = number;
+            while (number < input.size() && std::isdigit(static_cast<unsigned char>(input[number]))) ++number;
+            if (number == digits) { pos = checkpoint; break; }
+            result.expression.push_back(part);
+            result.expression.append(input, digits, number - digits);
+            hasNamedPart = true;
+            pos = number;
+            continue;
+        }
+
+        // Legacy `.ww N successLine` / `.dx N criticalLine` requires whitespace
+        // before the second number and cannot be combined with named parts.
+        if (!hasNamedPart && !hasLegacyLine && pos > checkpoint && std::isdigit(current)) {
+            const size_t digits = pos;
+            while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) ++pos;
+            result.expression.push_back(' ');
+            result.expression.append(input, digits, pos - digits);
+            hasLegacyLine = true;
+            continue;
+        }
+        pos = checkpoint;
+        break;
+    }
+    result.reason = trimAsciiWhitespace(input.substr(pos));
+    return result;
+}
+
 inline bool hasNonDigit(const std::string& input) {
     if (input.empty()) return false;
     for (const char ch : input)

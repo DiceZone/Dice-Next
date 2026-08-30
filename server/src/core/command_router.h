@@ -23,6 +23,7 @@
 #include "check_roll_override.h"
 #include "master_delivery.h"
 #include "command_prefix_policy.h"
+#include "legacy_clock_command.h"
 #include "../service/notice_manager.h"   // B：通知系统（权限变更等推送给骰主）
 #include "../service/sensitive_word_filter.h"
 
@@ -106,6 +107,12 @@ public:
     void setLuaTaskBridge(LuaTaskExistsFn exists, LuaTaskRunFn run) {
         luaTaskExists_ = std::move(exists);
         luaTaskRun_ = std::move(run);
+    }
+    using ScheduledPluginCommandFn = std::function<bool(
+        const std::string& adapterId, const std::string& platform, const std::string& targetType,
+        const std::string& targetId, const std::string& command, std::string* error)>;
+    void setScheduledPluginCommandBridge(ScheduledPluginCommandFn run) {
+        scheduledPluginCommand_ = std::move(run);
     }
     // Narrow compatibility bridge for trusted Lua code. Only the two legacy
     // notice commands used by DailyNews are handled here; no general admin
@@ -1069,22 +1076,25 @@ private:
     std::optional<std::string> tryHandleWW(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("ww", 0) != 0) return std::nullopt;
         std::string rest = trim(cmd.substr(2));
+        const auto parsedPool = roll_command::parsePoolInput(rest);
+        const std::string& poolSpec = parsedPool.expression;
+        const std::string& reason = parsedPool.reason;
         // Legacy: .ww N [success-line] (10 explodes).  Extended Shiki-style:
         // .ww NaAcS+X — a=add/explosion line (default 10), c=success line
         // (default 8), +X=extra successes.  Whitespace is optional in the
         // extended form, so `.ww 10 a8 c7 +2` equals `.ww 10a8c7+2`.
         int n = 0, addLine = 10, successLine = 8, bonus = 0;
         bool explicitAdd = false, explicitSuccess = false, explicitBonus = false;
-        const bool extended = rest.find_first_of("aAcC+") != std::string::npos;
+        const bool extended = poolSpec.find_first_of("aAcC+") != std::string::npos;
         if (!extended) {
-            std::istringstream iss(rest);
+            std::istringstream iss(poolSpec);
             iss >> n;
             if (iss) { int t; if (iss >> t) successLine = t; }
             std::string extra;
             if (iss >> extra) return i18n_.tr(loc, "dice.pool.usage");
         } else {
             std::string spec;
-            for (unsigned char ch : rest) if (!std::isspace(ch)) spec.push_back(static_cast<char>(ch));
+            for (unsigned char ch : poolSpec) if (!std::isspace(ch)) spec.push_back(static_cast<char>(ch));
             size_t p = 0;
             auto readNumber = [&](int& out) {
                 if (p >= spec.size() || !std::isdigit(static_cast<unsigned char>(spec[p]))) return false;
@@ -1165,6 +1175,9 @@ private:
         if (bonus) expr << "+" << bonus;
         expr << "=" << successes;
 
+        if (!reason.empty())
+            return i18n_.tr(loc, "dice.roll.result_reason",
+                {{"nick", displayName(msg)}, {"reason", reason}, {"res", expr.str()}});
         return i18n_.tr(loc, "dice.pool.result",
             {{"nick", displayName(msg)}, {"expr", expr.str()}});
     }
@@ -1181,24 +1194,27 @@ private:
     std::optional<std::string> tryHandleDX(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("dx", 0) != 0) return std::nullopt;
         std::string rest = trim(cmd.substr(2));
+        const auto parsedPool = roll_command::parsePoolInput(rest);
+        const std::string& poolSpec = parsedPool.expression;
+        const std::string& reason = parsedPool.reason;
 
-        std::string lc = toLower(rest);
+        std::string lc = toLower(poolSpec);
         // a = OneDice 无限加骰骰池（WoD/数成功，≥加骰线重骰累加、数≥成功线个数），
         // 不同于双十字(c 求和)。交给 OneDice 引擎求值并展示全过程（与 .r 一致）。
         if (lc.find('a') != std::string::npos) {
-            auto od = onedice::eval(rest, 10);   // 池默认 d10
+            auto od = onedice::eval(poolSpec, 10);   // 池默认 d10
             if (!od.ok) return i18n_.tr(loc, "dice.dx.usage");
-            return i18n_.tr(loc, "dice.roll.result",
-                {{"nick", displayName(msg)}, {"reason", ""}, {"res", od.detail}});
+            return i18n_.tr(loc, reason.empty() ? "dice.roll.result" : "dice.roll.result_reason",
+                {{"nick", displayName(msg)}, {"reason", reason}, {"res", od.detail}});
         }
 
         // Parse "AcB" (A dice, B critical line) or "A [B]" (default B=10).
         int pool = 0, crit = 10, faces = 10;
         if (auto cp = lc.find('c'); cp != std::string::npos) {
-            pool = parseIntOr(trim(rest.substr(0, cp)), 0);
-            crit = parseIntOr(trim(rest.substr(cp + 1)), 10);
+            pool = parseIntOr(trim(poolSpec.substr(0, cp)), 0);
+            crit = parseIntOr(trim(poolSpec.substr(cp + 1)), 10);
         } else {
-            std::istringstream iss(rest);
+            std::istringstream iss(poolSpec);
             iss >> pool; if (iss) { int kk; if (iss >> kk) crit = kk; }
         }
         if (pool < 1) return i18n_.tr(loc, "dice.dx.usage");
@@ -1244,7 +1260,8 @@ private:
         proc << "=" << total;
 
         const std::string nick = displayName(msg);
-        return i18n_.tr(loc, "dice.roll.result", {{"nick", nick}, {"reason", ""}, {"res", proc.str()}});
+        return i18n_.tr(loc, reason.empty() ? "dice.roll.result" : "dice.roll.result_reason",
+            {{"nick", nick}, {"reason", reason}, {"res", proc.str()}});
     }
 
     // ─── Opposed check: .rav / .rcv ──────────────────────────
@@ -5734,16 +5751,21 @@ public:
     // .admin add/del/list <@/QQ> —— 授予/撤销管理员(=trust 4) / 列出管理员。需 Master。
     std::string handleAdmin(Locale loc, const std::string& args, const Message& msg) {
         if (!isMaster(msg)) return i18n_.tr(loc, "gate.not_master");
-        std::istringstream iss(args); std::string act; iss >> act; act = toLower(act);
+        std::istringstream iss(args); std::string act; iss >> act;
+        const std::string actRaw = act;
+        act = toLower(act);
         std::string origin = (msg.type == MessageType::kGroup) ? msg.targetId : msg.senderId;
         if (act == "censor") {
             std::string censorArgs;
             std::getline(iss, censorArgs);
             return handleSensitiveWordAdmin(loc, trim(censorArgs), msg);
         }
-        if (act == "clock") {
-            std::string clockArgs;
-            std::getline(iss, clockArgs);
+        if (act == "clock" || (act.size() > 5 && act.rfind("clock", 0) == 0
+                               && (act[5] == '+' || act[5] == '-'))) {
+            std::string clockArgs = act == "clock" ? std::string() : actRaw.substr(5);
+            std::string tail;
+            std::getline(iss, tail);
+            if (!trim(tail).empty()) clockArgs += (clockArgs.empty() ? "" : " ") + trim(tail);
             return handleLegacyLuaClock(loc, trim(clockArgs), msg);
         }
         if (act == "notice") {
@@ -5790,84 +5812,121 @@ public:
     std::string handleLegacyLuaClock(Locale loc, const std::string& args, const Message& msg) {
         auto* st = db_.getStorage();
         if (!st) return i18n_.tr(loc, "admin.clock_error");
-        std::istringstream in(args);
-        std::string op, taskName, clockTime;
-        in >> op;
-        op = toLower(op);
-        if (op.empty() || op == "list") {
+        const auto request = legacy_clock::parse(args);
+        const std::string targetType = msg.type == MessageType::kPrivate ? "private" : "group";
+        const std::string targetId = msg.type == MessageType::kPrivate ? msg.senderId : msg.targetId;
+        auto sameWindow = [&](const ScheduledTaskRow& row) {
+            return row.platform == msg.platform && row.targetType == targetType && row.targetId == targetId
+                && (row.adapterId.empty() || row.adapterId == msg.adapterId);
+        };
+        if (request.operation == legacy_clock::Operation::kList) {
             std::string list;
             try {
                 for (const auto& row : st->get_all<ScheduledTaskRow>()) {
-                    if (row.action != "lua") continue;
-                    const std::string line = row.content + " " + row.cronTime
-                        + (row.enabled ? "" : " [off]");
+                    std::string line;
+                    if (row.action == "lua") {
+                        line = row.content + " " + row.cronTime + " [Lua]";
+                    } else if (row.action == "command" && sameWindow(row)) {
+                        const std::string when = row.triggerType == "interval"
+                            ? "every " + std::to_string(row.intervalMin) + "min"
+                            : row.triggerType == "once" ? row.onceDate + " " + row.cronTime : row.cronTime;
+                        line = row.name + " " + when + " [" + targetType + ":" + targetId + "] " + row.content;
+                    } else continue;
+                    if (!row.enabled) line += " [off]";
                     list += (list.empty() ? "" : "\n") + line;
                 }
             } catch (...) {}
             return i18n_.tr(loc, "admin.clock_list", {{"list", list.empty()
                 ? i18n_.tr(loc, "admin.clock_none") : list}});
         }
-        in >> taskName;
-        if (taskName.empty()) return i18n_.tr(loc, "admin.clock_usage");
-        if (op == "+" || op == "add") {
-            in >> clockTime;
-            auto normalizeTime = [](const std::string& value) -> std::optional<std::string> {
-                const size_t colon = value.find(':');
-                if (colon == std::string::npos || colon < 1 || colon > 2 ||
-                    value.size() - colon - 1 != 2) return std::nullopt;
-                for (size_t i = 0; i < value.size(); ++i)
-                    if (i != colon && !std::isdigit(static_cast<unsigned char>(value[i])))
-                        return std::nullopt;
-                int hour = 0;
-                for (size_t i = 0; i < colon; ++i) hour = hour * 10 + value[i] - '0';
-                const int minute = (value[colon + 1] - '0') * 10 + value[colon + 2] - '0';
-                if (hour >= 24 || minute >= 60) return std::nullopt;
-                return (hour < 10 ? "0" : "") + std::to_string(hour) + ":" + value.substr(colon + 1);
-            };
-            const auto normalizedTime = normalizeTime(clockTime);
+        if (request.operation == legacy_clock::Operation::kAdd) {
+            const auto normalizedTime = legacy_clock::normalizeDailyTime(request.time);
             if (!normalizedTime) return i18n_.tr(loc, "admin.clock_bad_time");
-            clockTime = *normalizedTime;
-            if (!luaTaskExists_ || !luaTaskExists_(taskName))
-                return i18n_.tr(loc, "admin.clock_not_found", {{"task", taskName}});
+            const std::string clockTime = *normalizedTime;
+            if (!request.command.empty()) {
+                if (targetId.empty()) return i18n_.tr(loc, "admin.clock_error");
+                try {
+                    ScheduledTaskRow row;
+                    bool updating = false;
+                    for (const auto& existing : st->get_all<ScheduledTaskRow>()) {
+                        if (existing.action == "command" && existing.name == request.name && sameWindow(existing)) {
+                            row = existing; updating = true; break;
+                        }
+                    }
+                    row.name = request.name;
+                    row.adapterId = msg.adapterId;
+                    row.platform = msg.platform;
+                    row.targetType = targetType;
+                    row.targetId = targetId;
+                    row.cronTime = clockTime;
+                    row.days.clear(); row.content = request.command; row.enabled = 1;
+                    row.action = "command"; row.condition.clear(); row.triggerType = "daily";
+                    row.intervalMin = 0; row.onceDate.clear();
+                    if (!updating) row.createdAt = nowIso();
+                    const std::time_t current = std::time(nullptr);
+                    const std::string hm = utils::formatTimeInTimezone(current, "%H:%M");
+                    row.lastRun = clockTime <= hm
+                        ? utils::formatTimeInTimezone(current, "%Y-%m-%d") : std::string();
+                    if (updating) st->update(row); else st->insert(row);
+                    return i18n_.tr(loc, "admin.clock_command_added", {
+                        {"task", request.name}, {"time", clockTime}, {"command", request.command}});
+                } catch (const std::exception& e) {
+                    DICE_LOG_ERROR("failed to save scoped plugin clock '{}': {}", request.name, e.what());
+                    return i18n_.tr(loc, "admin.clock_error");
+                }
+            }
+            if (!luaTaskExists_ || !luaTaskExists_(request.name))
+                return i18n_.tr(loc, "admin.clock_not_found", {{"task", request.name}});
             try {
                 ScheduledTaskRow row;
                 bool updating = false;
                 for (const auto& existing : st->get_all<ScheduledTaskRow>()) {
-                    if (existing.action == "lua" && existing.content == taskName) {
+                    if (existing.action == "lua" && existing.content == request.name) {
                         row = existing; updating = true; break;
                     }
                 }
-                row.name = "Lua: " + taskName;
+                row.name = "Lua: " + request.name;
                 row.adapterId = msg.adapterId;
                 row.platform = msg.platform;
                 row.targetType = "private";
                 row.targetId = msg.senderId.empty() ? "lua" : msg.senderId;
                 row.cronTime = clockTime;
-                row.days.clear(); row.content = taskName; row.enabled = 1;
+                row.days.clear(); row.content = request.name; row.enabled = 1;
                 row.action = "lua"; row.condition.clear(); row.triggerType.clear();
-                row.intervalMin = 0; row.onceDate.clear(); row.createdAt = nowIso();
+                row.intervalMin = 0; row.onceDate.clear();
+                if (!updating) row.createdAt = nowIso();
                 const std::time_t current = std::time(nullptr);
                 const std::string hm = utils::formatTimeInTimezone(current, "%H:%M");
                 row.lastRun = clockTime <= hm
                     ? utils::formatTimeInTimezone(current, "%Y-%m-%d") : std::string();
                 if (updating) st->update(row); else st->insert(row);
-                return i18n_.tr(loc, "admin.clock_added", {{"task", taskName}, {"time", clockTime}});
+                return i18n_.tr(loc, "admin.clock_added", {{"task", request.name}, {"time", clockTime}});
             } catch (const std::exception& e) {
-                DICE_LOG_ERROR("failed to save legacy Lua clock '{}': {}", taskName, e.what());
+                DICE_LOG_ERROR("failed to save legacy Lua clock '{}': {}", request.name, e.what());
                 return i18n_.tr(loc, "admin.clock_error");
             }
         }
-        if (op == "-" || op == "del" || op == "remove") {
+        if (request.operation == legacy_clock::Operation::kRemove) {
             int removed = 0;
             try {
-                for (const auto& row : st->get_all<ScheduledTaskRow>()) {
-                    if (row.action == "lua" && row.content == taskName) {
+                const auto rows = st->get_all<ScheduledTaskRow>();
+                // A scoped command with the same name shadows a global task in
+                // this window; remove it first so one command never deletes both.
+                for (const auto& row : rows) {
+                    if (row.action == "command" && row.name == request.name && sameWindow(row)) {
                         st->remove<ScheduledTaskRow>(row.id); ++removed;
                     }
                 }
+                if (!removed) {
+                    for (const auto& row : rows) {
+                        if (row.action == "lua" && row.content == request.name) {
+                            st->remove<ScheduledTaskRow>(row.id); ++removed;
+                        }
+                    }
+                }
             } catch (...) { return i18n_.tr(loc, "admin.clock_error"); }
-            return removed ? i18n_.tr(loc, "admin.clock_removed", {{"task", taskName}})
-                           : i18n_.tr(loc, "admin.clock_not_found", {{"task", taskName}});
+            return removed ? i18n_.tr(loc, "admin.clock_removed", {{"task", request.name}})
+                           : i18n_.tr(loc, "admin.clock_schedule_not_found", {{"task", request.name}});
         }
         return i18n_.tr(loc, "admin.clock_usage");
     }
@@ -9432,6 +9491,19 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         else a->sendGroupMessageCQ(targetId, text);
         return true;
     }
+    bool runScheduledPluginCommand(const std::string& adapterId, const std::string& platform,
+                                   const std::string& targetType, const std::string& targetId,
+                                   const std::string& command) {
+        if (!scheduledPluginCommand_) {
+            DICE_LOG_ERROR("scheduled plugin command skipped: bridge unavailable");
+            return false;
+        }
+        std::string error;
+        const bool ok = scheduledPluginCommand_(
+            adapterId, platform, targetType, targetId, command, &error);
+        if (!ok) DICE_LOG_ERROR("scheduled plugin command '{}' failed: {}", command, error);
+        return ok;
+    }
     /// 所有已知群 [(platform, groupId)]（有 enabled 配置行、未退群、未删除记录）。
     /// 定时任务 targetId="*" 的展开来源。
     std::vector<std::pair<std::string, std::string>> allKnownGroups() const {
@@ -9495,6 +9567,8 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                     if (!evalScheduledCondition(tk.condition, tk.platform, "group", gid)) continue;
                     if (action == "leave") {
                         if (leaveGroupWith(tk.adapterId, tk.platform, endpoint, tk.content)) ++done;
+                    } else if (action == "command") {
+                        if (runScheduledPluginCommand(tk.adapterId, tk.platform, "group", endpoint, tk.content)) ++done;
                     } else if (sendScheduled(tk.adapterId, tk.platform, "group", endpoint, tk.content)) ++done;
                 }
                 return done;
@@ -9503,13 +9577,18 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                 if (!tk.platform.empty() && plat != tk.platform) continue;
                 if (!evalScheduledCondition(tk.condition, plat, "group", gid)) continue;
                 if (action == "leave") { if (leaveGroupWith("", plat, gid, tk.content)) ++done; }
-                else if (groupSettingValue(plat, gid, "enabled") != "0"
+                else if (action == "command") {
+                    if (groupSettingValue(plat, gid, "enabled") != "0"
+                        && runScheduledPluginCommand("", plat, "group", gid, tk.content)) ++done;
+                } else if (groupSettingValue(plat, gid, "enabled") != "0"
                          && sendScheduled("", plat, "group", gid, tk.content)) ++done;
             }
             return done;
         }
         if (!force && !evalScheduledCondition(tk.condition, tk.platform, tk.targetType, tk.targetId)) return 0;
         if (action == "leave") return leaveGroupWith(tk.adapterId, tk.platform, tk.targetId, tk.content) ? 1 : 0;
+        if (action == "command")
+            return runScheduledPluginCommand(tk.adapterId, tk.platform, tk.targetType, tk.targetId, tk.content) ? 1 : 0;
         return sendScheduled(tk.adapterId, tk.platform, tk.targetType, tk.targetId, tk.content) ? 1 : 0;
     }
 
@@ -11020,6 +11099,7 @@ private:
     PersonaManager* personaMgr_ = nullptr;  // set via setPersonaManager()
     LuaTaskExistsFn luaTaskExists_;
     LuaTaskRunFn luaTaskRun_;
+    ScheduledPluginCommandFn scheduledPluginCommand_;
     // 卡片模板（原版 CardTemp）：JS 求值钩子（main.cpp 注入 jsMod.evalString）+ preset 注册表缓存。
     std::function<std::optional<std::string>(const std::string&)> jsEval_;
     mutable std::map<std::string, std::vector<CardPresetItem>> cardPresets_;

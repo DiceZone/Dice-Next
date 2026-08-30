@@ -267,20 +267,22 @@
     "target_higher": "That user's trust level is not below yours; cannot modify."
   },
   "admin": {
-    "usage": "Usage: .admin add/del <@user/QQ> to grant/revoke admin; .admin list to list admins; .admin clock + <task> HH:MM to add a Lua task, - <task> to remove it; .admin censor manages sensitive words. Master only.",
+    "usage": "Usage: .admin add/del <@user/QQ> grants or revokes admin; .admin list lists admins; .admin clock manages global Lua or per-chat plugin schedules; .admin censor manages sensitive words. Master only.",
     "added": "Granted admin to {user} √",
     "removed": "Revoked admin from {user} √",
     "not_admin": "That user has no admin permission.",
     "list": "Admins:\n{list}",
     "none": "(none)",
-    "clock_usage": "Usage: .admin clock + <task> HH:MM; .admin clock - <task>; .admin clock list.",
+    "clock_usage": "Usage: .admin clock + <Lua task> HH:MM; or, in the current chat, .admin clock + <name> HH:MM <plugin command>; use - <name> to remove and list to view. Compact clock+task=H:MM is supported.",
     "clock_added": "Lua task {task} will run daily at {time} √",
-    "clock_removed": "Removed Lua task {task} √",
+    "clock_command_added": "Added plugin schedule {task} in this chat: {command} runs daily at {time} √",
+    "clock_removed": "Removed scheduled task {task} √",
     "clock_not_found": "The Lua plugin did not register task: {task}",
+    "clock_schedule_not_found": "Scheduled task not found: {task}",
     "clock_bad_time": "Invalid time. Use H:MM or HH:MM (0:00–23:59).",
-    "clock_list": "Lua scheduled tasks:\n{list}",
-    "clock_none": "(no Lua scheduled tasks)",
-    "clock_error": "Failed to save Lua scheduled task.",
+    "clock_list": "Global Lua tasks / plugin-command tasks in this chat:\n{list}",
+    "clock_none": "(no scheduled tasks)",
+    "clock_error": "Failed to save scheduled task.",
     "notice_usage": "Usage: .admin notice group/QQ <id> +<level> or -<level>.",
     "notice_send_usage": "Usage: .send notice <level> <message>."
 

@@ -182,6 +182,55 @@ static std::string argStr(lua_State* L, int i) {
     size_t n = 0; const char* s = lua_tolstring(L, i, &n);
     return s ? std::string(s, n) : std::string();
 }
+// Old single-file plugins often ship a generated cache containing absolute paths
+// from the author's Dice! installation. Dice! resolved those paths relative to
+// the active plugin directory after the bundle was moved. Preserve that useful
+// behaviour, but only for a traversal-free tail below plugin/ (or a genuinely
+// relative path), so this fallback cannot widen filesystem access.
+static int l_resolvePluginFile(lua_State* L) {
+    auto* m = mgrOf(L);
+    const std::string raw = argStr(L, 1);
+    if (!m || m->loadingModDir_.empty() || raw.empty()) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    std::string slash = raw;
+    std::replace(slash.begin(), slash.end(), '\\', '/');
+    std::string tail;
+    const size_t pluginMarker = slash.rfind("/plugin/");
+    if (pluginMarker != std::string::npos) {
+        tail = slash.substr(pluginMarker + std::string("/plugin/").size());
+    } else {
+        const bool rooted = !slash.empty() && slash.front() == '/';
+        const bool drive = slash.size() >= 2 && slash[1] == ':';
+        if (!rooted && !drive) tail = slash;
+    }
+    if (tail.empty()) {
+        lua_pushnil(L);
+        return 1;
+    }
+    size_t start = 0;
+    while (start <= tail.size()) {
+        const size_t end = tail.find('/', start);
+        const std::string part = tail.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (part == ".." || part.find(':') != std::string::npos) {
+            lua_pushnil(L);
+            return 1;
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+#ifdef _WIN32
+    std::replace(tail.begin(), tail.end(), '/', '\\');
+#endif
+    std::string mapped = m->loadingModDir_;
+    if (!mapped.empty() && mapped.back() != '/' && mapped.back() != '\\')
+        mapped.push_back(fs::path::preferred_separator);
+    mapped += tail;  // Deliberately preserve legacy path bytes for Lua's io.open.
+    lua_pushlstring(L, mapped.data(), mapped.size());
+    return 1;
+}
 // 取配置键，并解析 &field（经 speech 模板 → 实际字段名）。
 static std::string resolvedKey(LuaPluginManager* m, lua_State* L, int i) {
     std::string key = argStr(L, i);
@@ -650,7 +699,13 @@ static std::string luaAuditMod(LuaPluginManager* m) {
 }
 // __dnx_audit(action, detail)：bootstrap 包装 io/os/package 后回调审计。
 static int l_audit(lua_State* L) {
-    luaAudit(luaAuditMod(mgrOf(L)), argStr(L, 1), argStr(L, 2));
+    try {
+        luaAudit(luaAuditMod(mgrOf(L)), argStr(L, 1), argStr(L, 2));
+    } catch (const std::exception& e) {
+        DICE_LOG_ERROR("[lua] audit callback failed: {}", e.what());
+    } catch (...) {
+        DICE_LOG_ERROR("[lua] audit callback failed with an unknown error");
+    }
     return 0;
 }
 // sendMsg(text, groupId, userId)：插件主动发消息（经注入的 sender 路由适配器）。
@@ -886,7 +941,14 @@ static void luaAudit(const std::string& mod, const std::string& action, const st
     std::filesystem::create_directories("data/audit", ec);
     std::ofstream f("data/audit/lua_audit.jsonl", std::ios::app | std::ios::binary);
     if (!f) return;
-    nlohmann::json j{{"ts", luaAuditTs()}, {"mod", mod}, {"action", action}, {"detail", detail}};
+    // Audit is a diagnostic boundary and must never be able to terminate the
+    // host. Legacy plugins commonly pass mixed UTF-8/CP936 filenames here.
+    nlohmann::json j{
+        {"ts", luaAuditTs()},
+        {"mod", dnx_normalizeLuaText(mod)},
+        {"action", dnx_normalizeLuaText(action)},
+        {"detail", dnx_normalizeLuaText(detail)},
+    };
     f << j.dump() << '\n';
 }
 
@@ -959,7 +1021,8 @@ void LuaPluginManager::registerGlobals() {
         {"__dnx_roll", l_rollExpr},                                // pc:rollDice 引擎桥
         {"__dnx_fmt", l_formatTpl},                                // msg:format 模板桥
         {"__dnx_conf", l_confRaw},                                 // 通用配置读写（GameTable 等）
-        {"__dnx_audit", l_audit},                                // Lua 安全审计回调
+        {"__dnx_audit", l_audit},                                  // Lua 安全审计回调
+        {"__dnx_resolve_plugin_file", l_resolvePluginFile},         // 旧插件缓存路径重映射
         {nullptr, nullptr},
     };
     for (const luaL_Reg* f = fns; f->name; ++f) lua_register(state_, f->name, f->func);
@@ -1208,16 +1271,34 @@ end
     static const char* kAuditWrap = R"lua(
 if __dnx_audit then
   do
+    local function detail(...)
+      local values = {}
+      for i = 1, select('#', ...) do values[i] = tostring(select(i, ...)) end
+      return table.concat(values, ' ')
+    end
     local function wrap(t, k, act)
       local orig = t[k]
       if type(orig) == 'function' then
         t[k] = function(...)
-          __dnx_audit(act, table.concat({...}, ' '))
+          __dnx_audit(act, detail(...))
           return orig(...)
         end
       end
     end
-    wrap(io, 'open', 'io.open')
+    do
+      local orig = io.open
+      io.open = function(path, ...)
+        __dnx_audit('io.open', detail(path, ...))
+        local file, err, code = orig(path, ...)
+        if file ~= nil then return file, err, code end
+        local mapped = __dnx_resolve_plugin_file and __dnx_resolve_plugin_file(path)
+        if mapped ~= nil and mapped ~= path then
+          __dnx_audit('io.open.remap', detail(path, mapped))
+          return orig(mapped, ...)
+        end
+        return file, err, code
+      end
+    end
     wrap(io, 'popen', 'io.popen')
     wrap(os, 'execute', 'os.execute')
     wrap(os, 'remove', 'os.remove')

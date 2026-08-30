@@ -268,20 +268,22 @@
     "target_higher": "相手の信頼レベルが自分未満ではないため変更できません。"
   },
   "admin": {
-    "usage": "用法：.admin add/del <@ユーザー/QQ> で管理者を付与/剥奪；.admin list で一覧；.admin clock + <タスク名> HH:MM で Lua 定時タスクを追加、- <タスク名> で削除；.admin censor でセンシティブワードを管理。マスターのみ。",
+    "usage": "使い方：.admin add/del <@ユーザー/QQ> で管理者を付与/剥奪；.admin list で一覧；.admin clock でグローバル Lua またはチャット別プラグイン定時タスクを管理；.admin censor でセンシティブワードを管理。マスターのみ。",
     "added": "{user} に管理権限を付与しました √",
     "removed": "{user} の管理権限を剥奪しました √",
     "not_admin": "そのユーザーに管理権限はありません。",
     "list": "管理者一覧：\n{list}",
     "none": "（なし）",
-    "clock_usage": "用法：.admin clock + <タスク名> HH:MM；.admin clock - <タスク名>；.admin clock list。",
+    "clock_usage": "使い方：.admin clock + <Luaタスク名> HH:MM。または現在のグループ/個人チャットで .admin clock + <名前> HH:MM <プラグインコマンド>。削除は - <名前>、一覧は list。clock+task=H:MM にも対応。",
     "clock_added": "Lua タスク {task} を毎日 {time} に実行します √",
-    "clock_removed": "Lua タスク {task} を削除しました √",
+    "clock_command_added": "このチャットにプラグイン定時タスク {task} を追加しました。毎日 {time} に {command} を実行します √",
+    "clock_removed": "定時タスク {task} を削除しました √",
     "clock_not_found": "Lua プラグインにタスクが登録されていません：{task}",
+    "clock_schedule_not_found": "定時タスクが見つかりません：{task}",
     "clock_bad_time": "時刻が不正です。H:MM または HH:MM（0:00–23:59）を使用してください。",
-    "clock_list": "Lua 定時タスク：\n{list}",
-    "clock_none": "（Lua 定時タスクなし）",
-    "clock_error": "Lua 定時タスクの保存に失敗しました。",
+    "clock_list": "グローバル Lua タスク / このチャットのプラグインコマンドタスク：\n{list}",
+    "clock_none": "（定時タスクなし）",
+    "clock_error": "定時タスクの保存に失敗しました。",
     "notice_usage": "用法：.admin notice group/QQ <ID> +<レベル> または -<レベル>。",
     "notice_send_usage": "用法：.send notice <レベル> <メッセージ>。"
 

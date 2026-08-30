@@ -359,7 +359,7 @@ struct ScheduledTaskRow {
     int enabled = 1;
     std::string lastRun;     // daily: 上次触发日期 "YYYY-MM-DD"；interval/once: "YYYY-MM-DD HH:MM"
     std::string createdAt;
-    std::string action;      // 因果动作："send"(默认,发内容) | "leave"(退群,内容作告别语)
+    std::string action;      // 动作："send"(发内容) | "command"(插件指令) | "leave"(退群) | "lua"(内部任务)
     std::string condition;   // 因果条件（空=无条件）。如 "inactive>=7"：本群 ≥7 天无指令才触发
     std::string triggerType; // "daily"(默认,每日 cronTime+days) | "interval"(每 N 分钟) | "once"(onceDate+cronTime 执行一次后自动停用)
     int intervalMin = 0;     // interval: 间隔分钟
