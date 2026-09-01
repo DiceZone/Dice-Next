@@ -107,6 +107,66 @@ static inline std::string dnx_u8str(const std::filesystem::path& p) {
     return std::string(u.begin(), u.end());
 }
 
+constexpr const char* kLegacyWebSessionCookie = "dice_session";
+
+drogon::Cookie makeWebSessionCookie(const std::string& name,
+                                    const std::string& token,
+                                    int persistentSeconds = 0) {
+    drogon::Cookie cookie(name, token);
+    cookie.setPath("/");
+    cookie.setHttpOnly(true);
+    cookie.setSameSite(drogon::Cookie::SameSite::kLax);
+    if (persistentSeconds > 0) cookie.setMaxAge(persistentSeconds);
+    return cookie;
+}
+
+drogon::Cookie makeExpiredWebSessionCookie(const std::string& name) {
+    drogon::Cookie cookie = makeWebSessionCookie(name, "");
+    cookie.setMaxAge(0);
+    return cookie;
+}
+
+// Prefer the installation-specific cookie. During the upgrade window, accept
+// the old shared name as a fallback so an existing session can be migrated by
+// /api/auth/status without forcing an otherwise unnecessary login.
+bool findValidWebSession(dice::WebAuth& auth,
+                         const drogon::HttpRequestPtr& req,
+                         const std::string& sessionCookieName,
+                         std::string* token = nullptr,
+                         bool* usedLegacyCookie = nullptr) {
+    if (token) token->clear();
+    if (usedLegacyCookie) *usedLegacyCookie = false;
+
+    const std::string current = req->getCookie(sessionCookieName);
+    if (!current.empty() && auth.validToken(current)) {
+        if (token) *token = current;
+        return true;
+    }
+    if (sessionCookieName == kLegacyWebSessionCookie) return false;
+
+    const std::string legacy = req->getCookie(kLegacyWebSessionCookie);
+    if (!legacy.empty() && auth.validToken(legacy)) {
+        if (token) *token = legacy;
+        if (usedLegacyCookie) *usedLegacyCookie = true;
+        return true;
+    }
+    return false;
+}
+
+// Revoke every session token from this request that belongs to the current
+// instance. A same-host legacy cookie owned by another instance is untouched
+// because it cannot validate against this instance's token store.
+void revokeRequestWebSessions(dice::WebAuth& auth,
+                              const drogon::HttpRequestPtr& req,
+                              const std::string& sessionCookieName) {
+    const std::string current = req->getCookie(sessionCookieName);
+    if (!current.empty() && auth.validToken(current)) auth.revoke(current);
+
+    if (sessionCookieName == kLegacyWebSessionCookie) return;
+    const std::string legacy = req->getCookie(kLegacyWebSessionCookie);
+    if (!legacy.empty() && legacy != current && auth.validToken(legacy)) auth.revoke(legacy);
+}
+
 /// Request a restart.  dice-next.exe waits for this process to disappear — the
 /// port and the single-instance lock are only free then — applies anything
 /// staged under updates/pending, starts the new core and exits again.  A build
@@ -2464,16 +2524,18 @@ static int realMain(int argc, char* argv[]) {
     app.setClientMaxMemoryBodySize(128 * 1024 * 1024);
 
     // ── WebUI 登录鉴权 ───────────────────────────────────
-    dice::WebAuth::instance().configure(configMgr.get<std::string>("webui/password", ""),
+    auto& webAuth = dice::WebAuth::instance();
+    webAuth.configure(configMgr.get<std::string>("webui/password", ""),
         std::filesystem::path(configPath) / "webui_sessions.json",
         configMgr.get<std::string>("server/api_key", ""));
+    const std::string sessionCookieName = webAuth.sessionCookieName();
     // H2: X-API-Key 凭据（服务间/脚本调用）。仅配置了 key 时生效。
     const std::string apiKey = configMgr.get<std::string>("server/api_key", "");
     const bool diceFlatsManaged = isDiceFlatsManagedMode();
 
     // 前置拦截：设了口令时，/api/* 需有效会话 Cookie（放行登录/状态查询与静态文件）。
     app.registerPreHandlingAdvice(
-        [apiKey, diceFlatsManaged](const drogon::HttpRequestPtr& req,
+        [apiKey, diceFlatsManaged, sessionCookieName](const drogon::HttpRequestPtr& req,
            drogon::AdviceCallback&& stop, drogon::AdviceChainCallback&& next) {
             const std::string& path = req->path();
             if (path.rfind("/api/", 0) != 0 ||                       // 静态文件
@@ -2495,7 +2557,7 @@ static int realMain(int argc, char* argv[]) {
                 resp->setBody("{\"code\":401,\"message\":\"need_setup\",\"need_setup\":true}");
                 stop(resp); return;
             }
-            if (auth.validToken(req->getCookie("dice_session"))) { next(); return; }
+            if (findValidWebSession(auth, req, sessionCookieName)) { next(); return; }
 
             auto resp = drogon::HttpResponse::newHttpResponse();
             resp->setStatusCode(drogon::k401Unauthorized);
@@ -2530,16 +2592,30 @@ static int realMain(int argc, char* argv[]) {
 
         // 是否需要登录 + 当前会话是否已登录。
         app.registerHandler("/api/auth/status",
-            [jResp](const drogon::HttpRequestPtr& req,
+            [jResp, sessionCookieName](const drogon::HttpRequestPtr& req,
                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
-                bool required = dice::WebAuth::instance().hasPassword();
-                bool needSetup = !required;
-                bool authed = required && dice::WebAuth::instance().validToken(req->getCookie("dice_session"));
-                cb(jResp({{"code", 0}, {"message", "ok"}, {"data", {{"required", required}, {"authed", authed}, {"need_setup", needSetup}}}}));
+                auto& auth = dice::WebAuth::instance();
+                const bool required = auth.hasPassword();
+                const bool needSetup = !required;
+                std::string token;
+                bool usedLegacyCookie = false;
+                const bool authed = required && findValidWebSession(
+                    auth, req, sessionCookieName, &token, &usedLegacyCookie);
+                auto resp = jResp({{"code", 0}, {"message", "ok"},
+                    {"data", {{"required", required}, {"authed", authed},
+                              {"need_setup", needSetup}}}});
+                if (authed && usedLegacyCookie) {
+                    // Preserve the remaining 30-day lifetime when migrating a
+                    // trusted cookie; memory-only sessions stay session cookies.
+                    resp->addCookie(makeWebSessionCookie(
+                        sessionCookieName, token,
+                        auth.persistentSecondsRemaining(token)));
+                }
+                cb(resp);
             }, {drogon::Get});
         // 登录：校验口令 → 颁发 token，写 Cookie。
         app.registerHandler("/api/auth/login",
-            [jResp, &configMgr](const drogon::HttpRequestPtr& req,
+            [jResp, &configMgr, sessionCookieName](const drogon::HttpRequestPtr& req,
                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 try {
                     // M1: 登录限速（同一 IP 60 秒内最多 5 次失败）。
@@ -2584,6 +2660,10 @@ static int realMain(int argc, char* argv[]) {
                                 }
                                 dice::WebAuth::instance().setPassword(newPassword);
                             }
+                            // Rotate any current-instance token presented by this
+                            // browser, including the legacy cookie during upgrade.
+                            revokeRequestWebSessions(
+                                dice::WebAuth::instance(), req, sessionCookieName);
                             const bool trustDevice = j.value("trust_device", false);
                             bool trustedPersisted = true;
                             std::string token = dice::WebAuth::instance().issueToken(trustDevice, &trustedPersisted);
@@ -2592,14 +2672,12 @@ static int realMain(int argc, char* argv[]) {
                                 return;
                             }
                             auto resp = jResp({{"code", 0}, {"message", "ok"}, {"data", {{"authed", true}}}});
-                        drogon::Cookie ck("dice_session", token);
-                        ck.setPath("/"); ck.setHttpOnly(true);
-                        // Explicitly persist the cookie across browser and
-                        // program restarts. Lax is appropriate for a local
-                        // management panel and remains compatible with HTTP.
-                        ck.setSameSite(drogon::Cookie::SameSite::kLax);
-                        if (trustDevice) ck.setMaxAge(30 * 24 * 3600);
-                        resp->addCookie(ck);
+                        // Explicitly persist trusted login across browser and
+                        // program restarts. The per-installation cookie name
+                        // prevents another localhost port from replacing it.
+                        resp->addCookie(makeWebSessionCookie(
+                            sessionCookieName, token,
+                            trustDevice ? 30 * 24 * 3600 : 0));
                         cb(resp);
                     } else {
                         { std::lock_guard<std::mutex> lk(sLoginMu); const long long now = static_cast<long long>(std::time(nullptr)); auto& f = sLoginFails[ip]; if (now - f.second >= 60) f = {0, now}; ++f.first; }
@@ -2609,7 +2687,7 @@ static int realMain(int argc, char* argv[]) {
             }, {drogon::Post});
         // 首次设置管理口令（仅空口令时可用；成功后自动登录）。
         app.registerHandler("/api/auth/setup",
-            [jResp, &configMgr](const drogon::HttpRequestPtr& req,
+            [jResp, &configMgr, sessionCookieName](const drogon::HttpRequestPtr& req,
                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 try {
                     if (dice::WebAuth::instance().hasPassword()) {
@@ -2630,21 +2708,22 @@ static int realMain(int argc, char* argv[]) {
                         return;
                     }
                     auto resp = jResp({{"code", 0}, {"message", "ok"}, {"data", {{"authed", true}}}});
-                    drogon::Cookie ck("dice_session", token);
-                    ck.setPath("/"); ck.setHttpOnly(true);
-                    ck.setSameSite(drogon::Cookie::SameSite::kLax);
-                    if (trustDevice) ck.setMaxAge(30 * 24 * 3600);
-                    resp->addCookie(ck);
+                    resp->addCookie(makeWebSessionCookie(
+                        sessionCookieName, token,
+                        trustDevice ? 30 * 24 * 3600 : 0));
                     cb(resp);
                 } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }
             }, {drogon::Post});
 
         // 退出：吊销当前 token。
         app.registerHandler("/api/auth/logout",
-            [jResp](const drogon::HttpRequestPtr& req,
+            [jResp, sessionCookieName](const drogon::HttpRequestPtr& req,
                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
-                dice::WebAuth::instance().revoke(req->getCookie("dice_session"));
-                cb(jResp({{"code", 0}, {"message", "ok"}}));
+                revokeRequestWebSessions(
+                    dice::WebAuth::instance(), req, sessionCookieName);
+                auto resp = jResp({{"code", 0}, {"message", "ok"}});
+                resp->addCookie(makeExpiredWebSessionCookie(sessionCookieName));
+                cb(resp);
             }, {drogon::Post});
         // 设置/修改/清除 WebUI 口令（已登录态下才可达——前置拦截已保证）。空=关闭鉴权。
         app.registerHandler("/api/system/webui-auth",

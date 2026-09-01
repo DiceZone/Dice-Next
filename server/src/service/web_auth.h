@@ -11,6 +11,8 @@
 #include <sstream>
 #include <iomanip>
 #include <cctype>
+#include <cstdint>
+#include <limits>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <nlohmann/json.hpp>
@@ -23,6 +25,57 @@ namespace dice {
 class WebAuth {
 public:
     static WebAuth& instance() { static WebAuth a; return a; }
+
+    // Cookies are scoped by host and path, not by TCP port. Derive a stable
+    // per-installation name from the sessions file so two local instances on
+    // different ports cannot overwrite each other's browser session. The port
+    // is deliberately excluded: changing it must not invalidate trusted login.
+    static std::string cookieNameForSessionsPath(const std::filesystem::path& sessionsPath) {
+        if (sessionsPath.empty()) return "dice_session_default";
+
+        std::error_code ec;
+        std::filesystem::path normalized = std::filesystem::absolute(sessionsPath, ec);
+        if (ec) {
+            ec.clear();
+            normalized = sessionsPath.lexically_normal();
+        }
+        const auto canonical = std::filesystem::weakly_canonical(normalized, ec);
+        if (!ec) normalized = canonical;
+
+        const auto utf8 = normalized.generic_u8string();
+        std::string material(utf8.begin(), utf8.end());
+#ifdef _WIN32
+        // Windows paths are case-insensitive. Keep the same cookie name if only
+        // the spelling/case of the installation path changes between launches.
+        for (char& c : material) {
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        }
+#endif
+
+        unsigned char digest[EVP_MAX_MD_SIZE]{};
+        unsigned int digestSize = 0;
+        if (EVP_Digest(material.data(), material.size(), digest, &digestSize,
+                       EVP_sha256(), nullptr) == 1 && digestSize >= 12) {
+            std::ostringstream out;
+            out << "dice_session_" << std::hex << std::setfill('0');
+            for (size_t i = 0; i < 12; ++i)
+                out << std::setw(2) << static_cast<unsigned int>(digest[i]);
+            return out.str();
+        }
+
+        // OpenSSL failure is not expected, but cookie isolation must still be
+        // deterministic rather than silently falling back to one shared name.
+        std::uint64_t h64 = UINT64_C(14695981039346656037);
+        std::uint32_t h32 = UINT32_C(2166136261);
+        for (const unsigned char c : material) {
+            h64 = (h64 ^ c) * UINT64_C(1099511628211);
+            h32 = (h32 ^ c) * UINT32_C(16777619);
+        }
+        std::ostringstream out;
+        out << "dice_session_" << std::hex << std::setfill('0')
+            << std::setw(16) << h64 << std::setw(8) << h32;
+        return out.str();
+    }
 
     // New passwords are deliberately portable across keyboard layouts and
     // config tooling. Login remains unrestricted so legacy passwords continue
@@ -48,6 +101,7 @@ public:
         password_ = password;
         apiKey_ = apiKey;
         sessionsPath_ = sessionsPath;
+        sessionCookieName_ = cookieNameForSessionsPath(sessionsPath_);
         tokens_.clear();
         loadTrustedLocked();
     }
@@ -72,6 +126,21 @@ public:
         if (password_.empty()) return false;   // 未设口令 = 无有效会话（前端走 setup 流程）
         const auto it = tokens_.find(token);
         return it != tokens_.end() && (it->second == 0 || it->second > std::time(nullptr));
+    }
+    std::string sessionCookieName() const {
+        std::lock_guard<std::mutex> lk(m_);
+        return sessionCookieName_;
+    }
+    // Remaining lifetime for a persisted trusted-device token. A return value
+    // of zero means a browser-session token (or an invalid/expired token).
+    int persistentSecondsRemaining(const std::string& token) const {
+        std::lock_guard<std::mutex> lk(m_);
+        const auto it = tokens_.find(token);
+        const auto now = std::time(nullptr);
+        if (it == tokens_.end() || it->second <= now) return 0;
+        const auto remaining = it->second - now;
+        const auto limit = static_cast<std::time_t>((std::numeric_limits<int>::max)());
+        return static_cast<int>(remaining > limit ? limit : remaining);
     }
     /// X-API-Key 校验（服务间/脚本调用凭据，与 server/api_key 常量时间比较）。
     bool checkApiKey(const std::string& key) const {
@@ -187,6 +256,7 @@ private:
     std::string password_;
     std::string apiKey_;
     std::filesystem::path sessionsPath_;
+    std::string sessionCookieName_ = "dice_session_default";
     std::unordered_map<std::string, std::time_t> tokens_; // 0 = browser session only
 };
 

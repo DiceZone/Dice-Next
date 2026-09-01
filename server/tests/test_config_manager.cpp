@@ -89,16 +89,52 @@ TEST(WebAuth, TrustedDeviceSessionSurvivesReconfigure) {
 
     auto& auth = WebAuth::instance();
     auth.configure("test-password", sessions);
+    const std::string cookieName = auth.sessionCookieName();
     const std::string token = auth.issueToken(true);
+    const std::string browserSessionToken = auth.issueToken(false);
     ASSERT_TRUE(fs::exists(sessions));
     ASSERT_TRUE(auth.validToken(token));
+    ASSERT_TRUE(auth.persistentSecondsRemaining(token) > 0);
+    ASSERT_TRUE(auth.validToken(browserSessionToken));
+    ASSERT_EQ(auth.persistentSecondsRemaining(browserSessionToken), 0);
 
     // configure() represents a server restart: all memory-only sessions are
     // gone, while the trusted token must be recovered from disk.
     auth.configure("test-password", sessions);
+    ASSERT_EQ(auth.sessionCookieName(), cookieName);
     ASSERT_TRUE(auth.validToken(token));
+    ASSERT_FALSE(auth.validToken(browserSessionToken));
     auth.revoke(token);
     ASSERT_FALSE(auth.validToken(token));
+    auth.configure("", {});
+    fs::remove_all(root, ec);
+}
+
+TEST(WebAuth, SessionCookieNamesAreStableAndSeparateInstallations) {
+    const fs::path root = temporaryConfigRoot("web_auth_cookie");
+    const fs::path sessionsA = root / "instance-a" / "config" / "webui_sessions.json";
+    const fs::path sessionsB = root / "instance-b" / "config" / "webui_sessions.json";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(sessionsA.parent_path(), ec);
+    ASSERT_FALSE(static_cast<bool>(ec));
+    fs::create_directories(sessionsB.parent_path(), ec);
+    ASSERT_FALSE(static_cast<bool>(ec));
+
+    const std::string cookieA = WebAuth::cookieNameForSessionsPath(sessionsA);
+    const std::string cookieANormalized = WebAuth::cookieNameForSessionsPath(
+        sessionsA.parent_path() / ".." / "config" / "webui_sessions.json");
+    const std::string cookieB = WebAuth::cookieNameForSessionsPath(sessionsB);
+    ASSERT_TRUE(cookieA.rfind("dice_session_", 0) == 0);
+    ASSERT_EQ(cookieA, cookieANormalized);
+    ASSERT_NE(cookieA, cookieB);
+
+    auto& auth = WebAuth::instance();
+    auth.configure("test-password", sessionsA);
+    ASSERT_EQ(auth.sessionCookieName(), cookieA);
+    auth.configure("test-password", sessionsB);
+    ASSERT_EQ(auth.sessionCookieName(), cookieB);
+
     auth.configure("", {});
     fs::remove_all(root, ec);
 }
