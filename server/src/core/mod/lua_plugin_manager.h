@@ -57,6 +57,13 @@ public:
                             const std::string& gid, const std::string& nick,
                             const std::string& groupCard, bool isPrivate,
                             int trust = 0, const std::string& platform = "");
+    // Side-effect-free exact trigger probe used before compact core parsers.
+    // Search-pattern rules are intentionally excluded: ordinary chatter must not
+    // claim a command route merely because it contains a keyword.
+    bool hasCommandTrigger(const std::string& text, const std::string& uid,
+                           const std::string& gid, const std::string& nick,
+                           const std::string& groupCard, bool isPrivate,
+                           int trust = 0, const std::string& platform = "");
 
     // 插件分群启停（地基）：派发前问宿主「此 mod 在该群是否启用」。id="lua:<mod名>"。
     using GroupGateFn = std::function<bool(const std::string& platform, const std::string& group, const std::string& pluginId)>;
@@ -266,11 +273,13 @@ private:
         int  echoRef = 0;                    // echo 为函数时的 registry 引用
         std::string echoScript;              // echo={lua="name"} 时的脚本名（跑 script/<name>.lua）
         bool maySleep = false;                // 单文件源码使用 sleepTime → 以协程调用
+        std::string legacySourceFile;         // data/plugin 单文件：每次调用重新执行源码
+        std::string legacyFunctionName;       // msg_order 指向的全局函数名（位于独立 _ENV）
     };
 
     struct LegacyTask {
         std::string name, modName, modDir;
-        int functionRef = 0;
+        std::string sourceFile, functionName;
     };
     struct PendingCoroutine {
         uint64_t generation = 0;

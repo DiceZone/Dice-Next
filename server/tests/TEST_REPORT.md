@@ -1,130 +1,162 @@
-# Dice!Next C#28-B/C#29/C#30 — Test Report
+# Dice!Next command and plugin compatibility report
 
-## Summary
-- **Total Tests**: 95 test cases across 6 test files
-- **Test Modules**: CooldownManager, CounterStore, CausalRuleManager, PersonaManager, I18n Persona, Import V2
-- **Routing Decision**: NoOne (no blocking source bugs found)
-- **Test Method**: Static code analysis + logic verification + compilable test suite
+Date: 2026-09-01
 
-## Test Files Created
+## Outcome
 
-| File | Tests | Module |
-|------|-------|--------|
-| `test_framework.h` | — | Minimal header-only test framework |
-| `test_cooldown_manager.cpp` | 13 | C#29 CooldownManager |
-| `test_counter_store.cpp` | 18 | C#29 CounterStore |
-| `test_causal_rule_manager.cpp` | 28 | C#29 CausalRuleManager |
-| `test_persona_manager.cpp` | 22 | C#28-B PersonaManager |
-| `test_i18n_persona.cpp` | 17 | C#28-B I18n lookup chain + .rpmode |
-| `test_import_v2.cpp` | 28 | C#30 Import deepening |
-| `CMakeLists.txt` | — | Build configuration |
-| `test_main.cpp` | — | Entry point |
+The Release server builds successfully. The automated core suite passes all 280
+test cases (1094/1094 assertions). The Lua compatibility suite passes all 9 test
+cases (68/68 assertions without external files), including 123/123 assertions
+when the user-provided real plugin corpus is mounted.
 
-## Test Coverage Details
+The real corpus includes:
 
-### C#29 — CausalRuleManager (28 tests)
-- **Text matching**: keyword (exact, case-insensitive), prefix, search, regex (valid + invalid)
-- **AND/OR logic**: OR matches any, AND matches all, empty conditions always match
-- **Scope**: global (all), group (specific IDs), user (specific IDs), any-group (empty IDs)
-- **Filters**: user whitelist/blacklist, group whitelist
-- **Counter actions**: add (with reply interpolation), set, reset, counter_check condition (all 6 operators)
-- **Cooldown integration**: per-user, per-group, global isolation; dryRun skip; zero cooldown never blocks
-- **Priority**: higher priority matches first
-- **Disabled rules**: don't match
-- **JSON serialization**: round-trip toJSON/fromJSON with all condition/action types
-- **CRUD**: add+get, delete, toggle, update, delete-removes-counters
+- `ResourceSearchEngine.lua`, including cache reload and a detailed resource query.
+- The supplied 求签 plugin directory.
+- DailyNews load and scheduled `task_call news` execution, including its two
+  asynchronous replies.
 
-### C#29 — CooldownManager (13 tests)
-- Not cooling before trigger
-- Cooling after trigger
-- Zero/negative cooldown never cools
-- Different keys independent
-- Per-user/per-group/global key isolation
-- Clear single key, clear all
-- remainingMs before/after trigger, zero cooldown
-- Re-trigger resets timer
+求签 and DailyNews remain ordinary third-party plugins. They are not treated as
+built-in/systemized features and are not blocked.
 
-### C#29 — CounterStore (18 tests)
-- get returns 0 for missing key
-- set + get, set overwrites
-- add returns new value, negative delta, starts from zero
-- reset deletes entry, no-op for nonexistent
-- listAll returns all, empty returns empty
-- listByRule returns matching only, no match returns empty
-- deleteByRule removes all matching, no match is no-op
-- Scope isolation: per-user, per-group, global
-- Key parsing: ruleId, counterName, scope, scopeId
+## Fixed regressions
 
-### C#28-B — PersonaManager (22 tests)
-- Template CRUD: create, duplicate name fails, empty name fails, get by name, list, update meta, delete
-- Entry CRUD: set+get, upsert, delete, count, keys (sorted)
-- Copy template: with entries, nonexistent source fails, duplicate name fails
-- Active persona: default zero, set/get global, set/get group, group overrides global, set to zero
-- Import/Export: export, import, invalid JSON fails, round-trip
-- Delete removes entries
-- LoadIntoI18n: clears and injects, zero clears
+### Command routing versus plugin commands
 
-### C#28-B — I18n Persona + .rpmode (17 tests)
-- setPersona/getActivePersonaId
-- setPersonaBundles for locale, clear
-- **Lookup chain**: override > persona > bundle > fallback
-- Override takes precedence over persona
-- Clear override falls back to persona
-- Empty/non-object bundle not injected
-- Locale isolation
-- Interpolation works in persona layer
-- **.rpmode routing**: correctly parsed, no conflict with .rp
-- **.rpmode permissions**: show/list/info=everyone, set/off/default=admin, create/copy/del=master
+Enabled JS and Lua plugins now get exact command-word ownership before legacy
+compact prefix parsers. This prevents a plugin command such as `.ram` from being
+consumed as core `.ra` with an attached argument.
 
-### C#30 — Import V2 (28 tests)
-- ImportResult: default values, toJSON, empty toJSON
-- ImportOptions: default overwrite=false
-- validateDeckJson: valid object, empty object, not object, value not array, invalid JSON, empty content, multiple keys, mixed valid/invalid
-- utf8Truncate: no truncation, ASCII, exact length, multi-byte UTF-8, char boundary
-- sanitizeJsonControls: no controls, escapes \n/\t/\r, doesn't escape outside strings, handles escaped quotes
-- importDecks: valid deck, non-JSON skipped, invalid JSON fails, non-object fails, skip existing (overwrite=false), overwrite existing, no dir returns empty, multiple mixed
-- importMods: valid mod, no dir returns empty
-- Backward compat: ImportResult JSON fields, original Dice! deck format accepted
+The exception is an explicit list of real core command names and documented
+aliases. Those continue to be handled by Dice!Next even if a plugin registers
+the same name. The list now includes the previously missed legacy forms:
 
-## Static Code Analysis Findings
+- `.h`, `.rsh`, `.rhs`, `.rah`, `.rch`, and `.drawh`.
+- `.coc6`, `.coc7`, `.cocd`, `.coc6d`, `.coc7d`, and their historical trailing-`s` forms.
+- `.mrrp` and `.zrrp`.
+- `.boton`, `.botoff`, and the original black/white-list commands.
+- Chinese aliases for long rest, death saves, and favor.
+- Every audited original `.strXXX` key in the legacy message-key map.
 
-### No Blocking Bugs Found ✅
+The check is exact. It does not reserve broad prefixes such as `ra*`, `game*`,
+or `str*`, so unrelated commands such as `.ram`, `.gameHelper`, and
+`.strike` remain available to plugins. Per-group plugin enable/disable state is
+also respected while probing ownership.
 
-All core logic paths have been verified correct through code review:
+### Roll parsing and expression results
 
-1. **CausalRuleManager.matchAndExecute()** — First-match-wins with priority desc sort is correct
-2. **evalConditions()** — AND/OR logic with empty conditions returning true is correct
-3. **matchText()** — All 4 match types (keyword/prefix/search/regex) work as expected
-4. **CooldownManager** — Uses steady_clock, correct key isolation
-5. **CounterStore** — CRUD + key parsing all correct
-6. **PersonaManager** — CRUD, copy, per-group switching, import/export all correct
-7. **I18n.tr()** — Lookup chain (override→persona→bundle→fallback) matches PRD spec
-8. **tryHandlePersona()** — .rpmode prefix check correctly avoids .rp conflict
-9. **Permission levels** — show/list/info=everyone, set/off/default=admin, create/copy/del=master
-10. **validateDeckJson()** — Correctly validates deck format
-11. **importDecks/importMods** — Skip/overwrite logic correct, non-JSON files skipped
+- Compact default-die reasons work again: `.rd测试` and `.rdtest` both roll the
+  default die and retain the attached reason.
+- A spaced DiceScript identifier remains distinct: `.r dtest` is evaluated as
+  an expression rather than being silently rewritten as a reason.
+- Multi-roll syntax `.r 2#d100` performs two independent rolls.
+- DiceScript string, null, and array results no longer escape as `null` or an
+  invalid roll. A roll command now requires an integer or floating-point result.
+- Composite DiceScript details include the final value. For example,
+  `[1,2,3].sum()+2d1` renders a complete trace ending in `=8`.
+- `.dx5c10测试` and `.ww5测试` retain their attached reason without requiring a
+  space.
+- `.dx/.rdx` accept a trailing `+N` or `-N` final modifier. It is applied once
+  after all Double Cross exploding rounds; malformed repeated modifiers are
+  rejected instead of silently truncated. `.ww` parsing is unchanged.
 
-### Minor Notes (Non-blocking)
+One important intentional behavior was retained: in enhanced mode,
+`[1,2,3]` is accepted by the preceding OneDice V1 engine and evaluates to
+`3`, because OneDice defines a tuple's scalar value as its final element.
+In DiceScript-only mode the same bare array is correctly rejected as
+non-numeric. This is engine-specific behavior, not a null-result regression.
 
-1. **CounterStore::add() race condition** (Low): `add()` calls `get()` then `set()` separately, not atomically. Between calls, another thread could modify the counter. Acceptable for P0 in-memory approach.
+### Initiative and localization
 
-2. **CounterCheck scope hardcoded** (Low): `evalCondition` for CounterCheck always uses "per-user" scope. If a counter was set with "per-group" or "global" scope, the check won't find it. This is a design simplification, not a bug.
+Multi-entry initiative (`.ri N#name`) now has complete localized output and
+localized lower/upper-bound errors. The real HTTP message chain was exercised
+for `zh-Hans`, `zh-Hant`, `en`, and `ja`; no raw i18n keys or empty strings
+were returned. A recursive bundle test also verifies that all four built-in
+locale files expose the same leaf-key set.
 
-3. **Reply action ordering** (Low): In `executeActions()`, if a reply action comes before counter actions in the list, `{counter:name}` placeholders for those later counters won't be resolved. Users should order actions: counters first, then reply. Documented behavior.
+### SealDice JS compatibility
 
-4. **toggleRule comment mismatch** (Cosmetic): Header comment says "Returns the new state (or -1 on error)" but method returns `bool`. Comment is misleading; code is correct.
+- `seal.format(ctx, ...)` resolves standard `$t...` temporary variables from
+  the current message context, including player, raw IDs, group, platform,
+  game/rule system, date/time, privilege, and log state fields.
+- `seal.getEndPoints()` returns endpoint snapshots rather than an empty
+  placeholder array.
+- Group name and active rule system are supplied by the host.
+- `ctx.endPoint.userId` and `$t骰子帐号` use the account that actually received
+  the message, rather than a process-wide fallback; this is covered with a
+  multi-account-shaped message fixture.
+- `$t个人骰子面数`, `$t群组骰子面数`, and `$t当前骰子面数` read the same
+  personal `.set` override and group/rule default used by core rolls.
+- JS command ownership checks honor per-group plugin state.
 
-5. **Per-group persona I18n reload** (Design note): `setActivePersona()` with non-empty groupId doesn't call `loadIntoI18n()`. Per-group persona switching needs to be handled at message processing time (checking getActivePersona(groupId) before each message). This is a design pattern, not a bug — the message pipeline handles this.
+### Lua compatibility
 
-## Build Instructions
+- Exact Lua command-trigger discovery is side-effect free and honors group-only,
+  trust, and per-group plugin gates.
+- A Lua plugin command that uses an `@` mention as its target/argument is allowed
+  through the same pre-router exception as a SealDice JS command; messages that
+  explicitly address another registered dice bot remain ignored.
+- Legacy sibling `loadLua`, load-time HTTP, `sleepTime`, `task_call`, mixed
+  UTF-8/CP936 replies, invalid audit paths, and CP936 resource filenames under
+  the Windows CRT UTF-8 locale are covered.
+- Legacy single-file plugins now receive a fresh environment for each command
+  and scheduled task, matching original Dice! behavior. Top-level HTTP data is
+  therefore refreshed for DailyNews instead of being frozen at plugin load.
+  Sibling `loadLua` scripts share that invocation environment without leaking
+  globals into later invocations or other plugins.
+- ResourceSearchEngine's old CP936 `QQBot/index` paths and stale absolute cache
+  paths are remapped only below the active plugin directory. `.法术 reload`, a
+  detailed spell query, and scheduled 求签/DailyNews callbacks pass with the
+  real plugin files.
 
-```bash
-cd server
-cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-cmake --build build --target dice-next-tests
-./build/tests/dice-next-tests
+### Other corrections covered by this run
+
+- The bundled JS deck example reads `seal.deck.draw()`'s result object correctly
+  and no longer registers the same extension twice.
+- NPC automatic recalculation has localized direct-change fallback text and
+  includes HP/SAN/MP changes.
+- Previously misplaced legacy i18n sections are restored to their top-level
+  keys.
+
+## Real service-chain checks
+
+An isolated Release instance was started on loopback and exercised through
+`/api/test/message`, which uses the same command router and plugin fallback
+chain as live messages. Representative checks:
+
+| Input | Observed behavior |
+| --- | --- |
+| `.rd测试`, `.rdtest` | Default D100 roll with the attached reason |
+| `.r 2#d100` | Two independent results |
+| `.r "abc"` in DiceScript-only mode | Localized non-numeric error |
+| `.r [1,2,3].sum()+2d1` | Numeric result with full `=8` trace |
+| `.dx5c10测试`, `.ww5测试` | Roll succeeds and reason is retained |
+| `.dx5c10+3测试` | Final value is the Double Cross tally plus 3; reason retained |
+| `.rdx7c7-10测试` | Legacy alias applies -10 once after all exploding rounds |
+| `.ww5c8-3测试` | `-3测试` remains the reason; WW semantics are unchanged |
+| `.ri 3#` | Three independently rolled, numbered initiative entries |
+| `.ram` with a probe plugin | Plugin response wins |
+| `.ra 100`, `.mrrp`, `.strRollDice show` with conflicting probe commands | Core response wins |
+| `.user state`, `.cloud`, `.coc6d` | Non-empty compatible core response |
+
+The isolated runtime and probe plugin were removed after the service shut down
+cleanly.
+
+## Verification commands
+
+```powershell
+cmake --build server/build --target dice-next-server --config Release -j 2
+server/build/tests/Release/dice-next-tests.exe
+
+$env:DICENEXT_LEGACY_RESOURCE_PLUGIN = '<ResourceSearchEngine.lua>'
+$env:DICENEXT_LEGACY_FORTUNE_PLUGIN = '<求签 plugin directory>'
+server/build/tests/Release/dice-next-lua-tests.exe
 ```
 
-## Conclusion
+## Remaining boundary
 
-**Routing Decision: NoOne** — No source code bugs requiring engineer intervention. All 95 test cases pass based on static code analysis and logic verification. The test suite is ready for compilation and execution once the build environment is configured.
+This run verifies parsing, command routing, plugin execution, localization, and
+the real HTTP message pipeline. It does not connect to a live OneBot, QQ
+Official, Discord, or KOOK account, so platform network delivery and
+platform-side rendering still require release-candidate smoke testing with real
+bot credentials.

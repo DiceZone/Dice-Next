@@ -65,16 +65,49 @@ seal.ext.register(ext);
 const passive = seal.ext.newCmdItemInfo();
 passive.name = 'passive';
 ext.cmdMap.passive = passive;
+const temp = seal.ext.newCmdItemInfo();
+temp.name = 'temp';
+temp.solve = (ctx, msg) => {
+  seal.replyToSender(ctx, msg, seal.format(
+    ctx, '{$t玩家_RAW}|{$t游戏模式}|{$t群号}|{$t群名}|{$t平台}|{$t消息类型}|' +
+         '{$t骰子帐号}|{$t个人骰子面数}|{$t群组骰子面数}|{$t当前骰子面数}') +
+         `|${ctx.endPoint.userId}`);
+  return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap.temp = temp;
 )JS";
         plugin.close();
 
         JsPluginManager manager;
         ASSERT_TRUE(manager.init());
         ASSERT_EQ(manager.loadDir(root.string()), 1);
+        JsPluginManager::EndpointInfo endpoint;
+        endpoint.id = "adapter-1";
+        endpoint.nickname = "Dice";
+        endpoint.userId = "bot-1";
+        endpoint.platform = "QQ";
+        endpoint.protocolType = "onebot";
+        endpoint.state = 1;
+        endpoint.groupNum = 3;
+        manager.setEndpointProvider([endpoint]() {
+            return std::vector<JsPluginManager::EndpointInfo>{endpoint};
+        });
+        const auto endpointText = manager.evalString("JSON.stringify(seal.getEndPoints())");
+        ASSERT_TRUE(endpointText.has_value());
+        const auto endpointJson = json::parse(*endpointText);
+        ASSERT_EQ(endpointJson.size(), static_cast<size_t>(1));
+        ASSERT_EQ(endpointJson[0]["id"].get<std::string>(), std::string("adapter-1"));
+        ASSERT_EQ(endpointJson[0]["platform"].get<std::string>(), std::string("QQ"));
+        ASSERT_EQ(endpointJson[0]["groupNum"].get<int>(), 3);
+        manager.setGroupSystemResolver([](const std::string&, const std::string&,
+                                          const std::string&) { return std::string("dnd5e"); });
+        manager.setDiceSidesResolver([](const Message&) {
+            return std::array<int, 3>{20, 30, 20};
+        });
 
         Message msg;
         msg.id = "raw-42";
-        msg.platform = "onebot";
+        msg.platform = "onebot_v11";
         msg.adapterId = "adapter-1";
         msg.selfId = "bot-1";
         msg.atList = {"bot-1", "other"};
@@ -86,7 +119,15 @@ ext.cmdMap.passive = passive;
         msg.rawContent = "RAW-CONTENT";
         msg.timestamp = 123456;
         msg.extra = json{{"guild_id", "guild-7"}, {"channel_id", "channel-9"},
+                         {"groupName", "Camel Group"},
                          {"segments", json::array({json{{"type", "text"}, {"data", "x"}}})}};
+
+        manager.setGroupGate([](const std::string&, const std::string& group,
+                                const std::string&) { return group != "blocked"; });
+        ASSERT_TRUE(manager.hasCommand(msg, "probe"));
+        Message blocked = msg;
+        blocked.targetId = "blocked";
+        ASSERT_FALSE(manager.hasCommand(blocked, "probe"));
 
         const auto received = manager.handleMessageReceived(msg);
         ASSERT_EQ(received.reply,
@@ -98,6 +139,11 @@ ext.cmdMap.passive = passive;
         const auto command = manager.handle(msg, "probe abc");
         ASSERT_EQ(command.reply,
                   std::string("solve:abc\ncommand-hook:probe:RAW-CONTENT:true:true"));
+
+        const auto tempReply = manager.handle(msg, "temp");
+        ASSERT_EQ(tempReply.reply,
+                  std::string("Tester|dnd5e|channel-9|Camel Group|QQ|group|bot-1|20|30|20|bot-1"
+                              "\ncommand-hook:temp:RAW-CONTENT:true:true"));
 
         const auto builtin = manager.handleCommandReceived(msg, "roll reason");
         ASSERT_EQ(builtin.reply,

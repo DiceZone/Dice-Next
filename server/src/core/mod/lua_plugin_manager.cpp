@@ -142,10 +142,10 @@ static std::string dnx_normalizeLuaText(const std::string& s) {
     }
     return out;
 }
-// luaL_dofile 的宽路径安全替代：读文本 + loadbuffer（chunkname 用 UTF-8 文件名）+ pcall。
+// luaL_loadfile 的宽路径安全替代：读文本 + loadbuffer（chunkname 用 UTF-8 文件名）。
 // 复刻 lua loadfile 的头部处理：剥 UTF-8 BOM（EF BB BF）与 shebang 行（loadbuffer 不做，
 // 不剥则带 BOM 的社区插件全部报 unexpected symbol near '<\239>'）。
-static inline int dnx_dofile(lua_State* L, const std::filesystem::path& p) {
+static inline int dnx_loadfile(lua_State* L, const std::filesystem::path& p) {
     std::string src;
     if (!dnx_readFile(p, src)) {
         lua_pushfstring(L, "cannot open %s", dnx_u8str(p.filename()).c_str());
@@ -166,7 +166,11 @@ static inline int dnx_dofile(lua_State* L, const std::filesystem::path& p) {
     // chunkname 用完整路径（对齐 luaL_dofile 的 source="@fullpath"——有插件靠
     // debug.getinfo(1).source 定位自己的资源目录，只给文件名会破坏它们）。
     std::string chunk = "@" + dnx_u8str(p);
-    if (int r = luaL_loadbuffer(L, src.data() + off, src.size() - off, chunk.c_str()); r != LUA_OK) return r;
+    return luaL_loadbuffer(L, src.data() + off, src.size() - off, chunk.c_str());
+}
+
+static inline int dnx_dofile(lua_State* L, const std::filesystem::path& p) {
+    if (const int status = dnx_loadfile(L, p); status != LUA_OK) return status;
     return lua_pcall(L, 0, LUA_MULTRET, 0);
 }
 
@@ -182,11 +186,50 @@ static std::string argStr(lua_State* L, int i) {
     size_t n = 0; const char* s = lua_tolstring(L, i, &n);
     return s ? std::string(s, n) : std::string();
 }
+
+// 原版 Dice! 对 data/plugin 下的单文件 Lua 每次调用都会新建 LuaState、重新执行
+// 文件顶层，再调用 msg_order/task_call 指向的函数。用带 _G 回退的独立 _ENV
+// 复刻这一生命周期：HTTP 等动态顶层数据会刷新，同时不会把插件全局变量泄漏给
+// 其他插件。成功时仅把 env 留在栈顶；失败时仅把错误对象留在栈顶。
+static int dnx_loadLegacyEnvironment(lua_State* L, const fs::path& path) {
+    lua_newtable(L);
+    const int env = lua_absindex(L, -1);
+
+    lua_pushvalue(L, env);
+    lua_setfield(L, env, "_G");
+    lua_newtable(L);
+    lua_setfield(L, env, "msg_order");
+    lua_newtable(L);
+    lua_setfield(L, env, "task_call");
+
+    lua_newtable(L);
+    lua_pushglobaltable(L);
+    lua_setfield(L, -2, "__index");
+    lua_setmetatable(L, env);
+
+    const int status = dnx_loadfile(L, path);
+    if (status != LUA_OK) {
+        lua_remove(L, env);
+        return status;
+    }
+    lua_pushvalue(L, env);
+    if (lua_setupvalue(L, -2, 1) == nullptr) {
+        lua_pop(L, 1);  // loaded chunk
+        lua_remove(L, env);
+        lua_pushliteral(L, "legacy plugin chunk has no _ENV upvalue");
+        return LUA_ERRRUN;
+    }
+    const int callStatus = lua_pcall(L, 0, 0, 0);
+    if (callStatus != LUA_OK) lua_remove(L, env);
+    return callStatus;
+}
 // Old single-file plugins often ship a generated cache containing absolute paths
 // from the author's Dice! installation. Dice! resolved those paths relative to
 // the active plugin directory after the bundle was moved. Preserve that useful
 // behaviour, but only for a traversal-free tail below plugin/ (or a genuinely
-// relative path), so this fallback cannot widen filesystem access.
+// relative path), so this fallback cannot widen filesystem access. ResourceSearchEngine
+// additionally stores Chinese filenames in CP936 inside its index/cache. The server
+// runs the Windows CRT in UTF-8 mode, therefore normalize that tail before retrying.
 static int l_resolvePluginFile(lua_State* L) {
     auto* m = mgrOf(L);
     const std::string raw = argStr(L, 1);
@@ -200,20 +243,26 @@ static int l_resolvePluginFile(lua_State* L) {
     std::string tail;
     const size_t pluginMarker = slash.rfind("/plugin/");
     if (pluginMarker != std::string::npos) {
-        tail = slash.substr(pluginMarker + std::string("/plugin/").size());
+        // Keep the original bytes for code-page conversion. A CP936 trail byte
+        // may itself be 0x5c, so converting every backslash before decoding can
+        // silently split a Chinese filename.
+        tail = raw.substr(pluginMarker + std::string("/plugin/").size());
     } else {
         const bool rooted = !slash.empty() && slash.front() == '/';
         const bool drive = slash.size() >= 2 && slash[1] == ':';
-        if (!rooted && !drive) tail = slash;
+        if (!rooted && !drive) tail = raw;
     }
     if (tail.empty()) {
         lua_pushnil(L);
         return 1;
     }
+    std::string checkedTail = tail;
+    std::replace(checkedTail.begin(), checkedTail.end(), '\\', '/');
     size_t start = 0;
-    while (start <= tail.size()) {
-        const size_t end = tail.find('/', start);
-        const std::string part = tail.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    while (start <= checkedTail.size()) {
+        const size_t end = checkedTail.find('/', start);
+        const std::string part = checkedTail.substr(
+            start, end == std::string::npos ? std::string::npos : end - start);
         if (part == ".." || part.find(':') != std::string::npos) {
             lua_pushnil(L);
             return 1;
@@ -222,12 +271,36 @@ static int l_resolvePluginFile(lua_State* L) {
         start = end + 1;
     }
 #ifdef _WIN32
+    if (!dnx_validUtf8(tail)) {
+        const std::string cp936Tail = dnx_cp936SourceToUtf8(tail);
+        const std::string mixedTail = dnx_normalizeLuaText(tail);
+        const auto existsBelowPlugin = [&](const std::string& candidateTail) {
+            std::string candidate = m->loadingModDir_;
+            if (!candidate.empty() && candidate.back() != '/' && candidate.back() != '\\')
+                candidate.push_back(fs::path::preferred_separator);
+            candidate += candidateTail;
+            const fs::path candidatePath(
+                std::u8string(candidate.begin(), candidate.end()));
+            std::error_code ec;
+            return fs::is_regular_file(candidatePath, ec);
+        };
+
+        // A legacy index is normally wholly CP936 after its ASCII directory
+        // prefix. Some community plugins instead concatenate UTF-8 and CP936
+        // fragments. Prefer whichever decoding maps to an existing file; for a
+        // new write target, the full CP936 interpretation is the legacy default.
+        if (!cp936Tail.empty() && existsBelowPlugin(cp936Tail)) tail = cp936Tail;
+        else if (existsBelowPlugin(mixedTail)) tail = mixedTail;
+        else tail = cp936Tail.empty() ? mixedTail : cp936Tail;
+    }
     std::replace(tail.begin(), tail.end(), '/', '\\');
+#else
+    tail = std::move(checkedTail);
 #endif
     std::string mapped = m->loadingModDir_;
     if (!mapped.empty() && mapped.back() != '/' && mapped.back() != '\\')
         mapped.push_back(fs::path::preferred_separator);
-    mapped += tail;  // Deliberately preserve legacy path bytes for Lua's io.open.
+    mapped += tail;
     lua_pushlstring(L, mapped.data(), mapped.size());
     return 1;
 }
@@ -877,6 +950,28 @@ static int l_urlDecode(lua_State* L) {
     }
     lua_pushlstring(L, o.data(), o.size()); return 1;
 }
+
+// Push the Lua caller's _ENV. Legacy loadLua executes a sibling inside the same
+// fresh LuaState as its entry plugin, so global assignments made by that sibling
+// must belong to the current per-invocation environment rather than the shared
+// host runtime. Returns false without changing the stack when no Lua _ENV exists.
+static bool dnx_pushCallerEnvironment(lua_State* L) {
+    lua_Debug frame{};
+    if (!lua_getstack(L, 1, &frame) || !lua_getinfo(L, "f", &frame)) return false;
+    const int caller = lua_absindex(L, -1);
+    for (int index = 1;; ++index) {
+        const char* name = lua_getupvalue(L, caller, index);
+        if (!name) break;
+        if (std::string_view(name) == "_ENV") {
+            lua_remove(L, caller);  // leave only the environment value
+            return true;
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);  // caller function
+    return false;
+}
+
 static int l_loadLua(lua_State* L) {
     auto* m = mgrOf(L); std::string name = argStr(L, 1);
     if (!m || name.empty()) { lua_pushnil(L); return 1; }
@@ -917,7 +1012,13 @@ static int l_loadLua(lua_State* L) {
         lua_pushnil(L); return 1;
     }
     const int stackBefore = lua_gettop(L);
-    if (dnx_dofile(L, p) != LUA_OK) {
+    if (dnx_loadfile(L, p) != LUA_OK) {
+        DICE_LOG_ERROR("[lua] loadLua '{}' error: {}", name, argStr(L, -1));
+        lua_settop(L, stackBefore); lua_pushnil(L); return 1;
+    }
+    const int chunk = lua_absindex(L, -1);
+    if (dnx_pushCallerEnvironment(L)) lua_setupvalue(L, chunk, 1);
+    if (lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK) {
         DICE_LOG_ERROR("[lua] loadLua '{}' error: {}", name, argStr(L, -1));
         lua_settop(L, stackBefore); lua_pushnil(L); return 1;
     }
@@ -1920,13 +2021,13 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     std::string pluginSource;
     dnx_readFile(path, pluginSource);
     const bool maySleep = pluginSource.find("sleepTime") != std::string::npos;
-    lua_newtable(state_); lua_setglobal(state_, "msg_order");
-    lua_newtable(state_); lua_setglobal(state_, "task_call");
-    if (dnx_dofile(state_, path) != LUA_OK) {
+    const int stackBase = lua_gettop(state_);
+    if (dnx_loadLegacyEnvironment(state_, path) != LUA_OK) {
         DICE_LOG_ERROR("[lua] plugin '{}' load error: {}", m.name, argStr(state_, -1));
-        lua_pop(state_, 1); loadingModDir_.clear(); mods_.push_back(std::move(m)); return;
+        lua_settop(state_, stackBase); loadingModDir_.clear(); mods_.push_back(std::move(m)); return;
     }
-    lua_getglobal(state_, "msg_order");
+    const int env = lua_absindex(state_, -1);
+    lua_getfield(state_, env, "msg_order");
     // 收集 {关键字, 函数名}，按关键字长度降序（长前缀优先，如「选择」先于「选」）。
     std::vector<std::pair<std::string, std::string>> orders;
     if (lua_istable(state_, -1)) {
@@ -1941,7 +2042,7 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     lua_pop(state_, 1);   // msg_order
 
     // 原版单文件插件的定时入口：task_call[任务名]="全局函数名"。
-    lua_getglobal(state_, "task_call");
+    lua_getfield(state_, env, "task_call");
     if (lua_istable(state_, -1)) {
         lua_pushnil(state_);
         while (lua_next(state_, -2)) {
@@ -1950,15 +2051,14 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
             lua_pop(state_, 1);
             const std::string functionName = argStr(state_, -1);
             if (!taskName.empty() && !functionName.empty()) {
-                lua_getglobal(state_, functionName.c_str());
+                lua_getfield(state_, env, functionName.c_str());
                 if (lua_isfunction(state_, -1)) {
-                    if (auto old = taskCalls_.find(taskName); old != taskCalls_.end())
-                        luaL_unref(state_, LUA_REGISTRYINDEX, old->second.functionRef);
                     LegacyTask task;
                     task.name = taskName; task.modName = m.name; task.modDir = m.dir;
-                    task.functionRef = luaL_ref(state_, LUA_REGISTRYINDEX);
+                    task.sourceFile = dnx_u8str(path); task.functionName = functionName;
                     taskCalls_[taskName] = std::move(task);
-                } else lua_pop(state_, 1);
+                }
+                lua_pop(state_, 1);
             }
             lua_pop(state_, 1);
         }
@@ -1968,16 +2068,19 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     std::sort(orders.begin(), orders.end(),
               [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
     for (auto& [key, func] : orders) {
-        lua_getglobal(state_, func.c_str());
+        lua_getfield(state_, env, func.c_str());
         if (!lua_isfunction(state_, -1)) { lua_pop(state_, 1); continue; }
+        lua_pop(state_, 1);
         ReplyRule rule;
         rule.name = m.name + ":" + key; rule.modName = m.name; rule.modDir = m.dir;
         rule.prefixPatterns.push_back(key);
-        rule.echoRef = luaL_ref(state_, LUA_REGISTRYINDEX);   // 捕获该函数（弹出）
         rule.maySleep = maySleep;
+        rule.legacySourceFile = dnx_u8str(path);
+        rule.legacyFunctionName = func;
         replyRules_.push_back(std::move(rule));
         ++m.replies;
     }
+    lua_settop(state_, stackBase);  // isolated discovery environment
     loadingModDir_.clear();
     mods_.push_back(std::move(m));
 }
@@ -2026,8 +2129,23 @@ bool LuaPluginManager::runTask(const std::string& name, std::string* error) {
     const int base = lua_gettop(state_);
     const std::string previousDir = loadingModDir_;
     loadingModDir_ = it->second.modDir;
-    lua_rawgeti(state_, LUA_REGISTRYINDEX, it->second.functionRef);
-    const int status = lua_pcall(state_, 0, LUA_MULTRET, 0);
+    const fs::path sourcePath(std::u8string(
+        it->second.sourceFile.begin(), it->second.sourceFile.end()));
+    int status = dnx_loadLegacyEnvironment(state_, sourcePath);
+    if (status == LUA_OK) {
+        const int env = lua_absindex(state_, -1);
+        lua_getfield(state_, env, it->second.functionName.c_str());
+        if (lua_isfunction(state_, -1)) {
+            lua_remove(state_, env);  // function closure keeps its isolated _ENV alive
+            status = lua_pcall(state_, 0, LUA_MULTRET, 0);
+        } else {
+            lua_pop(state_, 1);
+            lua_remove(state_, env);
+            lua_pushfstring(state_, "task function '%s' not found",
+                            it->second.functionName.c_str());
+            status = LUA_ERRRUN;
+        }
+    }
     loadingModDir_ = previousDir;
     if (status != LUA_OK) {
         const std::string message = dnx_normalizeLuaText(argStr(state_, -1));
@@ -2438,6 +2556,29 @@ void LuaPluginManager::resumeCoroutine(int threadRef) {
         catch (...) { DICE_LOG_ERROR("[lua] async reply host callback failed"); }
     }
 }
+bool LuaPluginManager::hasCommandTrigger(
+        const std::string& text, const std::string& uid, const std::string& gid,
+        const std::string& nick, const std::string& groupCard, bool isPrivate,
+        int trust, const std::string& platform) {
+    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    if (!state_ || text.empty() || replyRules_.empty()) return false;
+    std::map<std::string, std::string> vars = {
+        {"uid", uid}, {"user", uid}, {"gid", gid}, {"grp", gid},
+        {"platform", platform}, {"nick", nick}, {"card", groupCard}, {"pc", nick}, {"self", selfName_},
+        {"fromMsg", text}, {"fromUser", uid}, {"fromGroup", gid},
+    };
+    for (const auto& rule : replyRules_) {
+        if (rule.groupOnly && (isPrivate || gid.empty())) continue;
+        if (rule.trustAtLeast > 0 && trust < rule.trustAtLeast) continue;
+        if (groupGate_ && !gid.empty() && !groupGate_(platform, gid, "lua:" + rule.modName)) continue;
+        for (const auto& pat : rule.matchPatterns)
+            if (formatTemplate(pat, vars) == text) return true;
+        for (const auto& pat : rule.prefixPatterns)
+            if (formatTemplate(pat, vars) == text) return true;
+    }
+    return false;
+}
+
 LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         const std::string& text, const std::string& uid, const std::string& gid,
         const std::string& nick, const std::string& groupCard, bool isPrivate, int trust, const std::string& platform) {
@@ -2511,7 +2652,29 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         bool usedCoroutine = false;
         std::string callError;
         std::string tmpl;
-        if (!rule.echoScript.empty()) {
+        bool legacyCallableReady = false;
+        if (rule.echoScript.empty() && !rule.legacySourceFile.empty()) {
+            const fs::path sourcePath(std::u8string(
+                rule.legacySourceFile.begin(), rule.legacySourceFile.end()));
+            const int loadStatus = dnx_loadLegacyEnvironment(state_, sourcePath);
+            if (loadStatus != LUA_OK) {
+                callError = dnx_normalizeLuaText(argStr(state_, -1));
+            } else {
+                const int env = lua_absindex(state_, -1);
+                lua_getfield(state_, env, rule.legacyFunctionName.c_str());
+                if (lua_isfunction(state_, -1)) {
+                    lua_remove(state_, env);  // closure retains its fresh plugin environment
+                    legacyCallableReady = true;
+                } else {
+                    lua_pop(state_, 1);
+                    lua_remove(state_, env);
+                    callError = "legacy function '" + rule.legacyFunctionName + "' not found";
+                }
+            }
+        }
+        if (!callError.empty()) {
+            // The common error path below logs and restores the stack.
+        } else if (!rule.echoScript.empty()) {
             std::string erel = rule.echoScript; for (auto& c : erel) if (c == '.') c = '/';
             fs::path sp = fs::path(rule.modDir) / "script" / (erel + ".lua");
             callOk = (dnx_dofile(state_, sp) == LUA_OK);
@@ -2521,7 +2684,8 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
             const int messageRef = luaL_ref(state_, LUA_REGISTRYINDEX);
             lua_State* coroutine = lua_newthread(state_);
             const int threadRef = luaL_ref(state_, LUA_REGISTRYINDEX);
-            lua_rawgeti(state_, LUA_REGISTRYINDEX, rule.echoRef);
+            if (!legacyCallableReady)
+                lua_rawgeti(state_, LUA_REGISTRYINDEX, rule.echoRef);
             lua_xmove(state_, coroutine, 1);
             lua_rawgeti(state_, LUA_REGISTRYINDEX, messageRef);
             lua_xmove(state_, coroutine, 1);
@@ -2560,7 +2724,8 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
             luaL_unref(state_, LUA_REGISTRYINDEX, messageRef);
             luaL_unref(state_, LUA_REGISTRYINDEX, threadRef);
         } else {
-            lua_rawgeti(state_, LUA_REGISTRYINDEX, rule.echoRef);
+            if (!legacyCallableReady)
+                lua_rawgeti(state_, LUA_REGISTRYINDEX, rule.echoRef);
             lua_getglobal(state_, "msg");
             callOk = (lua_pcall(state_, 1, LUA_MULTRET, 0) == LUA_OK);
         }

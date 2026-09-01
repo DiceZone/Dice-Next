@@ -18,6 +18,7 @@
 #include <mutex>
 #include <functional>
 #include <optional>
+#include <array>
 
 #include <quickjs.h>
 
@@ -167,6 +168,7 @@ public:
                     const std::string& groupId, const std::string& userId, const std::string& text);
     JSValue findExt(const std::string& name) const;                    // seal.ext.find
     bool hasCommand(const std::string& word);                          // is `word` a registered JS cmd?
+    bool hasCommand(const Message& message, const std::string& word);  // same, respecting per-group enable state
 
     // 供内嵌的 C 函数回调使用（经 JS_GetContextOpaque 取到 this）。
     void appendReply(const std::string& s) { if (!pendingReply_.empty()) pendingReply_ += "\n"; pendingReply_ += s; }
@@ -196,6 +198,22 @@ public:
     using GroupGateFn = std::function<bool(const std::string& platform, const std::string& group, const std::string& pluginId)>;
     void setGroupGate(GroupGateFn f) { groupGate_ = std::move(f); }
 
+    // seal.getEndPoints(): live adapter snapshots in SealDice's public shape.
+    struct EndpointInfo {
+        std::string id, nickname, userId, platform, protocolType;
+        int state = 0;
+        bool enable = true;
+        int64_t groupNum = 0;
+        int64_t cmdExecutedNum = 0;
+        int64_t cmdExecutedLastTime = 0;
+        int64_t onlineTotalTime = 0;
+    };
+    using EndpointProviderFn = std::function<std::vector<EndpointInfo>()>;
+    void setEndpointProvider(EndpointProviderFn f) { endpointProvider_ = std::move(f); }
+    std::vector<EndpointInfo> endpointInfos() const {
+        return endpointProvider_ ? endpointProvider_() : std::vector<EndpointInfo>{};
+    }
+
     // seal.vars 人物卡桥接：海豹 gameSystem 插件用「无 $ 前缀」的属性名读写玩家人物卡
     // （= .st/.ra 用的同一份卡）。注入后，seal.vars.intGet/intSet 的无前缀名直达人物卡，
     // 这样自订规则插件（如最终物语）的检定/状态指令才能读到 .st 录入的属性。
@@ -215,6 +233,12 @@ public:
     // 当前群日志状态，供 ctx.group.logOn / ctx.group.logCurName 兼容海豹字段。
     using LogStateFn = std::function<std::pair<bool, std::string>(const std::string&, const std::string&)>;
     void setLogStateResolver(LogStateFn f) { logStateResolver_ = std::move(f); }
+    using GroupNameFn = std::function<std::string(const std::string&, const std::string&, const std::string&)>;
+    void setGroupNameResolver(GroupNameFn f) { groupNameResolver_ = std::move(f); }
+    using GroupSystemFn = std::function<std::string(const std::string&, const std::string&, const std::string&)>;
+    void setGroupSystemResolver(GroupSystemFn f) { groupSystemResolver_ = std::move(f); }
+    using DiceSidesFn = std::function<std::array<int, 3>(const Message&)>;
+    void setDiceSidesResolver(DiceSidesFn f) { diceSidesResolver_ = std::move(f); }
     bool cardGetStr(const std::string& p, const std::string& u, const std::string& g, const std::string& a, std::string& out) const {
         return cardGetStr_ ? cardGetStr_(p, u, g, a, out) : false;
     }
@@ -307,6 +331,7 @@ private:
     ScheduleFn scheduler_;
     SenderFn sender_;
     GroupGateFn groupGate_;   // 分群启停 gate（地基）
+    EndpointProviderFn endpointProvider_;
     CardGetFn cardGet_;       // seal.vars ↔ 人物卡桥接
     CardSetFn cardSet_;
     CardGetStrFn cardGetStr_; // 关联/表达式属性读取
@@ -315,6 +340,9 @@ private:
     FavorGrowFn favorGrow_;
     CardNameFn cardNameResolver_;   // 群名片/显示名解析
     LogStateFn logStateResolver_;   // 群日志状态/当前名称
+    GroupNameFn groupNameResolver_;
+    GroupSystemFn groupSystemResolver_;
+    DiceSidesFn diceSidesResolver_;
     std::vector<std::string> extraDirs_;   // 规则包附加 js 目录
     GroupAdminFn groupAdmin_;
     BanFn banOp_;

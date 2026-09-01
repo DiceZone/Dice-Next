@@ -7,7 +7,51 @@
 #include "../src/common/markdown.h"
 #include "../src/common/types.h"
 
+#include <filesystem>
+#include <fstream>
+#include <set>
+
 using namespace dice;
+
+TEST(I18nBundles, LocaleLeafKeysStayInSyncAndLegacyKeysAreTopLevel) {
+    namespace fs = std::filesystem;
+    const fs::path i18nDir = fs::path(__FILE__).parent_path().parent_path() / "i18n";
+    auto load = [&](const char* locale) {
+        std::ifstream input(i18nDir / (std::string(locale) + ".json"), std::ios::binary);
+        if (!input.good()) return json();
+        return json::parse(input);
+    };
+    auto leaves = [](const json& root) {
+        std::set<std::string> result;
+        std::function<void(const json&, const std::string&)> visit;
+        visit = [&](const json& value, const std::string& prefix) {
+            if (!value.is_object()) {
+                result.insert(prefix);
+                return;
+            }
+            for (auto it = value.begin(); it != value.end(); ++it)
+                visit(it.value(), prefix.empty() ? it.key() : prefix + "." + it.key());
+        };
+        visit(root, "");
+        return result;
+    };
+
+    const json baseline = load("zh-Hans");
+    ASSERT_TRUE(baseline.is_object());
+    const auto expected = leaves(baseline);
+    for (const char* locale : {"zh-Hant", "en", "ja"}) {
+        const json bundle = load(locale);
+        ASSERT_TRUE(bundle.is_object());
+        ASSERT_TRUE(leaves(bundle) == expected);
+    }
+
+    for (const char* key : {"legacy_user", "legacy_cloud", "legacy_str"})
+        ASSERT_TRUE(baseline.contains(key));
+    ASSERT_FALSE(baseline.at("system").contains("legacy_user"));
+    for (const char* key : {"rolled_multi", "count_err", "count_exceeded"})
+        ASSERT_TRUE(baseline.at("init").contains(key));
+    ASSERT_TRUE(baseline.at("dice").at("error").contains("non_numeric"));
+}
 
 // Helper: create an I18n with a minimal bundle for testing
 // We can't easily load from disk in tests, so we test the lookup chain

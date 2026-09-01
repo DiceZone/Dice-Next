@@ -149,6 +149,17 @@ public:
         return true;
     }
 
+    /// SealDice temporary-variable bridge: personal override, group/rule default,
+    /// and the effective side count used by a bare `d`.  An unset personal value
+    /// is represented as 0, matching SealDice's Player.DiceSideNum semantics.
+    std::array<int, 3> pluginDiceSides(const Message& msg) const {
+        const std::string personalRaw = getUserSetting(msg, "defaultDice");
+        const std::string groupRaw = getGroupSetting(msg, "groupDefaultDice");
+        const int personal = personalRaw.empty() ? 0 : parseIntOr(personalRaw, 0);
+        const int group = groupRaw.empty() ? 100 : parseIntOr(groupRaw, 100);
+        return {personal, group, personal > 0 ? personal : group};
+    }
+
     // 本条消息回复的「类别」（供 AI 润色/翻译按覆盖范围过滤）。取值：
     //   roll(掷骰/检定) / deck(牌堆抽取) / fun(娱乐:jrrp/ti/li/name/favor/sleep) /
     //   plugin(规则包自定义指令) / ""(其它)。普通自定义回复(custom) 与 JS/Lua 插件(plugin)
@@ -301,6 +312,15 @@ public:
             Locale gloc = forcedLocale.value_or(resolver_.resolve(msg));
             if (auto blocked = gateCommand(gloc, msg, cmdL0)) return *blocked;
         }
+
+        // JS/Lua plugins register complete command words, while many legacy core
+        // commands intentionally accept compact arguments by prefix (for example
+        // `.ra侦查`). Give an enabled plugin that explicitly owns the incoming
+        // word a chance before those compact parsers run; the host callback keeps
+        // exact built-in command names reserved. Returning empty here continues
+        // into main.cpp's normal plugin fallback chain and does not execute plugin
+        // code twice.
+        if (pluginCommandClaim_ && pluginCommandClaim_(msg, cmd)) return "";
 
         // 代骰: a roll/check command that @s a real person (not the bot / not @all)
         // is rolled from THAT person's perspective — their nick + character card.
@@ -663,6 +683,7 @@ private:
         std::string error;
         std::string engine;
         std::vector<int> individualResults;
+        std::string errorKey;
     };
 
     /// Legacy .rs only exposes the final value.  Keep richer output for engines
@@ -818,13 +839,16 @@ private:
                 dicescript_script_result result{};
                 if (!dicescript_context_eval(context.get(), expr.c_str(), &result))
                     return {false, {}, result.error, id, {}};
+                if (!roll_command::isNumericResult(result.type))
+                    return {false, {}, "expression result is not numeric", id, {},
+                            "dice.error.non_numeric"};
 
                 std::vector<int> samples;
                 samples.reserve(result.sample_count);
                 for (uint32_t i = 0; i < result.sample_count; ++i)
                     samples.push_back(static_cast<int>(result.samples[i]));
-                const std::string detail = result.detail[0] != '\0'
-                    ? std::string(result.detail) : std::string(result.text);
+                const std::string detail = roll_command::renderNumericDetail(
+                    result.text, result.detail);
                 return {true, detail, {}, id, std::move(samples)};
             }
         }
@@ -859,18 +883,20 @@ private:
             if (!ok) return std::nullopt;
         }
 
-        std::string out = handleRoll(loc, msg, trim(cmd.substr(j)), shortForm);
+        const bool compact = j < cmd.size() &&
+            !std::isspace(static_cast<unsigned char>(cmd[j]));
+        std::string out = handleRoll(loc, msg, trim(cmd.substr(j)), shortForm, compact);
         if (hidden) { sendPrivate(msg, out); return i18n_.tr(loc, "dice.roll.hidden", {{"nick", displayName(msg)}}); }
         return out;
     }
 
     std::string handleRoll(Locale loc, const Message& msg, const std::string& restRaw,
-                           bool shortForm = false) {
+                           bool shortForm = false, bool compact = false) {
         std::string rest = substituteFormulaAttrs(restRaw, msg);   // 展开 +db 等公式属性
         // Split before selecting an expression engine. In particular, `.rd测试`
         // is the historic compact spelling for default die + reason, not a
         // Unicode DiceScript identifier.
-        auto parsedRoll = roll_command::parse(rest);
+        auto parsedRoll = roll_command::parse(rest, compact);
         std::string expr = std::move(parsedRoll.expression);
         std::string reason = std::move(parsedRoll.reason);
 
@@ -934,7 +960,9 @@ private:
 
         if (turns == 1) {
             auto result = evaluateExpression(msg, expr);
-            if (!result.ok) return i18n_.tr(loc, "dice.error.roll", {{"error", result.error}});
+            if (!result.ok) return result.errorKey.empty()
+                ? i18n_.tr(loc, "dice.error.roll", {{"error", result.error}})
+                : i18n_.tr(loc, result.errorKey);
             if (!result.individualResults.empty())
                 recordSimpleDiceResult(msg, expr, result.individualResults);
             return i18n_.tr(loc, reason.empty() ? "dice.roll.result" : "dice.roll.result_reason",
@@ -945,7 +973,9 @@ private:
         std::ostringstream res;
         for (int i = 0; i < turns; ++i) {
             auto result = evaluateExpression(msg, expr);
-            if (!result.ok) return i18n_.tr(loc, "dice.error.roll", {{"error", result.error}});
+            if (!result.ok) return result.errorKey.empty()
+                ? i18n_.tr(loc, "dice.error.roll", {{"error", result.error}})
+                : i18n_.tr(loc, result.errorKey);
             if (!result.individualResults.empty())
                 recordSimpleDiceResult(msg, expr, result.individualResults);
             if (i > 0) res << ", \n";
@@ -1194,7 +1224,7 @@ private:
     std::optional<std::string> tryHandleDX(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("dx", 0) != 0) return std::nullopt;
         std::string rest = trim(cmd.substr(2));
-        const auto parsedPool = roll_command::parsePoolInput(rest);
+        const auto parsedPool = roll_command::parsePoolInput(rest, true);
         const std::string& poolSpec = parsedPool.expression;
         const std::string& reason = parsedPool.reason;
 
@@ -1208,16 +1238,11 @@ private:
                 {{"nick", displayName(msg)}, {"reason", reason}, {"res", od.detail}});
         }
 
-        // Parse "AcB" (A dice, B critical line) or "A [B]" (default B=10).
-        int pool = 0, crit = 10, faces = 10;
-        if (auto cp = lc.find('c'); cp != std::string::npos) {
-            pool = parseIntOr(trim(poolSpec.substr(0, cp)), 0);
-            crit = parseIntOr(trim(poolSpec.substr(cp + 1)), 10);
-        } else {
-            std::istringstream iss(poolSpec);
-            iss >> pool; if (iss) { int kk; if (iss >> kk) crit = kk; }
-        }
-        if (pool < 1) return i18n_.tr(loc, "dice.dx.usage");
+        // Parse "AcB[+/-modifier]" or legacy "A [B] [+/-modifier]".  The
+        // modifier applies once, after all exploding rounds have been tallied.
+        const auto dx = roll_command::parseDoubleCrossSpec(poolSpec);
+        if (!dx.valid) return i18n_.tr(loc, "dice.dx.usage");
+        int pool = dx.pool, crit = dx.critical, faces = 10;
         if (pool > 100) pool = 100;
         if (crit < 2) crit = 2;           // a critical line of 1 would loop forever
         if (crit > faces) crit = faces;
@@ -1245,7 +1270,9 @@ private:
         // Build a readable process: a critical die is shown as <value,critical-line>
         // rather than a trailing '*', so both the trigger and its threshold are clear.
         std::ostringstream proc;
-        proc << pool << "c" << crit << "=";
+        proc << pool << "c" << crit;
+        if (dx.hasModifier) proc << (dx.modifier >= 0 ? "+" : "") << dx.modifier;
+        proc << "=";
         for (size_t r = 0; r < rounds.size(); ++r) {
             if (r) proc << "+";
             proc << "{";
@@ -1257,7 +1284,8 @@ private:
             }
             proc << "}";
         }
-        proc << "=" << total;
+        if (dx.hasModifier) proc << (dx.modifier >= 0 ? "+" : "") << dx.modifier;
+        proc << "=" << (static_cast<long long>(total) + dx.modifier);
 
         const std::string nick = displayName(msg);
         return i18n_.tr(loc, reason.empty() ? "dice.roll.result" : "dice.roll.result_reason",
@@ -3612,9 +3640,13 @@ private:
         if (!recalcDetail.empty()) {
             // 列出本次触发重算的基础属性。
             std::string causes;
-            for (const char* base : { "\xe4\xbd\x93\xe8\xb4\xa8","\xe4\xbd\x93\xe5\x9e\x8b","\xe6\x84\x8f\xe5\xbf\x97","\xe5\x85\x8b\xe8\x8b\x8f\xe9\xb2\x81\xe7\xa5\x9e\xe8\xaf\x9d" }) {  // 体质 体型 意志 克苏鲁神话
+            for (const char* base : {
+                    "\xe4\xbd\x93\xe8\xb4\xa8","\xe4\xbd\x93\xe5\x9e\x8b","\xe6\x84\x8f\xe5\xbf\x97",
+                    "\xe5\x85\x8b\xe8\x8b\x8f\xe9\xb2\x81\xe7\xa5\x9e\xe8\xaf\x9d",  // 体质 体型 意志 克苏鲁神话
+                    "\xe7\x94\x9f\xe5\x91\xbd","\xe7\x90\x86\xe6\x99\xba","\xe9\xad\x94\xe6\xb3\x95" }) { // 生命 理智 魔法
                 if (changes.count(CharacterCardStore::canonical(base))) { if (!causes.empty()) causes += "\xe3\x80\x81"; causes += base; }
             }
+            if (causes.empty()) causes = i18n_.tr(loc, "card.autocard.direct_change");
             reply += "\n" + i18n_.tr(loc, "card.autocard.recalc", {{"causes", causes}, {"detail", recalcDetail}});
         }
         if (!dbDetail.empty())   // 告知自动算出的 DB
@@ -3808,6 +3840,23 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
     struct PluginEntry { std::string id; std::string name; std::string kind; bool enabledGlobal = true; };
     using PluginListFn = std::function<std::vector<PluginEntry>()>;
     void setPluginProvider(PluginListFn f) { pluginProvider_ = std::move(f); }
+
+    // Enabled plugin command ownership probe. It must be side-effect free: true
+    // only tells the router to defer to the existing plugin fallback chain.
+    using PluginCommandClaimFn = std::function<bool(const Message&, const std::string& commandBody)>;
+    void setPluginCommandClaim(PluginCommandClaimFn f) { pluginCommandClaim_ = std::move(f); }
+
+    /// True only for an audited original Dice! `.strXXX` command that maps to a
+    /// real Dice!Next template.  Keeping this check exact prevents a broad
+    /// `str*` reservation from blocking unrelated plugin words such as `strike`.
+    bool isLegacyTextCommandName(const std::string& word) const {
+        const std::string wanted = toLower(word);
+        for (const auto& [legacyKey, unused] : legacyv2::msgKeyMap()) {
+            (void)unused;
+            if (toLower(legacyKey) == wanted) return true;
+        }
+        return false;
+    }
 
     // 一条帮助条目（合并自内置 i18n / 规则包 / 插件 / 文件四源）。
     struct HelpEntry { std::string key, content, source; };  // builtin | rule:<包> | plugin:<名> | file:<名>
@@ -11117,6 +11166,7 @@ private:
     // 插件帮助提供器（main.cpp 注入），供 .help 合并插件 cmd.help。
     HelpProviderFn helpProvider_;
     PluginListFn pluginProvider_;   // 
+    PluginCommandClaimFn pluginCommandClaim_;
 
     // .rules 规则速查的懒加载缓存（rules/*.json）。mutable：在 const 查询里填充。
     mutable bool rulesLoaded_ = false;

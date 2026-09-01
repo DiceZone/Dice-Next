@@ -815,7 +815,17 @@ static JSValue jsFormat(JSContext* ctx, JSValueConst, int argc, JSValueConst* ar
             size_t end = s.find('}', i);
             if (end != std::string::npos) {
                 std::string inner = s.substr(i + 1, end - i - 1);
-                if (inner.rfind("$t", 0) == 0) out += s.substr(i, end - i + 1);    // 临时变量：原样保留
+                if (inner.rfind("$t", 0) == 0) {
+                    JSValue vars = JS_GetPropertyStr(ctx, ctxObj, "_tempVars");
+                    JSValue value = JS_IsObject(vars)
+                        ? JS_GetPropertyStr(ctx, vars, inner.c_str()) : JS_UNDEFINED;
+                    if (!JS_IsUndefined(value) && !JS_IsNull(value))
+                        out += toStr(ctx, value);
+                    else
+                        out += s.substr(i, end - i + 1);   // 未知临时变量保持可见，便于插件诊断
+                    JS_FreeValue(ctx, value);
+                    JS_FreeValue(ctx, vars);
+                }
                 else if (!inner.empty() && inner[0] == '$') out += (m ? m->kvGet(varKeyOf(ctx, ctxObj, inner)) : "");  // 个人/群/全局变量
                 else if (m) out += m->evalDice(inner);                              // 表达式：交骰子引擎求值
                 else out += inner;
@@ -979,9 +989,29 @@ static JSValue jsDeckDraw(JSContext* ctx, JSValueConst, int argc, JSValueConst* 
     JS_SetPropertyStr(ctx, o, "result", JS_NewString(ctx, result.c_str()));
     return o;
 }
-// seal.getEndPoints() → 数组（插件常 .forEach/.map；至少返回空数组避免崩）。
+// seal.getEndPoints() → 当前所有适配器的 SealDice EndPointInfoBase 快照。
 static JSValue jsGetEndPoints(JSContext* ctx, JSValueConst, int, JSValueConst*) {
-    return JS_NewArray(ctx);
+    JSValue array = JS_NewArray(ctx);
+    auto* manager = mgrOf(ctx);
+    if (!manager) return array;
+    const auto endpoints = manager->endpointInfos();
+    for (uint32_t i = 0; i < endpoints.size(); ++i) {
+        const auto& endpoint = endpoints[i];
+        JSValue value = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, value, "id", JS_NewString(ctx, endpoint.id.c_str()));
+        JS_SetPropertyStr(ctx, value, "nickname", JS_NewString(ctx, endpoint.nickname.c_str()));
+        JS_SetPropertyStr(ctx, value, "state", JS_NewInt32(ctx, endpoint.state));
+        JS_SetPropertyStr(ctx, value, "userId", JS_NewString(ctx, endpoint.userId.c_str()));
+        JS_SetPropertyStr(ctx, value, "groupNum", JS_NewInt64(ctx, endpoint.groupNum));
+        JS_SetPropertyStr(ctx, value, "cmdExecutedNum", JS_NewInt64(ctx, endpoint.cmdExecutedNum));
+        JS_SetPropertyStr(ctx, value, "cmdExecutedLastTime", JS_NewInt64(ctx, endpoint.cmdExecutedLastTime));
+        JS_SetPropertyStr(ctx, value, "onlineTotalTime", JS_NewInt64(ctx, endpoint.onlineTotalTime));
+        JS_SetPropertyStr(ctx, value, "platform", JS_NewString(ctx, endpoint.platform.c_str()));
+        JS_SetPropertyStr(ctx, value, "enable", JS_NewBool(ctx, endpoint.enable));
+        JS_SetPropertyStr(ctx, value, "protocolType", JS_NewString(ctx, endpoint.protocolType.c_str()));
+        JS_SetPropertyUint32(ctx, array, i, value);
+    }
+    return array;
 }
 
 // ─── JsPluginManager ─────────────────────────────────────────
@@ -1558,15 +1588,28 @@ JSValue JsPluginManager::findExt(const std::string& name) const {
 }
 
 bool JsPluginManager::hasCommand(const std::string& word) {
+    Message message;
+    message.type = MessageType::kPrivate;   // no group gate for the legacy query
+    return hasCommand(message, word);
+}
+
+bool JsPluginManager::hasCommand(const Message& message, const std::string& word) {
     std::lock_guard<std::mutex> lk(mutex_);
     if (!ctx_ || word.empty()) return false;
+    const std::string groupId = message.type == MessageType::kPrivate
+        ? std::string() : message.targetId;
     bool found = false;
     for (auto& e : exts_) {
+        if (groupGate_ && !groupId.empty() && !e.second.empty()
+            && !groupGate_(message.platform, groupId, "js:" + e.second)) continue;
         JSValue cmdMap = JS_GetPropertyStr(ctx_, e.first, "cmdMap");
         if (JS_IsObject(cmdMap)) {
-            JSValue c = JS_GetPropertyStr(ctx_, cmdMap, word.c_str());
-            found = JS_IsObject(c);
-            JS_FreeValue(ctx_, c);
+            for (const std::string& candidate : {word, "." + word, "。" + word, "!" + word, "！" + word}) {
+                JSValue c = JS_GetPropertyStr(ctx_, cmdMap, candidate.c_str());
+                found = JS_IsObject(c);
+                JS_FreeValue(ctx_, c);
+                if (found) break;
+            }
         }
         JS_FreeValue(ctx_, cmdMap);
         if (found) break;
@@ -1893,6 +1936,17 @@ void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
     JS_SetPropertyStr(ctx_, jctx, "_at", atArr);
     JSValue group = JS_NewObject(ctx_);
     JS_SetPropertyStr(ctx_, group, "groupId", JS_NewString(ctx_, groupId.c_str()));
+    // Adapters use both API-style groupName and protocol-style group_name.
+    std::string groupName = extraString("groupName");
+    if (groupName.empty()) groupName = extraString("group_name");
+    if (groupName.empty() && groupNameResolver_ && !groupId.empty())
+        groupName = groupNameResolver_(platform, groupId, message.adapterId);
+    std::string groupSystem;
+    if (groupSystemResolver_ && !groupId.empty())
+        groupSystem = groupSystemResolver_(platform, groupId, message.adapterId);
+    if (groupSystem.empty()) groupSystem = "coc7";
+    JS_SetPropertyStr(ctx_, group, "groupName", JS_NewString(ctx_, groupName.c_str()));
+    JS_SetPropertyStr(ctx_, group, "system", JS_NewString(ctx_, groupSystem.c_str()));
     bool logOn = false; std::string logCurName;
     if (!groupId.empty() && logStateResolver_) {
         auto logState = logStateResolver_(platform, groupId);
@@ -1910,12 +1964,88 @@ void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
     JS_SetPropertyStr(ctx_, endPoint, "platform", JS_NewString(ctx_, platform.c_str()));
     // 海豹 EndPointInfo 常用字段（插件读 endPoint.userId 判「是否 @ 骰子自己」等，缺则 undefined）。
     const std::string endpointId = message.adapterId.empty() ? platform : message.adapterId;
+    const std::string currentSelfId = message.selfId.empty() ? selfId_ : message.selfId;
     JS_SetPropertyStr(ctx_, endPoint, "id",       JS_NewString(ctx_, endpointId.c_str()));
-    JS_SetPropertyStr(ctx_, endPoint, "userId",   JS_NewString(ctx_, selfId_.c_str()));
+    JS_SetPropertyStr(ctx_, endPoint, "userId",   JS_NewString(ctx_, currentSelfId.c_str()));
     JS_SetPropertyStr(ctx_, endPoint, "nickname", JS_NewString(ctx_, selfNick_.c_str()));
     JS_SetPropertyStr(ctx_, endPoint, "state",    JS_NewInt32(ctx_, 1));
     JS_SetPropertyStr(ctx_, endPoint, "enable",   JS_NewBool(ctx_, 1));
     JS_SetPropertyStr(ctx_, jctx, "endPoint", endPoint);
+
+    // SealDice SetTempVars compatibility. Store resolved values on the context
+    // so seal.format(ctx, "{$t玩家_RAW}") is a pure lookup and never performs
+    // adapter/database work while formatting.
+    JSValue tempVars = JS_NewObject(ctx_);
+    auto setTemp = [&](const char* key, const std::string& value) {
+        JS_SetPropertyStr(ctx_, tempVars, key, JS_NewString(ctx_, value.c_str()));
+    };
+    auto setTempInt = [&](const char* key, int64_t value) {
+        JS_SetPropertyStr(ctx_, tempVars, key, JS_NewInt64(ctx_, value));
+    };
+    const auto sealPlatform = [](const std::string& value) {
+        if (value == "onebot_v11" || value == "milky" || value == "qq_official")
+            return std::string("QQ");
+        if (value == "discord") return std::string("DISCORD");
+        if (value == "kook") return std::string("KOOK");
+        return value;
+    };
+    setTemp("$t玩家", "<" + dispName + ">");
+    setTemp("$t玩家_RAW", dispName);
+    setTemp("$tQQ昵称", "<" + nickname + ">");
+    setTemp("$t帐号昵称", "<" + nickname + ">");
+    setTemp("$t账号昵称", "<" + nickname + ">");
+    setTemp("$t帐号ID", userId);
+    setTemp("$t账号ID", userId);
+    setTemp("$tQQ", userId);
+    std::array<int, 3> diceSides{0, 100, 100};
+    if (diceSidesResolver_) diceSides = diceSidesResolver_(message);
+    setTempInt("$t个人骰子面数", diceSides[0]);
+    setTemp("$t骰子帐号", currentSelfId);
+    setTemp("$t骰子账号", currentSelfId);
+    setTemp("$t骰子昵称", selfNick_);
+    setTemp("$t帐号ID_RAW", userId);
+    setTemp("$t账号ID_RAW", userId);
+    setTemp("$t平台", platform == "qq_official" ? "QQ-official" : sealPlatform(platform));
+
+    const std::time_t now = std::time(nullptr);
+    std::tm localNow{};
+#ifdef _WIN32
+    localtime_s(&localNow, &now);
+#else
+    localtime_r(&now, &localNow);
+#endif
+    const int64_t year = localNow.tm_year + 1900;
+    const int64_t month = localNow.tm_mon + 1;
+    const int64_t day = localNow.tm_mday;
+    setTempInt("$tDate", year * 10000 + month * 100 + day);
+    setTempInt("$tWeekday", localNow.tm_wday == 0 ? 7 : localNow.tm_wday);
+    setTempInt("$tYear", year);
+    setTempInt("$tMonth", month);
+    setTempInt("$tDay", day);
+    setTempInt("$tHour", localNow.tm_hour);
+    setTempInt("$tMinute", localNow.tm_min);
+    setTempInt("$tSecond", localNow.tm_sec);
+    setTempInt("$tTimestamp", static_cast<int64_t>(now));
+    const int64_t daySeed = (static_cast<int64_t>(now) + 8 * 60 * 60) / (24 * 60 * 60);
+    const size_t rpHash = std::hash<std::string>{}(
+        currentSelfId + "\n" + userId + "\n" + std::to_string(daySeed));
+    setTempInt("$t人品", static_cast<int64_t>(rpHash % 100) + 1);
+
+    if (!groupId.empty()) {
+        setTemp("$t群号", groupId);
+        setTemp("$t群名", groupName);
+        setTemp("$t群号_RAW", groupId);
+    }
+    setTempInt("$t群组骰子面数", diceSides[1]);
+    setTempInt("$t当前骰子面数", diceSides[2]);
+    setTemp("$t游戏模式", groupSystem);
+    setTemp("$t规则模板", groupSystem);
+    setTemp("$tSystem", groupSystem);
+    setTemp("$t当前记录", logCurName);
+    setTempInt("$t权限等级", privilege);
+    setTempInt("$t日志开启", logOn ? 1 : 0);
+    setTemp("$t消息类型", isPrivate ? "private" : "group");
+    JS_SetPropertyStr(ctx_, jctx, "_tempVars", tempVars);
 
     JSValue jmsg = JS_NewObject(ctx_);
     JS_SetPropertyStr(ctx_, jmsg, "message", JS_NewString(ctx_, fullMsg.c_str()));

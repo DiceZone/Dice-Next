@@ -12,6 +12,7 @@
   "dice": {
     "error": {
       "roll": "Roll error: {error}",
+      "non_numeric": "The roll expression must return a number.",
       "coc": "COC check error: {error}",
       "dnd": "DND check error: {error}",
       "sc": "Sanity check error: {error}",
@@ -40,7 +41,7 @@
       "result": "**{nick}** rolls: `{expr}`"
     },
     "dx": {
-      "usage": "Command .dx usage: .dx <dice>c<add-line> (double-cross, e.g. .dx 3c8) or .dx <dice>a<add-line> (success pool/WoD, e.g. .dx 5a7)"
+      "usage": "Command .dx usage: .dx <dice>c<critical>[+/-final modifier] (Double Cross, e.g. .dx 5c10+3; the modifier is applied once after all exploding rounds) or .dx <dice>a<target> (success pool/WoD, e.g. .dx 5a7)"
     },
     "rav": {
       "usage": "Command .rav usage: .rav <A> <B> (values or attributes), e.g. .rav 60 50 or .rav Spot Sneak",
@@ -156,6 +157,7 @@
       "set": "Bound weapon(s) for {nick}: {detail} (roll damage with .r <name>)"
     },
     "autocard": {
+      "direct_change": "HP/SAN/MP",
       "recalc": "(Auto sheet) {causes} changed, recalculated: {detail}"
     },
     "db": {
@@ -202,7 +204,7 @@
     "unknown": "No help found for \"{topic}\". Try .helpdoc for available topics.",
     "ambiguous": "\"{topic}\" matches several help topics: {list}. Please be more specific.",
     "topic": {
-      "rdx": "Double-cross .rdx: legacy Dice compatibility alias, identical to .dx. e.g. .rdx 3c8.",
+      "rdx": "Double-Cross .rdx: legacy Dice compatibility alias, identical to .dx, including a trailing +/- final modifier. e.g. .rdx 5c10+3.",
       "r": "Roll .r [expr] [reason]: roll dice. e.g. .r3d6+2 attack; .rh hidden; N#expr repeat. A non-ASCII default-die reason may be attached, e.g. .rd测试.",
       "rh": "Hidden .rh [expr] [reason]: hidden roll / hidden check. The result is DM'd to you; the group only sees \"<name> made a hidden roll\". Hidden checks use .rah / .rch (e.g. .rah Spot 60). House rules (.setcoc) and bonus/penalty dice still apply.",
       "ra": "Check .ra <skill|attr> [rate] [reason]: COC check. Reads the card if rate omitted. Use .ra(outcome)rate to preview a specific result level. e.g. .ra spot / .ra str60 / .ra(1)1 / .ra(100)1",
@@ -224,7 +226,7 @@
       "nn": "Nickname .nn <name>: set your display name in the bot; .nn to clear.",
       "set": "Default die .set <sides>: set the default die (used by bare .r)\n.set resets to 100.",
       "ww": "Dice pool .ww N [success-line]: WOD adding dice pool. Legacy .ww 5 or .ww 5 7 uses 10 as the add line; extended .ww 10a8c7+2 uses a=add line (default 10), c=success line (default 8), and +2=extra successes. Successful dice use circled numerals and every round is shown.",
-      "dx": "Double-Cross .dx <count>c<crit> (e.g. .dx 3c8) or .dx <count> <crit>: Double-Cross dice — d10 reaching the crit value explodes; tallies per the DX rules. A DX-specific exploding check, not a plain roll.",
+      "dx": "Double-Cross .dx <count>c<crit>[+/-final modifier] (e.g. .dx 5c10+3) or .dx <count> <crit>: d10 reaching the crit value explodes; the optional modifier is applied once to the final tally. A DX-specific exploding check, not a plain roll. Legacy alias: .rdx.",
       "rav": "Opposed .rav A B [@target]: opposed check — both roll d100, compare success level first, then the roll on a tie. e.g. .rav fighting 60 / .rav spot @someone.",
       "ba": "BRP check .ba <skill|attr> [rate] [reason]: BRP check (roll-under d100). Levels: critical ≤ skill/20, special ≤ skill/5, success ≤ skill, failure > skill, fumble (100, or 99 on a failure). Reads the card if rate omitted; supports @someone proxy and N# multi. e.g. .ba spot / .ba fighting60.",
       "bav": "Resistance .bav <active> <passive>: BRP resistance table. target% = 50 + (active − passive)×5; roll 1d100 ≤ target → active wins. Active/passive may be attribute names (read from card) or numbers. e.g. .bav STR SIZ.",
@@ -756,6 +758,9 @@
   "init": {
     "group_only": "Initiative only works in groups.",
     "rolled": "{name}'s initiative: {roll}={total}",
+    "rolled_multi": "{base} × {count} initiative rolls:{detail}",
+    "count_err": "Initiative count must be at least 1.",
+    "count_exceeded": "You can add at most {max} initiative entries at once.",
     "list": "Initiative order:\n{list}",
     "empty": "No initiative yet. Use .ri to join.",
     "cleared": "Initiative list cleared.",
@@ -882,7 +887,6 @@
     "sub_empty": "NPC \"{name}\" did not respond to subcommand: {sub}.",
     "proxy_note": "[NPC: {name}]\n"
   },
-  "system": {
   "legacy_user": {
     "usage": "Usage: .user state | trust <user> [level] | tojson [user] | diss <user> [reason]",
     "state": "User record for {user}\nTrust level: {trust}\nCreated: {created}\nCommands: {commands}\nCharacter cards: {cards}\nLast command: {last}",
@@ -905,6 +909,7 @@
     "reset": "Reset {key} to the built-in template for the current language.",
     "failed": "Failed to save the template override."
   },
+  "system": {
     "usage": "Usage: .system info (system info) / .system stats (runtime stats)",
     "unknown": "unknown",
     "info": "System info\nOS: {os}\nCPU: {cores} cores · {cpu}% used\nMemory: {memused}/{memtotal} MB ({memload}%)\nProcess memory: {proc} MB",

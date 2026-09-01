@@ -37,6 +37,7 @@
 #include "adapter/onebot_v11_adapter.h"
 #include "adapter/qq_official_adapter.h"
 #include "core/command_router.h"
+#include "core/plugin_command_priority.h"
 #include "core/friend_approval_policy.h"
 #include "core/causal/causal_rule_manager.h"
 #include "core/causal/cooldown_manager.h"
@@ -174,16 +175,28 @@ void signalHandler(int signal) {
 }
 
 // A message that @s another account is normally treated as "for another bot" and
-// ignored — but if it's one of OUR JS plugin commands, the @ is a 代骰/arg target,
-// so let it through (the plugin resolves the @ via getCtxProxy).
-static bool jsCommandMatches(dice::JsPluginManager& jsMod, dice::CommandRouter& cmdRouter,
-                             const dice::Message& msg) {
-    if (!jsMod.ready()) return false;
+// ignored — but plugin commands may use that @ as a target/argument. Probe both
+// plugin runtimes without executing a rule, using the same gates as dispatch.
+static bool pluginCommandMatches(dice::JsPluginManager& jsMod,
+                                 dice::LuaPluginManager& luaMod,
+                                 dice::CommandRouter& cmdRouter,
+                                 const dice::Message& msg) {
     auto body = cmdRouter.commandBody(msg.content);
     if (!body || body->empty()) return false;
     std::string w = *body;
     if (auto sp = w.find_first_of(" \t"); sp != std::string::npos) w = w.substr(0, sp);
-    return jsMod.hasCommand(w);
+    if (jsMod.ready() && jsMod.hasCommand(msg, w)) return true;
+    if (!luaMod.ready()) return false;
+    const bool isPrivate = msg.type == dice::MessageType::kPrivate;
+    const std::string gid = isPrivate ? std::string() : msg.targetId;
+    const std::string nick = msg.senderName.empty() ? msg.senderId : msg.senderName;
+    const std::string card = msg.extra.is_object()
+        ? msg.extra.value("card", std::string()) : std::string();
+    const int trust = cmdRouter.jsPrivilegeLevel(msg) >= 70 ? 4 : 0;
+    return luaMod.hasCommandTrigger(w, msg.senderId, gid, nick, card,
+                                    isPrivate, trust, msg.platform)
+        || luaMod.hasCommandTrigger("." + w, msg.senderId, gid, nick, card,
+                                    isPrivate, trust, msg.platform);
 }
 
 void printBanner() {
@@ -598,6 +611,55 @@ static int realMain(int argc, char* argv[]) {
     jsMod.setGroupGate([&cmdRouter](const std::string& platform, const std::string& group, const std::string& pluginId) {
         return cmdRouter.isPluginEnabledInGroup(platform, group, pluginId);
     });
+    jsMod.setEndpointProvider([&adapterMgr]() {
+        std::vector<dice::JsPluginManager::EndpointInfo> result;
+        for (const auto& adapter : adapterMgr.allAdapters()) {
+            dice::JsPluginManager::EndpointInfo endpoint;
+            endpoint.id = adapter->id();
+            endpoint.nickname = adapter->getLoginName();
+            endpoint.userId = adapter->getLoginId();
+            endpoint.protocolType = adapter->platform() == "onebot_v11" ? "onebot"
+                : adapter->platform() == "qq_official" ? "official"
+                : adapter->platform();
+            endpoint.platform =
+                (adapter->platform() == "onebot_v11" ||
+                 adapter->platform() == "milky" ||
+                 adapter->platform() == "qq_official") ? "QQ"
+                : adapter->platform() == "discord" ? "DISCORD"
+                : adapter->platform() == "kook" ? "KOOK"
+                : adapter->platform();
+            const std::string state = adapter->connectionStatus();
+            endpoint.state = adapter->isConnected() ? 1
+                : (state == "connecting" || state == "reconnecting") ? 2
+                : (state == "failed" || state == "error" || state == "timeout") ? 3
+                : 0;
+            endpoint.enable = true;
+            endpoint.groupNum = static_cast<int64_t>(adapter->getGroupList().size());
+            result.push_back(std::move(endpoint));
+        }
+        return result;
+    });
+    jsMod.setGroupNameResolver([&adapterMgr](
+            const std::string& platform, const std::string& groupId,
+            const std::string& adapterId) {
+        if (!adapterId.empty()) {
+            if (auto adapter = adapterMgr.getAdapter(adapterId))
+                return adapter->getGroupName(groupId);
+        }
+        for (const auto& adapter : adapterMgr.allAdapters())
+            if (adapter->platform() == platform) return adapter->getGroupName(groupId);
+        return std::string();
+    });
+    jsMod.setGroupSystemResolver([&cmdRouter](
+            const std::string& platform, const std::string& groupId,
+            const std::string& adapterId) {
+        std::string system = cmdRouter.getGroupSettingFor(
+            platform, groupId, "ruleSystem", adapterId);
+        return system.empty() ? std::string("coc7") : system;
+    });
+    jsMod.setDiceSidesResolver([&cmdRouter](const dice::Message& message) {
+        return cmdRouter.pluginDiceSides(message);
+    });
     // 溯洄引用：牌堆里的 {词条} 若不是牌堆名，就查帮助词条并展开（#帮助/牌堆溯洄函数）。
     cardDeck.setHelpLookup([&cmdRouter](const std::string& name) { return cmdRouter.helpEntryContent(name); });
     // seal.vars ↔ 人物卡桥接：让海豹 gameSystem 插件用无$前缀属性名读写 .st 录入的卡。
@@ -990,6 +1052,25 @@ static int realMain(int argc, char* argv[]) {
     { std::vector<std::string> luaDirs, jsDirs; dice::CommandRouter::packPluginDirs(luaDirs, jsDirs); luaMod.setExtraDirs(luaDirs); }   // 规则包 lua 附加加载
     dice::crashdiag::setPhase("lua-mods");
     luaMod.loadDir("data/mod");   // 与 JS 规则插件共用 data/mod（Lua mod=目录，JS=文件）
+    cmdRouter.setPluginCommandClaim([&jsMod, &luaMod, &cmdRouter](
+            const dice::Message& message, const std::string& commandBody) {
+        std::string word = commandBody;
+        if (auto sp = word.find_first_of(" \t"); sp != std::string::npos) word.resize(sp);
+        if (word.empty() || dice::plugin_command_priority::isReservedCoreCommand(word)
+            || cmdRouter.isLegacyTextCommandName(word)) return false;
+        if (jsMod.ready() && jsMod.hasCommand(message, word)) return true;
+        if (!luaMod.ready()) return false;
+        const bool isPrivate = message.type == dice::MessageType::kPrivate;
+        const std::string gid = isPrivate ? std::string() : message.targetId;
+        const std::string nick = message.senderName.empty() ? message.senderId : message.senderName;
+        const std::string card = message.extra.is_object()
+            ? message.extra.value("card", std::string()) : std::string();
+        const int trust = cmdRouter.jsPrivilegeLevel(message) >= 70 ? 4 : 0;
+        return luaMod.hasCommandTrigger(word, message.senderId, gid, nick, card,
+                                        isPrivate, trust, message.platform)
+            || luaMod.hasCommandTrigger("." + word, message.senderId, gid, nick, card,
+                                        isPrivate, trust, message.platform);
+    });
     cmdRouter.setLuaTaskBridge(
         [&luaMod](const std::string& name) { return luaMod.hasTask(name); },
         [&luaMod](const std::string& name, std::string* error) { return luaMod.runTask(name, error); });
@@ -1146,11 +1227,11 @@ static int realMain(int argc, char* argv[]) {
 
     // Wire: incoming messages → command router; if no command matched, fall back
     // to the custom-reply word library; then send via the originating adapter.
-    adapterMgr.onMessage([&adapterMgr, &cmdRouter, &jsMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, &i18n, replyFallback](const dice::Message& msg) {
+    adapterMgr.onMessage([&adapterMgr, &cmdRouter, &jsMod, &luaMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, &i18n, replyFallback](const dice::Message& msg) {
         // Multi-bot群: a known dice bot always wins over @-as-argument and JS
         // plugin exceptions.  Otherwise retain the plugin @-argument exception.
         if (cmdRouter.mentionsOtherKnownDiceBot(msg) ||
-            (cmdRouter.isForAnotherBot(msg) && !jsCommandMatches(jsMod, cmdRouter, msg))) return;
+            (cmdRouter.isForAnotherBot(msg) && !pluginCommandMatches(jsMod, luaMod, cmdRouter, msg))) return;
         // Black/white-list: ignore blacklisted users/groups (and non-whitelisted in whitelist mode).
         if (cmdRouter.isBlocked(msg)) return;
         // 群自动化：消息命中「自动踢出/禁言」关键字则执行并跳过后续处理。
@@ -2797,7 +2878,7 @@ static int realMain(int argc, char* argv[]) {
         }, {drogon::Post});
 
     app.registerHandler("/api/test/message",
-        [&cmdRouter, &jsMod, &configMgr, &db, &makeAiTool, replyFallback](const drogon::HttpRequestPtr& req,
+        [&cmdRouter, &jsMod, &luaMod, &configMgr, &db, &makeAiTool, replyFallback](const drogon::HttpRequestPtr& req,
                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
             nlohmann::json out;
             try {
@@ -2832,7 +2913,7 @@ static int realMain(int argc, char* argv[]) {
                 }
                 std::string reply;
                 if (!cmdRouter.mentionsOtherKnownDiceBot(msg)
-                    && (!cmdRouter.isForAnotherBot(msg) || jsCommandMatches(jsMod, cmdRouter, msg))
+                    && (!cmdRouter.isForAnotherBot(msg) || pluginCommandMatches(jsMod, luaMod, cmdRouter, msg))
                     && !cmdRouter.isBlocked(msg)) {
                     bool disabled = cmdRouter.isGroupDisabled(msg);
                     bool forcedByAt = cmdRouter.listenAtWhenOff(msg)

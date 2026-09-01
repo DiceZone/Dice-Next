@@ -2,6 +2,7 @@
 #include "../src/core/mod/lua_plugin_manager.h"
 
 #include <chrono>
+#include <clocale>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -50,9 +51,26 @@ private:
     fs::path root_;
 };
 
+#ifdef _WIN32
+class ScopedCLocale {
+public:
+    explicit ScopedCLocale(const char* locale) {
+        if (const char* current = std::setlocale(LC_ALL, nullptr)) previous_ = current;
+        active_ = std::setlocale(LC_ALL, locale) != nullptr;
+    }
+    ~ScopedCLocale() {
+        if (!previous_.empty()) std::setlocale(LC_ALL, previous_.c_str());
+    }
+    bool active() const { return active_; }
+private:
+    std::string previous_;
+    bool active_ = false;
+};
+#endif
+
 }  // namespace
 
-TEST(LuaPluginCompat, LegacySiblingLoadLuaAndLoadTimeHttpBothWork) {
+TEST(LuaPluginCompat, LegacySiblingLoadLuaAndTopLevelHttpRefreshPerInvocation) {
     TempWorkspace workspace("dice_next_lua_compat_");
     const fs::path pluginDir = workspace.root() / "data" / "plugin";
 
@@ -71,7 +89,7 @@ end
 
 function draw_modern(msg)
     local target = loadLua("modern")
-    return target and target.value or "missing-modern"
+    return target and (target.value .. ":" .. target.count) or "missing-modern"
 end
 
 function draw_escape(msg)
@@ -92,7 +110,10 @@ return {
 }
 )LUA");
 
-    writeText(pluginDir / "script" / "modern.lua", "return { value = \"modern-ok\" }\n");
+    writeText(pluginDir / "script" / "modern.lua", R"LUA(
+helper_counter = (helper_counter or 0) + 1
+return { value = "modern-ok", count = helper_counter }
+)LUA");
     writeText(workspace.root() / "data" / "secret.lua", "return { value = \"must-not-load\" }\n");
 
     writeText(pluginDir / "DailyNews-fixed.lua", R"LUA(
@@ -117,7 +138,8 @@ msg_order["60s"] = "dailynews"
             ++fetchCalls;
             status = 200;
             return method == "GET" && url == "http://excerpt.example/toolman/getMiniNews"
-                ? std::string(R"JSON({"data":{"image":"https://img.example/daily.png"}})JSON")
+                ? std::string(R"JSON({"data":{"image":"https://img.example/daily-)JSON") +
+                      std::to_string(fetchCalls) + ".png\"}}"
                 : std::string();
         });
 
@@ -133,7 +155,11 @@ msg_order["60s"] = "dailynews"
         const auto modern = manager.dispatch(
             "现代", "user-42", "group-1", "Tester", "", false, 0, "onebot");
         ASSERT_TRUE(modern.matched);
-        ASSERT_EQ(modern.reply, std::string("modern-ok"));
+        ASSERT_EQ(modern.reply, std::string("modern-ok:1"));
+        const auto modernAgain = manager.dispatch(
+            "现代", "user-42", "group-1", "Tester", "", false, 0, "onebot");
+        ASSERT_TRUE(modernAgain.matched);
+        ASSERT_EQ(modernAgain.reply, std::string("modern-ok:1"));
 
         const auto escape = manager.dispatch(
             "越界", "user-42", "group-1", "Tester", "", false, 0, "onebot");
@@ -143,7 +169,14 @@ msg_order["60s"] = "dailynews"
         const auto news = manager.dispatch(
             "60s", "user-42", "group-1", "Tester", "", false, 0, "onebot");
         ASSERT_TRUE(news.matched);
-        ASSERT_EQ(news.reply, std::string("新闻:https://img.example/daily.png"));
+        ASSERT_EQ(news.reply, std::string("新闻:https://img.example/daily-2.png"));
+        ASSERT_EQ(fetchCalls, 2);
+
+        const auto nextNews = manager.dispatch(
+            "60s", "user-42", "group-1", "Tester", "", false, 0, "onebot");
+        ASSERT_TRUE(nextNews.matched);
+        ASSERT_EQ(nextNews.reply, std::string("新闻:https://img.example/daily-3.png"));
+        ASSERT_EQ(fetchCalls, 3);
     }
 }
 
@@ -153,23 +186,35 @@ TEST(LuaPluginCompat, LegacyTaskCallRegistersAndRuns) {
     writeText(pluginDir / "task.lua", R"LUA(
 task_call = { news = "run_news" }
 msg_order = {}
+local ok, payload = http.get("https://news.example/task")
 function run_news()
-    eventMsg("task fired", "g", "u")
+    eventMsg("task fired:" .. (ok and payload or "failed"), "g", "u")
 end
 )LUA");
 
     LuaPluginManager manager;
+    int fetchCalls = 0;
     std::string fired;
+    manager.setHttpFetch([&](const std::string&, const std::string&,
+                             const std::string&, const std::string&, int& status) {
+        status = 200;
+        return std::to_string(++fetchCalls);
+    });
     manager.setEventMsg([&](const std::string& text, const std::string&, const std::string&) {
         fired = text;
     });
     ASSERT_TRUE(manager.init());
     ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    ASSERT_EQ(fetchCalls, 1);
     ASSERT_TRUE(manager.hasTask("news"));
     ASSERT_EQ(manager.taskNames().size(), static_cast<size_t>(1));
     std::string error;
     ASSERT_TRUE(manager.runTask("news", &error));
-    ASSERT_EQ(fired, std::string("task fired"));
+    ASSERT_EQ(fired, std::string("task fired:2"));
+    ASSERT_EQ(fetchCalls, 2);
+    ASSERT_TRUE(manager.runTask("news", &error));
+    ASSERT_EQ(fired, std::string("task fired:3"));
+    ASSERT_EQ(fetchCalls, 3);
 }
 
 TEST(LuaPluginCompat, SleepTimeYieldsAndRepliesWithoutBlockingDispatch) {
@@ -197,6 +242,14 @@ end
     });
     ASSERT_TRUE(manager.init());
     ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    manager.setGroupGate([](const std::string&, const std::string& group,
+                            const std::string&) { return group != "blocked"; });
+    ASSERT_TRUE(manager.hasCommandTrigger(
+        ".clock", "u1", "g1", "Tester", "", false, 0, "onebot_v11"));
+    ASSERT_FALSE(manager.hasCommandTrigger(
+        ".clock 1", "u1", "g1", "Tester", "", false, 0, "onebot_v11"));
+    ASSERT_FALSE(manager.hasCommandTrigger(
+        ".clock", "u1", "blocked", "Tester", "", false, 0, "onebot_v11"));
     const auto result = manager.dispatch(
         ".clock 1", "u1", "g1", "Tester", "", false, 0, "onebot_v11");
     ASSERT_TRUE(result.matched);
@@ -299,6 +352,55 @@ end
     ASSERT_TRUE(records >= 2);
 }
 
+TEST(LuaPluginCompat, LegacyCp936PluginFilenameOpensUnderUtf8Locale) {
+#ifndef _WIN32
+    return;  // CP936 and the Windows CRT UTF-8 locale are Windows compatibility behavior.
+#else
+    TempWorkspace workspace("dice_next_lua_cp936_path_");
+    const fs::path pluginDir = workspace.root() / "data" / "plugin";
+    std::error_code ec;
+    fs::create_directories(pluginDir / "QQBot" / "spell", ec);
+    ASSERT_FALSE(static_cast<bool>(ec));
+    writeText(pluginDir / "QQBot" / "spell" / utf8Path(u8"万法大全.txt"),
+              "cp936-path-ok\n");
+    writeText(pluginDir / "outside.txt", "must-not-open\n");
+    writeText(pluginDir / "cp936_path.lua", R"LUA(
+msg_order = { [".spell"] = "spell", [".escape"] = "escape" }
+function spell(msg)
+    -- ResourceSearchEngine reads these bytes from its old CP936 QQBot/index.
+    local filename = string.char(0xCD, 0xF2, 0xB7, 0xA8, 0xB4, 0xF3, 0xC8, 0xAB)
+    local stale = "D:/old/Dice/plugin/QQBot/spell/" .. filename .. ".txt"
+    local file = io.open(stale, "r")
+    if file == nil then return "missing" end
+    local value = file:read("*l")
+    file:close()
+    return value
+end
+function escape(msg)
+    local file = io.open("D:/old/Dice/plugin/QQBot/../outside.txt", "r")
+    if file == nil then return "blocked" end
+    file:close()
+    return "opened"
+end
+)LUA");
+
+    ScopedCLocale utf8Locale(".utf8");
+    ASSERT_TRUE(utf8Locale.active());
+
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    const auto result = manager.dispatch(
+        ".spell", "u", "g", "n", "", false, 0, "onebot");
+    ASSERT_TRUE(result.matched);
+    ASSERT_EQ(result.reply, std::string("cp936-path-ok"));
+    const auto escape = manager.dispatch(
+        ".escape", "u", "g", "n", "", false, 0, "onebot");
+    ASSERT_TRUE(escape.matched);
+    ASSERT_EQ(escape.reply, std::string("blocked"));
+#endif
+}
+
 TEST(LuaPluginCompat, ExternalLegacyResourceCorpusWhenProvided) {
     const char* entryValue = std::getenv("DICENEXT_LEGACY_RESOURCE_PLUGIN");
     if (!entryValue || !*entryValue) return;  // CI uses the self-contained fixture above.
@@ -319,6 +421,14 @@ TEST(LuaPluginCompat, ExternalLegacyResourceCorpusWhenProvided) {
              fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
     ASSERT_FALSE(static_cast<bool>(ec));
 
+#ifdef _WIN32
+    // main.cpp runs the CRT in UTF-8 mode. Switch only after std::filesystem has
+    // copied the externally supplied Chinese path; the behavior under test is
+    // Lua io.open on CP936 filenames, not narrow source-path construction.
+    ScopedCLocale utf8Locale(".utf8");
+    ASSERT_TRUE(utf8Locale.active());
+#endif
+
     LuaPluginManager manager;
     ASSERT_TRUE(manager.init());
     ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
@@ -327,6 +437,22 @@ TEST(LuaPluginCompat, ExternalLegacyResourceCorpusWhenProvided) {
     ASSERT_TRUE(result.matched);
     ASSERT_TRUE(!result.reply.empty());
     ASSERT_TRUE(result.reply.find("星质形态") != std::string::npos);
+
+    const auto reload = manager.dispatch(
+        ".法术 reload", "10001", "20002", "Tester", "", false, 0, "onebot");
+    ASSERT_TRUE(reload.matched);
+    ASSERT_TRUE(reload.reply.find("重载缓存数据") != std::string::npos);
+
+    const auto featReload = manager.dispatch(
+        ".专长 reload", "10001", "20002", "Tester", "", false, 0, "onebot");
+    ASSERT_TRUE(featReload.matched);
+    ASSERT_TRUE(featReload.reply.find("重载缓存数据") != std::string::npos);
+
+    const auto spell = manager.dispatch(
+        ".法术 武器吸收 ABSORB_WEAPON", "10001", "20002", "Tester", "", false, 0, "onebot");
+    ASSERT_TRUE(spell.matched);
+    ASSERT_TRUE(!spell.reply.empty());
+    ASSERT_TRUE(spell.reply.find("武器吸收") != std::string::npos);
 }
 
 TEST(LuaPluginCompat, ExternalLegacyFortuneCorpusWhenProvided) {
@@ -355,13 +481,20 @@ TEST(LuaPluginCompat, ExternalLegacyFortuneCorpusWhenProvided) {
     ASSERT_FALSE(static_cast<bool>(ec));
 
     LuaPluginManager manager;
-    manager.setHttpFetch([](const std::string&, const std::string&,
-                            const std::string&, const std::string&, int& status) {
+    std::vector<std::string> scheduledMessages;
+    manager.setBotId("dice-bot");
+    manager.setEventMsg([&](const std::string& text, const std::string&,
+                            const std::string&) { scheduledMessages.push_back(text); });
+    int dailyFetchCalls = 0;
+    manager.setHttpFetch([&](const std::string&, const std::string&,
+                             const std::string&, const std::string&, int& status) {
         status = 200;
-        return std::string(R"JSON({"data":{"image":"https://img.example/actual-daily.png"}})JSON");
+        return std::string("{\"data\":{\"image\":\"https://img.example/actual-daily-") +
+            std::to_string(++dailyFetchCalls) + ".png\"}}";
     });
     ASSERT_TRUE(manager.init());
     ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 2);
+    ASSERT_EQ(dailyFetchCalls, 1);
 
     const std::string commands[] = {
         "求签", "求签 月老", "求签 浅草寺", "求签 原神",
@@ -378,5 +511,13 @@ TEST(LuaPluginCompat, ExternalLegacyFortuneCorpusWhenProvided) {
     const auto news = manager.dispatch(
         "60s", "10001", "20002", "Tester", "", false, 0, "onebot");
     ASSERT_TRUE(news.matched);
-    ASSERT_TRUE(news.reply.find("https://img.example/actual-daily.png") != std::string::npos);
+    ASSERT_TRUE(news.reply.find("https://img.example/actual-daily-2.png") != std::string::npos);
+    ASSERT_EQ(dailyFetchCalls, 2);
+    ASSERT_TRUE(manager.hasTask("news"));
+    std::string taskError;
+    ASSERT_TRUE(manager.runTask("news", &taskError));
+    ASSERT_EQ(scheduledMessages.size(), static_cast<size_t>(2));
+    ASSERT_TRUE(scheduledMessages[1].find(
+        "https://img.example/actual-daily-3.png") != std::string::npos);
+    ASSERT_EQ(dailyFetchCalls, 3);
 }

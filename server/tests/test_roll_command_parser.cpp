@@ -3,6 +3,7 @@
 #include "../src/core/dice/dice_expression.h"
 #include "../src/core/dice/dice_result.h"
 #include "../src/core/dice/roll_command_parser.h"
+#include "../src/core/plugin_command_priority.h"
 #include <onedice/onedice.h>
 
 using namespace dice;
@@ -98,6 +99,92 @@ TEST(RollCommandParser, PoolCommandsKeepCompactAndSpacedReasons) {
     parsed = roll_command::parsePoolInput("10测试");
     ASSERT_EQ(parsed.expression, std::string("10"));
     ASSERT_EQ(parsed.reason, std::string("测试"));
+
+    parsed = roll_command::parsePoolInput("5c10+3测试", true);
+    ASSERT_EQ(parsed.expression, std::string("5c10+3"));
+    ASSERT_EQ(parsed.reason, std::string("测试"));
+
+    parsed = roll_command::parsePoolInput("7c7 - 10 reason", true);
+    ASSERT_EQ(parsed.expression, std::string("7c7-10"));
+    ASSERT_EQ(parsed.reason, std::string("reason"));
+
+    // Negative arithmetic is opt-in for Double Cross. `.ww` keeps its existing
+    // parser semantics and treats this suffix as a reason.
+    parsed = roll_command::parsePoolInput("5c10-3测试");
+    ASSERT_EQ(parsed.expression, std::string("5c10"));
+    ASSERT_EQ(parsed.reason, std::string("-3测试"));
+}
+
+TEST(RollCommandParser, DoubleCrossFixedModifierIsStrictAndFinal) {
+    auto spec = roll_command::parseDoubleCrossSpec("5c10+3");
+    ASSERT_TRUE(spec.valid);
+    ASSERT_EQ(spec.pool, 5);
+    ASSERT_EQ(spec.critical, 10);
+    ASSERT_TRUE(spec.hasModifier);
+    ASSERT_EQ(spec.modifier, 3);
+
+    spec = roll_command::parseDoubleCrossSpec("7c7-10");
+    ASSERT_TRUE(spec.valid);
+    ASSERT_EQ(spec.pool, 7);
+    ASSERT_EQ(spec.critical, 7);
+    ASSERT_TRUE(spec.hasModifier);
+    ASSERT_EQ(spec.modifier, -10);
+
+    spec = roll_command::parseDoubleCrossSpec("5 8+0");
+    ASSERT_TRUE(spec.valid);
+    ASSERT_EQ(spec.pool, 5);
+    ASSERT_EQ(spec.critical, 8);
+    ASSERT_TRUE(spec.hasModifier);
+    ASSERT_EQ(spec.modifier, 0);
+
+    ASSERT_FALSE(roll_command::parseDoubleCrossSpec("5c10+3+4").valid);
+    ASSERT_FALSE(roll_command::parseDoubleCrossSpec("5c10-3oops").valid);
+    ASSERT_FALSE(roll_command::parseDoubleCrossSpec("5c10c8+3").valid);
+}
+
+TEST(RollCommandParser, CompactDefaultDieKeepsAsciiReason) {
+    auto parsed = roll_command::parse("dtest", true);
+    ASSERT_TRUE(parsed.expression.empty());
+    ASSERT_EQ(parsed.reason, std::string("test"));
+
+    // A spaced expression remains available to DiceScript as an identifier;
+    // only the compact `.rdtest` spelling receives legacy reason semantics.
+    parsed = roll_command::parse("dtest", false);
+    ASSERT_EQ(parsed.expression, std::string("dtest"));
+    ASSERT_TRUE(parsed.reason.empty());
+}
+
+TEST(RollCommandParser, DiceScriptResultsMustBeNumeric) {
+    ASSERT_TRUE(roll_command::isNumericResult(DICESCRIPT_VALUE_INT));
+    ASSERT_TRUE(roll_command::isNumericResult(DICESCRIPT_VALUE_FLOAT));
+    ASSERT_FALSE(roll_command::isNumericResult(DICESCRIPT_VALUE_NULL));
+    ASSERT_FALSE(roll_command::isNumericResult(DICESCRIPT_VALUE_STRING));
+    ASSERT_FALSE(roll_command::isNumericResult(DICESCRIPT_VALUE_ARRAY));
+}
+
+TEST(RollCommandParser, CompositeDiceScriptDetailIncludesFinalTotal) {
+    ASSERT_EQ(roll_command::renderNumericDetail("2", "2[2d1=1+1]"),
+              std::string("2[2d1=1+1]"));
+    ASSERT_EQ(roll_command::renderNumericDetail("5", "2[2d1=1+1]+3"),
+              std::string("2[2d1=1+1]+3=5"));
+    ASSERT_EQ(roll_command::renderNumericDetail("3", ""),
+              std::string("3"));
+}
+
+TEST(PluginCommandPriority, ExactCoreNamesStayReservedButLongerPluginWordsDoNot) {
+    ASSERT_TRUE(plugin_command_priority::isReservedCoreCommand("ra"));
+    ASSERT_TRUE(plugin_command_priority::isReservedCoreCommand("rah"));
+    ASSERT_TRUE(plugin_command_priority::isReservedCoreCommand("drawh"));
+    ASSERT_TRUE(plugin_command_priority::isReservedCoreCommand("mrrp"));
+    ASSERT_TRUE(plugin_command_priority::isReservedCoreCommand("blackgroup"));
+    ASSERT_TRUE(plugin_command_priority::isReservedCoreCommand("死亡豁免"));
+    ASSERT_TRUE(plugin_command_priority::isReservedCoreCommand("AI"));
+    ASSERT_TRUE(plugin_command_priority::isReservedCoreCommand("game")
+                && plugin_command_priority::isReservedCoreCommand("coc6s")
+                && plugin_command_priority::isReservedCoreCommand("coc7ds"));
+    ASSERT_FALSE(plugin_command_priority::isReservedCoreCommand("ram"));
+    ASSERT_FALSE(plugin_command_priority::isReservedCoreCommand("gameHelper"));
+    ASSERT_FALSE(plugin_command_priority::isReservedCoreCommand("strike"));
 }
 
 TEST(RollCommandParser, NativeLexerReturnsValidUtf8ForUnicodeError) {

@@ -16,9 +16,9 @@ if (!seal.ext.find('jstest')) {
   cmd.solve = (ctx, msg, cmdArgs) => {
     const greet = seal.ext.getStringConfig(ext, '问候语');
     const card = seal.deck.draw(ctx, '数字', false);
-    seal.replyToSender(ctx, msg, `${greet}，${ctx.player.name}！抽到数字：${card}`);
+    const result = card.exists ? card.result : (card.err || '牌堆不存在');
+    seal.replyToSender(ctx, msg, `${greet}，${ctx.player.name}！抽到数字：${result}`);
     return seal.ext.newCmdExecuteResult(true);
   };
   ext.cmdMap['jstest'] = cmd;
-  seal.ext.register(ext);
 }
