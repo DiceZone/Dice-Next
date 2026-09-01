@@ -49,6 +49,38 @@ std::string lower(std::string value) {
     return value;
 }
 
+std::string environmentValue(const char* name) {
+#if defined(_WIN32)
+    const DWORD required = GetEnvironmentVariableA(name, nullptr, 0);
+    if (required == 0) return {};
+    std::string value(static_cast<std::size_t>(required), '\0');
+    const DWORD written = GetEnvironmentVariableA(name, value.data(), required);
+    if (written == 0 || written >= required) return {};
+    value.resize(static_cast<std::size_t>(written));
+    return value;
+#else
+    const char* value = std::getenv(name);
+    return value ? std::string(value) : std::string();
+#endif
+}
+
+std::string readRuntimeProbeFile(const fs::path& path) {
+    constexpr std::size_t kLimit = 512 * 1024;
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return {};
+    std::string result;
+    std::array<char, 4096> buffer{};
+    while (input && result.size() < kLimit) {
+        const auto remaining = kLimit - result.size();
+        input.read(buffer.data(), static_cast<std::streamsize>(
+            std::min<std::size_t>(buffer.size(), remaining)));
+        const auto count = input.gcount();
+        if (count <= 0) break;
+        result.append(buffer.data(), static_cast<std::size_t>(count));
+    }
+    return result;
+}
+
 bool safeFilename(const std::string& value) {
     if (value.empty() || value == "." || value == ".." || value.find("..") != std::string::npos)
         return false;
@@ -329,9 +361,125 @@ std::string currentArch() {
     return "amd64";
 #endif
 }
+
+ContainerEnvironment detectContainerEnvironment(const ContainerDetectionInput& input) {
+    const auto makeResult = [](std::string type, std::string evidence) {
+        return ContainerEnvironment{true, std::move(type), std::move(evidence)};
+    };
+    const auto normalizedMarker = [](std::string value) {
+        const auto first = value.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return std::string();
+        const auto last = value.find_last_not_of(" \t\r\n");
+        value = lower(value.substr(first, last - first + 1));
+        if (value == "0" || value == "false" || value == "no" || value == "off" ||
+            value == "host" || value == "baremetal") return std::string();
+        return value;
+    };
+    const auto markerType = [&](const std::string& marker) {
+        const std::string value = normalizedMarker(marker);
+        if (value.empty()) return std::string();
+        if (value.find("kube") != std::string::npos) return std::string("kubernetes");
+        if (value.find("podman") != std::string::npos || value.find("libpod") != std::string::npos)
+            return std::string("podman");
+        if (value.find("docker") != std::string::npos) return std::string("docker");
+        if (value.find("containerd") != std::string::npos) return std::string("containerd");
+        if (value.find("lxc") != std::string::npos) return std::string("lxc");
+        return std::string("container");
+    };
+    const auto contentType = [](const std::string& content) {
+        const std::string value = lower(content);
+        static const std::regex dockerCgroup(
+            R"((/docker/[0-9a-f]{12,64}($|\n))|((^|/)docker-[0-9a-f]{12,64}\.scope($|\n)))");
+        static const std::regex podmanCgroup(
+            R"((^|/)libpod-[0-9a-f]{12,64}\.scope($|\n))");
+        static const std::regex containerdCgroup(
+            R"((^|/)(cri-)?containerd-[0-9a-f]{12,64}\.scope($|\n))");
+        if (value.find("kubepods") != std::string::npos ||
+            value.find("kubernetes") != std::string::npos) return std::string("kubernetes");
+        if (std::regex_search(value, podmanCgroup)) return std::string("podman");
+        if (std::regex_search(value, dockerCgroup)) return std::string("docker");
+        if (std::regex_search(value, containerdCgroup)) return std::string("containerd");
+        if (value.find("lxc.payload") != std::string::npos ||
+            value.find("/lxc/") != std::string::npos) return std::string("lxc");
+        if (value.find("/garden/") != std::string::npos) return std::string("garden");
+        return std::string();
+    };
+    const auto mountType = [](const std::string& content) {
+        // A host mount namespace can see mounts belonging to unrelated Docker
+        // containers. Only the entry mounted as this process's root is evidence
+        // about this process itself.
+        std::istringstream lines(content);
+        std::string line;
+        while (std::getline(lines, line)) {
+            std::istringstream fields(line);
+            std::string id, parent, device, root, mountPoint;
+            if (!(fields >> id >> parent >> device >> root >> mountPoint) || mountPoint != "/")
+                continue;
+            const std::string value = lower(line);
+            if (value.find("kubepods") != std::string::npos ||
+                value.find("/kubernetes/") != std::string::npos)
+                return std::string("kubernetes");
+            if (value.find("containers/storage") != std::string::npos ||
+                value.find("libpod") != std::string::npos)
+                return std::string("podman");
+            if (value.find("/var/lib/docker/") != std::string::npos ||
+                value.find("/docker/containers/") != std::string::npos)
+                return std::string("docker");
+            if (value.find("/var/lib/containerd/") != std::string::npos ||
+                value.find("io.containerd.runtime") != std::string::npos)
+                return std::string("containerd");
+            if (value.find("lxcfs") != std::string::npos) return std::string("lxc");
+        }
+        return std::string();
+    };
+
+    if (!normalizedMarker(input.kubernetesServiceHost).empty())
+        return makeResult("kubernetes", "KUBERNETES_SERVICE_HOST");
+    if (const auto type = markerType(input.diceNextMarker); !type.empty())
+        return makeResult(type, "DICENEXT_CONTAINER");
+    if (!normalizedMarker(input.windowsSandboxMount).empty())
+        return makeResult("windows-container", "CONTAINER_SANDBOX_MOUNT_POINT");
+    if (const auto type = markerType(input.standardMarker); !type.empty())
+        return makeResult(type, "container");
+    if (const auto type = markerType(input.systemdMarker); !type.empty())
+        return makeResult(type, "/run/systemd/container");
+    if (input.dockerEnvFile) return makeResult("docker", "/.dockerenv");
+    if (input.containerEnvFile) return makeResult("podman", "/run/.containerenv");
+    if (const auto type = contentType(input.cgroup); !type.empty())
+        return makeResult(type, "/proc/*/cgroup");
+    if (const auto type = mountType(input.mountInfo); !type.empty())
+        return makeResult(type, "/proc/self/mountinfo");
+    return {};
+}
+
+ContainerEnvironment detectContainerEnvironment() {
+    ContainerDetectionInput input;
+    input.diceNextMarker = environmentValue("DICENEXT_CONTAINER");
+    input.standardMarker = environmentValue("container");
+    input.kubernetesServiceHost = environmentValue("KUBERNETES_SERVICE_HOST");
+    input.windowsSandboxMount = environmentValue("CONTAINER_SANDBOX_MOUNT_POINT");
+#if defined(__linux__)
+    std::error_code ec;
+    input.dockerEnvFile = fs::is_regular_file("/.dockerenv", ec);
+    ec.clear();
+    input.containerEnvFile = fs::is_regular_file("/run/.containerenv", ec);
+    input.systemdMarker = readRuntimeProbeFile("/run/systemd/container");
+    input.cgroup = readRuntimeProbeFile("/proc/1/cgroup") + "\n" +
+        readRuntimeProbeFile("/proc/self/cgroup");
+    input.mountInfo = readRuntimeProbeFile("/proc/self/mountinfo");
+#endif
+    return detectContainerEnvironment(input);
+}
+
 UpdateService::UpdateService(ConfigManager& config, std::function<void()> restart,
-                             NotifyCallback notify)
-    : config_(config), restart_(std::move(restart)), notify_(std::move(notify)) {
+                             NotifyCallback notify, ContainerEnvironment container)
+    : config_(config), restart_(std::move(restart)), notify_(std::move(notify)),
+      container_(std::move(container)) {
+    if (container_.detected) {
+        DICE_LOG_INFO("Container runtime detected ({} via {}); self-update download and "
+                      "installation are disabled",
+            container_.type, container_.evidence);
+    }
     worker_ = std::thread([this] { workerLoop(); });
 }
 
@@ -410,13 +558,19 @@ UpdateService::Settings UpdateService::settings() const {
     result.customMirror = config_.get<std::string>("update/custom_mirror", "");
     if (result.action != "notify" && result.action != "download" && result.action != "install")
         result.action = "notify";
+    if (container_.detected && result.action != "notify") result.action = "notify";
     if (result.source != "auto" && result.source != "direct" &&
         result.source != "mirror" && result.source != "custom")
         result.source = "auto";
     return result;
 }
 
+bool UpdateService::downloadSupported() const {
+    return !container_.detected;
+}
+
 bool UpdateService::installSupported() const {
+    if (!downloadSupported()) return false;
 #if defined(_WIN32)
     wchar_t managed[8]{};
     const DWORD length = GetEnvironmentVariableW(
@@ -428,6 +582,11 @@ bool UpdateService::installSupported() const {
 #else
     return false;
 #endif
+}
+
+std::string UpdateService::containerUpdateError() const {
+    return "self-update download and installation are disabled inside containers; "
+        "pull a new image and recreate the container";
 }
 
 std::string UpdateService::sourceLabel(const std::string& prefix) {
@@ -478,7 +637,14 @@ UpdateService::Json UpdateService::status() const {
         {"downloadedBytes", downloadedBytes_},
         {"totalBytes", totalBytes_},
         {"checkedAt", checkedAt_},
+        {"downloadSupported", downloadSupported()},
         {"installSupported", installSupported()},
+        {"selfUpdateBlockedReason", container_.detected ? "container" : ""},
+        {"runtime", Json{
+            {"container", container_.detected},
+            {"containerType", container_.type},
+            {"containerDetection", container_.evidence}
+        }},
         {"pending", fs::is_directory(fs::path("updates") / "pending")},
         {"settings", Json{
             {"autoCheck", current.autoCheck},
@@ -525,6 +691,10 @@ bool UpdateService::updateSettings(const Json& values, std::string& error) {
             next.action = values["autoAction"].get<std::string>();
             if (next.action != "notify" && next.action != "download" && next.action != "install") {
                 error = "unknown autoAction";
+                return false;
+            }
+            if (next.action != "notify" && !downloadSupported()) {
+                error = containerUpdateError();
                 return false;
             }
             if (next.action == "install" && !installSupported()) {
@@ -608,6 +778,10 @@ bool UpdateService::requestCheck(bool force, std::string& error) {
 
 bool UpdateService::requestDownload(std::string& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!downloadSupported()) {
+        error = containerUpdateError();
+        return false;
+    }
     if (!hasLatest_ || !updateAvailable_) {
         error = "no newer release is available";
         return false;
@@ -621,6 +795,10 @@ bool UpdateService::requestDownload(std::string& error) {
 
 bool UpdateService::requestInstall(std::string& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!downloadSupported()) {
+        error = containerUpdateError();
+        return false;
+    }
     if (!installSupported()) {
         error = "automatic installation requires the Windows dice-next.exe manager";
         return false;
@@ -779,7 +957,13 @@ UpdateService::ProbeResult UpdateService::probeManifest(const Source& source) co
     result.source = source;
     const auto started = std::chrono::steady_clock::now();
     const std::string url = buildMirroredUrl(kLatestManifestUrl, source.prefix);
-    const fs::path temporary = fs::path("updates") / "tmp" /
+    fs::path temporaryRoot = fs::path("updates") / "tmp";
+    if (container_.detected) {
+        std::error_code ec;
+        const fs::path systemTemporary = fs::temp_directory_path(ec);
+        if (!ec) temporaryRoot = systemTemporary / "dice-next-updater";
+    }
+    const fs::path temporary = temporaryRoot /
         ("manifest-" + std::to_string(g_tempSequence.fetch_add(1)) + ".json");
 
     std::string fetchError;
@@ -911,7 +1095,7 @@ void UpdateService::doCheck(bool force) {
         DICE_LOG_INFO("Update check via {}: latest {} (current v{}-beta.{})",
             activeSource_, latest_.tag, versionString(), buildNumber());
 
-        if (available && current.action != "notify") {
+        if (available && current.action != "notify" && downloadSupported()) {
             downloadedBytes_ = 0;
             totalBytes_ = 0;
             automaticDownload_ = true;
@@ -923,8 +1107,10 @@ void UpdateService::doCheck(bool force) {
 
     if (available && notify_ &&
         config_.get<std::string>("update/last_notified_tag", "") != checkedTag) {
-        const std::string action = current.action == "download"
-            ? "自动下载" : current.action == "install" ? "自动下载并安装" : "仅通知";
+        const std::string action = container_.detected
+            ? "仅通知（容器内禁止程序自更新，请更新镜像后重建容器）"
+            : current.action == "download"
+                ? "自动下载" : current.action == "install" ? "自动下载并安装" : "仅通知";
         emitNotification("update_available",
             "检测到 Dice!Next 新版本：" + checkedTag +
             "\n当前版本：v" + versionString() + "-beta." + std::to_string(buildNumber()) +
@@ -1250,7 +1436,9 @@ void UpdateService::doDownload() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         automatic = automaticDownload_;
-        if (!hasLatest_ || !updateAvailable_) {
+        if (!downloadSupported()) {
+            initialError = containerUpdateError();
+        } else if (!hasLatest_ || !updateAvailable_) {
             initialError = "no newer release is available";
         } else {
             manifest = latest_;
@@ -1344,6 +1532,10 @@ void UpdateService::doInstall() {
             "Dice!Next 更新安装失败。\n原因：" + message);
     };
 
+    if (!downloadSupported()) {
+        fail(containerUpdateError());
+        return;
+    }
     if (!installSupported() || !fs::is_directory(fs::path("updates") / "pending")) {
         fail("staged update cannot be installed in the current launch mode");
         return;

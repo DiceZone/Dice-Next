@@ -51,6 +51,29 @@ bool noRestartRequested() {
     return value == L"NO";
 }
 
+bool environmentMarkerPresent(const std::wstring& name) {
+    std::wstring value = pathValue(name);
+    const auto first = std::find_if_not(value.begin(), value.end(), [](wchar_t ch) {
+        return std::iswspace(ch) != 0;
+    });
+    if (first == value.end()) return false;
+    const auto last = std::find_if_not(value.rbegin(), value.rend(), [](wchar_t ch) {
+        return std::iswspace(ch) != 0;
+    }).base();
+    value.assign(first, last);
+    std::transform(value.begin(), value.end(), value.begin(), towupper);
+    return value != L"0" && value != L"FALSE" && value != L"NO" &&
+        value != L"OFF" && value != L"HOST" && value != L"BAREMETAL";
+}
+
+bool runningInContainer() {
+    return environmentMarkerPresent(L"DICENEXT_CONTAINER") ||
+        environmentMarkerPresent(L"CONTAINER_SANDBOX_MOUNT_POINT") ||
+        environmentMarkerPresent(L"KUBERNETES_SERVICE_HOST") ||
+        environmentMarkerPresent(L"DOTNET_RUNNING_IN_CONTAINER") ||
+        environmentMarkerPresent(L"container");
+}
+
 std::wstring wideError(const std::error_code& error) {
     const std::string message = error.message();
     return std::wstring(message.begin(), message.end());
@@ -314,6 +337,12 @@ bool applyPendingUpdate(const fs::path& root) {
     const fs::path stage = root / L"updates" / L"pending";
     std::error_code ec;
     if (!fs::is_directory(stage, ec)) return false;
+    if (runningInContainer()) {
+        std::wcerr << L"Dice!Next: a container environment was detected; the staged "
+                      L"program update was not applied. Pull a new image and recreate "
+                      L"the container instead.\n";
+        return false;
+    }
     const std::string metadata = readUpdateMetadata(stage);
     const bool applied = applyUpdate(root, stage);
     writeUpdateResult(root, metadata, applied,

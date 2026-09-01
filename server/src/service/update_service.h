@@ -48,13 +48,35 @@ std::vector<std::string> githubAssetNameCandidates(const std::string& manifestNa
 std::string currentOs();
 std::string currentArch();
 
+struct ContainerDetectionInput {
+    std::string diceNextMarker;
+    std::string standardMarker;
+    std::string systemdMarker;
+    std::string kubernetesServiceHost;
+    std::string windowsSandboxMount;
+    bool dockerEnvFile = false;
+    bool containerEnvFile = false;
+    std::string cgroup;
+    std::string mountInfo;
+};
+
+struct ContainerEnvironment {
+    bool detected = false;
+    std::string type;
+    std::string evidence;
+};
+
+ContainerEnvironment detectContainerEnvironment(const ContainerDetectionInput& input);
+ContainerEnvironment detectContainerEnvironment();
+
 class UpdateService {
 public:
     using Json = nlohmann::json;
     using NotifyCallback = std::function<void(const std::string& event, const std::string& message)>;
 
     UpdateService(ConfigManager& config, std::function<void()> restart,
-                  NotifyCallback notify = {});
+                  NotifyCallback notify = {},
+                  ContainerEnvironment container = detectContainerEnvironment());
     ~UpdateService();
 
     UpdateService(const UpdateService&) = delete;
@@ -92,7 +114,9 @@ private:
     };
 
     Settings settings() const;
+    bool downloadSupported() const;
     bool installSupported() const;
+    std::string containerUpdateError() const;
     bool isBusyLocked() const;
     bool queueJobLocked(Job job, const std::string& phase, std::string& error);
     void workerLoop();
@@ -120,6 +144,7 @@ private:
     ConfigManager& config_;
     std::function<void()> restart_;
     NotifyCallback notify_;
+    ContainerEnvironment container_;
 
     mutable std::mutex mutex_;
     std::condition_variable wake_;

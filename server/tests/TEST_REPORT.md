@@ -4,8 +4,8 @@ Date: 2026-09-01
 
 ## Outcome
 
-The Release server builds successfully. The automated core suite passes all 280
-test cases (1094/1094 assertions). The Lua compatibility suite passes all 9 test
+The Release server builds successfully. The automated core suite passes all 283
+test cases (1135/1135 assertions). The Lua compatibility suite passes all 9 test
 cases (68/68 assertions without external files), including 123/123 assertions
 when the user-provided real plugin corpus is mounted.
 
@@ -18,6 +18,43 @@ The real corpus includes:
 
 求签 and DailyNews remain ordinary third-party plugins. They are not treated as
 built-in/systemized features and are not blocked.
+
+## WebUI multi-instance session isolation
+
+WebUI session cookies are now named from a stable identity derived from each
+installation's session/config path. This keeps two Dice!Next installations on
+the same host independent even though browsers do not isolate cookies by port,
+while deliberately excluding the listening port so a port change or restart
+does not discard a trusted-device session.
+
+The legacy `dice_session` cookie remains accepted and is migrated through
+`/api/auth/status`. Logout revokes and clears only the current instance's
+session. Automated coverage verifies cookie-name stability, per-installation
+separation, legacy migration, and scoped logout. A real HTTP flow also exercised
+two instances on ports 18088 and 18089 with one cookie container: both stayed
+authenticated, logging out of one did not affect the other, and the trusted
+session survived its instance restart.
+
+## Container update boundary
+
+The updater now combines an explicit `DICENEXT_CONTAINER` image marker with
+Kubernetes and Windows-container environment variables, the standard
+`container` and systemd container markers, Docker/Podman marker files, cgroups,
+and strongly scoped mountinfo signatures. False-like explicit values do not by
+themselves classify a bare-metal process, and an ordinary host path containing
+the word `docker` is not enough to trigger the mountinfo fallback.
+
+When a container is detected, Release checks remain available and use the
+container temporary directory so a read-only application root still works.
+Manual download, manual installation, automatic download, and automatic
+installation are rejected by the service itself. A persisted old automatic
+download/install policy has an effective action of `notify`; it cannot bypass
+the restriction through the API or a stale WebUI. The Windows distribution
+manager independently checks container markers before applying an already
+staged package; a launcher smoke test confirmed that the package remains
+untouched. The two new service test cases cover
+the detection signals, false-positive boundary, status fields, old-setting
+normalization, and every mutating service entry point.
 
 ## Fixed regressions
 

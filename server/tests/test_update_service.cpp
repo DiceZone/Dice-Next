@@ -144,6 +144,98 @@ TEST(UpdateAssetName, RecoversGithubNormalizedLegacyParentheses) {
     ASSERT_EQ(safe.size(), static_cast<std::size_t>(1));
     ASSERT_EQ(safe[0], std::string("DiceNext-beta-3.0.0-874-windows-amd64.zip"));
 }
+
+TEST(UpdateContainer, DetectsExplicitAndRuntimeFallbackSignals) {
+    ContainerDetectionInput explicitMarker;
+    explicitMarker.diceNextMarker = " docker ";
+    auto detected = detectContainerEnvironment(explicitMarker);
+    ASSERT_TRUE(detected.detected);
+    ASSERT_EQ(detected.type, std::string("docker"));
+    ASSERT_EQ(detected.evidence, std::string("DICENEXT_CONTAINER"));
+
+    ContainerDetectionInput kubernetes;
+    kubernetes.kubernetesServiceHost = "10.96.0.1";
+    detected = detectContainerEnvironment(kubernetes);
+    ASSERT_TRUE(detected.detected);
+    ASSERT_EQ(detected.type, std::string("kubernetes"));
+
+    ContainerDetectionInput podman;
+    podman.containerEnvFile = true;
+    detected = detectContainerEnvironment(podman);
+    ASSERT_TRUE(detected.detected);
+    ASSERT_EQ(detected.type, std::string("podman"));
+
+    ContainerDetectionInput systemd;
+    systemd.systemdMarker = "systemd-nspawn\n";
+    detected = detectContainerEnvironment(systemd);
+    ASSERT_TRUE(detected.detected);
+    ASSERT_EQ(detected.type, std::string("container"));
+    ASSERT_EQ(detected.evidence, std::string("/run/systemd/container"));
+
+    ContainerDetectionInput cgroup;
+    cgroup.cgroup = "0::/system.slice/docker-0123456789abcdef.scope";
+    detected = detectContainerEnvironment(cgroup);
+    ASSERT_TRUE(detected.detected);
+    ASSERT_EQ(detected.type, std::string("docker"));
+
+    ContainerDetectionInput mountInfo;
+    mountInfo.mountInfo =
+        "36 25 0:32 / / rw,relatime - overlay overlay "
+        "rw,lowerdir=/var/lib/docker/overlay2/l";
+    detected = detectContainerEnvironment(mountInfo);
+    ASSERT_TRUE(detected.detected);
+    ASSERT_EQ(detected.type, std::string("docker"));
+}
+
+TEST(UpdateContainer, IgnoresFalseMarkersAndBlocksEveryMutationEntry) {
+    ContainerDetectionInput host;
+    host.diceNextMarker = "false";
+    host.standardMarker = "off";
+    host.cgroup = "0::/system.slice/docker-dice-next.service";
+    host.mountInfo =
+        "36 25 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n"
+        "100 36 0:45 / /var/lib/docker/containers/abc/mounts/shm rw - tmpfs shm rw";
+    ASSERT_FALSE(detectContainerEnvironment(host).detected);
+
+    namespace fs = std::filesystem;
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path configPath = fs::temp_directory_path() /
+        ("dice_next_container_update_config_" + std::to_string(nonce));
+    dice::ConfigManager config(configPath.string());
+    config.set<std::string>("update/auto_action", "install");
+    {
+        UpdateService service(config, [] {}, {},
+            ContainerEnvironment{true, "docker", "DICENEXT_CONTAINER"});
+        const auto status = service.status();
+        ASSERT_FALSE(status.value("downloadSupported", true));
+        ASSERT_FALSE(status.value("installSupported", true));
+        ASSERT_EQ(status.value("selfUpdateBlockedReason", std::string()),
+            std::string("container"));
+        ASSERT_TRUE(status.at("runtime").value("container", false));
+        ASSERT_EQ(status.at("runtime").value("containerType", std::string()),
+            std::string("docker"));
+        ASSERT_EQ(status.at("settings").value("autoAction", std::string()),
+            std::string("notify"));
+
+        std::string error;
+        ASSERT_FALSE(service.requestDownload(error));
+        ASSERT_TRUE(error.find("disabled inside containers") != std::string::npos);
+        error.clear();
+        ASSERT_FALSE(service.requestInstall(error));
+        ASSERT_TRUE(error.find("disabled inside containers") != std::string::npos);
+        error.clear();
+        ASSERT_FALSE(service.updateSettings(
+            nlohmann::json{{"autoAction", "download"}}, error));
+        ASSERT_TRUE(error.find("disabled inside containers") != std::string::npos);
+        error.clear();
+        ASSERT_FALSE(service.updateSettings(
+            nlohmann::json{{"autoAction", "install"}}, error));
+        ASSERT_TRUE(error.find("disabled inside containers") != std::string::npos);
+    }
+    std::error_code ec;
+    fs::remove_all(configPath, ec);
+}
+
 TEST(UpdateService, PortableWorkerStartsAndStopsCleanly) {
     namespace fs = std::filesystem;
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
