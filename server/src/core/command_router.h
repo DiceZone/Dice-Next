@@ -561,7 +561,7 @@ private:
                 "官方窗口直绑真实 QQ 默认关闭，可由骰主在网页系统设置中临时开启。";
 
         const bool sourceOfficial = transport == "qq_official";
-        const bool sourceOneBot = transport == "onebot_v11";
+        const bool sourceOneBot = transport == "onebot_v11" || transport == "milky";
         const bool sourcePlatform = transport == "discord" || transport == "kook";
         if (!sourceOfficial && !sourceOneBot && !sourcePlatform)
             return "当前适配器不支持 QQ 身份绑定。";
@@ -5445,7 +5445,7 @@ private:
     /// numbers on unrelated platforms must never be collapsed by guesswork.
     std::string canonicalMasterId(const MasterEntry& master) const {
         using identity::BindingStore;
-        if ((master.platform.empty() || master.platform == "onebot_v11") &&
+        if ((master.platform.empty() || master.platform == "onebot_v11" || master.platform == "milky") &&
             BindingStore::isRealQQ(master.id)) return master.id;
         if (master.platform.empty()) return {};
         auto* st = db_.getStorage(); if (!st) return {};
@@ -5474,7 +5474,7 @@ private:
                 if (adapter->isConnected() && adapter->platform() == recipient.platform) return adapter;
         } else if (!recipient.canonicalId.empty()) {
             for (auto& adapter : adapters_.allAdapters())
-                if (adapter->isConnected() && adapter->platform() == "onebot_v11") return adapter;
+                if (adapter->isConnected() && (adapter->platform() == "onebot_v11" || adapter->platform() == "milky")) return adapter;
         }
         return {};
     }
@@ -8115,7 +8115,7 @@ private:
 
     /// 平台缩写（日志文件名前缀）：onebot_v11→q、discord→d、kook→k。
     static std::string platformAbbrev(const std::string& platform) {
-        if (platform == "onebot_v11" || platform == "qq" || platform == "onebot") return "q";
+        if (platform == "onebot_v11" || platform == "milky" || platform == "qq" || platform == "onebot") return "q";
         if (platform == "discord") return "d";
         if (platform == "kook") return "k";
         return platform.empty() ? "x" : std::string(1, platform[0]);

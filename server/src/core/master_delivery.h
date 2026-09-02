@@ -38,7 +38,7 @@ inline std::vector<std::vector<Recipient>> groupRecipients(const std::vector<Rec
 /// Prefer a real QQ/OneBot route when several live transports represent the
 /// same person; QQ Official remains the fallback when OneBot is unavailable.
 inline int transportPriority(const Recipient& recipient) {
-    if (recipient.platform == "onebot_v11" ||
+    if (recipient.platform == "onebot_v11" || recipient.platform == "milky" ||
         (recipient.platform.empty() && !recipient.canonicalId.empty())) return 0;
     if (recipient.platform == "qq_official") return 1;
     return 2;

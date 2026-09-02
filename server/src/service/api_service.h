@@ -17,6 +17,7 @@
 #include "../adapter/adapter_interface.h"
 #include "../adapter/adapter_manager.h"
 #include "../adapter/onebot_v11_adapter.h"
+#include "../adapter/milky_adapter.h"
 #include "../adapter/qq_official_adapter.h"
 #include "../adapter/discord_adapter.h"
 #include "../adapter/kook_adapter.h"
@@ -162,6 +163,7 @@ static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std:
     J cfg = J::parse(a.config, nullptr, false);
     if (!cfg.is_object()) cfg = J::object();
     const bool official = a.type == static_cast<int>(AdapterType::kQQOfficial);
+    const bool milky = a.type == static_cast<int>(AdapterType::kMilky);
     const char* typeStr = adapterTypeToString(static_cast<AdapterType>(a.type));
     const std::string heartApiKey = cfg.value("heartApiKey", std::string());
     return J{
@@ -176,6 +178,10 @@ static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std:
         {"forceVerifyImageResource", official && cfg.is_object() ? cfg.value("forceVerifyImageResource", false) : false},
         {"heartApiKeyConfigured", !heartApiKey.empty()},
         {"heartApiKeyTail", heartApiKey.size() > 4 ? heartApiKey.substr(heartApiKey.size() - 4) : std::string()},
+        {"webhookBaseUrl", milky ? cfg.value("webhookBaseUrl", cfg.value("webhook_base_url", std::string())) : std::string()},
+        {"webhookTokenConfigured", milky && !cfg.value("webhookToken", cfg.value("webhook_token", std::string())).empty()},
+        {"webhookTokenTail", milky ? ([&] { const auto t = cfg.value("webhookToken", cfg.value("webhook_token", std::string())); return t.size() > 4 ? t.substr(t.size() - 4) : std::string(); })() : std::string()},
+        {"webhookUrl", milky ? (cfg.value("webhookBaseUrl", cfg.value("webhook_base_url", std::string())).empty() ? std::string() : cfg.value("webhookBaseUrl", cfg.value("webhook_base_url", std::string())) + "/milky/webhook/" + std::to_string(a.id)) : std::string()},
         {"enabled", a.enabled},
         {"status", "disconnected"},
         {"lastActive", lastActive.empty() ? J(nullptr) : J(lastActive)},
@@ -194,6 +200,10 @@ static J adapterToConfigJson(const AdapterRow& a) {
         out["app_secret"] = extra.value("appSecret", std::string());
         out["qq_number"] = extra.value("qqNumber", std::string());
         out["force_verify_image_resource"] = extra.value("forceVerifyImageResource", false);
+    }
+    if (a.type == static_cast<int>(AdapterType::kMilky)) {
+        out["webhook_base_url"] = extra.value("webhookBaseUrl", extra.value("webhook_base_url", std::string()));
+        out["webhook_token"] = extra.value("webhookToken", extra.value("webhook_token", std::string()));
     }
     return out;
 }
@@ -215,6 +225,15 @@ static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
                             {"appSecret", cfg.value("appSecret", std::string())},
                             {"qqNumber", cfg.value("qqNumber", std::string())},
                             {"forceVerifyImageResource", cfg.value("forceVerifyImageResource", false)},
+                            {"message_format", cfg.value("message_format", std::string())}});
+        return adapter;
+    }
+    if (a.type == static_cast<int>(AdapterType::kMilky)) {
+        J cfg = J::parse(a.config, nullptr, false); if (!cfg.is_object()) cfg = J::object();
+        auto adapter = std::make_shared<MilkyAdapter>(std::to_string(a.id));
+        adapter->configure({{"name", a.name}, {"endpoint", a.endpoint}, {"accessToken", a.accessToken},
+                            {"webhookBaseUrl", cfg.value("webhookBaseUrl", cfg.value("webhook_base_url", std::string()))},
+                            {"webhookToken", cfg.value("webhookToken", cfg.value("webhook_token", std::string()))},
                             {"message_format", cfg.value("message_format", std::string())}});
         return adapter;
     }
@@ -325,6 +344,28 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     auto& app = drogon::app();
     auto* st = db.getStorage();
     auto* lst = db.getLogStorage();   // game_logs / game_log_messages live in logs.db
+
+    // Milky WebHook ingress is intentionally outside /api/: the protocol
+    // client authenticates with its adapter-specific WebHook token.
+    app.registerHandler("/milky/webhook/{1}", [&adapterMgr](Req req, CB&& cb, const std::string& adapterId) {
+        auto adapter = std::dynamic_pointer_cast<MilkyAdapter>(adapterMgr.getAdapter(adapterId));
+        auto response = drogon::HttpResponse::newHttpResponse();
+        response->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+        if (!adapter || adapter->webhookToken().empty() ||
+            req->getHeader("Authorization") != "Bearer " + adapter->webhookToken()) {
+            response->setStatusCode(drogon::k401Unauthorized);
+            response->setBody(dumpJsonUtf8Safe(J{{"code", 1}, {"message", "unauthorized"}}));
+            cb(response); return;
+        }
+        J event = J::parse(req->getBody(), nullptr, false);
+        if (event.is_discarded() || !adapter->handleWebhook(event)) {
+            response->setStatusCode(drogon::k400BadRequest);
+            response->setBody(dumpJsonUtf8Safe(J{{"code", 1}, {"message", "invalid event"}}));
+            cb(response); return;
+        }
+        response->setBody(dumpJsonUtf8Safe(J{{"code", 0}, {"message", "ok"}}));
+        cb(response);
+    }, {drogon::Post});
 
     // ── System ────────────────────────────────────────────────
     app.registerHandler("/api/system/status", [](Req, CB&& cb) {
@@ -1289,7 +1330,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             for (auto& r : st->get_all<AdapterRow>()) {
                 const J cfg2 = scoped_settings::rawSection(
                     cfg.getAll(), "account", std::to_string(r.id), "dice");
-                adapters.push_back(J{{"id", std::to_string(r.id)}, {"type", r.type == static_cast<int>(AdapterType::kQQOfficial) ? "qq_official" : r.type == static_cast<int>(AdapterType::kDiscord) ? "discord" : r.type == static_cast<int>(AdapterType::kKook) ? "kook" : "onebot_v11"},
+                adapters.push_back(J{{"id", std::to_string(r.id)}, {"type", r.type == static_cast<int>(AdapterType::kUnknown) ? "onebot_v11" : adapterTypeToString(static_cast<AdapterType>(r.type))},
                                      {"name", r.name},
                                      {"loginId", [&] { auto a = adapterMgr.getAdapter(std::to_string(r.id)); return a ? a->getLoginId() : std::string(); }()},
                                      {"loginName", [&] { auto a = adapterMgr.getAdapter(std::to_string(r.id)); return a ? a->getLoginName() : std::string(); }()},
@@ -2295,6 +2336,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     if (a.accessToken.empty()) throw std::runtime_error("需要 Bot Token");
                     a.connectionMode = 0; a.endpoint.clear();
                     a.config = J{{"heartApiKey", heartApiKey}}.dump();
+                } else if (a.type == static_cast<int>(AdapterType::kMilky)) {
+                    a.endpoint = j.value("endpoint", "");
+                    a.accessToken = j.value("accessToken", "");
+                    if (a.endpoint.empty() || a.accessToken.empty()) throw std::runtime_error("Milky requires endpoint and access token");
+                    a.connectionMode = 2;
+                    a.config = J{{"heartApiKey", heartApiKey},
+                                 {"webhookBaseUrl", j.value("webhookBaseUrl", j.value("webhook_base_url", std::string()))},
+                                 {"webhookToken", j.value("webhookToken", j.value("webhook_token", std::string()))}}.dump();
                 } else {
                     a.endpoint = j.value("endpoint", ""); a.accessToken = j.value("accessToken", "");
                     std::string mode = j.value("connectionMode", "forward_ws");
@@ -2344,7 +2393,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     }
                     if (adapterCfg.value("appId", std::string()).empty() || adapterCfg.value("appSecret", std::string()).empty()) throw std::runtime_error("QQ 官方机器人需要 AppID 和 AppSecret");
                 } else {
-                    if (j.contains("endpoint") && j["endpoint"].is_string()) {
+                    if (a.type == static_cast<int>(AdapterType::kMilky)) {
+                        if (j.contains("endpoint") && j["endpoint"].is_string()) { runtimeConfigChanged = runtimeConfigChanged || a.endpoint != j["endpoint"].get<std::string>(); a.endpoint = j["endpoint"]; }
+                        if (j.contains("accessToken") && j["accessToken"].is_string() && !j["accessToken"].get<std::string>().empty()) { runtimeConfigChanged = runtimeConfigChanged || a.accessToken != j["accessToken"].get<std::string>(); a.accessToken = j["accessToken"]; }
+                        if (j.contains("webhookBaseUrl") && j["webhookBaseUrl"].is_string()) { runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value("webhookBaseUrl", std::string()) != j["webhookBaseUrl"].get<std::string>(); adapterCfg["webhookBaseUrl"] = j["webhookBaseUrl"]; }
+                        if (j.contains("webhookToken") && j["webhookToken"].is_string() && !j["webhookToken"].get<std::string>().empty()) { runtimeConfigChanged = true; adapterCfg["webhookToken"] = j["webhookToken"]; }
+                        if (a.endpoint.empty() || a.accessToken.empty()) throw std::runtime_error("Milky requires endpoint and access token");
+                        a.connectionMode = 2;
+                    } else if (j.contains("endpoint") && j["endpoint"].is_string()) {
                         runtimeConfigChanged = runtimeConfigChanged || a.endpoint != j["endpoint"].get<std::string>();
                         a.endpoint = j["endpoint"];
                     }
@@ -2358,7 +2414,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 a.config = adapterCfg.dump();
                 bool wasEnabled = a.enabled;
                 if (j.contains("enabled")) a.enabled = j["enabled"];
-                if (j.contains("connectionMode") && j["connectionMode"].is_string()) {
+                if (a.type == static_cast<int>(AdapterType::kMilky)) {
+                    a.connectionMode = 2;
+                } else if (j.contains("connectionMode") && j["connectionMode"].is_string()) {
                     std::string m = j["connectionMode"];
                     const int nextMode = (m == "reverse_ws") ? 1 : (m == "http") ? 2 : 0;
                     runtimeConfigChanged = runtimeConfigChanged || a.connectionMode != nextMode;
@@ -2498,6 +2556,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (row->type == static_cast<int>(AdapterType::kQQOfficial)) return "qq_official";
             if (row->type == static_cast<int>(AdapterType::kDiscord)) return "discord";
             if (row->type == static_cast<int>(AdapterType::kKook)) return "kook";
+            if (row->type == static_cast<int>(AdapterType::kMilky)) return "milky";
             return "onebot_v11";
         };
         auto normalizeScope = [&](std::string scope, std::string target, std::string platform) {
@@ -2841,6 +2900,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (row->type == static_cast<int>(AdapterType::kQQOfficial)) return "qq_official";
                 if (row->type == static_cast<int>(AdapterType::kDiscord)) return "discord";
                 if (row->type == static_cast<int>(AdapterType::kKook)) return "kook";
+                if (row->type == static_cast<int>(AdapterType::kMilky)) return "milky";
                 return "onebot_v11";
             };
             auto scopeInfo = [&](const J& input) {
@@ -2982,6 +3042,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (row->type == static_cast<int>(AdapterType::kQQOfficial)) return "qq_official";
                 if (row->type == static_cast<int>(AdapterType::kDiscord)) return "discord";
                 if (row->type == static_cast<int>(AdapterType::kKook)) return "kook";
+                if (row->type == static_cast<int>(AdapterType::kMilky)) return "milky";
                 return "onebot_v11";
             };
             auto scopeInfo = [&](const J& input) {
@@ -4832,7 +4893,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 else lists[a->platform()] = arr;
                 const auto cap = a->capabilities();
                 if (cap.value("friend_delete", false)) deletePlatforms.push_back(a->platform());
-                if (a->platform() == "onebot_v11")
+                if (a->platform() == "onebot_v11" || a->platform() == "milky")
                     oneBotFriends.insert(friends.begin(), friends.end());
             }
             for (const auto& id : oneBotFriends) officialRealFriends.push_back(id);
@@ -5076,7 +5137,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 std::map<std::string, std::string> publicGroups; // public id -> native endpoint
                 for (auto& [endpoint, gname] : a->getGroupList()) {
                     std::string gid = endpoint;
-                    if (plat == "onebot_v11")
+                if (plat == "onebot_v11" || plat == "milky")
                         gid = identity::BindingStore::instance().observeQQ(db, plat, aid, endpoint, identity::Kind::Group);
                     else if (plat == "discord" || plat == "kook")
                         gid = identity::BindingStore::instance().observeVirtual(db, plat, aid, endpoint, identity::Kind::Group);
@@ -5786,7 +5847,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 jsonReply(fail("QQ Official user is not bound to a real QQ friend"), std::move(cb)); return;
             }
             for (auto& candidate : adapterMgr.allAdapters()) {
-                if (!canDelete(candidate) || candidate->platform() != "onebot_v11") continue;
+                if (!canDelete(candidate) || (candidate->platform() != "onebot_v11" && candidate->platform() != "milky")) continue;
                 const auto list = candidate->getFriendList();
                 if (std::find(list.begin(), list.end(), uid) != list.end()) { a = candidate; break; }
             }

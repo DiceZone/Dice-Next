@@ -35,6 +35,7 @@
 #include "adapter/adapter_interface.h"
 #include "adapter/adapter_manager.h"
 #include "adapter/onebot_v11_adapter.h"
+#include "adapter/milky_adapter.h"
 #include "adapter/qq_official_adapter.h"
 #include "core/command_router.h"
 #include "core/plugin_command_priority.h"
@@ -2372,14 +2373,23 @@ static int realMain(int argc, char* argv[]) {
             row.endpoint = a.value("endpoint", std::string());
             row.accessToken = a.value("access_token", a.value("accessToken", std::string()));
             row.enabled = a.value("enabled", false);
+            if (row.type == static_cast<int>(dice::AdapterType::kMilky)) row.connectionMode = static_cast<int>(dice::ConnectionMode::kHTTP);
             nlohmann::json extra{
                 {"heartApiKey", a.value("heart_api_key", a.value("heartApiKey", std::string()))},
             };
+            if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
+                extra["webhookBaseUrl"] = a.value("webhook_base_url", a.value("webhookBaseUrl", std::string()));
+                extra["webhookToken"] = a.value("webhook_token", a.value("webhookToken", std::string()));
+            }
             if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
                 extra["appId"] = a.value("app_id", a.value("appId", std::string()));
                 extra["appSecret"] = a.value("app_secret", a.value("appSecret", std::string()));
                 extra["qqNumber"] = a.value("qq_number", a.value("qqNumber", std::string()));
                 extra["forceVerifyImageResource"] = a.value("force_verify_image_resource", a.value("forceVerifyImageResource", false));
+            }
+            if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
+                a["webhook_base_url"] = extra.value("webhookBaseUrl", extra.value("webhook_base_url", std::string()));
+                a["webhook_token"] = extra.value("webhookToken", extra.value("webhook_token", std::string()));
             }
             row.config = extra.dump();
             return row;

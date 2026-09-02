@@ -321,13 +321,15 @@ private:
             }
             return;
         }
-        if (msg.platform == "onebot_v11" && (msg.type == MessageType::kGroup || msg.type == MessageType::kPrivate)) {
+        if ((msg.platform == "onebot_v11" || msg.platform == "milky") &&
+            (msg.type == MessageType::kGroup || msg.type == MessageType::kPrivate)) {
             const std::string rawTarget = msg.targetId;
             const std::string rawSender = msg.senderId;
             const Kind scope = msg.type == MessageType::kPrivate ? Kind::User : Kind::Group;
-            const std::string publicTarget = bindings.observeQQ(db_, "onebot_v11", msg.adapterId, rawTarget, scope);
-            const std::string publicSender = bindings.observeQQ(db_, "onebot_v11", msg.adapterId, rawSender, Kind::User);
-            msg.extra["__identity_transport"] = "onebot_v11";
+            const std::string transport = msg.platform;
+            const std::string publicTarget = bindings.observeQQ(db_, transport, msg.adapterId, rawTarget, scope);
+            const std::string publicSender = bindings.observeQQ(db_, transport, msg.adapterId, rawSender, Kind::User);
+            msg.extra["__identity_transport"] = transport;
             msg.extra["__identity_native_target"] = rawTarget;
             msg.extra["__identity_native_sender"] = rawSender;
             msg.extra["__identity_qualified_target"] = BindingStore::qualified(scope, publicTarget);
