@@ -30,6 +30,7 @@ set(TEST_SOURCES
     test_legacy_clock_command.cpp
     test_friend_approval_policy.cpp
     test_sensitive_word_filter.cpp
+    test_milky_adapter.cpp
 
     # Project source files needed by tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/causal/cooldown_manager.cpp

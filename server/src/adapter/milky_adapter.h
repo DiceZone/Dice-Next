@@ -126,8 +126,8 @@ public:
             ? json{{"user_id", parseId(original.targetId)}, {"message", message}}
             : json{{"group_id", parseId(original.targetId)}, {"message", message}};
         sendAction(original.type == MessageType::kPrivate ? "send_private_message" : "send_group_message", p,
-                   [self = shared_from_this(), gid = original.type == MessageType::kGroup ? original.targetId : std::string(), files = std::move(parsed.files)](json) {
-                       if (gid.empty()) return;
+                   [self = shared_from_this(), gid = original.type == MessageType::kGroup ? original.targetId : std::string(), files = std::move(parsed.files)](json result) {
+                       if (gid.empty() || !apiOk(result)) return;
                        for (const auto& f : files) self->uploadGroupFile(gid, f.name, f.content, f.path);
                    });
     }
@@ -224,7 +224,7 @@ public:
         sendAction("kick_group_member", {{"group_id", parseId(groupId)}, {"user_id", parseId(userId)}, {"reject_add_request", false}}, {});
     }
     void setGroupBan(const std::string& groupId, const std::string& userId, int durationSec) override {
-        sendAction("set_group_member_mute", {{"group_id", parseId(groupId)}, {"user_id", parseId(userId)}, {"duration", std::max(0, durationSec)}}, {});
+        sendAction("set_group_member_mute", {{"group_id", parseId(groupId)}, {"user_id", parseId(userId)}, {"duration", durationSec > 0 ? durationSec : 0}}, {});
     }
     void leaveGroup(const std::string& groupId) override { sendAction("quit_group", {{"group_id", parseId(groupId)}}, {}); }
     void setGroupCard(const std::string& groupId, const std::string& userId, const std::string& card) override {
@@ -329,9 +329,11 @@ public:
     bool handleWebhook(const json& event) {
         if (!event.is_object()) return false;
         const std::string type = event.value("event_type", event.value("type", std::string()));
+        if (type.empty()) return false;
         const std::string eventSelfId = field(event, "self_id");
         if (!eventSelfId.empty() && loginId_.empty()) loginId_ = eventSelfId;
         json data = event.value("data", json::object());
+        if (!data.is_object()) return false;
         if (event.contains("time")) data["__event_time"] = event["time"];
         if (type == "message_receive") { handleMessage(data); return true; }
         handleEvent(type, data); return true;
@@ -339,6 +341,15 @@ public:
 
     // Public for focused adapter tests and for diagnostics in the WebUI.
     static json buildSegmentsForTest(const std::string& text) { return parseOutgoingStatic(text).segments; }
+    static json buildOutgoingForTest(const std::string& text) {
+        ParsedOutgoing parsed = parseOutgoingStatic(text);
+        json files = json::array();
+        for (const auto& file : parsed.files) {
+            files.push_back({{"name", file.name}, {"content", file.content},
+                             {"path", file.path}, {"literal", file.literal}});
+        }
+        return {{"segments", std::move(parsed.segments)}, {"files", std::move(files)}};
+    }
 
 private:
 
@@ -405,8 +416,9 @@ private:
         p["message"] = parsed.segments;
         if (groupId.empty())
             for (const auto& f : parsed.files) p["message"].push_back({{"type", "text"}, {"data", {{"text", f.literal}}}});
-        sendAction(action, p, [self = shared_from_this(), groupId, files = std::move(parsed.files)](json) {
-            if (groupId.empty()) return; for (const auto& f : files) self->uploadGroupFile(groupId, f.name.empty() ? "file" : f.name, f.content, f.path);
+        sendAction(action, p, [self = shared_from_this(), groupId, files = std::move(parsed.files)](json result) {
+            if (groupId.empty() || !apiOk(result)) return;
+            for (const auto& f : files) self->uploadGroupFile(groupId, f.name.empty() ? "file" : f.name, f.content, f.path);
         });
     }
 
@@ -470,8 +482,12 @@ private:
     }
 
     void handleMessage(const json& d) {
-        Message m; m.platform = platform(); m.adapterId = id_; m.selfId = loginId_; m.id = field(d, "message_seq"); m.timestamp = d.value("time", static_cast<int64_t>(std::time(nullptr))); m.senderId = field(d, "sender_id");
-        const std::string scene = d.value("message_scene", "group"); m.type = scene == "friend" ? MessageType::kPrivate : MessageType::kGroup; m.targetId = field(d, "peer_id");
+        Message m; m.platform = platform(); m.adapterId = id_; m.selfId = loginId_; m.id = field(d, "message_seq");
+        m.timestamp = d.value("time", d.value("__event_time", static_cast<int64_t>(std::time(nullptr))));
+        m.senderId = field(d, "sender_id");
+        const std::string scene = d.value("message_scene", "group");
+        m.type = scene == "group" ? MessageType::kGroup : MessageType::kPrivate;
+        m.targetId = field(d, "peer_id");
         if (d.contains("group") && d["group"].is_object()) { m.targetId = field(d["group"], "group_id"); m.extra["groupName"] = d["group"].value("group_name", ""); }
         if (d.contains("group_member") && d["group_member"].is_object()) { const auto& s = d["group_member"]; m.senderName = s.value("nickname", s.value("card", "")); m.extra["role"] = s.value("role", "member"); m.extra["card"] = s.value("card", ""); }
         if (m.senderName.empty() && d.contains("friend") && d["friend"].is_object()) m.senderName = d["friend"].value("nickname", "");
@@ -515,7 +531,13 @@ private:
         else if (type == "group_join_request" || type == "group_invited_join_request") { e.type = EventType::kGroupRequest; e.groupId = field(d, "group_id"); e.userId = type == "group_join_request" ? field(d, "initiator_id") : field(d, "target_user_id"); e.operatorId = field(d, "initiator_id"); e.comment = d.value("comment", ""); e.subType = type == "group_join_request" ? "join_request" : "invited_join_request"; e.flag = json{{"kind", "group"}, {"request_type", e.subType}, {"group_id", e.groupId}, {"notification_seq", field(d, "notification_seq")}, {"is_filtered", d.value("is_filtered", false)}}.dump(); }
         else if (type == "group_invitation") { e.type = EventType::kGroupRequest; e.groupId = field(d, "group_id"); e.userId = field(d, "initiator_id"); e.operatorId = e.userId; e.subType = "invite"; e.flag = json{{"kind", "group"}, {"request_type", "invitation"}, {"group_id", e.groupId}, {"notification_seq", field(d, "invitation_seq")}}.dump(); }
         else if (type == "group_member_increase" || type == "group_member_decrease") { e.type = type == "group_member_increase" ? EventType::kGroupIncrease : EventType::kGroupDecrease; e.groupId = field(d, "group_id"); e.userId = field(d, "user_id"); e.operatorId = field(d, "operator_id"); if (e.operatorId.empty()) e.operatorId = field(d, "invitor_id"); }
+        else if (type == "friend_nudge") {
+            e.type = EventType::kPoke;
+            e.operatorId = field(d, "user_id");
+            e.userId = d.value("is_self_receive", false) ? loginId_ : e.operatorId;
+        }
         else if (type == "group_nudge") { e.type = EventType::kPoke; e.groupId = field(d, "group_id"); e.userId = field(d, "receiver_id"); e.operatorId = field(d, "sender_id"); }
+        else if (type == "group_disband") { e.type = EventType::kGroupDecrease; e.groupId = field(d, "group_id"); e.userId = loginId_; e.operatorId = field(d, "operator_id"); }
         else if (type == "group_file_upload") { e.type = EventType::kGroupUpload; e.groupId = field(d, "group_id"); e.userId = field(d, "user_id"); e.extra["file"] = {{"id", d.value("file_id", "")}, {"name", d.value("file_name", "")}, {"size", d.value("file_size", static_cast<int64_t>(0))}, {"busid", ""}}; }
         else return;
         for (auto& cb : eventCallbacks_) cb(e);

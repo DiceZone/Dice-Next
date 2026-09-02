@@ -13,7 +13,7 @@ and `accessToken`; the connection mode is always `http`.
   "type": "milky",
   "connection_mode": "http",
   "endpoint": "http://127.0.0.1:8080",
-  "access_token": "milky-api-token",
+  "accessToken": "milky-api-token",
   "webhook_base_url": "https://dice.example.com",
   "webhook_token": "milky-webhook-token",
   "enabled": true

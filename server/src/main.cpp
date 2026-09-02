@@ -2387,10 +2387,6 @@ static int realMain(int argc, char* argv[]) {
                 extra["qqNumber"] = a.value("qq_number", a.value("qqNumber", std::string()));
                 extra["forceVerifyImageResource"] = a.value("force_verify_image_resource", a.value("forceVerifyImageResource", false));
             }
-            if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
-                a["webhook_base_url"] = extra.value("webhookBaseUrl", extra.value("webhook_base_url", std::string()));
-                a["webhook_token"] = extra.value("webhookToken", extra.value("webhook_token", std::string()));
-            }
             row.config = extra.dump();
             return row;
         };
