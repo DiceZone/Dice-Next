@@ -2,6 +2,7 @@
 
 #include "../config/config_manager.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -50,6 +51,7 @@ std::string currentArch();
 
 struct ContainerDetectionInput {
     std::string diceNextMarker;
+    std::string dotnetMarker;
     std::string standardMarker;
     std::string systemdMarker;
     std::string kubernetesServiceHost;
@@ -73,10 +75,16 @@ class UpdateService {
 public:
     using Json = nlohmann::json;
     using NotifyCallback = std::function<void(const std::string& event, const std::string& message)>;
+    using CancellationCheck = std::function<bool()>;
+    using FetchCallback = std::function<bool(
+        const std::string& url, const std::filesystem::path& output,
+        std::uint64_t maxBytes, int timeoutSeconds, std::string& error,
+        const CancellationCheck& cancelled)>;
 
     UpdateService(ConfigManager& config, std::function<void()> restart,
                   NotifyCallback notify = {},
-                  ContainerEnvironment container = detectContainerEnvironment());
+                  ContainerEnvironment container = detectContainerEnvironment(),
+                  FetchCallback fetch = {});
     ~UpdateService();
 
     UpdateService(const UpdateService&) = delete;
@@ -127,7 +135,8 @@ private:
     void emitNotification(const std::string& event, const std::string& message) const;
 
     std::vector<Source> configuredSources(const Settings& settings) const;
-    ProbeResult probeManifest(const Source& source) const;
+    ProbeResult probeManifest(const Source& source,
+                              const CancellationCheck& cancelled = {}) const;
     std::vector<ProbeResult> raceManifestSources(const std::vector<Source>& sources) const;
     bool downloadAsset(const ReleaseManifest& manifest, const ReleaseAsset& asset,
                        const std::vector<Source>& sources, std::filesystem::path& archive,
@@ -136,22 +145,25 @@ private:
                              const ReleaseManifest& manifest, std::string& error);
 
     static bool fetchToFile(const std::string& url, const std::filesystem::path& output,
-                            std::uint64_t maxBytes, int timeoutSeconds, std::string& error);
+                            std::uint64_t maxBytes, int timeoutSeconds, std::string& error,
+                            const CancellationCheck& cancelled = {});
     static bool sha256File(const std::filesystem::path& file, std::string& digest,
-                           std::string& error);
+                           std::string& error,
+                           const CancellationCheck& cancelled = {});
     static std::string sourceLabel(const std::string& prefix);
 
     ConfigManager& config_;
     std::function<void()> restart_;
     NotifyCallback notify_;
     ContainerEnvironment container_;
+    FetchCallback fetch_;
 
     mutable std::mutex mutex_;
     std::condition_variable wake_;
 
     Job job_ = Job::none;
     bool forceCheck_ = false;
-    bool stopping_ = false;
+    std::atomic<bool> stopping_{false};
 
     std::string phase_ = "idle";
     std::string error_;

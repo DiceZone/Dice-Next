@@ -16,12 +16,15 @@
 #include <fstream>
 #include <future>
 #include <iomanip>
+#include <random>
 #include <regex>
 #include <sstream>
 #include <system_error>
 
 #if defined(_WIN32)
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace dice::update {
@@ -37,6 +40,29 @@ constexpr std::uint64_t kMaximumAssetSize = 1024ULL * 1024ULL * 1024ULL;
 constexpr std::int64_t kMirrorCacheSeconds = 30 * 60;
 
 std::atomic<unsigned long long> g_tempSequence{0};
+
+std::string updaterTemporarySuffix() {
+    static const std::string processToken = [] {
+        const auto pid =
+#if defined(_WIN32)
+            static_cast<unsigned long long>(GetCurrentProcessId());
+#else
+            static_cast<unsigned long long>(getpid());
+#endif
+        unsigned long long randomValue = 0;
+        try {
+            std::random_device random;
+            randomValue = (static_cast<unsigned long long>(random()) << 32U) ^ random();
+        } catch (...) {
+            randomValue = static_cast<unsigned long long>(
+                std::chrono::steady_clock::now().time_since_epoch().count());
+        }
+        std::ostringstream value;
+        value << pid << '-' << std::hex << randomValue;
+        return value.str();
+    }();
+    return processToken + '-' + std::to_string(g_tempSequence.fetch_add(1));
+}
 
 std::int64_t epochSeconds() {
     return static_cast<std::int64_t>(std::time(nullptr));
@@ -439,6 +465,8 @@ ContainerEnvironment detectContainerEnvironment(const ContainerDetectionInput& i
         return makeResult(type, "DICENEXT_CONTAINER");
     if (!normalizedMarker(input.windowsSandboxMount).empty())
         return makeResult("windows-container", "CONTAINER_SANDBOX_MOUNT_POINT");
+    if (const auto type = markerType(input.dotnetMarker); !type.empty())
+        return makeResult(type, "DOTNET_RUNNING_IN_CONTAINER");
     if (const auto type = markerType(input.standardMarker); !type.empty())
         return makeResult(type, "container");
     if (const auto type = markerType(input.systemdMarker); !type.empty())
@@ -458,6 +486,7 @@ ContainerEnvironment detectContainerEnvironment() {
     input.standardMarker = environmentValue("container");
     input.kubernetesServiceHost = environmentValue("KUBERNETES_SERVICE_HOST");
     input.windowsSandboxMount = environmentValue("CONTAINER_SANDBOX_MOUNT_POINT");
+    input.dotnetMarker = environmentValue("DOTNET_RUNNING_IN_CONTAINER");
 #if defined(__linux__)
     std::error_code ec;
     input.dockerEnvFile = fs::is_regular_file("/.dockerenv", ec);
@@ -472,9 +501,10 @@ ContainerEnvironment detectContainerEnvironment() {
 }
 
 UpdateService::UpdateService(ConfigManager& config, std::function<void()> restart,
-                             NotifyCallback notify, ContainerEnvironment container)
+                             NotifyCallback notify, ContainerEnvironment container,
+                             FetchCallback fetch)
     : config_(config), restart_(std::move(restart)), notify_(std::move(notify)),
-      container_(std::move(container)) {
+      container_(std::move(container)), fetch_(std::move(fetch)) {
     if (container_.detected) {
         DICE_LOG_INFO("Container runtime detected ({} via {}); self-update download and "
                       "installation are disabled",
@@ -484,10 +514,7 @@ UpdateService::UpdateService(ConfigManager& config, std::function<void()> restar
 }
 
 UpdateService::~UpdateService() {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stopping_ = true;
-    }
+    stopping_.store(true, std::memory_order_release);
     wake_.notify_all();
     if (worker_.joinable()) worker_.join();
 }
@@ -758,6 +785,10 @@ bool UpdateService::isBusyLocked() const {
 }
 
 bool UpdateService::queueJobLocked(Job job, const std::string& phase, std::string& error) {
+    if (stopping_.load(std::memory_order_acquire)) {
+        error = "update service is stopping";
+        return false;
+    }
     if (isBusyLocked()) {
         error = "another update operation is already running";
         return false;
@@ -834,8 +865,10 @@ void UpdateService::workerLoop() {
         bool force = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            wake_.wait(lock, [&] { return stopping_ || job_ != Job::none; });
-            if (stopping_) break;
+            wake_.wait(lock, [&] {
+                return stopping_.load(std::memory_order_acquire) || job_ != Job::none;
+            });
+            if (stopping_.load(std::memory_order_acquire)) break;
             next = job_;
             job_ = Job::none;
             force = forceCheck_;
@@ -848,6 +881,7 @@ void UpdateService::workerLoop() {
             else if (next == Job::install) doInstall();
         } catch (const std::exception& ex) {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_.load(std::memory_order_acquire)) break;
             phase_ = "error";
             error_ = ex.what();
             DICE_LOG_ERROR("Update service failed: {}", ex.what());
@@ -880,7 +914,8 @@ std::vector<UpdateService::Source> UpdateService::configuredSources(const Settin
 
 bool UpdateService::fetchToFile(const std::string& url, const fs::path& output,
                                 std::uint64_t maxBytes, int timeoutSeconds,
-                                std::string& error) {
+                                std::string& error,
+                                const CancellationCheck& cancelled) {
     if (!safeHttpsUrl(url) || maxBytes == 0 || maxBytes > kMaximumAssetSize + 1024) {
         error = "unsafe or invalid download request";
         return false;
@@ -895,8 +930,11 @@ bool UpdateService::fetchToFile(const std::string& url, const fs::path& output,
     fs::remove(output, ec);
     ec.clear();
 
-    const auto sequence = g_tempSequence.fetch_add(1);
-    const fs::path configPath = output.string() + "." + std::to_string(sequence) + ".curlcfg";
+    if (cancelled && cancelled()) {
+        error = "update operation cancelled";
+        return false;
+    }
+    const fs::path configPath = output.string() + "." + updaterTemporarySuffix() + ".curlcfg";
     const std::string outputText = fs::absolute(output).string();
     const std::string configText = fs::absolute(configPath).string();
     if (outputText.find('"') != std::string::npos || configText.find('"') != std::string::npos) {
@@ -926,10 +964,16 @@ bool UpdateService::fetchToFile(const std::string& url, const fs::path& output,
                << "write-out = \"%{http_code}\"\n";
     }
 
-    const dice::proc::Result probe = dice::proc::curlConfig(configPath, 64);
+    const dice::proc::Result probe =
+        dice::proc::curlConfigCancellable(configPath, cancelled, 64);
     const int result = probe.exitCode;
     const std::string& curlStatus = probe.output;
     fs::remove(configPath, ec);
+    if (probe.cancelled) {
+        fs::remove(output, ec);
+        error = "update operation cancelled";
+        return false;
+    }
     if (result != 0 || !fs::is_regular_file(output, ec)) {
         fs::remove(output, ec);
         std::smatch status;
@@ -952,7 +996,8 @@ bool UpdateService::fetchToFile(const std::string& url, const fs::path& output,
     return true;
 }
 
-UpdateService::ProbeResult UpdateService::probeManifest(const Source& source) const {
+UpdateService::ProbeResult UpdateService::probeManifest(
+    const Source& source, const CancellationCheck& cancelled) const {
     ProbeResult result;
     result.source = source;
     const auto started = std::chrono::steady_clock::now();
@@ -964,10 +1009,20 @@ UpdateService::ProbeResult UpdateService::probeManifest(const Source& source) co
         if (!ec) temporaryRoot = systemTemporary / "dice-next-updater";
     }
     const fs::path temporary = temporaryRoot /
-        ("manifest-" + std::to_string(g_tempSequence.fetch_add(1)) + ".json");
+        ("manifest-" + updaterTemporarySuffix() + ".json");
+
+    const auto shouldCancel = [this, &cancelled] {
+        return stopping_.load(std::memory_order_acquire) ||
+            (cancelled && cancelled());
+    };
 
     std::string fetchError;
-    if (!fetchToFile(url, temporary, kManifestLimit, 12, fetchError)) {
+    const bool fetched = fetch_
+        ? fetch_(url, temporary, kManifestLimit, 12, fetchError, shouldCancel)
+        : fetchToFile(url, temporary, kManifestLimit, 12, fetchError, shouldCancel);
+    if (!fetched) {
+        std::error_code ec;
+        fs::remove(temporary, ec);
         result.error = fetchError;
         return result;
     }
@@ -990,17 +1045,74 @@ UpdateService::ProbeResult UpdateService::probeManifest(const Source& source) co
 
 std::vector<UpdateService::ProbeResult> UpdateService::raceManifestSources(
     const std::vector<Source>& sources) const {
-    std::vector<std::future<ProbeResult>> futures;
-    futures.reserve(sources.size());
-    for (const auto& source : sources) {
-        futures.push_back(std::async(std::launch::async, [this, source] {
-            return probeManifest(source);
-        }));
+    struct RaceState {
+        std::mutex mutex;
+        std::condition_variable wake;
+        std::vector<ProbeResult> results;
+        std::size_t completed = 0;
+        bool hasWinner = false;
+        std::atomic<bool> cancel{false};
+    } state;
+
+    state.results.reserve(sources.size());
+    // Keep this on std::thread rather than std::jthread: the macOS release
+    // runner still targets the Xcode 15.4 libc++ that lacks jthread/stop_token.
+    std::vector<std::thread> workers;
+    workers.reserve(sources.size());
+    try {
+        for (const auto& source : sources) {
+            workers.emplace_back([this, source, &state] {
+                ProbeResult result;
+                try {
+                    result = probeManifest(source, [&state] {
+                        return state.cancel.load(std::memory_order_acquire);
+                    });
+                } catch (const std::exception& ex) {
+                    result.source = source;
+                    result.error = ex.what();
+                } catch (...) {
+                    result.source = source;
+                    result.error = "manifest probe failed";
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(state.mutex);
+                    if (result.ok && !state.hasWinner) {
+                        state.hasWinner = true;
+                        state.cancel.store(true, std::memory_order_release);
+                    }
+                    state.results.push_back(std::move(result));
+                    ++state.completed;
+                }
+                state.wake.notify_one();
+            });
+        }
+    } catch (...) {
+        // A partially constructed vector of joinable std::threads would call
+        // std::terminate while unwinding. Cancel and reap those already
+        // started before propagating the allocation/thread creation failure.
+        state.cancel.store(true, std::memory_order_release);
+        for (auto& worker : workers) if (worker.joinable()) worker.join();
+        throw;
     }
 
+    {
+        std::unique_lock<std::mutex> lock(state.mutex);
+        state.wake.wait(lock, [&] {
+            return state.hasWinner || state.completed == sources.size() ||
+                stopping_.load(std::memory_order_acquire);
+        });
+        if (state.hasWinner || stopping_.load(std::memory_order_acquire)) {
+            state.cancel.store(true, std::memory_order_release);
+        }
+    }
+    for (auto& worker : workers) if (worker.joinable()) worker.join();
+
     std::vector<ProbeResult> results;
-    results.reserve(futures.size());
-    for (auto& future : futures) results.push_back(future.get());
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        results = std::move(state.results);
+    }
     std::sort(results.begin(), results.end(), [](const ProbeResult& left, const ProbeResult& right) {
         if (left.ok != right.ok) return left.ok > right.ok;
         return left.source.latencyMs < right.source.latencyMs;
@@ -1012,6 +1124,7 @@ void UpdateService::doCheck(bool force) {
     const Settings current = settings();
     ProbeResult selected;
     std::vector<Source> cachedSources;
+    std::vector<Source> configured;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!force && sourceCacheUntil_ > epochSeconds()) cachedSources = sourceOrder_;
@@ -1020,21 +1133,24 @@ void UpdateService::doCheck(bool force) {
     if (!cachedSources.empty()) {
         for (const auto& source : cachedSources) {
             selected = probeManifest(source);
+            if (stopping_.load(std::memory_order_acquire)) return;
             if (selected.ok) break;
         }
     }
 
     std::vector<ProbeResult> raced;
     if (!selected.ok) {
-        const auto sources = configuredSources(current);
-        if (sources.empty()) {
+        configured = configuredSources(current);
+        if (configured.empty()) {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_.load(std::memory_order_acquire)) return;
             phase_ = "error";
             error_ = "no valid update source is configured";
             checkedAt_ = epochSeconds();
             return;
         }
-        raced = raceManifestSources(sources);
+        raced = raceManifestSources(configured);
+        if (stopping_.load(std::memory_order_acquire)) return;
         const auto found = std::find_if(raced.begin(), raced.end(),
             [](const ProbeResult& result) { return result.ok; });
         if (found != raced.end()) selected = *found;
@@ -1067,6 +1183,13 @@ void UpdateService::doCheck(bool force) {
     std::vector<Source> ordered;
     if (!raced.empty()) {
         for (const auto& result : raced) if (result.ok) ordered.push_back(result.source);
+        for (const auto& source : configured) {
+            if (std::none_of(ordered.begin(), ordered.end(), [&](const Source& item) {
+                    return item.prefix == source.prefix;
+                })) {
+                ordered.push_back(source);
+            }
+        }
     } else {
         ordered = cachedSources;
         const auto found = std::find_if(ordered.begin(), ordered.end(), [&](const Source& source) {
@@ -1082,6 +1205,7 @@ void UpdateService::doCheck(bool force) {
     const std::string checkedReleaseUrl = selected.manifest.releaseUrl;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_.load(std::memory_order_acquire)) return;
         latest_ = std::move(selected.manifest);
         hasLatest_ = true;
         updateAvailable_ = available;
@@ -1105,7 +1229,7 @@ void UpdateService::doCheck(bool force) {
         }
     }
 
-    if (available && notify_ &&
+    if (!stopping_.load(std::memory_order_acquire) && available && notify_ &&
         config_.get<std::string>("update/last_notified_tag", "") != checkedTag) {
         const std::string action = container_.detected
             ? "仅通知（容器内禁止程序自更新，请更新镜像后重建容器）"
@@ -1122,7 +1246,8 @@ void UpdateService::doCheck(bool force) {
         }
     }
 }
-bool UpdateService::sha256File(const fs::path& file, std::string& digest, std::string& error) {
+bool UpdateService::sha256File(const fs::path& file, std::string& digest, std::string& error,
+                               const CancellationCheck& cancelled) {
     std::ifstream input(file, std::ios::binary);
     if (!input) {
         error = "cannot open downloaded asset for hashing";
@@ -1138,6 +1263,11 @@ bool UpdateService::sha256File(const fs::path& file, std::string& digest, std::s
 
     std::array<char, 64 * 1024> buffer{};
     while (input) {
+        if (cancelled && cancelled()) {
+            EVP_MD_CTX_free(context);
+            error = "update operation cancelled";
+            return false;
+        }
         input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const std::streamsize count = input.gcount();
         if (count > 0 && EVP_DigestUpdate(context, buffer.data(),
@@ -1181,10 +1311,13 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
     }
 
     archive = downloads / asset.name;
+    const auto shouldCancel = [this] {
+        return stopping_.load(std::memory_order_acquire);
+    };
     if (fs::is_regular_file(archive, ec) && fs::file_size(archive, ec) == asset.size) {
         std::string existingDigest;
         std::string digestError;
-        if (sha256File(archive, existingDigest, digestError) &&
+        if (sha256File(archive, existingDigest, digestError, shouldCancel) &&
             lower(existingDigest) == asset.sha256) {
             usedSource = "local cache";
             return true;
@@ -1196,11 +1329,15 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
 
     for (const auto& source : sources) {
         for (const auto& downloadName : downloadNames) {
+            if (shouldCancel()) {
+                error = "update operation cancelled";
+                return false;
+            }
             const std::string originalUrl =
                 "https://github.com/DiceZone/Dice-Next/releases/download/" +
                 urlEncodeSegment(manifest.tag) + "/" + urlEncodeSegment(downloadName);
             const fs::path partial = downloads /
-                (asset.name + ".part-" + std::to_string(g_tempSequence.fetch_add(1)));
+                (asset.name + ".part-" + updaterTemporarySuffix());
             const std::string url = buildMirroredUrl(originalUrl, source.prefix);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -1211,7 +1348,11 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
 
             std::string fetchError;
             auto transfer = std::async(std::launch::async, [&] {
-                return fetchToFile(url, partial, asset.size + 1, 20 * 60, fetchError);
+                return fetch_
+                    ? fetch_(url, partial, asset.size + 1, 20 * 60, fetchError,
+                             shouldCancel)
+                    : fetchToFile(url, partial, asset.size + 1, 20 * 60, fetchError,
+                                  shouldCancel);
             });
             while (transfer.wait_for(std::chrono::milliseconds(250)) != std::future_status::ready) {
                 std::error_code progressError;
@@ -1223,6 +1364,11 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
                 }
             }
             if (!transfer.get()) {
+                if (stopping_.load(std::memory_order_acquire)) {
+                    fs::remove(partial, ec);
+                    error = "update operation cancelled";
+                    return false;
+                }
                 if (!failures.empty()) failures += "; ";
                 failures += source.label;
                 if (downloadName != asset.name) failures += " (" + downloadName + ")";
@@ -1234,7 +1380,7 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
             std::string actualDigest;
             std::string digestError;
             const bool verified = !ec && size == asset.size &&
-                sha256File(partial, actualDigest, digestError) &&
+                sha256File(partial, actualDigest, digestError, shouldCancel) &&
                 lower(actualDigest) == asset.sha256;
             if (!verified) {
                 fs::remove(partial, ec);
@@ -1248,7 +1394,7 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
             }
 
             const fs::path oldArchive = downloads /
-                (asset.name + ".old-" + std::to_string(g_tempSequence.fetch_add(1)));
+                (asset.name + ".old-" + updaterTemporarySuffix());
             if (fs::exists(archive, ec)) {
                 fs::rename(archive, oldArchive, ec);
                 if (ec) {
@@ -1292,7 +1438,7 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
     error = "automatic staging is currently available only for Windows packages";
     return false;
 #else
-    const auto sequence = std::to_string(g_tempSequence.fetch_add(1));
+    const auto sequence = updaterTemporarySuffix();
     const fs::path updates = fs::path("updates");
     const fs::path extractRoot = updates / ("extract-" + sequence);
     const fs::path pendingNew = updates / ("pending-new-" + sequence);
@@ -1319,9 +1465,18 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
 
     const std::string tar = dice::proc::systemTool("tar.exe");
     const fs::path archivePath = fs::absolute(archive);
+    const auto shouldCancel = [this] {
+        return stopping_.load(std::memory_order_acquire);
+    };
     const dice::proc::Result listed =
-        dice::proc::runPaths(tar, {"-tf", archivePath}, 8 * 1024 * 1024);
+        dice::proc::runPathsCancellable(
+            tar, {"-tf", archivePath}, shouldCancel, 8 * 1024 * 1024);
     const std::string& listing = listed.output;
+    if (listed.cancelled) {
+        error = "update operation cancelled";
+        fs::remove_all(extractRoot, ec);
+        return false;
+    }
     if (listed.exitCode != 0 || listed.truncated || listing.empty()) {
         error = "cannot inspect the update archive";
         fs::remove_all(extractRoot, ec);
@@ -1340,7 +1495,14 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
     }
 
     const dice::proc::Result extracted =
-        dice::proc::runPaths(tar, {"-xf", archivePath, "-C", fs::absolute(extractRoot)}, 4096);
+        dice::proc::runPathsCancellable(
+            tar, {"-xf", archivePath, "-C", fs::absolute(extractRoot)},
+            shouldCancel, 4096);
+    if (extracted.cancelled) {
+        error = "update operation cancelled";
+        fs::remove_all(extractRoot, ec);
+        return false;
+    }
     if (extracted.exitCode != 0) {
         error = "cannot extract the update archive";
         fs::remove_all(extractRoot, ec);
@@ -1447,8 +1609,10 @@ void UpdateService::doDownload() {
     }
 
     auto fail = [&](std::string message) {
+        if (stopping_.load(std::memory_order_acquire)) return;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_.load(std::memory_order_acquire)) return;
             phase_ = "error";
             error_ = message;
             automaticDownload_ = false;
@@ -1494,6 +1658,7 @@ void UpdateService::doDownload() {
     bool installQueued = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_.load(std::memory_order_acquire)) return;
         automaticDownload_ = false;
         activeSource_ = usedSource;
         error_.clear();
@@ -1513,7 +1678,7 @@ void UpdateService::doDownload() {
         }
     }
 
-    if (automatic) {
+    if (automatic && !stopping_.load(std::memory_order_acquire)) {
         emitNotification("update_result",
             "Dice!Next 自动更新包已下载并通过 SHA-256 校验：" + manifest.tag +
             "\n下载源：" + usedSource +
@@ -1542,7 +1707,14 @@ void UpdateService::doInstall() {
     }
 
     DICE_LOG_INFO("Handing staged update to dice-next.exe manager");
-    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (wake_.wait_for(lock, std::chrono::milliseconds(350), [&] {
+                return stopping_.load(std::memory_order_acquire);
+            })) {
+            return;
+        }
+    }
     if (restart_) {
         restart_();
     } else {

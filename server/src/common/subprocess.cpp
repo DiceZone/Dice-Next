@@ -1,12 +1,15 @@
 #include "subprocess.h"
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 
 #if defined(_WIN32)
 #include <windows.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -92,7 +95,8 @@ HANDLE inheritableNullDevice(SECURITY_ATTRIBUTES& attributes, DWORD access) {
 }
 
 Result runWide(const std::wstring& commandLine, std::size_t outputLimit,
-               bool captureStderr, const fs::path& workingDirectory) {
+               bool captureStderr, const fs::path& workingDirectory,
+               const CancellationCheck& cancelled) {
     Result result;
 
     SECURITY_ATTRIBUTES attributes{};
@@ -148,13 +152,34 @@ Result runWide(const std::wstring& commandLine, std::size_t outputLimit,
     }
 
     char buffer[kReadChunk];
-    DWORD count = 0;
-    while (ReadFile(readEnd, buffer, sizeof(buffer), &count, nullptr) && count > 0) {
-        appendLimited(result.output, buffer, count, outputLimit, result.truncated);
+    while (true) {
+        if (!result.cancelled && cancelled && cancelled()) {
+            result.cancelled = true;
+            TerminateProcess(process.hProcess, ERROR_CANCELLED);
+        }
+
+        DWORD available = 0;
+        if (PeekNamedPipe(readEnd, nullptr, 0, nullptr, &available, nullptr) && available > 0) {
+            DWORD count = 0;
+            const DWORD wanted = (std::min)(available, static_cast<DWORD>(sizeof(buffer)));
+            if (ReadFile(readEnd, buffer, wanted, &count, nullptr) && count > 0) {
+                appendLimited(result.output, buffer, count, outputLimit, result.truncated);
+            }
+        }
+
+        if (WaitForSingleObject(process.hProcess, 20) == WAIT_OBJECT_0) {
+            while (PeekNamedPipe(readEnd, nullptr, 0, nullptr, &available, nullptr) &&
+                   available > 0) {
+                DWORD count = 0;
+                const DWORD wanted = (std::min)(available, static_cast<DWORD>(sizeof(buffer)));
+                if (!ReadFile(readEnd, buffer, wanted, &count, nullptr) || count == 0) break;
+                appendLimited(result.output, buffer, count, outputLimit, result.truncated);
+            }
+            break;
+        }
     }
     CloseHandle(readEnd);
 
-    WaitForSingleObject(process.hProcess, INFINITE);
     DWORD exitCode = 1;
     GetExitCodeProcess(process.hProcess, &exitCode);
     CloseHandle(process.hThread);
@@ -183,13 +208,19 @@ std::string systemTool(const std::string& name) {
 
 Result run(const std::string& program, const std::vector<std::string>& args,
            std::size_t outputLimit, bool captureStderr, const fs::path& workingDirectory) {
+    return runCancellable(program, args, {}, outputLimit, captureStderr, workingDirectory);
+}
+
+Result runCancellable(const std::string& program, const std::vector<std::string>& args,
+                      CancellationCheck cancelled, std::size_t outputLimit,
+                      bool captureStderr, const fs::path& workingDirectory) {
 #if defined(_WIN32)
     std::wstring commandLine = quoteArgument(widen(program));
     for (const auto& argument : args) {
         commandLine.push_back(L' ');
         commandLine += quoteArgument(widen(argument));
     }
-    return runWide(commandLine, outputLimit, captureStderr, workingDirectory);
+    return runWide(commandLine, outputLimit, captureStderr, workingDirectory, cancelled);
 #else
     Result result;
     int channel[2];
@@ -227,17 +258,48 @@ Result run(const std::string& program, const std::vector<std::string>& args,
     }
 
     close(channel[1]);
+    const int flags = fcntl(channel[0], F_GETFL, 0);
+    if (flags >= 0) fcntl(channel[0], F_SETFL, flags | O_NONBLOCK);
+
     char buffer[kReadChunk];
+    int status = 0;
+    bool finished = false;
+    auto cancelledAt = std::chrono::steady_clock::time_point{};
+    while (!finished) {
+        ssize_t count = 0;
+        while ((count = read(channel[0], buffer, sizeof(buffer))) > 0) {
+            appendLimited(result.output, buffer, static_cast<std::size_t>(count), outputLimit,
+                          result.truncated);
+        }
+
+        const pid_t waited = waitpid(child, &status, WNOHANG);
+        if (waited == child) {
+            finished = true;
+            break;
+        }
+        if (waited < 0 && errno != EINTR) {
+            finished = true;
+            break;
+        }
+
+        if (!result.cancelled && cancelled && cancelled()) {
+            result.cancelled = true;
+            cancelledAt = std::chrono::steady_clock::now();
+            kill(child, SIGTERM);
+        } else if (result.cancelled &&
+                   std::chrono::steady_clock::now() - cancelledAt >
+                       std::chrono::milliseconds(500)) {
+            kill(child, SIGKILL);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
     ssize_t count = 0;
     while ((count = read(channel[0], buffer, sizeof(buffer))) > 0) {
         appendLimited(result.output, buffer, static_cast<std::size_t>(count), outputLimit,
                       result.truncated);
     }
     close(channel[0]);
-
-    int status = 0;
-    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
-    }
     result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     return result;
 #endif
@@ -245,30 +307,44 @@ Result run(const std::string& program, const std::vector<std::string>& args,
 
 Result runPaths(const std::string& program, const std::vector<fs::path>& args,
                 std::size_t outputLimit, bool captureStderr, const fs::path& workingDirectory) {
+    return runPathsCancellable(program, args, {}, outputLimit, captureStderr,
+                               workingDirectory);
+}
+
+Result runPathsCancellable(const std::string& program, const std::vector<fs::path>& args,
+                           CancellationCheck cancelled, std::size_t outputLimit,
+                           bool captureStderr, const fs::path& workingDirectory) {
 #if defined(_WIN32)
     std::wstring commandLine = quoteArgument(widen(program));
     for (const auto& argument : args) {
         commandLine.push_back(L' ');
         commandLine += quoteArgument(argument.wstring());
     }
-    return runWide(commandLine, outputLimit, captureStderr, workingDirectory);
+    return runWide(commandLine, outputLimit, captureStderr, workingDirectory, cancelled);
 #else
     std::vector<std::string> narrowed;
     narrowed.reserve(args.size());
     for (const auto& argument : args) narrowed.push_back(argument.string());
-    return run(program, narrowed, outputLimit, captureStderr, workingDirectory);
+    return runCancellable(program, narrowed, std::move(cancelled), outputLimit,
+                          captureStderr, workingDirectory);
 #endif
 }
 
 Result curlConfig(const fs::path& configFile, std::size_t outputLimit) {
+    return curlConfigCancellable(configFile, {}, outputLimit);
+}
+
+Result curlConfigCancellable(const fs::path& configFile, CancellationCheck cancelled,
+                             std::size_t outputLimit) {
 #if defined(_WIN32)
     // Built straight from the wide path: the config file can sit under a
     // directory the system code page cannot represent.
     const std::wstring commandLine = quoteArgument(widen(systemTool("curl.exe"))) + L" -K " +
                                      quoteArgument(fs::absolute(configFile).wstring());
-    return runWide(commandLine, outputLimit, false, {});
+    return runWide(commandLine, outputLimit, false, {}, cancelled);
 #else
-    return run("curl", {"-K", configFile.string()}, outputLimit);
+    return runCancellable("curl", {"-K", configFile.string()}, std::move(cancelled),
+                          outputLimit);
 #endif
 }
 

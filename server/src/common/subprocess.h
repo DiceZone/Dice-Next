@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -21,9 +22,12 @@ struct Result {
     int exitCode = -1;
     std::string output;
     bool truncated = false;
+    bool cancelled = false;
 
     bool ok() const { return exitCode == 0; }
 };
+
+using CancellationCheck = std::function<bool()>;
 
 /// Runs @p program with @p args directly.  stdout is captured, and stderr too
 /// when @p captureStderr.  @p outputLimit of 0 means unlimited; output past the
@@ -40,6 +44,15 @@ Result run(const std::string& program,
            bool captureStderr = false,
            const std::filesystem::path& workingDirectory = {});
 
+/// Cancellable form of run(). When @p cancelled returns true, the child is
+/// terminated and reaped before this function returns.
+Result runCancellable(const std::string& program,
+                      const std::vector<std::string>& args,
+                      CancellationCheck cancelled,
+                      std::size_t outputLimit = 0,
+                      bool captureStderr = false,
+                      const std::filesystem::path& workingDirectory = {});
+
 /// Same as run(), with every argument given as a path.  On Windows they reach
 /// the child as wide strings, so an install directory the system code page
 /// cannot represent still works.  Plain flags may be passed too.
@@ -48,6 +61,13 @@ Result runPaths(const std::string& program,
                 std::size_t outputLimit = 0,
                 bool captureStderr = false,
                 const std::filesystem::path& workingDirectory = {});
+
+Result runPathsCancellable(const std::string& program,
+                           const std::vector<std::filesystem::path>& args,
+                           CancellationCheck cancelled,
+                           std::size_t outputLimit = 0,
+                           bool captureStderr = false,
+                           const std::filesystem::path& workingDirectory = {});
 
 /// Absolute path of a tool that ships with the operating system.  On Windows it
 /// resolves inside the system directory, so a file dropped next to the
@@ -61,6 +81,10 @@ std::string systemTool(const std::string& name);
 /// passed to the child as a wide string, so non-ASCII install directories work
 /// regardless of the system code page.
 Result curlConfig(const std::filesystem::path& configFile, std::size_t outputLimit = 0);
+
+Result curlConfigCancellable(const std::filesystem::path& configFile,
+                             CancellationCheck cancelled,
+                             std::size_t outputLimit = 0);
 
 /// curl with an explicit argument vector, for the calls that do not use a
 /// config file.  Arguments are passed verbatim -- no quoting required.

@@ -1,11 +1,11 @@
 # Dice!Next command and plugin compatibility report
 
-Date: 2026-09-01
+Date: 2026-09-03
 
 ## Outcome
 
-The Release server builds successfully. The automated core suite passes all 283
-test cases (1135/1135 assertions). The Lua compatibility suite passes all 9 test
+The Release server builds successfully. The automated core suite passes all 286
+test cases (1153/1153 assertions). The Lua compatibility suite passes all 9 test
 cases (68/68 assertions without external files), including 123/123 assertions
 when the user-provided real plugin corpus is mounted.
 
@@ -38,7 +38,8 @@ session survived its instance restart.
 ## Container update boundary
 
 The updater now combines an explicit `DICENEXT_CONTAINER` image marker with
-Kubernetes and Windows-container environment variables, the standard
+Kubernetes and Windows-container environment variables (including
+`DOTNET_RUNNING_IN_CONTAINER`), the standard
 `container` and systemd container markers, Docker/Podman marker files, cgroups,
 and strongly scoped mountinfo signatures. False-like explicit values do not by
 themselves classify a bare-metal process, and an ordinary host path containing
@@ -52,9 +53,17 @@ download/install policy has an effective action of `notify`; it cannot bypass
 the restriction through the API or a stale WebUI. The Windows distribution
 manager independently checks container markers before applying an already
 staged package; a launcher smoke test confirmed that the package remains
-untouched. The two new service test cases cover
-the detection signals, false-positive boundary, status fields, old-setting
-normalization, and every mutating service entry point.
+untouched.
+
+Update HTTP subprocesses are cancellable and reaped on both Windows and Unix,
+so stopping the service no longer waits for a 20-minute curl timeout. Manifest
+source racing accepts the first valid response, cancels and joins slower probes,
+and temporary updater files include a process-specific random token plus a
+sequence number to isolate co-located instances. Automated coverage includes
+container signals and API refusal paths as well as subprocess cancellation,
+active-fetch shutdown, first-success racing, and temporary-name uniqueness.
+The Docker publishing workflow now builds and starts an amd64 candidate before
+pushing, then checks the runtime status and all self-update refusal paths.
 
 ## Fixed regressions
 
@@ -183,7 +192,8 @@ cleanly.
 
 ```powershell
 cmake --build server/build --target dice-next-server --config Release -j 2
-server/build/tests/Release/dice-next-tests.exe
+ctest --test-dir server/build -C Release --output-on-failure
+server/build/tests/Release/dice-next-tests.exe  # detailed 286 / 1153 summary
 
 $env:DICENEXT_LEGACY_RESOURCE_PLUGIN = '<ResourceSearchEngine.lua>'
 $env:DICENEXT_LEGACY_FORTUNE_PLUGIN = '<求签 plugin directory>'

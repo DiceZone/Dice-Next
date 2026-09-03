@@ -36,6 +36,7 @@ jobs:
         working-directory: web
         run: |
           npm ci
+          npm test
           npm run build
       - uses: actions/upload-artifact@v4
         with:

@@ -1,9 +1,15 @@
 #include "test_framework.h"
+#include "../src/common/subprocess.h"
 #include "../src/service/update_service.h"
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <mutex>
+#include <regex>
+#include <thread>
 
 using namespace dice::update;
 
@@ -36,6 +42,40 @@ std::string validManifest() {
             }
         ]
     })json";
+}
+
+std::string validManifestForCurrentPlatform() {
+    auto manifest = nlohmann::json::parse(validManifest());
+    auto asset = manifest["assets"][0];
+    manifest["assets"] = nlohmann::json::array({std::move(asset)});
+    manifest["assets"][0]["os"] = currentOs();
+    manifest["assets"][0]["arch"] = currentArch();
+    return manifest.dump();
+}
+
+class ScopedCurrentPath {
+public:
+    explicit ScopedCurrentPath(const std::filesystem::path& next)
+        : previous_(std::filesystem::current_path()) {
+        std::filesystem::current_path(next);
+    }
+    ~ScopedCurrentPath() {
+        std::error_code ignored;
+        std::filesystem::current_path(previous_, ignored);
+    }
+
+private:
+    std::filesystem::path previous_;
+};
+
+bool waitUntil(const std::function<bool()>& predicate,
+               std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
 }
 
 }  // namespace
@@ -172,6 +212,13 @@ TEST(UpdateContainer, DetectsExplicitAndRuntimeFallbackSignals) {
     ASSERT_EQ(detected.type, std::string("container"));
     ASSERT_EQ(detected.evidence, std::string("/run/systemd/container"));
 
+    ContainerDetectionInput dotnet;
+    dotnet.dotnetMarker = "true";
+    detected = detectContainerEnvironment(dotnet);
+    ASSERT_TRUE(detected.detected);
+    ASSERT_EQ(detected.type, std::string("container"));
+    ASSERT_EQ(detected.evidence, std::string("DOTNET_RUNNING_IN_CONTAINER"));
+
     ContainerDetectionInput cgroup;
     cgroup.cgroup = "0::/system.slice/docker-0123456789abcdef.scope";
     detected = detectContainerEnvironment(cgroup);
@@ -248,4 +295,132 @@ TEST(UpdateService, PortableWorkerStartsAndStopsCleanly) {
     }
     std::error_code ec;
     fs::remove_all(configPath, ec);
+}
+
+TEST(UpdateSubprocess, CancellationTerminatesAndReapsChildPromptly) {
+    std::atomic<bool> cancel{false};
+    std::thread trigger([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        cancel.store(true, std::memory_order_release);
+    });
+    const auto started = std::chrono::steady_clock::now();
+#if defined(_WIN32)
+    const auto result = dice::proc::runCancellable(
+        dice::proc::systemTool("ping.exe"), {"-n", "30", "127.0.0.1"},
+        [&] { return cancel.load(std::memory_order_acquire); }, 1024);
+#else
+    const auto result = dice::proc::runCancellable(
+        "sleep", {"30"}, [&] { return cancel.load(std::memory_order_acquire); }, 1024);
+#endif
+    trigger.join();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    ASSERT_TRUE(result.cancelled);
+    ASSERT_TRUE(elapsed < std::chrono::seconds(2));
+}
+
+TEST(UpdateService, StopCancelsAnActiveManifestFetch) {
+    namespace fs = std::filesystem;
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path root = fs::temp_directory_path() /
+        ("dice_next_update_cancel_" + std::to_string(nonce));
+    fs::create_directories(root);
+    {
+        ScopedCurrentPath currentPath(root);
+        dice::ConfigManager config((root / "config").string());
+        config.set<std::string>("update/source", "direct");
+        std::atomic<bool> started{false};
+        std::atomic<bool> observedCancellation{false};
+        auto fetch = [&](const std::string&, const fs::path&, std::uint64_t, int,
+                         std::string& error,
+                         const UpdateService::CancellationCheck& cancelled) {
+            started.store(true, std::memory_order_release);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (cancelled()) {
+                    observedCancellation.store(true, std::memory_order_release);
+                    error = "cancelled";
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            error = "test fetch timeout";
+            return false;
+        };
+
+        auto service = std::make_unique<UpdateService>(
+            config, [] {}, UpdateService::NotifyCallback{}, ContainerEnvironment{}, fetch);
+        std::string error;
+        ASSERT_TRUE(service->requestCheck(true, error));
+        ASSERT_TRUE(waitUntil([&] { return started.load(std::memory_order_acquire); }));
+        const auto stoppingAt = std::chrono::steady_clock::now();
+        service.reset();
+        const auto stopElapsed = std::chrono::steady_clock::now() - stoppingAt;
+        ASSERT_TRUE(observedCancellation.load(std::memory_order_acquire));
+        ASSERT_TRUE(stopElapsed < std::chrono::seconds(1));
+    }
+    std::error_code ignored;
+    fs::remove_all(root, ignored);
+}
+
+TEST(UpdateService, ManifestRaceUsesFirstSuccessAndCancelsSlowSources) {
+    namespace fs = std::filesystem;
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path root = fs::temp_directory_path() /
+        ("dice_next_update_race_" + std::to_string(nonce));
+    fs::create_directories(root);
+    {
+        ScopedCurrentPath currentPath(root);
+        std::ofstream("update-mirrors.json", std::ios::binary)
+            << R"json({"mirrors":["https://slow.example"]})json";
+        dice::ConfigManager config((root / "config").string());
+        config.set<std::string>("update/source", "auto");
+        std::atomic<bool> slowStarted{false};
+        std::atomic<bool> slowCancelled{false};
+        std::mutex pathsMutex;
+        std::vector<fs::path> outputPaths;
+        const std::string manifest = validManifestForCurrentPlatform();
+        auto fetch = [&](const std::string& url, const fs::path& output, std::uint64_t,
+                         int, std::string& error,
+                         const UpdateService::CancellationCheck& cancelled) {
+            {
+                std::lock_guard<std::mutex> lock(pathsMutex);
+                outputPaths.push_back(output.filename());
+            }
+            if (url.rfind("https://slow.example/", 0) == 0) {
+                slowStarted.store(true, std::memory_order_release);
+                while (!cancelled()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                slowCancelled.store(true, std::memory_order_release);
+                error = "cancelled";
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            fs::create_directories(output.parent_path());
+            std::ofstream(output, std::ios::binary) << manifest;
+            return true;
+        };
+
+        UpdateService service(config, [] {}, UpdateService::NotifyCallback{},
+                              ContainerEnvironment{}, fetch);
+        std::string error;
+        const auto startedAt = std::chrono::steady_clock::now();
+        ASSERT_TRUE(service.requestCheck(true, error));
+        ASSERT_TRUE(waitUntil([&] {
+            const auto phase = service.status().value("phase", std::string());
+            return phase == "available" || phase == "up_to_date";
+        }));
+        const auto elapsed = std::chrono::steady_clock::now() - startedAt;
+        ASSERT_TRUE(slowStarted.load(std::memory_order_acquire));
+        ASSERT_TRUE(slowCancelled.load(std::memory_order_acquire));
+        ASSERT_TRUE(elapsed < std::chrono::seconds(1));
+        {
+            std::lock_guard<std::mutex> lock(pathsMutex);
+            ASSERT_EQ(outputPaths.size(), static_cast<std::size_t>(2));
+            ASSERT_NE(outputPaths[0], outputPaths[1]);
+            const std::regex uniqueName(R"(^manifest-[0-9]+-[0-9a-f]+-[0-9]+\.json$)");
+            ASSERT_TRUE(std::regex_match(outputPaths[0].string(), uniqueName));
+            ASSERT_TRUE(std::regex_match(outputPaths[1].string(), uniqueName));
+        }
+    }
+    std::error_code ignored;
+    fs::remove_all(root, ignored);
 }
