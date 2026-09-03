@@ -397,7 +397,7 @@ private:
         std::string accountId = nativeId;
         std::string displayId;
         std::string shareUrl;
-        if (platform == "onebot_v11") {
+        if (platform == "onebot_v11" || platform == "milky") {
             displayId = nativeId;
         } else if (platform == "qq_official") {
             if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(adapter)) {
@@ -458,7 +458,7 @@ private:
                     // 心跳展示只认 OneBot（真实 QQ 号）骰主：QQ 官方 OpenID、
                     // Discord/KOOK ID 对展示无意义，且 OpenID 会超服务端 master_id
                     // 列长导致上报 500。空平台视为旧版 QQ 号条目，兼容老数据。
-                    if (platform.empty() || platform == "onebot_v11") {
+                    if (platform.empty() || platform == "onebot_v11" || platform == "milky") {
                         std::string nickname;
                         if (masterNicknameProvider_) nickname = masterNicknameProvider_(id);
                         return {id, nickname, false};

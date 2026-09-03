@@ -27,6 +27,7 @@ std::string compilerString() {
 
 std::string platformDisplay(const std::string& p) {
     if (p == "onebot_v11") return "OnebotV11";
+    if (p == "milky")      return "Milky";
     if (p == "discord")    return "Discord";
     return p.empty() ? "Unknown" : p;
 }

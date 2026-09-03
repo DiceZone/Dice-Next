@@ -35,6 +35,7 @@
 #include "adapter/adapter_interface.h"
 #include "adapter/adapter_manager.h"
 #include "adapter/onebot_v11_adapter.h"
+#include "adapter/milky_adapter.h"
 #include "adapter/qq_official_adapter.h"
 #include "core/command_router.h"
 #include "core/plugin_command_priority.h"
@@ -2375,6 +2376,10 @@ static int realMain(int argc, char* argv[]) {
             nlohmann::json extra{
                 {"heartApiKey", a.value("heart_api_key", a.value("heartApiKey", std::string()))},
             };
+            if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
+                row.connectionMode = 0;
+                extra["eventEndpoint"] = a.value("event_endpoint", a.value("eventEndpoint", std::string()));
+            }
             if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
                 extra["appId"] = a.value("app_id", a.value("appId", std::string()));
                 extra["appSecret"] = a.value("app_secret", a.value("appSecret", std::string()));
@@ -2388,7 +2393,7 @@ static int realMain(int argc, char* argv[]) {
             nlohmann::json extra = nlohmann::json::parse(row.config, nullptr, false);
             if (!extra.is_object()) extra = nlohmann::json::object();
             nlohmann::json a{{"id", row.id}, {"name", row.name}, {"type", dice::adapterTypeToString(static_cast<dice::AdapterType>(row.type))},
-                             {"connection_mode", row.connectionMode == 1 ? "reverse_ws" : row.connectionMode == 2 ? "http" : "forward_ws"},
+                             {"connection_mode", row.type == static_cast<int>(dice::AdapterType::kMilky) ? "forward_ws" : row.connectionMode == 1 ? "reverse_ws" : row.connectionMode == 2 ? "http" : "forward_ws"},
                              {"endpoint", row.endpoint}, {"access_token", row.accessToken}, {"enabled", row.enabled},
                              {"heart_api_key", extra.value("heartApiKey", std::string())}};
             if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
@@ -2396,6 +2401,9 @@ static int realMain(int argc, char* argv[]) {
                 a["app_secret"] = extra.value("appSecret", std::string());
                 a["qq_number"] = extra.value("qqNumber", std::string());
                 a["force_verify_image_resource"] = extra.value("forceVerifyImageResource", false);
+            }
+            if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
+                a["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));
             }
             return a;
         };
