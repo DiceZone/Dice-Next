@@ -1,7 +1,7 @@
 #pragma once
 
-// Milky protocol adapter. API calls use HTTP /api/:api; events use either the
-// /event WebSocket or an application WebHook, selected independently.
+// Milky protocol adapter. API calls use HTTP /api/:api and events use the
+// /event WebSocket. WebHook ingress is intentionally disabled for now.
 
 #include "adapter_interface.h"
 #include "self_echo_filter.h"
@@ -50,6 +50,7 @@ public:
     }
 
     bool configure(const json& cfg) override {
+        configured_ = false;
         name_ = cfg.value("name", id_);
         endpoint_ = cfg.value("endpoint", cfg.value("apiEndpoint", std::string()));
         while (!endpoint_.empty() && endpoint_.back() == '/') endpoint_.pop_back();
@@ -57,44 +58,44 @@ public:
         if (endpoint_.size() >= 4 && endpoint_.compare(endpoint_.size() - 4, 4, "/api") == 0)
             endpoint_.resize(endpoint_.size() - 4);
         accessToken_ = cfg.value("accessToken", cfg.value("access_token", std::string()));
-        mode_ = cfg.value("connectionMode", std::string("http"));
-        if (mode_ != "forward_ws") mode_ = "http";
+        std::string mode = cfg.value("connectionMode", std::string("forward_ws"));
         eventEndpoint_ = cfg.value("eventEndpoint", cfg.value("event_endpoint", std::string()));
         if (legacyWsEndpoint && eventEndpoint_.empty()) eventEndpoint_ = endpoint_;
         if (legacyWsEndpoint) {
             endpoint_ = endpoint_.rfind("wss://", 0) == 0
                 ? "https://" + endpoint_.substr(6)
                 : "http://" + endpoint_.substr(5);
-            mode_ = "forward_ws";
+            mode = "forward_ws";
         }
-        webhookBaseUrl_ = cfg.value("webhookBaseUrl", cfg.value("webhook_base_url", std::string()));
-        while (!webhookBaseUrl_.empty() && webhookBaseUrl_.back() == '/') webhookBaseUrl_.pop_back();
-        webhookToken_ = cfg.value("webhookToken", cfg.value("webhook_token", std::string()));
         setMessageFormatOverride(parseFormatOverride(cfg.value("message_format", std::string())));
+        if (mode != "forward_ws") {
+            lastError_ = "Milky currently supports WebSocket event transport only";
+            return false;
+        }
         if (endpoint_.empty()) { lastError_ = "Milky API endpoint is required"; return false; }
         if (endpoint_.rfind("http://", 0) != 0 && endpoint_.rfind("https://", 0) != 0) {
             lastError_ = "Milky API endpoint must start with http:// or https://";
             return false;
         }
-        if (mode_ == "forward_ws") {
-            if (eventEndpoint_.empty()) {
-                eventEndpoint_ = endpoint_.rfind("https://", 0) == 0
-                    ? "wss://" + endpoint_.substr(8)
-                    : "ws://" + endpoint_.substr(7);
-                eventEndpoint_ += "/event";
-            }
-            while (eventEndpoint_.size() > 1 && eventEndpoint_.back() == '/') eventEndpoint_.pop_back();
-            if (eventEndpoint_.rfind("ws://", 0) != 0 && eventEndpoint_.rfind("wss://", 0) != 0) {
-                lastError_ = "Milky event endpoint must start with ws:// or wss://";
-                return false;
-            }
-            if (eventEndpoint_.find('/', eventEndpoint_.find("://") + 3) == std::string::npos)
-                eventEndpoint_ += "/event";
+        if (eventEndpoint_.empty()) {
+            eventEndpoint_ = endpoint_.rfind("https://", 0) == 0
+                ? "wss://" + endpoint_.substr(8)
+                : "ws://" + endpoint_.substr(7);
+            eventEndpoint_ += "/event";
         }
+        while (eventEndpoint_.size() > 1 && eventEndpoint_.back() == '/') eventEndpoint_.pop_back();
+        if (eventEndpoint_.rfind("ws://", 0) != 0 && eventEndpoint_.rfind("wss://", 0) != 0) {
+            lastError_ = "Milky event endpoint must start with ws:// or wss://";
+            return false;
+        }
+        if (eventEndpoint_.find('/', eventEndpoint_.find("://") + 3) == std::string::npos)
+            eventEndpoint_ += "/event";
+        configured_ = true;
         return true;
     }
 
     bool start() override {
+        if (!configured_) return false;
         if (connected_) return true;
         stopping_ = false;
         json result = invokeAction("get_login_info", json::object(), 10000);
@@ -110,13 +111,10 @@ public:
         loginId_ = field(d, "uin");
         if (loginId_.empty()) loginId_ = field(d, "user_id");
         loginName_ = field(d, "nickname");
-        connected_ = true;
         lastError_.clear();
         refreshGroupList();
-        if (mode_ == "forward_ws") {
-            connected_ = false;
-            startEventWebSocket();
-        }
+        connected_ = false;
+        startEventWebSocket();
         return true;
     }
 
@@ -134,12 +132,6 @@ public:
 
     std::string getLoginId() const override { return loginId_; }
     std::string getLoginName() const override { return loginName_; }
-    std::string accessToken() const { return accessToken_; }
-    std::string webhookToken() const { return webhookToken_; }
-    std::string webhookUrl() const {
-        return webhookBaseUrl_.empty() ? std::string() : webhookBaseUrl_ + "/milky/webhook/" + id_;
-    }
-
     void sendMessage(const Message& msg) override {
         ParsedOutgoing parsed = parseOutgoing(prepOutgoing(msg.targetId, msg.content, ContentFormat::kPlainText));
         sendSegments(msg.type == MessageType::kPrivate ? "send_private_message" : "send_group_message",
@@ -330,7 +322,8 @@ public:
     }
 
     void requestGroupHistory(const std::string& groupId, int count) override {
-        invokeActionAsync("get_history_messages", {{"message_scene", "group"}, {"peer_id", parseId(groupId)}, {"limit", count > 0 ? count : 50}},
+        const int limit = historyLimit(count);
+        invokeActionAsync("get_history_messages", {{"message_scene", "group"}, {"peer_id", parseId(groupId)}, {"limit", limit}},
                           [self = shared_from_this(), groupId](json r) {
                               if (!apiOk(r)) return; const json d = r.value("data", json::object());
                               const json* arr = d.is_array() ? &d : (d.contains("messages") && d["messages"].is_array() ? &d["messages"] : nullptr);
@@ -363,8 +356,8 @@ public:
         std::thread([self = shared_from_this(), action, params, cb = std::move(cb)]() mutable { cb(self->performAction(action, params)); }).detach();
     }
 
-    // Called by the /milky/webhook/{adapterId} route.
-    bool handleWebhook(const json& event) {
+    // Shared event-payload parser used by the Milky event WebSocket and tests.
+    bool handleEventPayload(const json& event) {
         if (!event.is_object()) return false;
         const std::string type = event.value("event_type", event.value("type", std::string()));
         if (type.empty()) return false;
@@ -388,8 +381,18 @@ public:
         }
         return {{"segments", std::move(parsed.segments)}, {"files", std::move(files)}};
     }
+    static json buildApiRequestForTest(const std::string& action, const json& params) {
+        auto request = spec(action, params);
+        return {{"path", request.path}, {"body", std::move(request.body)}};
+    }
+    static json normalizeActionResponseForTest(const std::string& action, json response) {
+        return normalizeActionResponse(action, std::move(response));
+    }
+    static int historyLimitForTest(int count) { return historyLimit(count); }
 
 private:
+
+    static int historyLimit(int count) { return std::clamp(count > 0 ? count : 20, 1, 30); }
 
     void startEventWebSocket() {
         if (stopping_ || wsConnecting_.exchange(true)) return;
@@ -415,7 +418,7 @@ private:
                                             const drogon::WebSocketMessageType& type) {
             if (type != drogon::WebSocketMessageType::Text && type != drogon::WebSocketMessageType::Binary) return;
             auto event = json::parse(raw, nullptr, false);
-            if (event.is_discarded() || !self->handleWebhook(event))
+            if (event.is_discarded() || !self->handleEventPayload(event))
                 DICE_LOG_WARN("Milky '{}': ignored invalid event WebSocket payload", self->name_);
         });
         wsClient_->setConnectionClosedHandler([self](const drogon::WebSocketClientPtr&) {
@@ -558,13 +561,41 @@ private:
         if (!p.is_object()) p = json::object();
         if (action == "get_group_root_files" && !p.contains("parent_folder_id")) p["parent_folder_id"] = "/";
         if (action == "get_group_files_by_folder") { p["parent_folder_id"] = p.value("folder_id", std::string("/")); p.erase("folder_id"); }
+        if (action == "get_group_file_url" || action == "get_group_file_download_url") p.erase("busid");
         return {"/api/" + it->second, std::move(p)};
+    }
+    static json normalizeActionResponse(const std::string& action, json result) {
+        if (!apiOk(result) || !result.contains("data") || !result["data"].is_object()) return result;
+        auto& data = result["data"];
+        if ((action == "get_group_file_url" || action == "get_group_file_download_url") &&
+            data.contains("download_url")) {
+            data["url"] = data["download_url"];
+        }
+        if (action == "get_group_files" || action == "get_group_root_files" ||
+            action == "get_group_files_by_folder") {
+            if (data.contains("files") && data["files"].is_array()) {
+                for (auto& file : data["files"]) {
+                    if (!file.is_object()) continue;
+                    if (!file.contains("upload_time") && file.contains("uploaded_time"))
+                        file["upload_time"] = file["uploaded_time"];
+                    if (!file.contains("uploader") && file.contains("uploader_id"))
+                        file["uploader"] = file["uploader_id"];
+                    if (!file.contains("download_times") && file.contains("downloaded_times"))
+                        file["download_times"] = file["downloaded_times"];
+                }
+            }
+            if (data.contains("folders") && data["folders"].is_array()) {
+                for (auto& folder : data["folders"]) {
+                    if (folder.is_object() && !folder.contains("total_file_count") && folder.contains("file_count"))
+                        folder["total_file_count"] = folder["file_count"];
+                }
+            }
+        }
+        return result;
     }
     json performAction(const std::string& action, const json& params) {
         ApiSpec s = spec(action, params); if (s.path.empty()) return json{{"status", "failed"}, {"retcode", -1}, {"message", "unsupported Milky action"}};
-        json result = httpPost(s.path, s.body);
-        if (apiOk(result) && action == "get_group_file_url" && result["data"].is_object() && result["data"].contains("download_url"))
-            result["data"]["url"] = result["data"]["download_url"];
+        json result = normalizeActionResponse(action, httpPost(s.path, s.body));
         if (!apiOk(result)) { std::lock_guard<std::mutex> lk(stateMutex_); lastError_ = result.value("message", std::string("Milky API request failed")); }
         return result;
     }
@@ -613,7 +644,13 @@ private:
         const std::string scene = d.value("message_scene", "group");
         m.type = scene == "group" ? MessageType::kGroup : MessageType::kPrivate;
         m.targetId = field(d, "peer_id");
-        if (d.contains("group") && d["group"].is_object()) { m.targetId = field(d["group"], "group_id"); m.extra["groupName"] = d["group"].value("group_name", ""); }
+        if (scene == "group" && d.contains("group") && d["group"].is_object()) {
+            m.targetId = field(d["group"], "group_id");
+            m.extra["groupName"] = d["group"].value("group_name", "");
+        } else if (scene == "temp" && d.contains("group") && d["group"].is_object()) {
+            m.extra["sourceGroupId"] = field(d["group"], "group_id");
+            m.extra["sourceGroupName"] = d["group"].value("group_name", "");
+        }
         if (d.contains("group_member") && d["group_member"].is_object()) { const auto& s = d["group_member"]; m.senderName = s.value("nickname", s.value("card", "")); m.extra["role"] = s.value("role", "member"); m.extra["card"] = s.value("card", ""); }
         if (m.senderName.empty() && d.contains("friend") && d["friend"].is_object()) m.senderName = d["friend"].value("nickname", "");
         std::string raw, display, clean;
@@ -679,9 +716,9 @@ private:
         m.rawContent = raw.empty() ? clean : raw; m.content = clean;
     }
 
-    std::string id_, name_, endpoint_, eventEndpoint_, accessToken_, webhookBaseUrl_, webhookToken_;
-    std::string mode_{"http"};
+    std::string id_, name_, endpoint_, eventEndpoint_, accessToken_;
     std::string loginId_, loginName_;
+    bool configured_{false};
     std::atomic<bool> connected_{false}, stopping_{false};
     std::atomic<bool> wsConnecting_{false}, reconnectScheduled_{false};
     drogon::WebSocketClientPtr wsClient_;

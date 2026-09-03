@@ -2377,9 +2377,8 @@ static int realMain(int argc, char* argv[]) {
                 {"heartApiKey", a.value("heart_api_key", a.value("heartApiKey", std::string()))},
             };
             if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
+                row.connectionMode = 0;
                 extra["eventEndpoint"] = a.value("event_endpoint", a.value("eventEndpoint", std::string()));
-                extra["webhookBaseUrl"] = a.value("webhook_base_url", a.value("webhookBaseUrl", std::string()));
-                extra["webhookToken"] = a.value("webhook_token", a.value("webhookToken", std::string()));
             }
             if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
                 extra["appId"] = a.value("app_id", a.value("appId", std::string()));
@@ -2394,7 +2393,7 @@ static int realMain(int argc, char* argv[]) {
             nlohmann::json extra = nlohmann::json::parse(row.config, nullptr, false);
             if (!extra.is_object()) extra = nlohmann::json::object();
             nlohmann::json a{{"id", row.id}, {"name", row.name}, {"type", dice::adapterTypeToString(static_cast<dice::AdapterType>(row.type))},
-                             {"connection_mode", row.connectionMode == 1 ? "reverse_ws" : row.connectionMode == 2 ? "http" : "forward_ws"},
+                             {"connection_mode", row.type == static_cast<int>(dice::AdapterType::kMilky) ? "forward_ws" : row.connectionMode == 1 ? "reverse_ws" : row.connectionMode == 2 ? "http" : "forward_ws"},
                              {"endpoint", row.endpoint}, {"access_token", row.accessToken}, {"enabled", row.enabled},
                              {"heart_api_key", extra.value("heartApiKey", std::string())}};
             if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
@@ -2405,8 +2404,6 @@ static int realMain(int argc, char* argv[]) {
             }
             if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
                 a["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));
-                a["webhook_base_url"] = extra.value("webhookBaseUrl", extra.value("webhook_base_url", std::string()));
-                a["webhook_token"] = extra.value("webhookToken", extra.value("webhook_token", std::string()));
             }
             return a;
         };

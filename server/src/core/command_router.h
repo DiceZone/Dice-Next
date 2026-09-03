@@ -542,7 +542,7 @@ private:
                 return "用法：.bind " + firstL + " <" + label + " 用户ID>\n"
                     "在 OneBot（真实 QQ）窗口执行，把该 " + label + " 账号的数据并入你的 QQ。\n"
                     "对方需先在 " + label + " 上给机器人发过一条消息。";
-            if (transport != "onebot_v11")
+            if (transport != "onebot_v11" && transport != "milky")
                 return "请在 OneBot（真实 QQ）窗口执行 .bind " + firstL + "，以验证你的 QQ 身份。";
             if (!BindingStore::isRealQQ(msg.senderId)) return "当前会话没有有效的真实 QQ 号。";
             std::string error;

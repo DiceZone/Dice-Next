@@ -45,20 +45,35 @@ TEST(MilkyAdapter, PreservesUnsupportedOrMalformedCqSegmentsAsText) {
     ASSERT_EQ(segments[6]["data"]["text"].get<std::string>(), std::string("d"));
 }
 
-TEST(MilkyAdapter, RejectsWebhookPayloadWithoutTypeOrObjectData) {
+TEST(MilkyAdapter, RejectsInvalidEventPayload) {
     auto adapter = std::make_shared<MilkyAdapter>("42");
 
-    ASSERT_FALSE(adapter->handleWebhook(json::object()));
-    ASSERT_FALSE(adapter->handleWebhook({{"event_type", "message_receive"}, {"data", json::array()}}));
+    ASSERT_FALSE(adapter->handleEventPayload(json::object()));
+    ASSERT_FALSE(adapter->handleEventPayload({{"event_type", "message_receive"}, {"data", json::array()}}));
 }
 
-TEST(MilkyAdapter, RoutesWebhookMessagesWithCqCompatibleContent) {
+TEST(MilkyAdapter, SupportsOnlyWebSocketEventTransport) {
+    auto adapter = std::make_shared<MilkyAdapter>("42");
+
+    ASSERT_FALSE(adapter->configure({
+        {"endpoint", "http://127.0.0.1:8080"},
+        {"connectionMode", "http"}
+    }));
+    ASSERT_EQ(adapter->lastError(), std::string("Milky currently supports WebSocket event transport only"));
+    ASSERT_TRUE(adapter->configure({
+        {"endpoint", "http://127.0.0.1:8080"},
+        {"connectionMode", "forward_ws"},
+        {"eventEndpoint", "ws://127.0.0.1:8080/event"}
+    }));
+}
+
+TEST(MilkyAdapter, RoutesEventMessagesWithCqCompatibleContent) {
     auto adapter = std::make_shared<MilkyAdapter>("42");
     Message received;
     int callbacks = 0;
     adapter->onMessage([&](const Message& message) { received = message; ++callbacks; });
 
-    ASSERT_TRUE(adapter->handleWebhook({
+    ASSERT_TRUE(adapter->handleEventPayload({
         {"event_type", "message_receive"},
         {"self_id", 10001},
         {"time", 123456},
@@ -93,11 +108,11 @@ TEST(MilkyAdapter, MapsFriendNudgeAndGroupDisbandEvents) {
     std::vector<BotEvent> events;
     adapter->onEvent([&](const BotEvent& event) { events.push_back(event); });
 
-    ASSERT_TRUE(adapter->handleWebhook({
+    ASSERT_TRUE(adapter->handleEventPayload({
         {"event_type", "friend_nudge"}, {"self_id", 10001},
         {"data", {{"user_id", 30003}, {"is_self_receive", true}}}
     }));
-    ASSERT_TRUE(adapter->handleWebhook({
+    ASSERT_TRUE(adapter->handleEventPayload({
         {"event_type", "group_disband"},
         {"data", {{"group_id", 20002}, {"operator_id", 30003}}}
     }));
@@ -117,11 +132,45 @@ TEST(MilkyAdapter, RoutesTemporaryMessagesAsPrivate) {
     Message received;
     adapter->onMessage([&](const Message& message) { received = message; });
 
-    ASSERT_TRUE(adapter->handleWebhook({
+    ASSERT_TRUE(adapter->handleEventPayload({
         {"event_type", "message_receive"},
         {"data", {{"message_scene", "temp"}, {"peer_id", 30003}, {"sender_id", 30003},
+                   {"group", {{"group_id", 20002}, {"group_name", "source group"}}},
                    {"segments", json::array({{{"type", "text"}, {"data", {{"text", "hi"}}}}})}}}
     }));
     ASSERT_EQ(static_cast<int>(received.type), static_cast<int>(MessageType::kPrivate));
     ASSERT_EQ(received.targetId, std::string("30003"));
+    ASSERT_EQ(received.extra["sourceGroupId"].get<std::string>(), std::string("20002"));
+    ASSERT_EQ(received.extra["sourceGroupName"].get<std::string>(), std::string("source group"));
+}
+
+TEST(MilkyAdapter, ClampsHistoryRequestsToProtocolLimit) {
+    ASSERT_EQ(MilkyAdapter::historyLimitForTest(50), 30);
+    ASSERT_EQ(MilkyAdapter::historyLimitForTest(0), 20);
+    ASSERT_EQ(MilkyAdapter::historyLimitForTest(-1), 20);
+}
+
+TEST(MilkyAdapter, NormalizesGroupFileRequestsAndResponses) {
+    const json request = MilkyAdapter::buildApiRequestForTest(
+        "get_group_file_url", {{"group_id", 20002}, {"file_id", "file-1"}, {"busid", 0}});
+    ASSERT_EQ(request["path"].get<std::string>(), std::string("/api/get_group_file_download_url"));
+    ASSERT_FALSE(request["body"].contains("busid"));
+
+    json response = MilkyAdapter::normalizeActionResponseForTest("get_group_root_files", {
+        {"status", "ok"}, {"retcode", 0},
+        {"data", {
+            {"files", json::array({{{"file_id", "file-1"}, {"uploaded_time", 123},
+                                     {"uploader_id", 30003}, {"downloaded_times", 4}}})},
+            {"folders", json::array({{{"folder_id", "folder-1"}, {"file_count", 5}}})}
+        }}
+    });
+    ASSERT_EQ(response["data"]["files"][0]["upload_time"].get<int>(), 123);
+    ASSERT_EQ(response["data"]["files"][0]["uploader"].get<int>(), 30003);
+    ASSERT_EQ(response["data"]["files"][0]["download_times"].get<int>(), 4);
+    ASSERT_EQ(response["data"]["folders"][0]["total_file_count"].get<int>(), 5);
+
+    response = MilkyAdapter::normalizeActionResponseForTest("get_group_file_url", {
+        {"status", "ok"}, {"retcode", 0}, {"data", {{"download_url", "https://example.test/file"}}}
+    });
+    ASSERT_EQ(response["data"]["url"].get<std::string>(), std::string("https://example.test/file"));
 }
