@@ -296,8 +296,8 @@ public:
     }
 
     void refreshGroupList() override {
-        invokeActionAsync("get_group_list", {}, [self = shared_from_this()](json r) { self->cacheGroupList(r); });
-        invokeActionAsync("get_friend_list", {}, [self = shared_from_this()](json r) {
+        invokeActionAsync("get_group_list", json::object(), [self = shared_from_this()](json r) { self->cacheGroupList(r); });
+        invokeActionAsync("get_friend_list", json::object(), [self = shared_from_this()](json r) {
             const json d = r.value("data", json::object());
             if (!apiOk(r) || !d.value("friends", json()).is_array()) return;
             std::lock_guard<std::mutex> lk(self->cacheMutex_); self->friendList_.clear();
@@ -552,6 +552,10 @@ private:
             {"get_group_file_url", "get_group_file_download_url"}, {"upload_group_file", "upload_group_file"}
         };
         auto it = paths.find(action); if (it == paths.end()) return {};
+        // Milky API inputs are JSON objects, including actions without fields.
+        // An empty braced initializer can become JSON null, which strict
+        // protocol implementations reject during request deserialization.
+        if (!p.is_object()) p = json::object();
         if (action == "get_group_root_files" && !p.contains("parent_folder_id")) p["parent_folder_id"] = "/";
         if (action == "get_group_files_by_folder") { p["parent_folder_id"] = p.value("folder_id", std::string("/")); p.erase("folder_id"); }
         return {"/api/" + it->second, std::move(p)};
