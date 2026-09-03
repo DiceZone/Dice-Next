@@ -172,6 +172,7 @@ static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std:
         {"type", std::string(typeStr) == "unknown" ? "onebot_v11" : typeStr},
         {"connectionMode", a.connectionMode == 0 ? "forward_ws" : a.connectionMode == 1 ? "reverse_ws" : "http"},
         {"endpoint", a.endpoint},
+        {"eventEndpoint", milky ? cfg.value("eventEndpoint", cfg.value("event_endpoint", std::string())) : std::string()},
         {"accessToken", official ? "" : a.accessToken},
         {"appId", official && cfg.is_object() ? cfg.value("appId", std::string()) : std::string()},
         {"qqNumber", official && cfg.is_object() ? cfg.value("qqNumber", std::string()) : std::string()},
@@ -202,6 +203,7 @@ static J adapterToConfigJson(const AdapterRow& a) {
         out["force_verify_image_resource"] = extra.value("forceVerifyImageResource", false);
     }
     if (a.type == static_cast<int>(AdapterType::kMilky)) {
+        out["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));
         out["webhook_base_url"] = extra.value("webhookBaseUrl", extra.value("webhook_base_url", std::string()));
         out["webhook_token"] = extra.value("webhookToken", extra.value("webhook_token", std::string()));
     }
@@ -232,6 +234,8 @@ static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
         J cfg = J::parse(a.config, nullptr, false); if (!cfg.is_object()) cfg = J::object();
         auto adapter = std::make_shared<MilkyAdapter>(std::to_string(a.id));
         adapter->configure({{"name", a.name}, {"endpoint", a.endpoint}, {"accessToken", a.accessToken},
+                            {"connectionMode", a.connectionMode == 0 ? "forward_ws" : "http"},
+                            {"eventEndpoint", cfg.value("eventEndpoint", cfg.value("event_endpoint", std::string()))},
                             {"webhookBaseUrl", cfg.value("webhookBaseUrl", cfg.value("webhook_base_url", std::string()))},
                             {"webhookToken", cfg.value("webhookToken", cfg.value("webhook_token", std::string()))},
                             {"message_format", cfg.value("message_format", std::string())}});
@@ -345,14 +349,17 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     auto* st = db.getStorage();
     auto* lst = db.getLogStorage();   // game_logs / game_log_messages live in logs.db
 
-    // Milky WebHook ingress is intentionally outside /api/: the protocol
-    // client authenticates with its adapter-specific WebHook token.
+    // Milky WebHook ingress is intentionally outside /api/: when a WebHook
+    // token is configured, the protocol client authenticates with that token.
     app.registerHandler("/milky/webhook/{1}", [&adapterMgr](Req req, CB&& cb, const std::string& adapterId) {
         auto adapter = std::dynamic_pointer_cast<MilkyAdapter>(adapterMgr.getAdapter(adapterId));
         auto response = drogon::HttpResponse::newHttpResponse();
         response->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-        if (!adapter || adapter->webhookToken().empty() ||
-            req->getHeader("Authorization") != "Bearer " + adapter->webhookToken()) {
+        const std::string eventToken = adapter
+            ? (!adapter->webhookToken().empty() ? adapter->webhookToken() : adapter->accessToken())
+            : std::string();
+        if (!adapter || (!eventToken.empty() &&
+            req->getHeader("Authorization") != "Bearer " + eventToken)) {
             response->setStatusCode(drogon::k401Unauthorized);
             response->setBody(dumpJsonUtf8Safe(J{{"code", 1}, {"message", "unauthorized"}}));
             cb(response); return;
@@ -2339,9 +2346,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 } else if (a.type == static_cast<int>(AdapterType::kMilky)) {
                     a.endpoint = j.value("endpoint", "");
                     a.accessToken = j.value("accessToken", "");
-                    if (a.endpoint.empty() || a.accessToken.empty()) throw std::runtime_error("Milky requires endpoint and access token");
-                    a.connectionMode = 2;
+                    if (a.endpoint.empty()) throw std::runtime_error("Milky requires an endpoint");
+                    const std::string mode = j.value("connectionMode", "http");
+                    a.connectionMode = mode == "forward_ws" ? 0 : 2;
                     a.config = J{{"heartApiKey", heartApiKey},
+                                 {"eventEndpoint", j.value("eventEndpoint", j.value("event_endpoint", std::string()))},
                                  {"webhookBaseUrl", j.value("webhookBaseUrl", j.value("webhook_base_url", std::string()))},
                                  {"webhookToken", j.value("webhookToken", j.value("webhook_token", std::string()))}}.dump();
                 } else {
@@ -2395,11 +2404,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 } else {
                     if (a.type == static_cast<int>(AdapterType::kMilky)) {
                         if (j.contains("endpoint") && j["endpoint"].is_string()) { runtimeConfigChanged = runtimeConfigChanged || a.endpoint != j["endpoint"].get<std::string>(); a.endpoint = j["endpoint"]; }
-                        if (j.contains("accessToken") && j["accessToken"].is_string() && !j["accessToken"].get<std::string>().empty()) { runtimeConfigChanged = runtimeConfigChanged || a.accessToken != j["accessToken"].get<std::string>(); a.accessToken = j["accessToken"]; }
+                        if (j.contains("accessToken") && j["accessToken"].is_string()) { runtimeConfigChanged = runtimeConfigChanged || a.accessToken != j["accessToken"].get<std::string>(); a.accessToken = j["accessToken"]; }
+                        if (j.contains("eventEndpoint") && j["eventEndpoint"].is_string()) { runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value("eventEndpoint", std::string()) != j["eventEndpoint"].get<std::string>(); adapterCfg["eventEndpoint"] = j["eventEndpoint"]; }
                         if (j.contains("webhookBaseUrl") && j["webhookBaseUrl"].is_string()) { runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value("webhookBaseUrl", std::string()) != j["webhookBaseUrl"].get<std::string>(); adapterCfg["webhookBaseUrl"] = j["webhookBaseUrl"]; }
                         if (j.contains("webhookToken") && j["webhookToken"].is_string() && !j["webhookToken"].get<std::string>().empty()) { runtimeConfigChanged = true; adapterCfg["webhookToken"] = j["webhookToken"]; }
-                        if (a.endpoint.empty() || a.accessToken.empty()) throw std::runtime_error("Milky requires endpoint and access token");
-                        a.connectionMode = 2;
+                        if (a.endpoint.empty()) throw std::runtime_error("Milky requires an endpoint");
                     } else if (j.contains("endpoint") && j["endpoint"].is_string()) {
                         runtimeConfigChanged = runtimeConfigChanged || a.endpoint != j["endpoint"].get<std::string>();
                         a.endpoint = j["endpoint"];
@@ -2415,7 +2424,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 bool wasEnabled = a.enabled;
                 if (j.contains("enabled")) a.enabled = j["enabled"];
                 if (a.type == static_cast<int>(AdapterType::kMilky)) {
-                    a.connectionMode = 2;
+                    if (j.contains("connectionMode") && j["connectionMode"].is_string()) {
+                        const int nextMode = j["connectionMode"].get<std::string>() == "forward_ws" ? 0 : 2;
+                        runtimeConfigChanged = runtimeConfigChanged || a.connectionMode != nextMode;
+                        a.connectionMode = nextMode;
+                    }
                 } else if (j.contains("connectionMode") && j["connectionMode"].is_string()) {
                     std::string m = j["connectionMode"];
                     const int nextMode = (m == "reverse_ws") ? 1 : (m == "http") ? 2 : 0;

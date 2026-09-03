@@ -2373,11 +2373,11 @@ static int realMain(int argc, char* argv[]) {
             row.endpoint = a.value("endpoint", std::string());
             row.accessToken = a.value("access_token", a.value("accessToken", std::string()));
             row.enabled = a.value("enabled", false);
-            if (row.type == static_cast<int>(dice::AdapterType::kMilky)) row.connectionMode = static_cast<int>(dice::ConnectionMode::kHTTP);
             nlohmann::json extra{
                 {"heartApiKey", a.value("heart_api_key", a.value("heartApiKey", std::string()))},
             };
             if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
+                extra["eventEndpoint"] = a.value("event_endpoint", a.value("eventEndpoint", std::string()));
                 extra["webhookBaseUrl"] = a.value("webhook_base_url", a.value("webhookBaseUrl", std::string()));
                 extra["webhookToken"] = a.value("webhook_token", a.value("webhookToken", std::string()));
             }
@@ -2402,6 +2402,11 @@ static int realMain(int argc, char* argv[]) {
                 a["app_secret"] = extra.value("appSecret", std::string());
                 a["qq_number"] = extra.value("qqNumber", std::string());
                 a["force_verify_image_resource"] = extra.value("forceVerifyImageResource", false);
+            }
+            if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
+                a["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));
+                a["webhook_base_url"] = extra.value("webhookBaseUrl", extra.value("webhook_base_url", std::string()));
+                a["webhook_token"] = extra.value("webhookToken", extra.value("webhook_token", std::string()));
             }
             return a;
         };

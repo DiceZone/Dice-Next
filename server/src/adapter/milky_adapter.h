@@ -1,9 +1,7 @@
 #pragma once
 
-// Milky protocol adapter.  Milky is an HTTP API plus WebHook protocol, so the
-// adapter deliberately keeps the transport independent from Drogon's event
-// loop: API calls run through curl in short-lived worker threads and WebHook
-// events enter through the public handler registered by api_service.h.
+// Milky protocol adapter. API calls use HTTP /api/:api; events use either the
+// /event WebSocket or an application WebHook, selected independently.
 
 #include "adapter_interface.h"
 #include "self_echo_filter.h"
@@ -13,6 +11,8 @@
 #include "../service/image_send.h"
 
 #include <drogon/utils/Utilities.h>
+#include <drogon/WebSocketClient.h>
+#include <drogon/HttpAppFramework.h>
 
 #include <atomic>
 #include <algorithm>
@@ -53,15 +53,44 @@ public:
         name_ = cfg.value("name", id_);
         endpoint_ = cfg.value("endpoint", cfg.value("apiEndpoint", std::string()));
         while (!endpoint_.empty() && endpoint_.back() == '/') endpoint_.pop_back();
+        const bool legacyWsEndpoint = endpoint_.rfind("ws://", 0) == 0 || endpoint_.rfind("wss://", 0) == 0;
         if (endpoint_.size() >= 4 && endpoint_.compare(endpoint_.size() - 4, 4, "/api") == 0)
             endpoint_.resize(endpoint_.size() - 4);
         accessToken_ = cfg.value("accessToken", cfg.value("access_token", std::string()));
+        mode_ = cfg.value("connectionMode", std::string("http"));
+        if (mode_ != "forward_ws") mode_ = "http";
+        eventEndpoint_ = cfg.value("eventEndpoint", cfg.value("event_endpoint", std::string()));
+        if (legacyWsEndpoint && eventEndpoint_.empty()) eventEndpoint_ = endpoint_;
+        if (legacyWsEndpoint) {
+            endpoint_ = endpoint_.rfind("wss://", 0) == 0
+                ? "https://" + endpoint_.substr(6)
+                : "http://" + endpoint_.substr(5);
+            mode_ = "forward_ws";
+        }
         webhookBaseUrl_ = cfg.value("webhookBaseUrl", cfg.value("webhook_base_url", std::string()));
         while (!webhookBaseUrl_.empty() && webhookBaseUrl_.back() == '/') webhookBaseUrl_.pop_back();
         webhookToken_ = cfg.value("webhookToken", cfg.value("webhook_token", std::string()));
         setMessageFormatOverride(parseFormatOverride(cfg.value("message_format", std::string())));
         if (endpoint_.empty()) { lastError_ = "Milky API endpoint is required"; return false; }
-        if (accessToken_.empty()) { lastError_ = "Milky access token is required"; return false; }
+        if (endpoint_.rfind("http://", 0) != 0 && endpoint_.rfind("https://", 0) != 0) {
+            lastError_ = "Milky API endpoint must start with http:// or https://";
+            return false;
+        }
+        if (mode_ == "forward_ws") {
+            if (eventEndpoint_.empty()) {
+                eventEndpoint_ = endpoint_.rfind("https://", 0) == 0
+                    ? "wss://" + endpoint_.substr(8)
+                    : "ws://" + endpoint_.substr(7);
+                eventEndpoint_ += "/event";
+            }
+            while (eventEndpoint_.size() > 1 && eventEndpoint_.back() == '/') eventEndpoint_.pop_back();
+            if (eventEndpoint_.rfind("ws://", 0) != 0 && eventEndpoint_.rfind("wss://", 0) != 0) {
+                lastError_ = "Milky event endpoint must start with ws:// or wss://";
+                return false;
+            }
+            if (eventEndpoint_.find('/', eventEndpoint_.find("://") + 3) == std::string::npos)
+                eventEndpoint_ += "/event";
+        }
         return true;
     }
 
@@ -84,10 +113,18 @@ public:
         connected_ = true;
         lastError_.clear();
         refreshGroupList();
+        if (mode_ == "forward_ws") {
+            connected_ = false;
+            startEventWebSocket();
+        }
         return true;
     }
 
-    void stop() override { stopping_ = true; connected_ = false; }
+    void stop() override {
+        stopping_ = true;
+        connected_ = false;
+        if (wsClient_) { wsClient_->stop(); wsClient_.reset(); }
+    }
     bool isConnected() const override { return connected_.load(); }
     std::string lastError() const override {
         std::lock_guard<std::mutex> lk(stateMutex_);
@@ -97,6 +134,7 @@ public:
 
     std::string getLoginId() const override { return loginId_; }
     std::string getLoginName() const override { return loginName_; }
+    std::string accessToken() const { return accessToken_; }
     std::string webhookToken() const { return webhookToken_; }
     std::string webhookUrl() const {
         return webhookBaseUrl_.empty() ? std::string() : webhookBaseUrl_ + "/milky/webhook/" + id_;
@@ -353,6 +391,80 @@ public:
 
 private:
 
+    void startEventWebSocket() {
+        if (stopping_ || wsConnecting_.exchange(true)) return;
+
+        const auto authorityStart = eventEndpoint_.find("://") + 3;
+        const auto pathAt = eventEndpoint_.find('/', authorityStart);
+        const std::string serverUrl = pathAt == std::string::npos
+            ? eventEndpoint_ : eventEndpoint_.substr(0, pathAt);
+        const std::string eventPath = pathAt == std::string::npos
+            ? std::string("/event") : eventEndpoint_.substr(pathAt);
+
+        wsClient_ = drogon::WebSocketClient::newWebSocketClient(serverUrl);
+        if (!wsClient_) {
+            wsConnecting_ = false;
+            std::lock_guard<std::mutex> lk(stateMutex_);
+            lastError_ = "Failed to create Milky event WebSocket client";
+            scheduleEventReconnect();
+            return;
+        }
+
+        auto self = shared_from_this();
+        wsClient_->setMessageHandler([self](std::string&& raw, const drogon::WebSocketClientPtr&,
+                                            const drogon::WebSocketMessageType& type) {
+            if (type != drogon::WebSocketMessageType::Text && type != drogon::WebSocketMessageType::Binary) return;
+            auto event = json::parse(raw, nullptr, false);
+            if (event.is_discarded() || !self->handleWebhook(event))
+                DICE_LOG_WARN("Milky '{}': ignored invalid event WebSocket payload", self->name_);
+        });
+        wsClient_->setConnectionClosedHandler([self](const drogon::WebSocketClientPtr&) {
+            self->wsConnecting_ = false;
+            self->connected_ = false;
+            if (!self->stopping_) {
+                DICE_LOG_WARN("Milky '{}': event WebSocket disconnected", self->name_);
+                self->scheduleEventReconnect();
+            }
+        });
+
+        auto request = drogon::HttpRequest::newHttpRequest();
+        request->setPath(eventPath);
+        if (!accessToken_.empty()) request->addHeader("Authorization", "Bearer " + accessToken_);
+        DICE_LOG_INFO("Milky '{}': connecting event WebSocket {}", name_, eventEndpoint_);
+        wsClient_->connectToServer(request,
+            [self](drogon::ReqResult result, const drogon::HttpResponsePtr& response,
+                   const drogon::WebSocketClientPtr&) {
+                self->wsConnecting_ = false;
+                if (result != drogon::ReqResult::Ok) {
+                    self->connected_ = false;
+                    const std::string status = response ? std::to_string(static_cast<int>(response->getStatusCode())) : "no response";
+                    {
+                        std::lock_guard<std::mutex> lk(self->stateMutex_);
+                        self->lastError_ = "Milky event WebSocket connect failed (" + status + ")";
+                    }
+                    self->scheduleEventReconnect();
+                    return;
+                }
+                self->connected_ = true;
+                {
+                    std::lock_guard<std::mutex> lk(self->stateMutex_);
+                    self->lastError_.clear();
+                }
+                DICE_LOG_INFO("Milky '{}': event WebSocket connected", self->name_);
+            });
+    }
+
+    void scheduleEventReconnect() {
+        if (stopping_ || reconnectScheduled_.exchange(true)) return;
+        auto weak = std::weak_ptr<MilkyAdapter>(shared_from_this());
+        drogon::app().getLoop()->runAfter(5.0, [weak]() {
+            if (auto self = weak.lock()) {
+                self->reconnectScheduled_ = false;
+                if (!self->stopping_) self->startEventWebSocket();
+            }
+        });
+    }
+
     static std::string field(const json& j, const char* key) {
         if (!j.is_object() || !j.contains(key) || j[key].is_null()) return {};
         if (j[key].is_string()) return j[key].get<std::string>();
@@ -464,11 +576,20 @@ private:
         const fs::path cfgFile = fs::temp_directory_path() / ("dice-milky-curl-" + tag + ".conf");
         { std::ofstream out(bodyFile, std::ios::binary); out << jsonBody(body); }
         auto esc = [](const std::string& s) { std::string out; out.reserve(s.size() + 8); for (char c : s) { if (c == '\\' || c == '"') out += '\\'; out += c; } return out; };
-        { std::ofstream out(cfgFile, std::ios::binary); out << "url = \"" << esc(endpoint_ + path) << "\"\nrequest = POST\nsilent\nshow-error\nconnect-timeout = 5\nmax-time = 20\nproto = \"=http,https\"\nheader = \"Content-Type: application/json\"\nheader = \"Authorization: Bearer " << esc(accessToken_) << "\"\ndata-binary = \"@" << esc(bodyFile.string()) << "\"\nwrite-out = \"\\n__DICE_STATUS__%{http_code}\"\n"; }
+        { std::ofstream out(cfgFile, std::ios::binary);
+          out << "url = \"" << esc(endpoint_ + path) << "\"\nrequest = POST\nsilent\nshow-error\nconnect-timeout = 5\nmax-time = 20\nproto = \"=http,https\"\nheader = \"Content-Type: application/json\"\n";
+          if (!accessToken_.empty()) out << "header = \"Authorization: Bearer " << esc(accessToken_) << "\"\n";
+          out << "data-binary = \"@" << esc(bodyFile.string()) << "\"\nwrite-out = \"\\n__DICE_STATUS__%{http_code}\"\n";
+        }
         auto r = proc::curlConfig(cfgFile, 4 * 1024 * 1024); std::error_code ec; fs::remove(bodyFile, ec); fs::remove(cfgFile, ec);
         const std::string marker = "__DICE_STATUS__"; size_t at = r.output.rfind(marker); int status = 0; std::string content = r.output;
         if (at != std::string::npos) { try { status = std::stoi(r.output.substr(at + marker.size())); } catch (...) {} content.resize(at > 0 && r.output[at - 1] == '\n' ? at - 1 : at); }
-        if (!r.ok() || status >= 400 || content.empty()) return json{{"status", "failed"}, {"retcode", status ? status : -1}, {"message", r.output}};
+        if (!r.ok() || status >= 400 || content.empty()) {
+            const std::string message = content.empty()
+                ? "Milky API request got no HTTP response from " + endpoint_ + path + " (curl status " + std::to_string(status) + ")"
+                : content;
+            return json{{"status", "failed"}, {"retcode", status ? status : -1}, {"message", message}};
+        }
         auto j = json::parse(content, nullptr, false); return j.is_discarded() ? json{{"status", "failed"}, {"retcode", status}, {"message", "invalid Milky JSON response"}} : j;
     }
 
@@ -554,9 +675,12 @@ private:
         m.rawContent = raw.empty() ? clean : raw; m.content = clean;
     }
 
-    std::string id_, name_, endpoint_, accessToken_, webhookBaseUrl_, webhookToken_;
+    std::string id_, name_, endpoint_, eventEndpoint_, accessToken_, webhookBaseUrl_, webhookToken_;
+    std::string mode_{"http"};
     std::string loginId_, loginName_;
     std::atomic<bool> connected_{false}, stopping_{false};
+    std::atomic<bool> wsConnecting_{false}, reconnectScheduled_{false};
+    drogon::WebSocketClientPtr wsClient_;
     mutable std::mutex stateMutex_, cacheMutex_;
     std::string lastError_;
     std::vector<MessageCallback> messageCallbacks_; std::vector<EventCallback> eventCallbacks_;
