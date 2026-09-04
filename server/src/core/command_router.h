@@ -176,6 +176,11 @@ public:
         quoteOverride_.clear();   // reset per-message reply-quote override (#10)
         forwardNodes_.clear();    // reset per-message 合并转发节点 (#6)
         s_replyCat.clear();       // 每条消息重置回复类别
+        const std::string personaGroupId =
+            msg.type == MessageType::kGroup ? msg.targetId : std::string();
+        auto personaScope = i18n_.scopedPersona(
+            personaMgr_ ? personaMgr_->getActivePersona(personaGroupId, msg.platform)
+                        : i18n_.getActivePersonaId());
         detectDiceBot(msg);       // 被动识别其他骰子的 .bot 横幅回执（须紧跟探测）
         recordBotProbe(msg);      // 记录本群 .bot 探测时间，作为识别的时间窗
         std::string text = trim(msg.content);
@@ -2191,7 +2196,7 @@ private:
 
     std::optional<std::string> handlePersonaShow(Locale loc, const Message& msg) {
         std::string groupId = (msg.type == MessageType::kGroup) ? msg.targetId : std::string();
-        int activeId = personaMgr_->getActivePersona(groupId);
+        int activeId = personaMgr_->getActivePersona(groupId, msg.platform);
         if (activeId <= 0) {
             return i18n_.tr(loc, "persona.current", {{"name", i18n_.tr(loc, "persona.default_name")}});
         }
@@ -2239,13 +2244,13 @@ private:
         auto tmpl = personaMgr_->getTemplateByName(name);
         if (tmpl.id <= 0) return i18n_.tr(loc, "persona.not_found", {{"name", name}});
         std::string groupId = (msg.type == MessageType::kGroup) ? msg.targetId : std::string();
-        personaMgr_->setActivePersona(tmpl.id, groupId);
+        personaMgr_->setActivePersona(tmpl.id, groupId, msg.platform);
         return i18n_.tr(loc, "persona.set", {{"name", tmpl.name}});
     }
 
     std::optional<std::string> handlePersonaOff(Locale loc, const Message& msg) {
         std::string groupId = (msg.type == MessageType::kGroup) ? msg.targetId : std::string();
-        personaMgr_->setActivePersona(0, groupId);
+        personaMgr_->setActivePersona(0, groupId, msg.platform);
         return i18n_.tr(loc, "persona.off");
     }
 

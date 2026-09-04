@@ -1077,7 +1077,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // Get active persona info (specific route — before {1})
     app.registerHandler("/api/personas/active", [&personaMgr, &cfg](Req req, CB&& cb) {
         std::string groupId = req->getParameter("groupId");
-        int activeId = personaMgr.getActivePersona(groupId);
+        std::string platform = req->getParameter("platform");
+        int activeId = personaMgr.getActivePersona(groupId, platform);
         J data;
         data["activeId"] = activeId;
         if (activeId > 0) {
@@ -1149,7 +1150,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             int id = std::stoi(idStr);
             auto j = J::parse(req->body());
             std::string groupId = j.value("groupId", "");
-            personaMgr.setActivePersona(id, groupId);
+            std::string platform = j.value("platform", "onebot_v11");
+            personaMgr.setActivePersona(id, groupId, platform);
             jsonReply(ok(nullptr), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});

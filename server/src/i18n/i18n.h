@@ -133,6 +133,24 @@ public:
     // default bundle in the lookup chain: override → persona(若启用) → bundle → key.
     // Persona data is injected by PersonaManager from the database (not files).
 
+    /// Select a persona only for the current thread and lexical scope.  Message
+    /// handling uses this instead of mutating the process-wide default, so two
+    /// groups can render replies concurrently without leaking personas.
+    class PersonaScope {
+    public:
+        explicit PersonaScope(int personaId);
+        ~PersonaScope();
+        PersonaScope(const PersonaScope&) = delete;
+        PersonaScope& operator=(const PersonaScope&) = delete;
+
+    private:
+        std::optional<int> previous_;
+    };
+
+    [[nodiscard]] PersonaScope scopedPersona(int personaId) const {
+        return PersonaScope(personaId);
+    }
+
     /// Switch to a named persona (0 = default/disabled).
     void setPersona(int personaId);
 
@@ -143,13 +161,14 @@ public:
     /// a no-op — data is injected via setPersonaBundles() by PersonaManager.
     bool loadPersona();
 
-    /// Inject persona bundles for a locale (called by PersonaManager).
+    /// Cache one persona's bundles for a locale (called by PersonaManager).
     /// @p formats maps the same keys to "plain" or "markdown". Missing
     /// formats remain plain so existing personas keep their literal semantics.
-    void setPersonaBundles(Locale loc, const json& bundles, const json& formats = json::object());
+    void setPersonaBundles(int personaId, Locale loc, const json& bundles,
+                           const json& formats = json::object());
 
-    /// Clear all persona bundles (called when switching to default persona).
-    void clearPersonaBundles();
+    /// Evict one persona from the cache (used before a reload or after deletion).
+    void clearPersonaBundles(int personaId);
 
 private:
     /// Look up a key in a single bundle. Returns nullptr if absent.
@@ -181,15 +200,16 @@ private:
     std::map<Locale, json> bundles_;
     std::map<Locale, std::map<std::string, TemplateValue>> preparedBundles_;
     std::map<Locale, std::map<std::string, TemplateValue>> overrides_;
-    std::map<Locale, json> personaBundles_;   // persona overlay (flat key→string)
-    std::map<Locale, json> personaFormats_;   // persona overlay (flat key→format)
-    std::map<Locale, std::map<std::string, TemplateValue>> preparedPersonaBundles_;
+    std::map<int, std::map<Locale, json>> personaBundles_;   // persona → locale → flat key/value
+    std::map<int, std::map<Locale, json>> personaFormats_;   // persona → locale → flat key/format
+    std::map<int, std::map<Locale, std::map<std::string, TemplateValue>>> preparedPersonaBundles_;
     int activePersonaId_ = 0;                   // current persona (0=default/off)
     std::map<std::string, Locale> keywordMap_;  // _meta.keywords → locale（键已转小写）
     mutable std::mutex mutex_;
     static thread_local bool outboundCaptureActive_;
     static thread_local bool outboundCaptureMarkdown_;
     static thread_local ContentFormat outboundPreferredOutput_;
+    static thread_local std::optional<int> scopedPersonaId_;
 };
 
 }  // namespace dice

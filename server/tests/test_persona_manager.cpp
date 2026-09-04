@@ -378,6 +378,33 @@ TEST(PersonaActive, GroupPersonaOverridesGlobal) {
     ASSERT_EQ(mgr.getActivePersona(""), globalPid);
 }
 
+TEST(PersonaActive, SameGroupIdIsIsolatedByPlatform) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("i18n", Locale::kZhHans);
+    PersonaManager mgr(*db, i18n, *cfg);
+
+    int qqPid = mgr.createTemplate("QQ", "");
+    int discordPid = mgr.createTemplate("Discord", "");
+    mgr.setActivePersona(qqPid, "same-id", "onebot_v11");
+    mgr.setActivePersona(discordPid, "same-id", "discord");
+
+    ASSERT_EQ(mgr.getActivePersona("same-id", "onebot_v11"), qqPid);
+    ASSERT_EQ(mgr.getActivePersona("same-id", "discord"), discordPid);
+}
+
+TEST(PersonaActive, LegacyOneBotPlatformRowsRemainReadable) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("i18n", Locale::kZhHans);
+    PersonaManager mgr(*db, i18n, *cfg);
+
+    int pid = mgr.createTemplate("Legacy", "");
+    mgr.setActivePersona(pid, "legacy-group", "onebot_v11");
+
+    ASSERT_EQ(mgr.getActivePersona("legacy-group", "milky"), pid);
+}
+
 TEST(PersonaActive, SetGlobalPersonaToZero) {
     auto db = makeDb();
     auto cfg = makeCfg();
@@ -520,24 +547,40 @@ TEST(PersonaI18n, LoadIntoI18nClearsAndInjects) {
 
     mgr.loadIntoI18n(pid);
 
-    // Verify I18n has the persona layer active
+    // Loading a persona must not mutate the global selection.
     ASSERT_EQ(i18n.getActivePersonaId(), 0);  // setPersona not called yet
-    // The persona bundles should be injected though
-    // tr() should use the persona layer if bundle doesn't have the key
+    auto scope = i18n.scopedPersona(pid);
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.greeting"), "Persona greeting!");
+    ASSERT_EQ(i18n.tr(Locale::kEn, "dice.greeting"), "EN persona greeting!");
 }
 
-TEST(PersonaI18n, LoadZeroPersonaClearsBundles) {
+TEST(PersonaI18n, ReloadEmptyPersonaClearsOnlyItsCache) {
     auto db = makeDb();
     auto cfg = makeCfg();
     I18n i18n("i18n", Locale::kZhHans);
     PersonaManager mgr(*db, i18n, *cfg);
 
     int pid = mgr.createTemplate("Clear", "");
+    int otherPid = mgr.createTemplate("Other", "");
     mgr.setEntry(pid, "zh-Hans", "test.key", "test value");
+    mgr.setEntry(otherPid, "zh-Hans", "test.key", "other value");
 
     mgr.loadIntoI18n(pid);
-    mgr.loadIntoI18n(0);  // should clear
+    mgr.loadIntoI18n(otherPid);
+    {
+        auto scope = i18n.scopedPersona(pid);
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "test value");
+    }
 
-    // After clearing, persona bundles should be empty
-    // tr() should fall through to bundle/key
+    ASSERT_TRUE(mgr.deleteEntry(pid, "zh-Hans", "test.key"));
+    mgr.loadIntoI18n(pid);
+
+    {
+        auto scope = i18n.scopedPersona(pid);
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "test.key");
+    }
+    {
+        auto scope = i18n.scopedPersona(otherPid);
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "other value");
+    }
 }

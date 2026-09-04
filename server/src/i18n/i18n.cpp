@@ -18,6 +18,16 @@ static void flattenNode(const json& node, const std::string& prefix,
 thread_local bool I18n::outboundCaptureActive_ = false;
 thread_local bool I18n::outboundCaptureMarkdown_ = false;
 thread_local ContentFormat I18n::outboundPreferredOutput_ = ContentFormat::kMarkdown;
+thread_local std::optional<int> I18n::scopedPersonaId_ = std::nullopt;
+
+I18n::PersonaScope::PersonaScope(int personaId)
+    : previous_(I18n::scopedPersonaId_) {
+    I18n::scopedPersonaId_ = personaId;
+}
+
+I18n::PersonaScope::~PersonaScope() {
+    I18n::scopedPersonaId_ = previous_;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Construction
@@ -260,15 +270,20 @@ std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const
         return renderTemplate(keyIt->second, args);
     };
 
-    // requested locale: override -> persona -> bundled template
+    const int personaId = scopedPersonaId_.value_or(activePersonaId_);
+    auto personaIt = preparedPersonaBundles_.find(personaId);
+
+    // requested locale: override -> selected persona -> bundled template
     if (auto rendered = renderFrom(overrides_, loc)) return *rendered;
-    if (auto rendered = renderFrom(preparedPersonaBundles_, loc)) return *rendered;
+    if (personaIt != preparedPersonaBundles_.end())
+        if (auto rendered = renderFrom(personaIt->second, loc)) return *rendered;
     if (auto rendered = renderFrom(preparedBundles_, loc)) return *rendered;
 
     // default locale uses the same layer order.
     if (loc != defaultLocale_) {
         if (auto rendered = renderFrom(overrides_, defaultLocale_)) return *rendered;
-        if (auto rendered = renderFrom(preparedPersonaBundles_, defaultLocale_)) return *rendered;
+        if (personaIt != preparedPersonaBundles_.end())
+            if (auto rendered = renderFrom(personaIt->second, defaultLocale_)) return *rendered;
         if (auto rendered = renderFrom(preparedBundles_, defaultLocale_)) return *rendered;
     }
 
@@ -470,17 +485,22 @@ std::vector<Locale> I18n::availableLocales() const {
 
 const json* I18n::lookupPersonaNode(Locale loc, const std::string& key) const {
     // Persona bundles are flat {dotted-key → string}. No nested traversal.
-    auto it = personaBundles_.find(loc);
-    if (it == personaBundles_.end()) return nullptr;
-    if (!it->second.is_object()) return nullptr;
+    const int personaId = scopedPersonaId_.value_or(activePersonaId_);
+    auto personaIt = personaBundles_.find(personaId);
+    if (personaIt == personaBundles_.end()) return nullptr;
+    auto it = personaIt->second.find(loc);
+    if (it == personaIt->second.end() || !it->second.is_object()) return nullptr;
     auto kit = it->second.find(key);
     if (kit == it->second.end()) return nullptr;
     return kit->is_string() ? &(*kit) : nullptr;
 }
 
 ContentFormat I18n::lookupPersonaFormat(Locale loc, const std::string& key) const {
-    auto it = personaFormats_.find(loc);
-    if (it == personaFormats_.end() || !it->second.is_object()) return ContentFormat::kPlainText;
+    const int personaId = scopedPersonaId_.value_or(activePersonaId_);
+    auto personaIt = personaFormats_.find(personaId);
+    if (personaIt == personaFormats_.end()) return ContentFormat::kPlainText;
+    auto it = personaIt->second.find(loc);
+    if (it == personaIt->second.end() || !it->second.is_object()) return ContentFormat::kPlainText;
     auto kit = it->second.find(key);
     if (kit == it->second.end() || !kit->is_string()) return ContentFormat::kPlainText;
     return contentFormatFromString(kit->get<std::string>());
@@ -503,8 +523,9 @@ bool I18n::loadPersona() {
     return true;
 }
 
-void I18n::setPersonaBundles(Locale loc, const json& bundles, const json& formats) {
-    if (!bundles.is_object() || bundles.empty()) return;
+void I18n::setPersonaBundles(int personaId, Locale loc, const json& bundles,
+                             const json& formats) {
+    if (personaId <= 0 || !bundles.is_object() || bundles.empty()) return;
 
     std::map<std::string, TemplateValue> prepared;
     for (auto it = bundles.begin(); it != bundles.end(); ++it) {
@@ -519,18 +540,19 @@ void I18n::setPersonaBundles(Locale loc, const json& bundles, const json& format
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    personaBundles_[loc] = bundles;
-    personaFormats_[loc] = formats.is_object() ? formats : json::object();
-    preparedPersonaBundles_[loc] = std::move(prepared);
-    DICE_LOG_INFO("I18n: persona bundles injected for locale '{}' ({} entries)",
-                  localeToString(loc), personaBundles_[loc].size());
+    personaBundles_[personaId][loc] = bundles;
+    personaFormats_[personaId][loc] = formats.is_object() ? formats : json::object();
+    preparedPersonaBundles_[personaId][loc] = std::move(prepared);
+    DICE_LOG_INFO("I18n: persona {} bundles cached for locale '{}' ({} entries)",
+                  personaId, localeToString(loc), personaBundles_[personaId][loc].size());
 }
-void I18n::clearPersonaBundles() {
+void I18n::clearPersonaBundles(int personaId) {
+    if (personaId <= 0) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    personaBundles_.clear();
-    personaFormats_.clear();
-    preparedPersonaBundles_.clear();
-    DICE_LOG_INFO("I18n: persona bundles cleared");
+    personaBundles_.erase(personaId);
+    personaFormats_.erase(personaId);
+    preparedPersonaBundles_.erase(personaId);
+    DICE_LOG_INFO("I18n: persona {} bundles evicted", personaId);
 }
 
 }  // namespace dice
