@@ -9,7 +9,9 @@
 
 #include <filesystem>
 #include <fstream>
+#include <atomic>
 #include <set>
+#include <thread>
 
 using namespace dice;
 
@@ -69,9 +71,10 @@ TEST(I18nPersona, SetAndGetActivePersonaId) {
 
 TEST(I18nPersona, SetPersonaBundlesForLocale) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
 
     json bundles = {{"dice.greeting", "Hello from persona!"}};
-    i18n.setPersonaBundles(Locale::kZhHans, bundles);
+    i18n.setPersonaBundles(42, Locale::kZhHans, bundles);
 
     // tr() should find the persona entry (since no bundle or override exists)
     std::string result = i18n.tr(Locale::kZhHans, "dice.greeting");
@@ -80,15 +83,16 @@ TEST(I18nPersona, SetPersonaBundlesForLocale) {
 
 TEST(I18nPersona, ClearPersonaBundles) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
 
     json bundles = {{"dice.greeting", "Persona greeting"}};
-    i18n.setPersonaBundles(Locale::kZhHans, bundles);
+    i18n.setPersonaBundles(42, Locale::kZhHans, bundles);
 
     // Verify it works
     ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.greeting"), "Persona greeting");
 
     // Clear
-    i18n.clearPersonaBundles();
+    i18n.clearPersonaBundles(42);
 
     // Should fall back to raw key
     ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.greeting"), "dice.greeting");
@@ -96,10 +100,11 @@ TEST(I18nPersona, ClearPersonaBundles) {
 
 TEST(I18nPersona, OverrideTakesPrecedenceOverPersona) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
 
     // Set persona bundle
     json personaBundle = {{"test.key", "persona value"}};
-    i18n.setPersonaBundles(Locale::kZhHans, personaBundle);
+    i18n.setPersonaBundles(42, Locale::kZhHans, personaBundle);
 
     // Set override (should take precedence)
     i18n.setOverride(Locale::kZhHans, "test.key", "override value");
@@ -109,12 +114,13 @@ TEST(I18nPersona, OverrideTakesPrecedenceOverPersona) {
 
 TEST(I18nPersona, PersonaTakesPrecedenceOverBundle) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
 
     // Since we can't load bundles from disk in this test,
     // we verify the lookup order by testing that persona returns
     // its value when no override exists.
     json personaBundle = {{"test.key", "persona value"}};
-    i18n.setPersonaBundles(Locale::kZhHans, personaBundle);
+    i18n.setPersonaBundles(42, Locale::kZhHans, personaBundle);
 
     // No override → should use persona
     ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "persona value");
@@ -129,10 +135,11 @@ TEST(I18nPersona, FallbackToRawKeyWhenNothingExists) {
 
 TEST(I18nPersona, EmptyPersonaBundleNotInjected) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
 
     // Empty bundle should not be injected (per setPersonaBundles impl)
     json emptyBundle = json::object();
-    i18n.setPersonaBundles(Locale::kZhHans, emptyBundle);
+    i18n.setPersonaBundles(42, Locale::kZhHans, emptyBundle);
 
     // Should fall back to raw key
     ASSERT_EQ(i18n.tr(Locale::kZhHans, "any.key"), "any.key");
@@ -140,21 +147,23 @@ TEST(I18nPersona, EmptyPersonaBundleNotInjected) {
 
 TEST(I18nPersona, NonObjectBundleNotInjected) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
 
     // Non-object JSON should not be injected
     json badBundle = json::array({"not", "an", "object"});
-    i18n.setPersonaBundles(Locale::kZhHans, badBundle);
+    i18n.setPersonaBundles(42, Locale::kZhHans, badBundle);
 
     ASSERT_EQ(i18n.tr(Locale::kZhHans, "any.key"), "any.key");
 }
 
 TEST(I18nPersona, LocaleIsolation) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
 
     json zhBundle = {{"greeting", "你好"}};
     json enBundle = {{"greeting", "Hello"}};
-    i18n.setPersonaBundles(Locale::kZhHans, zhBundle);
-    i18n.setPersonaBundles(Locale::kEn, enBundle);
+    i18n.setPersonaBundles(42, Locale::kZhHans, zhBundle);
+    i18n.setPersonaBundles(42, Locale::kEn, enBundle);
 
     ASSERT_EQ(i18n.tr(Locale::kZhHans, "greeting"), "你好");
     ASSERT_EQ(i18n.tr(Locale::kEn, "greeting"), "Hello");
@@ -162,9 +171,10 @@ TEST(I18nPersona, LocaleIsolation) {
 
 TEST(I18nPersona, InterpolationWorksInPersonaLayer) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
 
     json personaBundle = {{"dice.roll", "You rolled {result}!"}};
-    i18n.setPersonaBundles(Locale::kZhHans, personaBundle);
+    i18n.setPersonaBundles(42, Locale::kZhHans, personaBundle);
 
     std::string result = i18n.tr(Locale::kZhHans, "dice.roll", {{"result", "42"}});
     ASSERT_EQ(result, "You rolled 42!");
@@ -172,9 +182,10 @@ TEST(I18nPersona, InterpolationWorksInPersonaLayer) {
 
 TEST(I18nPersona, ClearOverrideFallsBackToPersona) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
 
     json personaBundle = {{"test.key", "persona value"}};
-    i18n.setPersonaBundles(Locale::kZhHans, personaBundle);
+    i18n.setPersonaBundles(42, Locale::kZhHans, personaBundle);
 
     i18n.setOverride(Locale::kZhHans, "test.key", "override value");
     ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "override value");
@@ -283,9 +294,10 @@ TEST(I18nFormat, TraditionalCaptureUsesPreRenderedOverride) {
 
 TEST(I18nFormat, PersonaFormatIsExplicitAndLegacyPersonaStaysPlain) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
     json bundle = {{"plain.key", "**literal**"}, {"md.key", "**bold**"}};
     json formats = {{"md.key", "markdown"}};
-    i18n.setPersonaBundles(Locale::kZhHans, bundle, formats);
+    i18n.setPersonaBundles(42, Locale::kZhHans, bundle, formats);
 
     I18n::beginOutboundCapture();
     EXPECT_EQ(i18n.tr(Locale::kZhHans, "plain.key"), "**literal**");
@@ -298,6 +310,51 @@ TEST(I18nFormat, PersonaFormatIsExplicitAndLegacyPersonaStaysPlain) {
     EXPECT_EQ(i18n.tr(Locale::kZhHans, "md.key"), "bold");
     EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()),
               static_cast<int>(ContentFormat::kPlainText));
+}
+
+TEST(I18nPersona, ScopedSelectionRestoresAndIsolatesPersonas) {
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(1);
+    i18n.setPersonaBundles(1, Locale::kZhHans, {{"test.key", "global"}});
+    i18n.setPersonaBundles(2, Locale::kZhHans, {{"test.key", "group"}});
+
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "global");
+    {
+        auto groupScope = i18n.scopedPersona(2);
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "group");
+        {
+            auto disabledScope = i18n.scopedPersona(0);
+            ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "test.key");
+        }
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "group");
+    }
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "global");
+}
+
+TEST(I18nPersona, ScopedSelectionIsThreadLocal) {
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersonaBundles(1, Locale::kZhHans, {{"test.key", "one"}});
+    i18n.setPersonaBundles(2, Locale::kZhHans, {{"test.key", "two"}});
+
+    std::atomic<int> ready{0};
+    std::atomic<bool> start{false};
+    std::atomic<bool> ok{true};
+    auto render = [&](int personaId, const char* expected) {
+        auto scope = i18n.scopedPersona(personaId);
+        ready.fetch_add(1);
+        while (!start.load()) std::this_thread::yield();
+        for (int i = 0; i < 200; ++i) {
+            if (i18n.tr(Locale::kZhHans, "test.key") != expected) ok.store(false);
+        }
+    };
+
+    std::thread first(render, 1, "one");
+    std::thread second(render, 2, "two");
+    while (ready.load() != 2) std::this_thread::yield();
+    start.store(true);
+    first.join();
+    second.join();
+    ASSERT_TRUE(ok.load());
 }
 
 // ─── .rpmode vs .rp Conflict Test ─────────────────────────────

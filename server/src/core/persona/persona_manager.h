@@ -34,10 +34,12 @@ public:
 
     /// Get the active persona ID for a group (per-group > global > 0).
     /// @p groupId empty → returns global persona.
-    int getActivePersona(const std::string& groupId = "") const;
+    int getActivePersona(const std::string& groupId = "",
+                         const std::string& platform = "onebot_v11") const;
 
     /// Set the active persona for a group (or global if groupId is empty).
-    void setActivePersona(int personaId, const std::string& groupId = "");
+    void setActivePersona(int personaId, const std::string& groupId = "",
+                          const std::string& platform = "onebot_v11");
 
     // ─── Template CRUD ────────────────────────────────────────
 
@@ -84,7 +86,7 @@ public:
     // ─── I18n injection ───────────────────────────────────────
 
     /// Load persona entries from DB into I18n's personaBundles_ layer.
-    /// If personaId is 0, clears the persona layer.
+    /// Rebuild one persona's cached translation layer. A non-positive ID is ignored.
     void loadIntoI18n(int personaId);
 
     // ─── Import / Export ──────────────────────────────────────

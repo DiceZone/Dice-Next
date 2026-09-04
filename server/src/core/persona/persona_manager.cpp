@@ -22,12 +22,17 @@ std::string PersonaManager::nowIso() {
 // ═══════════════════════════════════════════════════════════════
 
 void PersonaManager::loadStartupPersona() {
+    // Group personas must already be available when the first message arrives;
+    // cache every template once and refresh individual entries after edits.
+    for (const auto& tmpl : listTemplates()) {
+        if (tmpl.id > 0) loadIntoI18n(tmpl.id);
+    }
+
     int globalId = cfg_.get<int>("persona/global", 0);
     if (globalId > 0) {
         // Verify the persona exists
         auto tmpl = getTemplateById(globalId);
         if (tmpl.id > 0) {
-            loadIntoI18n(globalId);
             i18n_.setPersona(globalId);
             DICE_LOG_INFO("PersonaManager: startup persona '{}' (id={}) loaded", tmpl.name, globalId);
         } else {
@@ -44,18 +49,26 @@ void PersonaManager::loadStartupPersona() {
 // Active persona resolution
 // ═══════════════════════════════════════════════════════════════
 
-int PersonaManager::getActivePersona(const std::string& groupId) const {
+int PersonaManager::getActivePersona(const std::string& groupId,
+                                     const std::string& platform) const {
     // Per-group override first
     if (!groupId.empty()) {
         auto* st = db_.getStorage();
         if (st) {
             try {
-                // group_settings stores persona as key="persona" per group
-                // We search across all platforms for this groupId
-                auto rows = st->get_all<GroupSettingRow>(
-                    orm::where(orm::c(&GroupSettingRow::groupId) == groupId
-                               and orm::c(&GroupSettingRow::key) == std::string("persona")),
-                    orm::limit(1));
+                const std::string effectivePlatform = platform.empty() ? "onebot_v11" : platform;
+                auto findForPlatform = [&](const std::string& wantedPlatform) {
+                    return st->get_all<GroupSettingRow>(
+                        orm::where(orm::c(&GroupSettingRow::platform) == wantedPlatform
+                                   and orm::c(&GroupSettingRow::groupId) == groupId
+                                   and orm::c(&GroupSettingRow::key) == std::string("persona")),
+                        orm::limit(1));
+                };
+                auto rows = findForPlatform(effectivePlatform);
+                // Older builds wrote every platform as onebot_v11. Preserve
+                // those settings until the group explicitly selects again.
+                if (rows.empty() && effectivePlatform != "onebot_v11")
+                    rows = findForPlatform("onebot_v11");
                 if (!rows.empty()) {
                     return std::stoi(rows.front().value);
                 }
@@ -66,7 +79,8 @@ int PersonaManager::getActivePersona(const std::string& groupId) const {
     return cfg_.get<int>("persona/global", 0);
 }
 
-void PersonaManager::setActivePersona(int personaId, const std::string& groupId) {
+void PersonaManager::setActivePersona(int personaId, const std::string& groupId,
+                                      const std::string& platform) {
     if (groupId.empty()) {
         // Global persona
         cfg_.set<int>("persona/global", personaId);
@@ -77,8 +91,10 @@ void PersonaManager::setActivePersona(int personaId, const std::string& groupId)
         auto* st = db_.getStorage();
         if (st) {
             try {
+                const std::string effectivePlatform = platform.empty() ? "onebot_v11" : platform;
                 auto rows = st->get_all<GroupSettingRow>(
-                    orm::where(orm::c(&GroupSettingRow::groupId) == groupId
+                    orm::where(orm::c(&GroupSettingRow::platform) == effectivePlatform
+                               and orm::c(&GroupSettingRow::groupId) == groupId
                                and orm::c(&GroupSettingRow::key) == std::string("persona")),
                     orm::limit(1));
                 if (!rows.empty()) {
@@ -87,22 +103,24 @@ void PersonaManager::setActivePersona(int personaId, const std::string& groupId)
                     st->update(row);
                 } else {
                     GroupSettingRow row;
-                    row.platform = "onebot_v11";
+                    row.platform = effectivePlatform;
                     row.groupId = groupId;
                     row.key = "persona";
                     row.value = std::to_string(personaId);
                     st->insert(row);
                 }
-                DICE_LOG_INFO("PersonaManager: group '{}' persona set to {}", groupId, personaId);
+                DICE_LOG_INFO("PersonaManager: group '{}:{}' persona set to {}",
+                              effectivePlatform, groupId, personaId);
             } catch (const std::exception& e) {
                 DICE_LOG_ERROR("PersonaManager: failed to set group persona: {}", e.what());
             }
         }
     }
 
-    // If this is the global persona or the current context, reload I18n
+    // Cache the selected template for this and future group contexts. The
+    // process-wide default changes only for a global selection.
+    if (personaId > 0) loadIntoI18n(personaId);
     if (groupId.empty()) {
-        loadIntoI18n(personaId);
         i18n_.setPersona(personaId);
     }
 }
@@ -225,6 +243,7 @@ bool PersonaManager::deleteTemplate(int id) {
             orm::where(orm::c(&PersonaEntryRow::personaId) == id));
         // Delete the template
         st->remove<PersonaTemplateRow>(id);
+        i18n_.clearPersonaBundles(id);
         DICE_LOG_INFO("PersonaManager: deleted persona '{}' (id={})", tmpl.name, id);
         return true;
     } catch (const std::exception& e) {
@@ -346,16 +365,14 @@ std::vector<std::string> PersonaManager::getEntryKeys(int personaId) const {
 // ═══════════════════════════════════════════════════════════════
 
 void PersonaManager::loadIntoI18n(int personaId) {
-    if (personaId <= 0) {
-        i18n_.clearPersonaBundles();
-        return;
-    }
+    if (personaId <= 0) return;
+
+    // Replace only this persona. Other groups may be using other cached
+    // personas concurrently and must remain untouched.
+    i18n_.clearPersonaBundles(personaId);
 
     auto entries = listEntries(personaId);
-    if (entries.empty()) {
-        i18n_.clearPersonaBundles();
-        return;
-    }
+    if (entries.empty()) return;
 
     // Group entries by locale and build flat JSON objects
     std::map<Locale, json> bundlesByLocale;
@@ -366,12 +383,9 @@ void PersonaManager::loadIntoI18n(int personaId) {
         formatsByLocale[loc][e.key] = e.format;
     }
 
-    // Clear existing persona bundles first
-    i18n_.clearPersonaBundles();
-
     // Inject each locale's bundle
     for (const auto& [loc, bundle] : bundlesByLocale) {
-        i18n_.setPersonaBundles(loc, bundle, formatsByLocale[loc]);
+        i18n_.setPersonaBundles(personaId, loc, bundle, formatsByLocale[loc]);
     }
 
     DICE_LOG_INFO("PersonaManager: loaded {} entries ({} locales) into I18n for persona {}",
