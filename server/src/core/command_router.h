@@ -177,7 +177,8 @@ public:
         forwardNodes_.clear();    // reset per-message 合并转发节点 (#6)
         s_replyCat.clear();       // 每条消息重置回复类别
         const std::string personaGroupId =
-            msg.type == MessageType::kGroup ? msg.targetId : std::string();
+            (msg.type == MessageType::kGroup || msg.type == MessageType::kChannel)
+                ? msg.targetId : std::string();
         auto personaScope = i18n_.scopedPersona(
             personaMgr_ ? personaMgr_->getActivePersona(personaGroupId, msg.platform)
                         : i18n_.getActivePersonaId());
@@ -2140,7 +2141,7 @@ private:
 
     // ─── Persona switching: .rpmode ─────────────────────
     // .rpmode is an independent command — no conflict with .rp (COC7 penalty dice).
-    // Permissions: show/list/info = everyone; set/off/default = group admin;
+    // Permissions: show/list/info = everyone; set/off/default/inherit = group admin;
     //              create/copy/del = Master only.
 
     std::optional<std::string> tryHandlePersona(Locale loc, const Message& msg,
@@ -2175,9 +2176,13 @@ private:
             if (!isGroupAdmin) return i18n_.tr(loc, "persona.no_perm_admin");
             return handlePersonaSet(loc, msg, args);
         }
-        if (subcmd == "off" || subcmd == "default") {
+        if (subcmd == "off") {
             if (!isGroupAdmin) return i18n_.tr(loc, "persona.no_perm_admin");
             return handlePersonaOff(loc, msg);
+        }
+        if (subcmd == "default" || subcmd == "inherit") {
+            if (!isGroupAdmin) return i18n_.tr(loc, "persona.no_perm_admin");
+            return handlePersonaInherit(loc, msg);
         }
         if (subcmd == "create") {
             if (!isMasterUser) return i18n_.tr(loc, "persona.no_perm_master");
@@ -2195,7 +2200,9 @@ private:
     }
 
     std::optional<std::string> handlePersonaShow(Locale loc, const Message& msg) {
-        std::string groupId = (msg.type == MessageType::kGroup) ? msg.targetId : std::string();
+        std::string groupId =
+            (msg.type == MessageType::kGroup || msg.type == MessageType::kChannel)
+                ? msg.targetId : std::string();
         int activeId = personaMgr_->getActivePersona(groupId, msg.platform);
         if (activeId <= 0) {
             return i18n_.tr(loc, "persona.current", {{"name", i18n_.tr(loc, "persona.default_name")}});
@@ -2243,15 +2250,49 @@ private:
         if (name.empty()) return i18n_.tr(loc, "persona.name_empty");
         auto tmpl = personaMgr_->getTemplateByName(name);
         if (tmpl.id <= 0) return i18n_.tr(loc, "persona.not_found", {{"name", name}});
-        std::string groupId = (msg.type == MessageType::kGroup) ? msg.targetId : std::string();
-        personaMgr_->setActivePersona(tmpl.id, groupId, msg.platform);
+        std::string groupId =
+            (msg.type == MessageType::kGroup || msg.type == MessageType::kChannel)
+                ? msg.targetId : std::string();
+        if (!personaMgr_->setActivePersona(tmpl.id, groupId, msg.platform))
+            return i18n_.tr(loc, "persona.switch_fail");
+        auto changedPersonaScope = i18n_.scopedPersona(
+            personaMgr_->getActivePersona(groupId, msg.platform));
         return i18n_.tr(loc, "persona.set", {{"name", tmpl.name}});
     }
 
     std::optional<std::string> handlePersonaOff(Locale loc, const Message& msg) {
-        std::string groupId = (msg.type == MessageType::kGroup) ? msg.targetId : std::string();
-        personaMgr_->setActivePersona(0, groupId, msg.platform);
+        std::string groupId =
+            (msg.type == MessageType::kGroup || msg.type == MessageType::kChannel)
+                ? msg.targetId : std::string();
+        if (!personaMgr_->setActivePersona(0, groupId, msg.platform))
+            return i18n_.tr(loc, "persona.switch_fail");
+        auto changedPersonaScope = i18n_.scopedPersona(0);
         return i18n_.tr(loc, "persona.off");
+    }
+
+    std::optional<std::string> handlePersonaInherit(Locale loc, const Message& msg) {
+        std::string groupId =
+            (msg.type == MessageType::kGroup || msg.type == MessageType::kChannel)
+                ? msg.targetId : std::string();
+        if (groupId.empty()) {
+            // A private command manages the global selection and has no group
+            // override to inherit from. Preserve the historical `default`
+            // behaviour by resetting the global persona.
+            if (!personaMgr_->setActivePersona(0, "", msg.platform))
+                return i18n_.tr(loc, "persona.switch_fail");
+        } else {
+            if (!personaMgr_->clearGroupPersona(groupId, msg.platform))
+                return i18n_.tr(loc, "persona.switch_fail");
+        }
+
+        const int activeId = personaMgr_->getActivePersona(groupId, msg.platform);
+        auto changedPersonaScope = i18n_.scopedPersona(activeId);
+        std::string name = i18n_.tr(loc, "persona.default_name");
+        if (activeId > 0) {
+            auto tmpl = personaMgr_->getTemplateById(activeId);
+            if (tmpl.id > 0) name = tmpl.name;
+        }
+        return i18n_.tr(loc, "persona.inherit", {{"name", name}});
     }
 
     std::optional<std::string> handlePersonaCreate(Locale loc, const Message& /*msg*/,
@@ -6294,33 +6335,23 @@ public:
 private:
 
     // ─── COC7 house rule (.setcoc) — per group/user, key "cocRule" ──
-    // Read directly (not via getGroupSetting, which skips private chats) so a
-    // private-chat rule (keyed by the sender) also works.
+    // Use the common group-setting path for every operation. In particular,
+    // messages from a real adapter carry adapterId and therefore store the rule
+    // in group_account_settings, with group_settings retained as the legacy
+    // fallback. Reading or clearing only the legacy table makes `.setcoc`
+    // acknowledge a change that neither `show` nor an actual check can observe.
     int getCocRule(const Message& msg) const {
         if (msg.targetId.empty()) return 0;
-        auto* st = db_.getStorage(); if (!st) return 0;
-        try {
-            namespace orm = sqlite_orm;
-            auto rows = st->get_all<GroupSettingRow>(orm::where(
-                orm::c(&GroupSettingRow::platform) == msg.platform and
-                orm::c(&GroupSettingRow::groupId) == msg.targetId and
-                orm::c(&GroupSettingRow::key) == std::string("cocRule")));
-            if (!rows.empty()) return parseIntOr(rows.front().value, 0);
-        } catch (...) {}
-        return 0;
+        return parseIntOr(getGroupSetting(msg, "cocRule"), 0);
     }
     void setCocRule(const Message& msg, int rule) {
-        setGroupSettingFor(msg.platform, msg.targetId, "cocRule", std::to_string(rule), msg.adapterId);
+        setGroupSetting(msg, "cocRule", std::to_string(rule));
     }
     void clearCocRule(const Message& msg) {
-        auto* st = db_.getStorage(); if (!st) return;
-        try {
-            namespace orm = sqlite_orm;
-            st->remove_all<GroupSettingRow>(orm::where(
-                orm::c(&GroupSettingRow::platform) == msg.platform and
-                orm::c(&GroupSettingRow::groupId) == msg.targetId and
-                orm::c(&GroupSettingRow::key) == std::string("cocRule")));
-        } catch (...) {}
+        // Keep an explicit rule-0 value in the current scope. Removing an
+        // account row would expose a possibly non-zero legacy shared fallback,
+        // contradicting the command's "restore rule 0" result.
+        setGroupSetting(msg, "cocRule", "0");
     }
 
     /// Map a named COC house rule to its numeric id, or -1 if unknown.

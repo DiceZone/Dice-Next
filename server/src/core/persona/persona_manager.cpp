@@ -79,41 +79,50 @@ int PersonaManager::getActivePersona(const std::string& groupId,
     return cfg_.get<int>("persona/global", 0);
 }
 
-void PersonaManager::setActivePersona(int personaId, const std::string& groupId,
+bool PersonaManager::setActivePersona(int personaId, const std::string& groupId,
                                       const std::string& platform) {
+    if (personaId < 0 || (personaId > 0 && getTemplateById(personaId).id <= 0)) {
+        DICE_LOG_WARN("PersonaManager: refusing unknown persona id={}", personaId);
+        return false;
+    }
+
     if (groupId.empty()) {
         // Global persona
+        const int previousId = cfg_.get<int>("persona/global", 0);
         cfg_.set<int>("persona/global", personaId);
-        cfg_.save();
+        if (!cfg_.save()) {
+            cfg_.set<int>("persona/global", previousId);
+            return false;
+        }
         DICE_LOG_INFO("PersonaManager: global persona set to {}", personaId);
     } else {
         // Per-group persona — store in group_settings
         auto* st = db_.getStorage();
-        if (st) {
-            try {
-                const std::string effectivePlatform = platform.empty() ? "onebot_v11" : platform;
-                auto rows = st->get_all<GroupSettingRow>(
-                    orm::where(orm::c(&GroupSettingRow::platform) == effectivePlatform
-                               and orm::c(&GroupSettingRow::groupId) == groupId
-                               and orm::c(&GroupSettingRow::key) == std::string("persona")),
-                    orm::limit(1));
-                if (!rows.empty()) {
-                    auto row = rows.front();
-                    row.value = std::to_string(personaId);
-                    st->update(row);
-                } else {
-                    GroupSettingRow row;
-                    row.platform = effectivePlatform;
-                    row.groupId = groupId;
-                    row.key = "persona";
-                    row.value = std::to_string(personaId);
-                    st->insert(row);
-                }
-                DICE_LOG_INFO("PersonaManager: group '{}:{}' persona set to {}",
-                              effectivePlatform, groupId, personaId);
-            } catch (const std::exception& e) {
-                DICE_LOG_ERROR("PersonaManager: failed to set group persona: {}", e.what());
+        if (!st) return false;
+        try {
+            const std::string effectivePlatform = platform.empty() ? "onebot_v11" : platform;
+            auto rows = st->get_all<GroupSettingRow>(
+                orm::where(orm::c(&GroupSettingRow::platform) == effectivePlatform
+                           and orm::c(&GroupSettingRow::groupId) == groupId
+                           and orm::c(&GroupSettingRow::key) == std::string("persona")),
+                orm::limit(1));
+            if (!rows.empty()) {
+                auto row = rows.front();
+                row.value = std::to_string(personaId);
+                st->update(row);
+            } else {
+                GroupSettingRow row;
+                row.platform = effectivePlatform;
+                row.groupId = groupId;
+                row.key = "persona";
+                row.value = std::to_string(personaId);
+                st->insert(row);
             }
+            DICE_LOG_INFO("PersonaManager: group '{}:{}' persona set to {}",
+                          effectivePlatform, groupId, personaId);
+        } catch (const std::exception& e) {
+            DICE_LOG_ERROR("PersonaManager: failed to set group persona: {}", e.what());
+            return false;
         }
     }
 
@@ -122,6 +131,61 @@ void PersonaManager::setActivePersona(int personaId, const std::string& groupId,
     if (personaId > 0) loadIntoI18n(personaId);
     if (groupId.empty()) {
         i18n_.setPersona(personaId);
+    }
+    return true;
+}
+
+bool PersonaManager::hasGroupPersonaOverride(const std::string& groupId,
+                                             const std::string& platform) const {
+    if (groupId.empty()) return false;
+    auto* st = db_.getStorage();
+    if (!st) return false;
+
+    try {
+        const std::string effectivePlatform = platform.empty() ? "onebot_v11" : platform;
+        auto hasForPlatform = [&](const std::string& wantedPlatform) {
+            return st->count<GroupSettingRow>(
+                orm::where(orm::c(&GroupSettingRow::platform) == wantedPlatform
+                           and orm::c(&GroupSettingRow::groupId) == groupId
+                           and orm::c(&GroupSettingRow::key) == std::string("persona"))) > 0;
+        };
+        if (hasForPlatform(effectivePlatform)) return true;
+        // Keep this in lockstep with getActivePersona's legacy fallback.
+        return effectivePlatform != "onebot_v11" && hasForPlatform("onebot_v11");
+    } catch (const std::exception& e) {
+        DICE_LOG_ERROR("PersonaManager: failed to inspect group persona override: {}", e.what());
+        return false;
+    }
+}
+
+bool PersonaManager::clearGroupPersona(const std::string& groupId,
+                                       const std::string& platform) {
+    if (groupId.empty()) return false;
+    auto* st = db_.getStorage();
+    if (!st) return false;
+
+    try {
+        const std::string effectivePlatform = platform.empty() ? "onebot_v11" : platform;
+        auto removeForPlatform = [&](const std::string& wantedPlatform) {
+            st->remove_all<GroupSettingRow>(
+                orm::where(orm::c(&GroupSettingRow::platform) == wantedPlatform
+                           and orm::c(&GroupSettingRow::groupId) == groupId
+                           and orm::c(&GroupSettingRow::key) == std::string("persona")));
+        };
+
+        removeForPlatform(effectivePlatform);
+        if (effectivePlatform != "onebot_v11") {
+            // getActivePersona falls back to legacy onebot_v11 rows whenever
+            // an exact platform row is absent. Clear both rows, even when an
+            // exact row existed, so removing it cannot reveal an older value.
+            removeForPlatform("onebot_v11");
+        }
+        DICE_LOG_INFO("PersonaManager: group '{}:{}' persona override cleared",
+                      effectivePlatform, groupId);
+        return true;
+    } catch (const std::exception& e) {
+        DICE_LOG_ERROR("PersonaManager: failed to clear group persona override: {}", e.what());
+        return false;
     }
 }
 
@@ -238,11 +302,27 @@ bool PersonaManager::deleteTemplate(int id) {
     if (tmpl.isBuiltin) return false;  // built-in cannot be deleted
 
     try {
-        // Delete all entries first
-        st->remove_all<PersonaEntryRow>(
-            orm::where(orm::c(&PersonaEntryRow::personaId) == id));
-        // Delete the template
-        st->remove<PersonaTemplateRow>(id);
+        const std::string idText = std::to_string(id);
+        const bool wasGlobal = cfg_.get<int>("persona/global", 0) == id;
+        const bool committed = st->transaction([&] {
+            // A deleted persona must not remain selected by any conversation.
+            // Otherwise it resolves to a missing bundle and the WebUI can only
+            // display an "unknown persona" state.
+            st->remove_all<GroupSettingRow>(
+                orm::where(orm::c(&GroupSettingRow::key) == std::string("persona")
+                           and orm::c(&GroupSettingRow::value) == idText));
+            st->remove_all<PersonaEntryRow>(
+                orm::where(orm::c(&PersonaEntryRow::personaId) == id));
+            st->remove<PersonaTemplateRow>(id);
+            return true;
+        });
+        if (!committed) return false;
+
+        if (wasGlobal) {
+            cfg_.set<int>("persona/global", 0);
+            cfg_.save();
+            i18n_.setPersona(0);
+        }
         i18n_.clearPersonaBundles(id);
         DICE_LOG_INFO("PersonaManager: deleted persona '{}' (id={})", tmpl.name, id);
         return true;

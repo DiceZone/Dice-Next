@@ -1089,8 +1089,34 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             }
         }
         data["globalId"] = cfg.get<int>("persona/global", 0);
+        const bool hasGroupOverride =
+            !groupId.empty() && personaMgr.hasGroupPersonaOverride(groupId, platform);
+        data["hasGroupOverride"] = hasGroupOverride;
+        data["inheritsGlobal"] = !groupId.empty() && !hasGroupOverride;
         jsonReply(ok(data), std::move(cb));
     }, {drogon::Get});
+
+    // Clear a group/channel override so it inherits the global persona.
+    // Empty groupId is rejected deliberately: this endpoint must never reset
+    // the process-wide selection by accident.
+    app.registerHandler("/api/personas/active", [&personaMgr, &cfg](Req req, CB&& cb) {
+        std::string groupId = req->getParameter("groupId");
+        std::string platform = req->getParameter("platform");
+        if (groupId.empty()) {
+            jsonReply(fail("groupId is required"), std::move(cb));
+            return;
+        }
+        if (!personaMgr.clearGroupPersona(groupId, platform)) {
+            jsonReply(fail("failed to clear group persona override"), std::move(cb));
+            return;
+        }
+        jsonReply(ok(J{
+            {"activeId", personaMgr.getActivePersona(groupId, platform)},
+            {"globalId", cfg.get<int>("persona/global", 0)},
+            {"hasGroupOverride", false},
+            {"inheritsGlobal", true}
+        }), std::move(cb));
+    }, {drogon::Delete});
 
     // Get persona detail
     app.registerHandler("/api/personas/{1}", [&personaMgr](Req, CB&& cb, const std::string& idStr) {
@@ -1151,7 +1177,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             auto j = J::parse(req->body());
             std::string groupId = j.value("groupId", "");
             std::string platform = j.value("platform", "onebot_v11");
-            personaMgr.setActivePersona(id, groupId, platform);
+            if (!personaMgr.setActivePersona(id, groupId, platform)) {
+                jsonReply(fail("failed to activate persona"), std::move(cb));
+                return;
+            }
             jsonReply(ok(nullptr), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});

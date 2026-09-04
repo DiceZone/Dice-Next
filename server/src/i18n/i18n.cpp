@@ -273,17 +273,19 @@ std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const
     const int personaId = scopedPersonaId_.value_or(activePersonaId_);
     auto personaIt = preparedPersonaBundles_.find(personaId);
 
-    // requested locale: override -> selected persona -> bundled template
-    if (auto rendered = renderFrom(overrides_, loc)) return *rendered;
+    // A selected persona customises the effective reply set.  The editable
+    // global override remains its base/fallback, rather than masking the
+    // persona entry with the same key.
     if (personaIt != preparedPersonaBundles_.end())
         if (auto rendered = renderFrom(personaIt->second, loc)) return *rendered;
+    if (auto rendered = renderFrom(overrides_, loc)) return *rendered;
     if (auto rendered = renderFrom(preparedBundles_, loc)) return *rendered;
 
     // default locale uses the same layer order.
     if (loc != defaultLocale_) {
-        if (auto rendered = renderFrom(overrides_, defaultLocale_)) return *rendered;
         if (personaIt != preparedPersonaBundles_.end())
             if (auto rendered = renderFrom(personaIt->second, defaultLocale_)) return *rendered;
+        if (auto rendered = renderFrom(overrides_, defaultLocale_)) return *rendered;
         if (auto rendered = renderFrom(preparedBundles_, defaultLocale_)) return *rendered;
     }
 

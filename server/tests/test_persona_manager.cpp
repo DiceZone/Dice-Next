@@ -378,6 +378,105 @@ TEST(PersonaActive, GroupPersonaOverridesGlobal) {
     ASSERT_EQ(mgr.getActivePersona(""), globalPid);
 }
 
+TEST(PersonaActive, TwoGroupsResolveAndRenderIndependentPersonas) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    PersonaManager mgr(*db, i18n, *cfg);
+
+    int firstPid = mgr.createTemplate("FirstGroup", "");
+    int secondPid = mgr.createTemplate("SecondGroup", "");
+    ASSERT_TRUE(mgr.setEntry(firstPid, "zh-Hans", "test.reply", "first"));
+    ASSERT_TRUE(mgr.setEntry(secondPid, "zh-Hans", "test.reply", "second"));
+
+    mgr.setActivePersona(firstPid, "group-a", "qq_official");
+    mgr.setActivePersona(secondPid, "group-b", "qq_official");
+
+    // Simulate a process restart: group selections come from the database and
+    // every referenced persona must be cached before the first message.
+    I18n restartedI18n("nonexistent_dir", Locale::kZhHans);
+    PersonaManager restartedMgr(*db, restartedI18n, *cfg);
+    restartedMgr.loadStartupPersona();
+
+    const int firstResolved =
+        restartedMgr.getActivePersona("group-a", "qq_official");
+    const int secondResolved =
+        restartedMgr.getActivePersona("group-b", "qq_official");
+    ASSERT_EQ(firstResolved, firstPid);
+    ASSERT_EQ(secondResolved, secondPid);
+
+    {
+        auto scope = restartedI18n.scopedPersona(firstResolved);
+        ASSERT_EQ(restartedI18n.tr(Locale::kZhHans, "test.reply"), "first");
+    }
+    {
+        auto scope = restartedI18n.scopedPersona(secondResolved);
+        ASSERT_EQ(restartedI18n.tr(Locale::kZhHans, "test.reply"), "second");
+    }
+}
+
+TEST(PersonaActive, ExplicitOffDoesNotInheritUntilGroupOverrideIsCleared) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    PersonaManager mgr(*db, i18n, *cfg);
+
+    int globalPid = mgr.createTemplate("GlobalBase", "");
+    int groupPid = mgr.createTemplate("GroupOverride", "");
+    mgr.setActivePersona(globalPid, "");
+    mgr.setActivePersona(groupPid, "group-a", "onebot_v11");
+
+    ASSERT_TRUE(mgr.hasGroupPersonaOverride("group-a", "onebot_v11"));
+    ASSERT_EQ(mgr.getActivePersona("group-a", "onebot_v11"), groupPid);
+
+    // .rpmode off is an explicit group-level disable, not inheritance.
+    mgr.setActivePersona(0, "group-a", "onebot_v11");
+    ASSERT_TRUE(mgr.hasGroupPersonaOverride("group-a", "onebot_v11"));
+    ASSERT_EQ(mgr.getActivePersona("group-a", "onebot_v11"), 0);
+
+    // .rpmode default/inherit removes the row and resumes the global persona.
+    ASSERT_TRUE(mgr.clearGroupPersona("group-a", "onebot_v11"));
+    ASSERT_FALSE(mgr.hasGroupPersonaOverride("group-a", "onebot_v11"));
+    ASSERT_EQ(mgr.getActivePersona("group-a", "onebot_v11"), globalPid);
+
+    // Clearing an already inherited group is intentionally idempotent.
+    ASSERT_TRUE(mgr.clearGroupPersona("group-a", "onebot_v11"));
+}
+
+TEST(PersonaActive, DeletingPersonaClearsGlobalAndGroupReferences) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    PersonaManager mgr(*db, i18n, *cfg);
+
+    int doomedPid = mgr.createTemplate("Doomed", "");
+    int survivorPid = mgr.createTemplate("Survivor", "");
+    mgr.setActivePersona(doomedPid, "");
+    mgr.setActivePersona(doomedPid, "group-a", "onebot_v11");
+    mgr.setActivePersona(doomedPid, "channel-b", "discord");
+    mgr.setActivePersona(survivorPid, "group-c", "onebot_v11");
+
+    ASSERT_TRUE(mgr.deleteTemplate(doomedPid));
+    ASSERT_EQ(cfg->get<int>("persona/global", -1), 0);
+    ASSERT_EQ(i18n.getActivePersonaId(), 0);
+    ASSERT_FALSE(mgr.hasGroupPersonaOverride("group-a", "onebot_v11"));
+    ASSERT_FALSE(mgr.hasGroupPersonaOverride("channel-b", "discord"));
+    ASSERT_TRUE(mgr.hasGroupPersonaOverride("group-c", "onebot_v11"));
+    ASSERT_EQ(mgr.getActivePersona("group-c", "onebot_v11"), survivorPid);
+}
+
+TEST(PersonaActive, UnknownPersonaCannotBecomeGlobalOrGroupSelection) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    PersonaManager mgr(*db, i18n, *cfg);
+
+    ASSERT_FALSE(mgr.setActivePersona(999999, ""));
+    ASSERT_FALSE(mgr.setActivePersona(999999, "group-a", "onebot_v11"));
+    ASSERT_EQ(mgr.getActivePersona("", "onebot_v11"), 0);
+    ASSERT_FALSE(mgr.hasGroupPersonaOverride("group-a", "onebot_v11"));
+}
+
 TEST(PersonaActive, SameGroupIdIsIsolatedByPlatform) {
     auto db = makeDb();
     auto cfg = makeCfg();
@@ -403,6 +502,27 @@ TEST(PersonaActive, LegacyOneBotPlatformRowsRemainReadable) {
     mgr.setActivePersona(pid, "legacy-group", "onebot_v11");
 
     ASSERT_EQ(mgr.getActivePersona("legacy-group", "milky"), pid);
+}
+
+TEST(PersonaActive, ClearExactPlatformAlsoRemovesLegacyFallbackRow) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("i18n", Locale::kZhHans);
+    PersonaManager mgr(*db, i18n, *cfg);
+
+    int globalPid = mgr.createTemplate("GlobalForMigration", "");
+    int legacyPid = mgr.createTemplate("LegacyOneBot", "");
+    int discordPid = mgr.createTemplate("ExactDiscord", "");
+    mgr.setActivePersona(globalPid, "");
+    mgr.setActivePersona(legacyPid, "migrated-group", "onebot_v11");
+    mgr.setActivePersona(discordPid, "migrated-group", "discord");
+
+    ASSERT_TRUE(mgr.hasGroupPersonaOverride("migrated-group", "discord"));
+    ASSERT_EQ(mgr.getActivePersona("migrated-group", "discord"), discordPid);
+
+    ASSERT_TRUE(mgr.clearGroupPersona("migrated-group", "discord"));
+    ASSERT_FALSE(mgr.hasGroupPersonaOverride("migrated-group", "discord"));
+    ASSERT_EQ(mgr.getActivePersona("migrated-group", "discord"), globalPid);
 }
 
 TEST(PersonaActive, SetGlobalPersonaToZero) {

@@ -94,6 +94,30 @@ TEST(GroupAccountScoping, LegacySharedRowsRemainTheFallback) {
     ASSERT_EQ(accountGroupSetting(*st, "adapterB", "onebot_v11", "2002", "enabled"), std::string("1"));
 }
 
+TEST(GroupAccountScoping, CocRuleOverrideAndClearStayWithinAdapterAccount) {
+    auto db = makeDb();
+    auto* st = db->getStorage();
+
+    // Legacy installs may already have a shared house rule. Each concrete bot
+    // account must be able to override it independently.
+    GroupSettingRow shared; shared.platform = "onebot_v11"; shared.groupId = "2100";
+    shared.key = "cocRule"; shared.value = "1"; st->insert(shared);
+    ASSERT_EQ(accountGroupSetting(*st, "adapterA", "onebot_v11", "2100", "cocRule"), std::string("1"));
+    ASSERT_EQ(accountGroupSetting(*st, "adapterB", "onebot_v11", "2100", "cocRule"), std::string("1"));
+
+    setAccountGroupSetting(*st, "adapterA", "onebot_v11", "2100", "2100", "cocRule", "3");
+    setAccountGroupSetting(*st, "adapterB", "onebot_v11", "2100", "2100", "cocRule", "2");
+    ASSERT_EQ(accountGroupSetting(*st, "adapterA", "onebot_v11", "2100", "cocRule"), std::string("3"));
+    ASSERT_EQ(accountGroupSetting(*st, "adapterB", "onebot_v11", "2100", "cocRule"), std::string("2"));
+
+    // `.setcoc clr` writes an explicit rule 0 in the active account scope so
+    // the old shared rule cannot unexpectedly reappear through legacy fallback.
+    setAccountGroupSetting(*st, "adapterA", "onebot_v11", "2100", "2100", "cocRule", "0");
+    ASSERT_EQ(accountGroupSetting(*st, "adapterA", "onebot_v11", "2100", "cocRule"), std::string("0"));
+    ASSERT_EQ(accountGroupSetting(*st, "adapterB", "onebot_v11", "2100", "cocRule"), std::string("2"));
+    ASSERT_EQ(accountGroupSetting(*st, "adapterC", "onebot_v11", "2100", "cocRule"), std::string("1"));
+}
+
 TEST(GroupAccountScoping, SyncOneAccountNeverMarksTheOtherAccountsGroupsLeft) {
     auto db = makeDb();
 

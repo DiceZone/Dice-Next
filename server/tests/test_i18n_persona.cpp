@@ -1,5 +1,5 @@
 // ─── C#28-B: I18n Persona Lookup Chain Tests ──────────────────
-// Tests the i18n lookup chain: override → persona → bundle → fallback.
+// Tests the i18n lookup chain: persona → override → bundle → fallback.
 // Also tests .rpmode command routing logic (no conflict with .rp).
 
 #include "test_framework.h"
@@ -98,7 +98,7 @@ TEST(I18nPersona, ClearPersonaBundles) {
     ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.greeting"), "dice.greeting");
 }
 
-TEST(I18nPersona, OverrideTakesPrecedenceOverPersona) {
+TEST(I18nPersona, PersonaTakesPrecedenceOverGlobalOverride) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
     i18n.setPersona(42);
 
@@ -106,10 +106,22 @@ TEST(I18nPersona, OverrideTakesPrecedenceOverPersona) {
     json personaBundle = {{"test.key", "persona value"}};
     i18n.setPersonaBundles(42, Locale::kZhHans, personaBundle);
 
-    // Set override (should take precedence)
+    // A global/default edit is the base layer. The active persona must still
+    // be able to replace the same reply key.
     i18n.setOverride(Locale::kZhHans, "test.key", "override value");
 
-    ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "override value");
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "persona value");
+}
+
+TEST(I18nPersona, MissingPersonaEntryFallsBackToGlobalOverride) {
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
+
+    i18n.setPersonaBundles(42, Locale::kZhHans,
+                           {{"persona.only", "persona value"}});
+    i18n.setOverride(Locale::kZhHans, "default.only", "override value");
+
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "default.only"), "override value");
 }
 
 TEST(I18nPersona, PersonaTakesPrecedenceOverBundle) {
@@ -180,7 +192,7 @@ TEST(I18nPersona, InterpolationWorksInPersonaLayer) {
     ASSERT_EQ(result, "You rolled 42!");
 }
 
-TEST(I18nPersona, ClearOverrideFallsBackToPersona) {
+TEST(I18nPersona, ClearingGlobalOverrideKeepsPersonaEffective) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
     i18n.setPersona(42);
 
@@ -188,10 +200,10 @@ TEST(I18nPersona, ClearOverrideFallsBackToPersona) {
     i18n.setPersonaBundles(42, Locale::kZhHans, personaBundle);
 
     i18n.setOverride(Locale::kZhHans, "test.key", "override value");
-    ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "override value");
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "persona value");
 
     i18n.clearOverride(Locale::kZhHans, "test.key");
-    // Should fall back to persona
+    // Removing the base override must not disturb the selected persona.
     ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "persona value");
 }
 
@@ -312,19 +324,38 @@ TEST(I18nFormat, PersonaFormatIsExplicitAndLegacyPersonaStaysPlain) {
               static_cast<int>(ContentFormat::kPlainText));
 }
 
+TEST(I18nFormat, PersonaValueAndFormatBothWinOverGlobalOverride) {
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setPersona(42);
+    i18n.setOverride(Locale::kZhHans, "test.key", "global plain",
+                     ContentFormat::kPlainText);
+    i18n.setPersonaBundles(
+        42, Locale::kZhHans, {{"test.key", "**{nick}**"}},
+        {{"test.key", "markdown"}});
+
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown);
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "test.key", {{"nick", "A**B"}}),
+              "**A\\*\\*B**");
+    EXPECT_EQ(static_cast<int>(I18n::endOutboundCapture()),
+              static_cast<int>(ContentFormat::kMarkdown));
+}
+
 TEST(I18nPersona, ScopedSelectionRestoresAndIsolatesPersonas) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
     i18n.setPersona(1);
     i18n.setPersonaBundles(1, Locale::kZhHans, {{"test.key", "global"}});
     i18n.setPersonaBundles(2, Locale::kZhHans, {{"test.key", "group"}});
+    i18n.setOverride(Locale::kZhHans, "test.key", "default override");
 
     ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "global");
     {
         auto groupScope = i18n.scopedPersona(2);
         ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "group");
         {
+            // An explicit group-level off disables personas but keeps the
+            // editable default reply layer available.
             auto disabledScope = i18n.scopedPersona(0);
-            ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "test.key");
+            ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "default override");
         }
         ASSERT_EQ(i18n.tr(Locale::kZhHans, "test.key"), "group");
     }

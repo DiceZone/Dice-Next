@@ -129,8 +129,8 @@ public:
     std::map<std::string, std::string> flatten(Locale loc) const;
 
     // ─── Persona layer (骰娘人格切换) ─────────────────
-    // A "persona" is an overlay bundle that sits between user overrides and the
-    // default bundle in the lookup chain: override → persona(若启用) → bundle → key.
+    // A "persona" is an overlay bundle on top of the editable global reply set:
+    // persona(when enabled) -> user override -> default bundle -> key.
     // Persona data is injected by PersonaManager from the database (not files).
 
     /// Select a persona only for the current thread and lexical scope.  Message

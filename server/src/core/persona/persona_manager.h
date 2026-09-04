@@ -38,8 +38,19 @@ public:
                          const std::string& platform = "onebot_v11") const;
 
     /// Set the active persona for a group (or global if groupId is empty).
-    void setActivePersona(int personaId, const std::string& groupId = "",
+    /// Returns false when the persona does not exist or persistence fails.
+    bool setActivePersona(int personaId, const std::string& groupId = "",
                           const std::string& platform = "onebot_v11");
+
+    /// Whether a group/channel has an explicit persona selection (including 0/off).
+    /// @p groupId empty has no group override and therefore always returns false.
+    bool hasGroupPersonaOverride(const std::string& groupId,
+                                 const std::string& platform = "onebot_v11") const;
+
+    /// Remove a group/channel selection so it inherits the global persona again.
+    /// This operation is idempotent. @p groupId must not be empty.
+    bool clearGroupPersona(const std::string& groupId,
+                           const std::string& platform = "onebot_v11");
 
     // ─── Template CRUD ────────────────────────────────────────
 
@@ -58,7 +69,8 @@ public:
     /// Copy a persona template (including entries). Returns the new ID (or -1).
     int copyTemplate(int srcId, const std::string& newName);
 
-    /// Delete a persona template (and its entries). Built-in cannot be deleted.
+    /// Delete a persona template, its entries, and every active reference to it.
+    /// Built-in personas cannot be deleted.
     bool deleteTemplate(int id);
 
     /// Update template metadata (name, description).

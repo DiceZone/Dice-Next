@@ -2978,15 +2978,22 @@ static int realMain(int argc, char* argv[]) {
                 msg.displayContent = msg.content;
                 msg.senderId   = body.value("userId", std::string("10001"));
                 msg.senderName = body.value("nickname", std::string("\xe6\xb5\x8b\xe8\xaf\x95\xe5\x91\x98"));
-                if (body.value("messageType", std::string("group")) == "private") {
+                const std::string messageType =
+                    body.value("messageType", std::string("group"));
+                if (messageType == "private") {
                     msg.type     = dice::MessageType::kPrivate;
                     msg.targetId = msg.senderId;
+                } else if (messageType == "channel") {
+                    msg.type = dice::MessageType::kChannel;
+                    msg.targetId = body.value(
+                        "channelId", body.value("groupId", std::string("100001")));
                 } else {
                     msg.type     = dice::MessageType::kGroup;
                     msg.targetId = body.value("groupId", std::string("100001"));
                 }
                 // Optional multi-bot targeting fields for testing.
                 msg.selfId = body.value("selfId", std::string(""));
+                msg.adapterId = body.value("adapterId", std::string(""));
                 if (body.contains("role")) msg.extra["role"] = body.value("role", std::string(""));
                 if (body.contains("card")) msg.extra["card"] = body.value("card", std::string(""));   // 测试台注入群名片，验证 {card}/{nick}
                 if (body.contains("atList") && body["atList"].is_array())
