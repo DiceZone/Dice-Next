@@ -5372,10 +5372,11 @@ private:
     std::optional<std::string> gateCommand(Locale loc, const Message& msg, const std::string& cmdL) {
         std::string head = cmdL.substr(0, cmdL.find(' '));
         if (head == "mrrp" || head == "zrrp") head = "jrrp";   // 同属 jrrp 家族
-        static const std::set<std::string> kGated = {"jrrp", "draw", "deck", "send", "help", "me"};
+        // .me has asymmetric group/remote trust rules; its handler owns all gates.
+        static const std::set<std::string> kGated = {"jrrp", "draw", "deck", "send", "help"};
         if (!kGated.count(head)) return std::nullopt;
         // 开关子指令必须放行到 handler，否则关掉后无法在群内恢复。
-        if (head == "me" || head == "jrrp" || head == "help") {
+        if (head == "jrrp" || head == "help") {
             std::string sub = trim(cmdL.substr((std::min)(cmdL.size(), cmdL.find(' ') == std::string::npos ? cmdL.size() : cmdL.find(' ') + 1)));
             if (sub == "on" || sub == "off") return std::nullopt;
         }
@@ -5384,7 +5385,6 @@ private:
         if (!privileged) {
             for (auto& g : globalDisabledCmds(msg)) if (g == head) {
                 if (head == "jrrp") return i18n_.tr(loc, "gate.jrrp_global");
-                if (head == "me")   return i18n_.tr(loc, "gate.me_global");
                 return i18n_.tr(loc, "gate.cmd_global", {{"cmd", head}});
             }
         }
@@ -5474,7 +5474,7 @@ private:
                 for (const auto& m : all["dice"]["masters"]) {
                     if (m.is_string()) {
                         std::string s = m.get<std::string>();
-                        if (!s.empty()) v.push_back({"", s});
+                        if (!s.empty()) v.push_back({"", "", s});
                     } else if (m.is_object()) {
                         MasterEntry e{m.value("platform", std::string()),
                                       m.value("adapter_id", m.value("adapterId", std::string())),
@@ -6851,22 +6851,64 @@ private:
     }
 
     // ─── .me 第三人称动作（原版 DiceEvent.cpp:3184）──────────────────────
-    // 群聊：.me <动作> → 以「人物卡名/昵称+动作」代述（Master 直出动作不带名）；
+    // 群聊：trust > 4 直出动作，否则「人物卡名/昵称+动作」（不加名称包裹符）；
     // .me on/off 本群开关（群管，同 .group ±禁用me）。私聊：.me <群号> <动作> 远程代述。
+    // 原版 getName(uid, gid)：.nn（本群→全局）→目标群名片→平台昵称；不取人物卡。
+    std::string meNickname(const Message& msg, bool remote) const {
+        std::string nick = getUserSetting(msg, "nick");
+        if (nick.empty() && !cardScope(msg).empty())
+            nick = getUserSettingOf(msg.senderId, "", "nick");
+        if (!nick.empty()) return nick;
+        if (!remote) return resolveNickDisplay(msg);
+
+        // 私聊附带的昵称/名片不代表目标群；只查询缓存，避免同步平台请求阻塞回复。
+        if (auto adapter = adapters_.getAdapter(msg.adapterId)) {
+            const std::string native = msg.extra.is_object()
+                ? msg.extra.value("__identity_native_sender", std::string()) : std::string();
+            const json members = adapter->getMembers(msg.targetId);
+            if (members.is_array()) for (const auto& member : members) {
+                if (!member.is_object()) continue;
+                auto id = member.find("user_id");
+                if (id == member.end()) continue;
+                std::string uid;
+                if (id->is_string()) uid = id->get<std::string>();
+                else if (id->is_number_integer()) uid = id->dump();
+                if (uid.empty() || uid != (native.empty() ? msg.senderId : native)) continue;
+                for (const char* key : {"card", "nickname"}) {
+                    auto value = member.find(key);
+                    if (value != member.end() && value->is_string() && !value->get_ref<const std::string&>().empty())
+                        return value->get<std::string>();
+                }
+                break;
+            }
+        }
+        return msg.senderName.empty() ? lookupNick(msg.platform, msg.senderId) : msg.senderName;
+    }
+
     std::optional<std::string> tryHandleMe(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("me", 0) != 0) return std::nullopt;
         if (cmd.size() > 2) { char c = cmd[2]; if (std::isalnum((unsigned char)c)) {
-            // on/off 子指令要先于禁用 gate 处理（原版顺序），其余 me* 字母开头的不是本指令。
+            // 保留完整插件命令优先规则，但允许原版私聊紧贴数字群号的写法。
             std::string low2 = toLower(trim(cmd.substr(2)));
-            if (low2 != "on" && low2 != "off") return std::nullopt;
+            if (low2 != "on" && low2 != "off" &&
+                !(msg.type == MessageType::kPrivate && c >= '0' && c <= '9')) return std::nullopt;
         } }
         std::string rest = trim(cmd.substr(2));
-        const bool master = isMaster(msg);
-        // 原版顺序：先处理 on/off 开关（否则关了就再也开不回来），再走禁用 gate。
-        if (msg.type == MessageType::kGroup) {
+        Message sender = msg;
+        sender.senderId = resolveAlias(msg.platform, msg.senderId);
+        const bool self = msg.fromSelf || (msg.platform != "qq_official" && !msg.selfId.empty() &&
+            (msg.senderId == msg.selfId || sender.senderId == msg.selfId));
+        // 使用账号级骰主判定；官方群不能借公共号映射继承未经验证的 trust。
+        const int trust = isMaster(msg) ? kTrustMaster : self ? kTrustSelf : senderTrust(sender);
+        if (trust < 4) {
+            for (const auto& name : globalDisabledCmds(msg))
+                if (name == "me") return i18n_.tr(loc, "gate.me_global");
+        }
+        // 原版顺序：全局禁用 → on/off 开关 → 本群禁用。
+        if (msg.type != MessageType::kPrivate) {
             std::string low = toLower(rest);
             if (low == "on" || low == "off") {
-                if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
+                if (trust < 4 && !senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
                 bool disable = (low == "off");
                 if (groupCmdDisabled(msg, "me") == disable)
                     return i18n_.tr(loc, disable ? "me.off_already" : "me.on_already");
@@ -6874,21 +6916,30 @@ private:
                 return i18n_.tr(loc, disable ? "me.off" : "me.on");
             }
         }
-        if (auto g = gateCommand(loc, msg, "me")) return *g;   // 全局/本群禁用 gate
         if (msg.type == MessageType::kPrivate) {
-            // 远程：.me <群号> <动作>
-            std::istringstream iss(rest); std::string gid; iss >> gid;
-            std::string action = trim(rest.substr((std::min)(rest.size(), rest.find(gid) + gid.size())));
-            if (gid.empty() || !isAllDigits(gid)) return i18n_.tr(loc, "me.private_usage");
-            if (action.empty()) return i18n_.tr(loc, "me.empty");
+            // 原版 readDigit：群号与动作不必空格分隔，不转换为整数以避免溢出。
+            const size_t digits = rest.find_first_not_of("0123456789");
+            std::string gid = rest.substr(0, digits);
+            if (gid.empty()) return i18n_.tr(loc, "me.private_usage");
+            // 原版整数群号会去掉前导零；禁用检查与实际发送必须使用同一个群号。
+            const size_t nonzero = gid.find_first_not_of('0');
+            gid = nonzero == std::string::npos ? "0" : gid.substr(nonzero);
             Message gm = msg; gm.type = MessageType::kGroup; gm.targetId = gid;
-            if (groupCmdDisabled(gm, "me") && !master) return i18n_.tr(loc, "me.disabled");
-            pushMessage(msg, MessageType::kGroup, gid, master ? action : (displayName(msg) + action));
+            if (trust < 5 && (groupExternalMode(gm) || groupCmdDisabled(gm, "me")))
+                return i18n_.tr(loc, "me.disabled");
+            const std::string action = digits == std::string::npos ? std::string() : trim(rest.substr(digits));
+            if (action.empty()) return i18n_.tr(loc, "me.empty");
+            // 注意原版私聊与群聊相反：trust > 4 才带目标群昵称；普通用户仅发送动作。
+            const std::string name = trust > 4 ? (self ? resolveSelfName(gm) : meNickname(gm, true)) : std::string();
+            pushMessage(msg, MessageType::kGroup, gid, name + action);
             return i18n_.tr(loc, "me.sent");
         }
+        if (groupCmdDisabled(msg, "me")) return i18n_.tr(loc, "me.disabled");
         if (rest.empty()) return i18n_.tr(loc, "me.empty");
-        // Master 直出动作；普通用户带人物卡名/昵称前缀（原版 idx_pc + strAction）。
-        return master ? rest : (displayName(msg) + rest);
+        if (trust > 4) return rest;
+        std::string name = cards_.boundCard(msg.senderId, cardScope(msg));
+        if (name.empty() || name == "角色卡") name = meNickname(msg, false);
+        return name + rest;
     }
 
     // ─── .ak 抉择分歧（原版 DiceEvent.cpp:2996 __Ank 列表）────────────────

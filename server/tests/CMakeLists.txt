@@ -27,6 +27,7 @@ set(TEST_SOURCES
     test_markdown.cpp
     test_heart_debounce.cpp
     test_command_prefix_policy.cpp
+    test_me_command.cpp
     test_legacy_clock_command.cpp
     test_friend_approval_policy.cpp
     test_sensitive_word_filter.cpp
@@ -51,6 +52,10 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_matcher.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/dice/dice_expression.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/dice/dice_engine.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/character/card_store.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/deck/card_deck.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/platform/system_info.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/mod/js_plugin_manager.cpp
 )
 
@@ -78,6 +83,9 @@ target_link_libraries(dice-next-tests PRIVATE
     onedice::onedice
     dicescript::dicescript
     dice-md4c
+    yaml-cpp::yaml-cpp
+    ZLIB::ZLIB
+    ${DICE_ZSTD_TARGET}
 )
 
 # Keep the real Lua runtime tests in a separate executable: test_import_v2.cpp
