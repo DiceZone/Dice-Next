@@ -650,6 +650,8 @@
     }
   },
   "master": {
+    "usage": "マスター管理：.master admin [±ID/list]、clock、notice、censor、blackqq、blackgroup、whiteqq、whitegroup、blackfriend、boton/botoff グループID、dismiss。通常の bot off 中も利用できます。既存の権限は維持されます。",
+    "unsupported": "この旧版 master サブコマンドは未対応です。WebUI の対応する設定を使用してください。.master で対応済みの操作を確認できます。",
     "boton": "グループ {group} でコマンドを有効にしました。",
     "botoff": "グループ {group} でコマンドを無効にしました。",
     "need_group": "グループIDを指定するか、対象グループ内で使用してください。",

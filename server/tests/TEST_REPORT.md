@@ -2,6 +2,34 @@
 
 Date: 2026-09-03
 
+## 2026-09-07: bot-off logging and operational command regression
+
+Full local Release regression: 343 core cases / 1485 assertions and 9 Lua cases /
+68 assertions passed (`ctest --test-dir server/build/tests -C Release --output-on-failure`).
+These figures supersede the historical baseline below. No real adapters or log-site
+uploads were used by the new tests; live platform delivery remains to be field-tested.
+
+`test_log_bot_off.cpp` adds 19 cases / 130 assertions covering:
+
+- Active incoming/final-reply transcripts continue during ordinary `.bot off`.
+- Explicit `.log new/on` can start recording while off; pause/resume/end work
+  independently, without implicitly waking dice commands or starting a transcript.
+- Hard locks block management and delayed transcript writes; private messages do
+  not enter group logs. Active-log pointers remain group/account-scoped and survive
+  database reopen. Global silence/external-mode restrictions remain in place.
+- The inbound blacklist gate still rejects events before command/recording dispatch.
+- Literal `.reply` controls retain permissions; unrelated reply/plugin commands stay silent.
+- The `.master` compatibility gateway reuses existing handlers, verifies the owner
+  account (including official-platform native identity), and rejects unsupported
+  operations instead of treating its arguments as arbitrary commands.
+- Remote bot switches really persist on first write and do not affect other groups
+  or adapter accounts. This regression exposed a null JSON `extra` in synthesized
+  remote messages, now initialized before account-scoped settings are written.
+
+This is not complete legacy `.master` parity: reset/delete/groupclr and other
+unimplemented operations are explicitly rejected. Existing explicit-@ wake-up and
+the separate `.dismiss` emergency behavior are unchanged.
+
 ## Outcome
 
 The Release server builds successfully. The automated core suite passes all 286

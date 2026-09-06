@@ -1395,7 +1395,7 @@ static int realMain(int argc, char* argv[]) {
         auto finishReply = [&adapterMgr, &cmdRouter, &configMgr, &db, &jsMod](
             const dice::Message& msg, std::string reply, std::string broadcast,
             const std::string& aiCat, const std::string& quoteId,
-            std::vector<std::string> fwdNodes, bool recordLog, bool linkReplyOk,
+            std::vector<std::string> fwdNodes, bool linkReplyOk,
             dice::ContentFormat replyFormat) {
             // Resolve self tokens ({self}/{strSelfName}/{strSelfCall}) in the final
             // text — works for both command replies and custom replies.
@@ -1422,7 +1422,7 @@ static int realMain(int argc, char* argv[]) {
                     cmdRouter.linkForward(msg, aim, reply);
             }
             // .log 游戏日志：骰娘回复按最终发送文本记录（入站已在消息线程记过）。
-            if (recordLog && !reply.empty()) cmdRouter.recordBotReply(msg, reply);
+            if (!reply.empty()) cmdRouter.recordBotReply(msg, reply);
             // 模拟聊天窗 + chat.db 持久化（骰娘侧）。私聊使用稳定的
             // private:<用户号> 作用域，避免不同私聊混在旧的空 groupId 中。
             if ((msg.type == dice::MessageType::kGroup && !msg.targetId.empty())
@@ -1562,10 +1562,10 @@ static int realMain(int argc, char* argv[]) {
             if ((npcHit || defaultHit) && (bypassCd || dice::aichat::cooldownOk(configMgr, gkey))) {
                 std::string senderNick = msg.senderName.empty() ? msg.senderId : msg.senderName;
                 dice::aitools::ToolExec toolExec = dice::aitools::enabled(configMgr) ? makeAiTool(msg) : nullptr;
-                bool rec = !disabled, lnk = linkReplyOk;
+                bool lnk = linkReplyOk;
                 dice::Message msgC = msg;
                 auto job = [&configMgr, &db, finishReply, msgC, gkey, npc, npcHit,
-                            senderNick, trigText, toolExec, rec, lnk]() {
+                            senderNick, trigText, toolExec, lnk]() {
                     std::string ctx;
                     if (auto* cst = db.getChatStorage()) {
                         try {
@@ -1616,7 +1616,7 @@ static int realMain(int argc, char* argv[]) {
                         ? ("[CQ:at,qq=" + msgC.senderId + "] " + aiReply) : aiReply;
                     // AI 对话回复不带一次性路由状态（无引用覆写/转发节点），类别为空 →
                     // finishReply 内的润色/翻译自然跳过（本就是 AI 生成，无需再加工）。
-                    finishReply(msgC, rep, "", "", "", {}, rec, lnk, dice::ContentFormat::kPlainText);
+                    finishReply(msgC, rep, "", "", "", {}, lnk, dice::ContentFormat::kPlainText);
                     // A1：互动结束后评估好感变化并写回（已在后台线程，先发后评不拖回复）。
                     if (npcHit && npc.moodEnabled)
                         dice::ainpc::updateMood(configMgr, db.getChatStorage(), npc, gkey,
@@ -1642,10 +1642,12 @@ static int realMain(int argc, char* argv[]) {
         // 这样定时任务的 inactive>=N 条件表示“N 天无指令”，纯聊天不计入，符合“无指令退群”语义。
         if (msg.type == dice::MessageType::kGroup && !msg.targetId.empty() && didCommand)
             cmdRouter.markGroupActive(msg.platform, msg.targetId);   // #47 群活跃度（按指令）
-        // .log transcript recording (skipped for disabled groups). 操作者手打的
-        // 自控消息（fromSelf 且已过自回声去重）视同正常消息记录；骰娘自己的回复回声不会到这里。
+        // .log transcript recording continues through .bot off when already active.
+        // recordIncoming/recordBotReply enforce active-log and hard-lock checks.
+        // 操作者手打的自控消息（fromSelf 且已过自回声去重）视同正常消息记录；
+        // 骰娘自己的回复回声不会到这里。
         // 只记入站；骰娘回复待润色/翻译定稿后在 finishReply 里记（recordBotReply）。
-        if (!disabled) cmdRouter.recordIncoming(msg);
+        cmdRouter.recordIncoming(msg);
         // Feed the web "模拟聊天" live window (incoming line + bot reply + broadcast).
         if ((msg.type == dice::MessageType::kGroup && !msg.targetId.empty())
             || (msg.type == dice::MessageType::kPrivate && !msg.senderId.empty())) {
@@ -1708,18 +1710,18 @@ static int realMain(int argc, char* argv[]) {
                  || (dice::aitrans::enabled(configMgr) && dice::aitrans::covers(configMgr, aiCat)
                      && !cmdRouter.aiLangFor(msg).empty()));
             if (needBg) {
-                bool rec = !disabled, lnk = linkReplyOk;
-                auto job = [finishReply, msg, reply, broadcast, aiCat, quoteId, fwdNodes, rec, lnk, replyFormat]() {
-                    finishReply(msg, reply, broadcast, aiCat, quoteId, fwdNodes, rec, lnk, replyFormat);
+                bool lnk = linkReplyOk;
+                auto job = [finishReply, msg, reply, broadcast, aiCat, quoteId, fwdNodes, lnk, replyFormat]() {
+                    finishReply(msg, reply, broadcast, aiCat, quoteId, fwdNodes, lnk, replyFormat);
                 };
                 if (!dice::aiwork::Worker::instance().post(std::move(job))) {
                     // AI 队列堵死（持续超时）→ 跳过润色/翻译（类别传空即跳过）直接发，
                     // 保证指令回复永远送达。
                     DICE_LOG_INFO("AI \xe9\x98\x9f\xe5\x88\x97\xe5\xb7\xb2\xe6\xbb\xa1\xef\xbc\x8c\xe8\xb7\xb3\xe8\xbf\x87\xe6\xb6\xa6\xe8\x89\xb2/\xe7\xbf\xbb\xe8\xaf\x91\xe7\x9b\xb4\xe6\x8e\xa5\xe5\x8f\x91\xe9\x80\x81");  // 队列已满，跳过润色/翻译直接发送
-                    finishReply(msg, reply, broadcast, "", quoteId, fwdNodes, !disabled, linkReplyOk, replyFormat);
+                    finishReply(msg, reply, broadcast, "", quoteId, fwdNodes, linkReplyOk, replyFormat);
                 }
             } else {
-                finishReply(msg, reply, broadcast, aiCat, quoteId, fwdNodes, !disabled, linkReplyOk, replyFormat);
+                finishReply(msg, reply, broadcast, aiCat, quoteId, fwdNodes, linkReplyOk, replyFormat);
             }
         }
     });
@@ -3085,7 +3087,7 @@ static int realMain(int argc, char* argv[]) {
                         if (!tgt.empty() && dice::aitrans::covers(configMgr, aiCat))
                             reply = dice::aitrans::translate(configMgr, tgt, reply);
                     }
-                    if (!disabled) cmdRouter.recordMessage(msg, reply);
+                    cmdRouter.recordMessage(msg, reply);
                     // 测试台沿用统计行为，但绝不能伪造真实的群聊使用资格。
                     cmdRouter.recordPlayerActivity(msg, didCommand, false);
                 }

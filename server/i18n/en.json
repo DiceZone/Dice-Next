@@ -649,6 +649,8 @@
     }
   },
   "master": {
+    "usage": "Master controls: .master admin [±ID/list], clock, notice, censor, blackqq, blackgroup, whiteqq, whitegroup, blackfriend, boton/botoff GROUP_ID, dismiss. Available during ordinary bot off; existing permissions still apply.",
+    "unsupported": "This legacy master operation is not supported. Use the corresponding WebUI setting, or .master to see supported operations.",
     "boton": "Commands enabled in group {group}.",
     "botoff": "Commands disabled in group {group}.",
     "need_group": "Specify a group id, or use this in the target group.",

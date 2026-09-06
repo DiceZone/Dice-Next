@@ -264,10 +264,27 @@ public:
         // Hard lock (web admin "彻底禁用"): EVERYTHING is silent, including .bot —
         // only the web panel can lift it. Stronger than .bot off.
         if (isGroupLocked(msg)) return "";
-        // Group-disabled gate (.bot off): normally only .bot works, but an explicit
+        // Literal operational gateway: never expand arbitrary commands or plugin aliases.
+        if (toLower(earlyCmd) == "master") {
+            if (!isMaster(msg)) return i18n_.tr(loc, "gate.not_master");
+            if (auto censored = filterSensitiveCommand(loc, msg, text)) return *censored;
+            return handleLegacyMaster(loc, earlyArgs, msg);
+        }
+        // Group-disabled gate (.bot off): bot, log and reply controls work; an explicit
         // @ to this bot is a deliberate wake-up and may run commands again. A hard
         // web-admin lock was already handled above and is never bypassed.
         if (isGroupDisabled(msg) && !isAtSelf(msg) && toLower(cmd).rfind("bot", 0) != 0) {
+            // Logging is independently controlled, including starting/resuming logs.
+            // Only the literal reply switch (not arbitrary reply/plugin commands) is exempt.
+            const auto word = toLower(earlyCmd);
+            const auto arg = toLower(trim(earlyArgs));
+            if (word == "log" || (word == "reply" && (arg.empty() || arg == "on" || arg == "off"))) {
+                const bool master = isMaster(msg);
+                if (silentGlobal(msg) && !master && senderTrust(msg) < 4) return "";
+                if (groupExternalMode(msg) && !master) return "";
+                if (auto censored = filterSensitiveCommand(loc, msg, text)) return *censored;
+                return word == "log" ? handleLog(loc, earlyArgs, msg) : handleReply(loc, earlyArgs, msg);
+            }
             return "";
         }
 
@@ -5630,6 +5647,10 @@ public:
         if (!adapterId.empty()) {
             Message m; m.platform = platform; m.targetId = groupId; m.adapterId = adapterId;
             m.type = MessageType::kGroup;
+            // Synthesized remote-control messages have null extra by default.
+            // setGroupSetting reads the native endpoint via json::value; without
+            // an object the first write throws and used to be silently discarded.
+            m.extra = nlohmann::json::object();
             if (!endpointId.empty()) m.extra["__identity_native_target"] = endpointId;
             setGroupSetting(m, key, value);
             return;
@@ -6387,6 +6408,30 @@ private:
             return i18n_.tr(loc, "setcoc.set", {{"rule", std::to_string(r)}});
         }
         return i18n_.tr(loc, "setcoc.invalid");
+    }
+
+    // Compatibility for legacy .master operations already implemented by Next.
+    // Keep an explicit allowlist: this is NOT an arbitrary bot-off command runner.
+    std::string handleLegacyMaster(Locale loc, const std::string& args, const Message& msg) {
+        if (!isMaster(msg)) return i18n_.tr(loc, "gate.not_master");
+        auto [word, rest] = splitCommand(trim(args));
+        const auto w = toLower(word);
+        if (w.empty()) return i18n_.tr(loc, "master.usage");
+        if (w == "admin") {
+            auto a = trim(rest);
+            if (a.empty()) a = "list";
+            else if (a.front() == '+' || a.front() == '-')
+                a = std::string(a.front() == '+' ? "add " : "del ") + trim(a.substr(1));
+            else if (isAllDigits(a)) a = "add " + a;
+            return handleAdmin(loc, a, msg);
+        }
+        if (w == "clock" || w == "notice" || w == "censor" ||
+            (w.size() > 5 && w.rfind("clock", 0) == 0 && (w[5] == '+' || w[5] == '-')))
+            return handleAdmin(loc, word + " " + rest, msg);
+        if (w == "dismiss") return handleDismiss(loc, rest, msg);
+        if (auto result = tryHandleMaster(loc, msg, w + " " + rest)) return *result;
+        if (w == "boton" || w == "botoff") return i18n_.tr(loc, "master.need_group");
+        return i18n_.tr(loc, "master.unsupported");
     }
 
     /// Master black/white-list & boton/botoff — FAITHFUL to original Dice!:
@@ -9250,8 +9295,9 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
 
     /// 入站消息落游戏日志。与骰娘回复拆开——回复可能经 AI 后台线程润色/翻译
     /// 后才定稿，入站部分必须在消息线程即时记录且只记一次。
+    /// 普通 .bot off 不停止已有日志；彻底禁用仍禁止写入。两种发送路径共用此门控。
     void recordIncoming(const Message& msg) {
-        if (msg.type == MessageType::kPrivate) return;
+        if (msg.type == MessageType::kPrivate || isGroupLocked(msg)) return;
         int logId = activeLogId(msg);
         if (logId <= 0) return;
         auto* st = db_.getLogStorage();   // transcripts live in logs.db
@@ -9275,7 +9321,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
 
     /// 骰娘回复落游戏日志（最终发送文本，含润色/翻译后的版本）。
     void recordBotReply(const Message& msg, const std::string& reply) {
-        if (msg.type == MessageType::kPrivate || reply.empty()) return;
+        if (msg.type == MessageType::kPrivate || reply.empty() || isGroupLocked(msg)) return;
         int logId = activeLogId(msg);
         if (logId <= 0) return;
         auto* st = db_.getLogStorage();

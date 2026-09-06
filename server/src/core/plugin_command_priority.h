@@ -24,7 +24,7 @@ inline bool isReservedCoreCommand(std::string word) {
         "ww", "dx", "favor", "jrrp", "mrrp", "zrrp", "ti", "li", "name", "gn", "en", "me",
         "ak", "nnn", "nn", "setcoc", "plugin", "system", "setsn", "setdnd",
         "set", "sleep", "draw", "drawh", "deck", "gacha", "helpdoc", "welcome", "dismiss",
-        "ruleset", "notice", "alias", "trust", "admin", "rules", "group", "reply",
+        "ruleset", "notice", "alias", "trust", "admin", "master", "rules", "group", "reply",
         "cloud", "user", "bind", "info", "buff", "send", "help", "text", "link",
         "init", "lang", "rule", "npc", "log", "hiy", "mod", "ai", "ob", "ri",
         "sn", "pc",

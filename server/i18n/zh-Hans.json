@@ -656,6 +656,8 @@
     }
   },
   "master": {
+    "usage": "骰主管理：.master admin [±账号/list]、clock、notice、censor、blackqq、blackgroup、whiteqq、whitegroup、blackfriend、boton/botoff 群号、dismiss。普通 bot off 时仍可使用，保留原有权限。",
+    "unsupported": "该旧版 master 子指令尚未兼容，请使用 WebUI 对应设置；使用 .master 查看支持的操作。",
     "boton": "已在群 {group} 启用指令（骰娘开启）。",
     "botoff": "已在群 {group} 停用指令（骰娘关闭）。",
     "need_group": "请指定群号，或在目标群里使用。",
