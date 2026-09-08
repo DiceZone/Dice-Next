@@ -10,6 +10,7 @@ namespace dice {
 struct BotControlCommand {
     std::string action;
     std::string target;
+    std::string feature;
 };
 
 inline std::string trimCommandText(const std::string& value) {
@@ -47,6 +48,11 @@ inline std::optional<BotControlCommand> parseBotControlCommand(const std::string
         if (loweredToken == "on" || loweredToken == "off") {
             if (!result.action.empty()) return std::nullopt;
             result.action = loweredToken;
+        } else if (loweredToken == "log" || loweredToken == "reply" || loweredToken == "roll" || loweredToken == "plugin") {
+            if (!result.feature.empty() || !result.action.empty() || !result.target.empty()) return std::nullopt;
+            // Feature controls require a separate word: never reserve .botlogger.
+            if (normalized.size() <= 3 || !std::isspace(static_cast<unsigned char>(normalized[3]))) return std::nullopt;
+            result.feature = loweredToken;
         } else if (commandTokenIsDigits(token)) {
             if (!result.target.empty()) return std::nullopt;
             result.target = token;

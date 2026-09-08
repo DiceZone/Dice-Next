@@ -30,6 +30,8 @@ set(TEST_SOURCES
     test_me_command.cpp
     test_log_bot_off.cpp
     test_legacy_clock_command.cpp
+    test_legacy_command_arguments.cpp
+    test_legacy_command_behaviour.cpp
     test_friend_approval_policy.cpp
     test_sensitive_word_filter.cpp
     test_milky_adapter.cpp

@@ -250,6 +250,15 @@ end
         ".clock 1", "u1", "g1", "Tester", "", false, 0, "onebot_v11"));
     ASSERT_FALSE(manager.hasCommandTrigger(
         ".clock", "u1", "blocked", "Tester", "", false, 0, "onebot_v11"));
+    manager.setGroupGate([](const std::string&, const std::string& group,
+                            const std::string&, const std::string& adapterId) {
+        return group != "blocked" && adapterId != "disabled-account";
+    });
+    ASSERT_FALSE(manager.hasCommandTrigger(
+        ".clock", "u1", "g1", "Tester", "", false, 0, "onebot_v11", "disabled-account"));
+    ASSERT_FALSE(manager.dispatch(
+        ".clock 1", "u1", "g1", "Tester", "", false, 0, "onebot_v11", "disabled-account").matched);
+    ASSERT_FALSE(static_cast<bool>(continuation));
     const auto result = manager.dispatch(
         ".clock 1", "u1", "g1", "Tester", "", false, 0, "onebot_v11");
     ASSERT_TRUE(result.matched);

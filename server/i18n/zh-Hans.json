@@ -147,10 +147,11 @@
       "result_noloss": "{nick} 的理智检定：1D100={res}/{san} {grade}\n无理智损失"
     },
     "en": {
-      "usage": "指令 .en 用法：.en 技能名（需已 .st 录入该技能）",
+      "usage": "用法：.en侦查60 或 .en 侦查 60 -1/+1；失败/成功成长分别保留符号，默认成功 +1d10，显式技能值为 0～999。",
       "success": "{nick} 的 {attr} 成长检定：{res}\n成功！{attr} 成长 {change} 点 → {final}",
       "fail": "{nick} 的 {attr} 成长检定：{res}\n未达成长，{attr} 无变化",
-      "fail_grow": "{nick} 的 {attr} 成长检定：{res}\n虽未成功，按失败成长 {change} → {final}"
+      "fail_grow": "{nick} 的 {attr} 成长检定：{res}\n虽未成功，按失败成长 {change} → {final}",
+      "default_name": "技能"
     },
     "insane": {
       "temp": "{nick} 的疯狂发作-临时症状:\n{res}",
@@ -225,8 +226,8 @@
       "deck": "牌堆一览 .deck\n.draw <牌堆> 抽牌\n.gacha 抽卡。",
       "jrrp": "人品 .jrrp：今日人品（每人每天固定）。",
       "bot": "骰娘 .bot：\n查看版本/状态\n.bot on/off 启用/停用本群（停用后仅 .bot 可用）。",
-      "group": "群设定 .group：查看本群设定（状态/记录/群名片/备注/旁观）。编辑请到网页后台。",
-      "ob": "旁观 .ob：\n旁观本群跑团\n.ob list 名单\n.ob exit 退出\n.ob clr 清空。",
+      "group": "用法：.group [群号] state/info\n.group [群号] +禁用回复 -禁用help\n.group [群号] clr\n.group all +词条 -词条（骰主或信任≥5，仅当前账号）",
+      "ob": "旁观 .ob：查看帮助\n.ob join 加入旁观\n.ob list 名单\n.ob exit 退出\n.ob on/off 群管开关\n.ob clr 群管或本团 GM 清空。",
       "send": "留言 .send <留言>：把留言转交给 Master。Master 可用 .send group/user <号> <消息> 主动发送。",
       "log": "日志 .log new [名称] 新建并开始记录\n.log on/off 继续/暂停\n.log end 结束并上传（发链接+群文件）\n.log halt 强行结束不上传\n.log list 日志列表\n.log get [名称] 重新上传取链接\n.log del <名称> 删除\n.log stat [名称] 统计\n.log export [名称] 只发群文件\n.log type txt/html 群文件格式（群管）\n.log time/timer 计时\n.log masterget <群号> [名称] 骰主跨群取链接。",
       "nn": "昵称 .nn <新名>：设定在骰子里显示的名字；.nn 清除。",
@@ -330,9 +331,21 @@
   "bot": {
     "on": "成功开启{self}√",
     "off": "成功关闭{self}√",
-    "usage": "用法：.bot on/off [骰子QQ]",
+    "usage": ".bot on/off [骰子QQ]：本群总开关\n.bot log/reply/roll/plugin on/off [骰子QQ]：日志/自定义回复/投掷指令/插件开关",
     "already_on": "{self}已经处于开启状态！",
-    "already_off": "{self}已经处于关闭状态！"
+    "already_off": "{self}已经处于关闭状态！",
+    "feature_log": "日志",
+    "feature_reply": "自定义回复",
+    "feature_roll": "投掷指令",
+    "feature_plugin": "插件",
+    "feature_group_only": "请在群聊中设置功能开关。",
+    "feature_state_on": "本群{feature}开关已开启。",
+    "feature_state_off": "本群{feature}开关已关闭。",
+    "feature_already_on": "本群{feature}开关已经开启。",
+    "feature_already_off": "本群{feature}开关已经关闭。",
+    "feature_on": "已开启本群{feature}；实际运行仍受 bot 总开关控制。",
+    "feature_off": "已关闭本群{feature}。",
+    "log_paused_notice": "注意：尚有未结束的日志「{name}」，将暂停记录，已有内容会保留。"
   },
   "send": {
     "empty": "要转交什么给 Master 呢？用法：.send <留言>",
@@ -564,7 +577,7 @@
     "empty_list": "（空）"
   },
   "group": {
-    "private": "群设定只能在群里查看哦。",
+    "private": "请在群中使用，或指定群号：.group <群号> state / +词条 / clr。",
     "info": "------※群信息------\n群名称：{name}\n群号：{group}\n骰子权限：{role}\n状态：{status}\n已激活的记录：{log}\n玩家：{players}名\n主持人：{gm}\n旁观者：{observers}名\n黑名单：{blacklist}名\n黑名单豁免：{quitLevel}",
     "enabled": "已启用",
     "disabled": "已禁用",
@@ -575,7 +588,7 @@
     "role_unknown": "未知",
     "quit_member": "群成员",
     "quit_admin": "群管理",
-    "cleared": "已清空本群的所有设定（开关/欢迎词/旁观/停用项等）。",
+    "cleared": "已重置当前骰子账号在本群的功能设置，保留群身份信息、硬锁与未结束日志。",
     "term_set": "已为本群开启「{term}」。",
     "term_cleared": "已为本群关闭「{term}」。",
     "term_unknown": "未知的群管词条：{term}\n可用：停用指令/禁用回复/禁用jrrp/禁用draw/禁用me/禁用help/禁用deck/禁用send",
@@ -592,7 +605,12 @@
       "kick_on": "已开启「自动踢出」：谁的发言含「{kw}」就移出本群。",
       "mute_off": "已关闭本群「自动禁言」。",
       "mute_on": "已开启「自动禁言」：谁的发言含「{kw}」就禁言 {min} 分钟。"
-    }
+    },
+    "usage": "用法：.group [群号] state/info\n.group [群号] +禁用回复 -禁用help\n.group [群号] clr\n.group all +词条 -词条（骰主或信任≥5，仅当前账号）",
+    "clear_failed": "群设置重置失败，未完成清空，请查看后台日志。",
+    "not_found": "当前骰子账号没有群 {group} 的记录。",
+    "empty": "当前骰子账号没有可操作的群。",
+    "target_result": "群 {group}：\n{result}"
   },
   "plugin": {
     "group_only": "插件开关只能在群聊中设定。",
@@ -766,7 +784,7 @@
   },
   "init": {
     "group_only": "先攻只能在群里使用哦。",
-    "rolled": "{name} 的先攻：{roll}={total}",
+    "rolled": "{name} 的先攻：{roll}",
     "rolled_multi": "{base} × {count} 的先攻：{detail}",
     "count_err": "先攻数量必须至少为 1。",
     "count_exceeded": "一次最多添加 {max} 个先攻单位。",

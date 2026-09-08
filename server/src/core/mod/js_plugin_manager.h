@@ -195,8 +195,12 @@ public:
     std::string evalDice(const std::string& expr) const { return diceEval_ ? diceEval_(expr) : expr; }
 
     // 插件分群启停（地基）：派发前问宿主「此插件(按源文件)在该群是否启用」。id="js:<文件>"。
-    using GroupGateFn = std::function<bool(const std::string& platform, const std::string& group, const std::string& pluginId)>;
+    using GroupGateFn = std::function<bool(const std::string& platform, const std::string& group, const std::string& pluginId, const std::string& adapterId)>;
     void setGroupGate(GroupGateFn f) { groupGate_ = std::move(f); }
+    void setGroupGate(std::function<bool(const std::string&, const std::string&, const std::string&)> f) {
+        groupGate_ = [f = std::move(f)](const std::string& p, const std::string& g,
+                                      const std::string& id, const std::string&) { return f(p, g, id); };
+    }
 
     // seal.getEndPoints(): live adapter snapshots in SealDice's public shape.
     struct EndpointInfo {

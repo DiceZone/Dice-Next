@@ -128,6 +128,19 @@ ext.cmdMap.temp = temp;
         Message blocked = msg;
         blocked.targetId = "blocked";
         ASSERT_FALSE(manager.hasCommand(blocked, "probe"));
+        // Account-scoped switches must gate every callback before plugin code runs.
+        manager.setGroupGate([](const std::string&, const std::string& group,
+                                const std::string&, const std::string& adapterId) {
+            return group != "blocked" && adapterId != "disabled-account";
+        });
+        blocked = msg;
+        blocked.adapterId = "disabled-account";
+        ASSERT_FALSE(manager.hasCommand(blocked, "probe"));
+        ASSERT_TRUE(manager.handle(blocked, "probe abc").reply.empty());
+        ASSERT_TRUE(manager.handleMessageReceived(blocked).reply.empty());
+        ASSERT_TRUE(manager.handleNonCommand(blocked).reply.empty());
+        ASSERT_TRUE(manager.handleCommandReceived(blocked, "roll reason").reply.empty());
+        ASSERT_TRUE(manager.hasCommand(msg, "probe"));
 
         const auto received = manager.handleMessageReceived(msg);
         ASSERT_EQ(received.reply,

@@ -56,18 +56,22 @@ public:
     DispatchResult dispatch(const std::string& text, const std::string& uid,
                             const std::string& gid, const std::string& nick,
                             const std::string& groupCard, bool isPrivate,
-                            int trust = 0, const std::string& platform = "");
+                            int trust = 0, const std::string& platform = "", const std::string& adapterId = "");
     // Side-effect-free exact trigger probe used before compact core parsers.
     // Search-pattern rules are intentionally excluded: ordinary chatter must not
     // claim a command route merely because it contains a keyword.
     bool hasCommandTrigger(const std::string& text, const std::string& uid,
                            const std::string& gid, const std::string& nick,
                            const std::string& groupCard, bool isPrivate,
-                           int trust = 0, const std::string& platform = "");
+                           int trust = 0, const std::string& platform = "", const std::string& adapterId = "");
 
     // 插件分群启停（地基）：派发前问宿主「此 mod 在该群是否启用」。id="lua:<mod名>"。
-    using GroupGateFn = std::function<bool(const std::string& platform, const std::string& group, const std::string& pluginId)>;
+    using GroupGateFn = std::function<bool(const std::string& platform, const std::string& group, const std::string& pluginId, const std::string& adapterId)>;
     void setGroupGate(GroupGateFn f) { groupGate_ = std::move(f); }
+    void setGroupGate(std::function<bool(const std::string&, const std::string&, const std::string&)> f) {
+        groupGate_ = [f = std::move(f)](const std::string& p, const std::string& g,
+                                      const std::string& id, const std::string&) { return f(p, g, id); };
+    }
     // 原版 fmt->format：把 {key} 递归解析为 speech 别名/嵌套模板 / msg 变量 / 全局。
     std::string formatTemplate(const std::string& text,
                                const std::map<std::string, std::string>& vars, int depth = 0) const;

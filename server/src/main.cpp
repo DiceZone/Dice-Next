@@ -255,9 +255,9 @@ static bool pluginCommandMatches(dice::JsPluginManager& jsMod,
         ? msg.extra.value("card", std::string()) : std::string();
     const int trust = cmdRouter.jsPrivilegeLevel(msg) >= 70 ? 4 : 0;
     return luaMod.hasCommandTrigger(w, msg.senderId, gid, nick, card,
-                                    isPrivate, trust, msg.platform)
+                                    isPrivate, trust, msg.platform, msg.adapterId)
         || luaMod.hasCommandTrigger("." + w, msg.senderId, gid, nick, card,
-                                    isPrivate, trust, msg.platform);
+                                    isPrivate, trust, msg.platform, msg.adapterId);
 }
 
 void printBanner() {
@@ -669,8 +669,8 @@ static int realMain(int argc, char* argv[]) {
         drogon::app().getLoop()->runAfter(sec, std::move(cb));
     });
     // 插件分群启停（地基）：JS 指令派发前问「该群是否启用此插件（按源文件）」。
-    jsMod.setGroupGate([&cmdRouter](const std::string& platform, const std::string& group, const std::string& pluginId) {
-        return cmdRouter.isPluginEnabledInGroup(platform, group, pluginId);
+    jsMod.setGroupGate([&cmdRouter](const std::string& platform, const std::string& group, const std::string& pluginId, const std::string& adapterId) {
+        return cmdRouter.isPluginEnabledInGroup(platform, group, pluginId, adapterId);
     });
     jsMod.setEndpointProvider([&adapterMgr]() {
         std::vector<dice::JsPluginManager::EndpointInfo> result;
@@ -768,9 +768,11 @@ static int realMain(int argc, char* argv[]) {
         return std::make_pair(!id.empty(), name);
     });
     // 计时器/异步回调里的 replyToSender → 通过对应平台适配器直接发出。
-    jsMod.setSender([&adapterMgr](const std::string& platform, bool isPrivate,
+    jsMod.setSender([&adapterMgr, &cmdRouter](const std::string& platform, bool isPrivate,
                                   const std::string& groupId, const std::string& userId, const std::string& text) {
         auto send = [&](const auto& a) {
+            if (!isPrivate && (cmdRouter.isGroupDisabledFor(a->platform(), groupId, a->id())
+                || !cmdRouter.isPluginAllowedInGroup(a->platform(), groupId, a->id()))) return;
             if (isPrivate) a->sendPrivateMessage(userId, text);
             else           a->sendGroupMessage(groupId, text);
         };
@@ -970,9 +972,11 @@ static int realMain(int argc, char* argv[]) {
         return {};
     });
     // Lua 插件 sendMsg(text,gid,uid) → 优先发到该会话所属平台的适配器，找不到再回退首个已连。
-    luaMod.setSender([&adapterMgr, resolveChatPlatform](const std::string& text, const std::string& gid, const std::string& uid) {
+    luaMod.setSender([&adapterMgr, &cmdRouter, resolveChatPlatform](const std::string& text, const std::string& gid, const std::string& uid) {
         const std::string plat = resolveChatPlatform(gid, uid);
         auto send = [&](const dice::AdapterPtr& a) {
+            if (!gid.empty() && (cmdRouter.isGroupDisabledFor(a->platform(), gid, a->id())
+                || !cmdRouter.isPluginAllowedInGroup(a->platform(), gid, a->id()))) return;
             if (!gid.empty()) a->sendGroupMessage(gid, text);
             else if (!uid.empty()) a->sendPrivateMessage(uid, text);
         };
@@ -982,9 +986,11 @@ static int realMain(int argc, char* argv[]) {
         for (auto& a : adapterMgr.allAdapters())
             if (a->isConnected()) { send(a); return; }
     });    // sleepTime 协程结束后的 return 值发回原会话；优先保持触发平台。
-    luaMod.setAsyncReply([&adapterMgr](const std::string& platform, const std::string& gid,
+    luaMod.setAsyncReply([&adapterMgr, &cmdRouter](const std::string& platform, const std::string& gid,
                                        const std::string& uid, const std::string& text) {
         auto send = [&](const dice::AdapterPtr& adapter) {
+            if (!gid.empty() && (cmdRouter.isGroupDisabledFor(adapter->platform(), gid, adapter->id())
+                || !cmdRouter.isPluginAllowedInGroup(adapter->platform(), gid, adapter->id()))) return;
             if (!gid.empty()) adapter->sendGroupMessage(gid, text);
             else if (!uid.empty()) adapter->sendPrivateMessage(uid, text);
         };
@@ -1002,21 +1008,23 @@ static int realMain(int argc, char* argv[]) {
             const dice::Message& m, std::string& replySrc) -> std::string {
         std::string reply;
         const bool pv = m.type == dice::MessageType::kPrivate;
+        const bool pluginsOn = cmdRouter.groupFeatureEnabled(m, "plugin");
+        const bool repliesOn = cmdRouter.groupFeatureEnabled(m, "reply");
         const std::string nick = m.senderName.empty() ? m.senderId : m.senderName;
         // extra 可能是默认构造的 null json（poke/eventMsg/测试台自造的消息），
         // 对 null 调 .value() 会抛 type_error.306。
         const std::string card = m.extra.is_object() ? m.extra.value("card", std::string()) : std::string();
         // JS 插件指令（海豹兼容）优先于自定义回复。
-        if (jsMod.ready()) {
+        if (pluginsOn && jsMod.ready()) {
             if (auto body = cmdRouter.commandBody(m.content); body && !body->empty()) {
                 auto jr = jsMod.handle(m, *body, cmdRouter.jsPrivilegeLevel(m));
                 if (jr.matched && !jr.reply.empty()) { reply = jr.reply; replySrc = "plugin_command"; }
             }
         }
         // Lua 模块的因果回复。
-        if (reply.empty() && luaMod.ready()) {
+        if (reply.empty() && pluginsOn && luaMod.ready()) {
             int trust = cmdRouter.jsPrivilegeLevel(m) >= 70 ? 4 : 0;   // master/信任≥4 → trust4
-            auto lr = luaMod.dispatch(m.content, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform);
+            auto lr = luaMod.dispatch(m.content, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform, m.adapterId);
             // Legacy Lua modules often hard-code `.command` in msg_order or
             // reply prefixes. Retry only an otherwise-unmatched command using
             // that legacy spelling after CommandRouter has validated an
@@ -1024,12 +1032,12 @@ static int realMain(int argc, char* argv[]) {
             if (!lr.matched) if (auto body = cmdRouter.commandBody(m.content); body && !body->empty()) {
                 const std::string legacy = "." + *body;
                 if (legacy != m.content)
-                    lr = luaMod.dispatch(legacy, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform);
+                    lr = luaMod.dispatch(legacy, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform, m.adapterId);
             }
             if (lr.matched && !lr.reply.empty()) { reply = lr.reply; replySrc = "plugin_command"; }
         }
         // C++ 因果规则（优先于普通自定义回复）。
-        if (reply.empty()) {
+        if (reply.empty() && repliesOn) {
             auto cr = causalMgr.matchAndExecute(m.content, m.senderId, pv ? "" : m.targetId, nick);
             if (cr.matched && !cr.reply.empty()) {
                 // Build counter context for {counter:name} resolution in renderReply
@@ -1042,7 +1050,7 @@ static int realMain(int argc, char* argv[]) {
             }
         }
         // 普通自定义回复（完整触发管线：匹配→范围→冷却→日限→概率）。
-        if (reply.empty()) {
+        if (reply.empty() && repliesOn) {
             dice::ReplyCtx rctx{m.platform, pv ? "" : m.targetId, m.senderId};
             auto pk = replyManager.pickReply(m.content, rctx);
             if (pk.rule) {
@@ -1056,7 +1064,7 @@ static int realMain(int argc, char* argv[]) {
             }
         }
         // 仍无回复 → JS 插件的非指令消息钩子（自动回复 / 随机抓话等）。
-        if (reply.empty() && jsMod.ready()) {
+        if (reply.empty() && pluginsOn && jsMod.ready()) {
             auto nc = jsMod.handleNonCommand(m, cmdRouter.jsPrivilegeLevel(m));
             if (nc.matched && !nc.reply.empty()) { reply = nc.reply; replySrc = "plugin"; }
         }
@@ -1091,6 +1099,7 @@ static int realMain(int argc, char* argv[]) {
         bool pv = gid.empty();
         pm.type = pv ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
         pm.targetId = pv ? uid : gid;
+        if (!pv && (cmdRouter.isGroupDisabled(pm) || !cmdRouter.groupFeatureEnabled(pm, "plugin"))) return;
         std::string reply = cmdRouter.handleMessage(pm);
         if (reply.empty() && !cmdRouter.isGroupDisabled(pm)) {
             std::string src;
@@ -1107,8 +1116,8 @@ static int realMain(int argc, char* argv[]) {
         }
     });
     // 插件分群启停（地基）：Lua mod 派发前问「该群是否启用此 mod」。
-    luaMod.setGroupGate([&cmdRouter](const std::string& platform, const std::string& group, const std::string& pluginId) {
-        return cmdRouter.isPluginEnabledInGroup(platform, group, pluginId);
+    luaMod.setGroupGate([&cmdRouter](const std::string& platform, const std::string& group, const std::string& pluginId, const std::string& adapterId) {
+        return cmdRouter.isPluginEnabledInGroup(platform, group, pluginId, adapterId);
     });
     { std::vector<std::string> luaDirs, jsDirs; dice::CommandRouter::packPluginDirs(luaDirs, jsDirs); luaMod.setExtraDirs(luaDirs); }   // 规则包 lua 附加加载
     dice::crashdiag::setPhase("lua-mods");
@@ -1128,9 +1137,9 @@ static int realMain(int argc, char* argv[]) {
             ? message.extra.value("card", std::string()) : std::string();
         const int trust = cmdRouter.jsPrivilegeLevel(message) >= 70 ? 4 : 0;
         return luaMod.hasCommandTrigger(word, message.senderId, gid, nick, card,
-                                        isPrivate, trust, message.platform)
+                                        isPrivate, trust, message.platform, message.adapterId)
             || luaMod.hasCommandTrigger("." + word, message.senderId, gid, nick, card,
-                                        isPrivate, trust, message.platform);
+                                        isPrivate, trust, message.platform, message.adapterId);
     });
     cmdRouter.setLuaTaskBridge(
         [&luaMod](const std::string& name) { return luaMod.hasTask(name); },
@@ -1172,6 +1181,10 @@ static int realMain(int argc, char* argv[]) {
             message.rawContent = command;
             message.displayContent = command;
 
+            if (cmdRouter.isGroupDisabled(message) || !cmdRouter.groupFeatureEnabled(message, "plugin")) {
+                if (error) *error = "group bot or plugins are disabled";
+                return false;
+            }
             bool matched = false;
             std::string reply;
             if (jsMod.ready()) {
@@ -1184,13 +1197,13 @@ static int realMain(int argc, char* argv[]) {
             if (!matched && luaMod.ready()) {
                 const bool isPrivate = message.type == dice::MessageType::kPrivate;
                 auto result = luaMod.dispatch(command, message.senderId,
-                    isPrivate ? "" : targetId, message.senderName, "", isPrivate, 0, message.platform);
+                    isPrivate ? "" : targetId, message.senderName, "", isPrivate, 0, message.platform, message.adapterId);
                 if (!result.matched) {
                     if (auto body = cmdRouter.commandBody(command); body && !body->empty()) {
                         const std::string legacy = "." + *body;
                         if (legacy != command)
                             result = luaMod.dispatch(legacy, message.senderId,
-                                isPrivate ? "" : targetId, message.senderName, "", isPrivate, 0, message.platform);
+                                isPrivate ? "" : targetId, message.senderName, "", isPrivate, 0, message.platform, message.adapterId);
                     }
                 }
                 matched = result.matched;
@@ -1322,7 +1335,7 @@ static int realMain(int argc, char* argv[]) {
         dice::ContentFormat replyFormat = dice::I18n::endOutboundCapture();
         bool didCommand = !reply.empty();
         dice::JsPluginManager::Result commandHook;
-        if (didCommand && jsMod.ready())
+        if (didCommand && jsMod.ready() && (!cmdRouter.isGroupDisabled(msg) || forcedByAt))
             if (auto body = cmdRouter.commandBody(msg.content); body && !body->empty())
                 commandHook = jsMod.handleCommandReceived(msg, *body, cmdRouter.jsPrivilegeLevel(msg));
 
@@ -1331,10 +1344,10 @@ static int realMain(int argc, char* argv[]) {
         // No command matched → custom replies, unless the group is disabled or has
         // custom replies turned off (.group +禁用回复).
         bool replyOff = msg.type == dice::MessageType::kGroup && !msg.targetId.empty()
-                        && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId);
+                        && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId, msg.adapterId);
         // 自控：操作者用骰娘账号手打的消息走**完整管线**（内置/插件/自定义回复）；
         // 骰娘自己的回复回声已在适配器层被自回声去重丢弃，不会到这里，故无需在此限制。
-        if (reply.empty() && (!disabled || forcedByAt) && !replyOff) {
+        if (reply.empty() && (!disabled || forcedByAt)) {
             reply = replyFallback(msg, replySrc);
             replyFormat = dice::ContentFormat::kPlainText;
         }
@@ -1461,7 +1474,8 @@ static int realMain(int argc, char* argv[]) {
                 sent.type = privateOut ? dice::MessageType::kPrivate : msg.type;
                 sent.content = text; sent.rawContent = text; sent.displayContent = text;
                 sent.timestamp = static_cast<int64_t>(std::time(nullptr)); sent.fromSelf = true;
-                jsMod.handleMessageSend(msg, sent);
+                if (!cmdRouter.isGroupDisabled(msg) || (cmdRouter.listenAtWhenOff(msg) && dice::CommandRouter::isAtSelf(msg)))
+                    jsMod.handleMessageSend(msg, sent);
             };
 
             if (!reply.empty()) {
@@ -1642,7 +1656,7 @@ static int realMain(int argc, char* argv[]) {
         // 这样定时任务的 inactive>=N 条件表示“N 天无指令”，纯聊天不计入，符合“无指令退群”语义。
         if (msg.type == dice::MessageType::kGroup && !msg.targetId.empty() && didCommand)
             cmdRouter.markGroupActive(msg.platform, msg.targetId);   // #47 群活跃度（按指令）
-        // .log transcript recording continues through .bot off when already active.
+        // Transcript recording obeys the overall and log switches, preserving the session.
         // recordIncoming/recordBotReply enforce active-log and hard-lock checks.
         // 操作者手打的自控消息（fromSelf 且已过自回声去重）视同正常消息记录；
         // 骰娘自己的回复回声不会到这里。
@@ -1732,7 +1746,11 @@ static int realMain(int argc, char* argv[]) {
         nlohmann::json cfgAll = configMgr.getAll();
         auto a = adapterMgr.getAdapter(e.adapterId);
         if (!a) return;
-        if (jsMod.ready()) jsMod.handleEvent(e);
+        dice::Message eventContext;
+        eventContext.type = e.groupId.empty() ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
+        eventContext.platform = e.platform; eventContext.adapterId = e.adapterId;
+        eventContext.targetId = e.groupId;
+        if (jsMod.ready() && !cmdRouter.isGroupDisabled(eventContext)) jsMod.handleEvent(e);
 
         nlohmann::json diceSettings = dice::scoped_settings::resolveSection(
             cfgAll, "dice", a->platform(), e.adapterId);
@@ -3015,11 +3033,11 @@ static int realMain(int argc, char* argv[]) {
                     bool forcedByAt = cmdRouter.listenAtWhenOff(msg)
                         && dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);
                     bool replyOff = msg.type == dice::MessageType::kGroup && !msg.targetId.empty()
-                                    && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId);
+                                    && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId, msg.adapterId);
                     reply = cmdRouter.handleMessage(msg, forced);
                     bool didCommand = !reply.empty();
                     std::string replySrc = "builtin";   // 来源分类（同 live 管线）
-                    if (reply.empty() && (!disabled || forcedByAt) && !replyOff)
+                    if (reply.empty() && (!disabled || forcedByAt))
                         reply = replyFallback(msg, replySrc);   // 与 live 完全同链（含因果规则）
                     if (!reply.empty() && replySrc == "plugin_command") didCommand = true;
                     // 智能化阶段A：测试台也走 AI 对话（无其它回复+触发时），方便骰主预览。
@@ -3248,7 +3266,7 @@ static int realMain(int argc, char* argv[]) {
                     std::string id = "lua:" + m.name;
                     arr.push_back({{"id", id}, {"name", m.title.empty() ? m.name : m.title},
                                    {"kind", "lua"}, {"enabledGlobal", m.enabled},
-                                   {"enabledInGroup", cmdRouter.isPluginEnabledInGroup(platform, group, id, adapterId)}});
+                                   {"enabledInGroup", cmdRouter.isPluginSelectedInGroup(platform, group, id, adapterId)}});
                 }
                 for (auto& p : jsMod.listAll()) {
                     std::string file = p.file;
@@ -3258,7 +3276,7 @@ static int realMain(int argc, char* argv[]) {
                     std::string id = "js:" + file;
                     arr.push_back({{"id", id}, {"name", p.name.empty() ? file : p.name},
                                    {"kind", "js"}, {"enabledGlobal", p.enabled},
-                                   {"enabledInGroup", cmdRouter.isPluginEnabledInGroup(platform, group, id, adapterId)}});
+                                   {"enabledInGroup", cmdRouter.isPluginSelectedInGroup(platform, group, id, adapterId)}});
                 }
                 cb(jResp({{"code", 0}, {"message", "ok"}, {"data", {{"plugins", arr}}}}));
             }, {drogon::Get});

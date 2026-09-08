@@ -140,10 +140,11 @@
       "result_noloss": "{nick}'s Sanity Check: 1D100={res}/{san} {grade}\nNo San loss"
     },
     "en": {
-      "usage": "Command .en usage: .en <skill> (must be set via .st first)",
+      "usage": "Usage: .en Spot60 or .en Spot 60 -1/+1. Failure/success expressions keep independent signs; default success is +1d10. Explicit skill values: 0–999.",
       "success": "{nick}'s {attr} growth check: {res}\nSuccess! {attr} {change} → {final}",
       "fail": "{nick}'s {attr} growth check: {res}\nNo growth; {attr} unchanged",
-      "fail_grow": "{nick}'s {attr} growth check: {res}\nFailed, but fail-growth {change} → {final}"
+      "fail_grow": "{nick}'s {attr} growth check: {res}\nFailed, but fail-growth {change} → {final}",
+      "default_name": "skill"
     },
     "insane": {
       "temp": "{nick}'s madness — temporary symptom:\n{res}",
@@ -219,8 +220,8 @@
       "deck": "Deck list .deck\n.draw <deck> draw\n.gacha pull.",
       "jrrp": "Luck .jrrp: luck of the day (fixed per person per day).",
       "bot": "Bot .bot: version/status\n.bot on/off enable/disable this group (only .bot works when off).",
-      "group": "Group .group: view this group's settings. Edit in the web admin.",
-      "ob": "Observe .ob: observe this group's session\n.ob list\n.ob exit\n.ob clr.",
+      "group": "Usage: .group [group ID] state/info\n.group [group ID] +禁用回复 -禁用help\n.group [group ID] clr\n.group all +term -term (owner or trust≥5; current bot account only)",
+      "ob": "Observer help: .ob\n.ob join: join\n.ob list: list\n.ob exit: leave\n.ob on/off: group admin switch\n.ob clr: clear (group admin or this session's GM).",
       "send": "Message .send <message>: forward a message to the Master. Master can .send group/user <id> <msg>.",
       "log": "Log .log new [name] start recording\n.log on/off resume/pause\n.log end finish & upload (link + group file)\n.log halt finish without uploading\n.log list\n.log get [name] re-upload for link\n.log del <name>\n.log stat [name]\n.log export [name] group file only\n.log type txt/html file format (group admin)\n.log time/timer\n.log masterget <group> [name] (master).",
       "nn": "Nickname .nn <name>: set your display name in the bot; .nn to clear.",
@@ -323,9 +324,21 @@
   "bot": {
     "on": "{self} enabled √",
     "off": "{self} disabled √",
-    "usage": "Usage: .bot on/off [bot QQ]",
+    "usage": ".bot on/off [bot ID]: overall group switch\n.bot log/reply/roll/plugin on/off [bot ID]: feature switches",
     "already_on": "{self} is already enabled here.",
-    "already_off": "{self} is already disabled here."
+    "already_off": "{self} is already disabled here.",
+    "feature_log": "logging",
+    "feature_reply": "custom replies",
+    "feature_roll": "roll commands",
+    "feature_plugin": "plugins",
+    "feature_group_only": "Feature switches can only be set in a group.",
+    "feature_state_on": "The {feature} switch is on in this group.",
+    "feature_state_off": "The {feature} switch is off in this group.",
+    "feature_already_on": "The {feature} switch is already on in this group.",
+    "feature_already_off": "The {feature} switch is already off in this group.",
+    "feature_on": "Enabled {feature} in this group. The overall bot switch still applies.",
+    "feature_off": "Disabled {feature} in this group.",
+    "log_paused_notice": "Unfinished log \"{name}\" will pause recording. Existing content is preserved."
   },
   "send": {
     "empty": "What should I pass to the Master? Usage: .send <message>",
@@ -557,7 +570,7 @@
     "empty_list": "(empty)"
   },
   "group": {
-    "private": "Group settings can only be viewed in a group.",
+    "private": "Use in a group, or specify a group ID: .group <ID> state / +term / clr.",
     "info": "------ Group Info ------\nName: {name}\nGroup: {group}\nBot role: {role}\nStatus: {status}\nActive log: {log}\nPlayers: {players}\nGM: {gm}\nObservers: {observers}\nBlacklisted: {blacklist}\nBlacklist-quit level: {quitLevel}",
     "enabled": "Enabled",
     "disabled": "Disabled",
@@ -568,7 +581,7 @@
     "role_unknown": "Unknown",
     "quit_member": "any member",
     "quit_admin": "admin+",
-    "cleared": "Cleared all settings for this group (toggles / welcome / observers / disabled items, etc.).",
+    "cleared": "Reset this bot account's group settings. Group identity, hard lock and unfinished logs are preserved.",
     "term_set": "Enabled \"{term}\" for this group.",
     "term_cleared": "Disabled \"{term}\" for this group.",
     "term_unknown": "Unknown group term: {term}\nAvailable: 停用指令/禁用回复/禁用jrrp/禁用draw/禁用me/禁用help/禁用deck/禁用send",
@@ -585,7 +598,12 @@
       "kick_on": "Auto-kick on: anyone whose message contains \"{kw}\" is removed from the group.",
       "mute_off": "Auto-mute turned off.",
       "mute_on": "Auto-mute on: anyone whose message contains \"{kw}\" is muted for {min} min."
-    }
+    },
+    "usage": "Usage: .group [group ID] state/info\n.group [group ID] +禁用回复 -禁用help\n.group [group ID] clr\n.group all +term -term (owner or trust≥5; current bot account only)",
+    "clear_failed": "Could not finish resetting group settings. Check the server log.",
+    "not_found": "No record of group {group} for this bot account.",
+    "empty": "This bot account has no eligible groups.",
+    "target_result": "Group {group}:\n{result}"
   },
   "plugin": {
     "group_only": "Plugin toggles can only be set in a group chat.",
@@ -759,7 +777,7 @@
   },
   "init": {
     "group_only": "Initiative only works in groups.",
-    "rolled": "{name}'s initiative: {roll}={total}",
+    "rolled": "{name}'s initiative: {roll}",
     "rolled_multi": "{base} × {count} initiative rolls:{detail}",
     "count_err": "Initiative count must be at least 1.",
     "count_exceeded": "You can add at most {max} initiative entries at once.",

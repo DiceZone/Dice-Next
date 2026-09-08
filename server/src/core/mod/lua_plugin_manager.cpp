@@ -2559,7 +2559,7 @@ void LuaPluginManager::resumeCoroutine(int threadRef) {
 bool LuaPluginManager::hasCommandTrigger(
         const std::string& text, const std::string& uid, const std::string& gid,
         const std::string& nick, const std::string& groupCard, bool isPrivate,
-        int trust, const std::string& platform) {
+        int trust, const std::string& platform, const std::string& adapterId) {
     std::lock_guard<std::recursive_mutex> lk(mutex_);
     if (!state_ || text.empty() || replyRules_.empty()) return false;
     std::map<std::string, std::string> vars = {
@@ -2570,7 +2570,7 @@ bool LuaPluginManager::hasCommandTrigger(
     for (const auto& rule : replyRules_) {
         if (rule.groupOnly && (isPrivate || gid.empty())) continue;
         if (rule.trustAtLeast > 0 && trust < rule.trustAtLeast) continue;
-        if (groupGate_ && !gid.empty() && !groupGate_(platform, gid, "lua:" + rule.modName)) continue;
+        if (groupGate_ && !gid.empty() && !groupGate_(platform, gid, "lua:" + rule.modName, adapterId)) continue;
         for (const auto& pat : rule.matchPatterns)
             if (formatTemplate(pat, vars) == text) return true;
         for (const auto& pat : rule.prefixPatterns)
@@ -2581,7 +2581,7 @@ bool LuaPluginManager::hasCommandTrigger(
 
 LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         const std::string& text, const std::string& uid, const std::string& gid,
-        const std::string& nick, const std::string& groupCard, bool isPrivate, int trust, const std::string& platform) {
+        const std::string& nick, const std::string& groupCard, bool isPrivate, int trust, const std::string& platform, const std::string& adapterId) {
     std::lock_guard<std::recursive_mutex> lk(mutex_);
     DispatchResult res;
     if (!state_ || replyRules_.empty()) return res;
@@ -2594,7 +2594,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
     for (auto& rule : replyRules_) {
         if (rule.groupOnly && (isPrivate || gid.empty())) continue;
         if (rule.trustAtLeast > 0 && trust < rule.trustAtLeast) continue;   // 权限门槛
-        if (groupGate_ && !gid.empty() && !groupGate_(platform, gid, "lua:" + rule.modName)) continue;  // 分群停用
+        if (groupGate_ && !gid.empty() && !groupGate_(platform, gid, "lua:" + rule.modName, adapterId)) continue;  // 分群停用
         bool hit = false; std::string suffix;
         for (auto& pat : rule.matchPatterns)
             if (formatTemplate(pat, base) == text) { hit = true; break; }
