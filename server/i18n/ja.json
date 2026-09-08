@@ -141,10 +141,11 @@
       "result_noloss": "{nick} の正気度判定: 1D100={res}/{san} {grade}\nSAN減少なし"
     },
     "en": {
-      "usage": "コマンド .en の使い方: .en <技能>（先に .st で設定が必要）",
+      "usage": "使い方：.en技能60 / .en 技能 60 -1/+1。失敗と成功の成長式は別々の符号を使います。成功時の既定値は +1d10、技能値の指定範囲は 0～999。",
       "success": "{nick} の{attr}成長判定: {res}\n成功！ {attr} {change} → {final}",
       "fail": "{nick} の{attr}成長判定: {res}\n成長なし。{attr} は変化しません",
-      "fail_grow": "{nick} の{attr}成長判定: {res}\n失敗、ただし失敗時成長 {change} → {final}"
+      "fail_grow": "{nick} の{attr}成長判定: {res}\n失敗、ただし失敗時成長 {change} → {final}",
+      "default_name": "技能"
     },
     "insane": {
       "temp": "{nick} の発狂 — 一時的狂気:\n{res}",
@@ -220,8 +221,8 @@
       "deck": "デッキ一覧 .deck\n.draw <デッキ> 抽選\n.gacha ガチャ。",
       "jrrp": "運勢 .jrrp: 今日の運勢（人ごと・日ごとに固定）。",
       "bot": "ボット .bot: バージョン/状態\n.bot on/off でこのグループの有効/無効（無効時は .bot のみ動作）。",
-      "group": "グループ設定 .group: このグループの設定を表示。編集はWeb管理画面で。",
-      "ob": "観戦 .ob: このグループのセッションを観戦\n.ob list\n.ob exit\n.ob clr。",
+      "group": "使い方：.group [グループID] state/info\n.group [グループID] +禁用回复 -禁用help\n.group [グループID] clr\n.group all +項目 -項目（所有者または信頼≥5、現在のボットアカウントのみ）",
+      "ob": "旁観ヘルプ：.ob\n.ob join：参加\n.ob list：一覧\n.ob exit：退出\n.ob on/off：管理者による切替\n.ob clr：管理者またはこのセッションの GM によるクリア。",
       "send": "伝言 .send <メッセージ>: マスターへ転送。マスターは .send group/user <id> <msg> が可能。",
       "log": "ログ .log new [名前] 記録開始\n.log on/off 再開/一時停止\n.log end 終了してアップロード（リンク+グループファイル）\n.log halt アップロードせず終了\n.log list 一覧\n.log get [名前] 再アップロードしてリンク取得\n.log del <名前> 削除\n.log stat [名前] 統計\n.log export [名前] ファイルのみ送信\n.log type txt/html ファイル形式（管理者）\n.log time/timer 計時\n.log masterget <グループ> [名前]（マスター）。",
       "nn": "ニックネーム .nn <名前>: ボット内での表示名を設定；.nn でクリア。",
@@ -324,9 +325,21 @@
   "bot": {
     "on": "{self} を有効にしました √",
     "off": "{self} を無効にしました √",
-    "usage": "使い方: .bot on/off [ボットのQQ]",
+    "usage": ".bot on/off [bot ID]：グループ全体のスイッチ\n.bot log/reply/roll/plugin on/off [bot ID]：機能別スイッチ",
     "already_on": "{self} はこのグループで既に有効です。",
-    "already_off": "{self} はこのグループで既に無効です。"
+    "already_off": "{self} はこのグループで既に無効です。",
+    "feature_log": "ログ",
+    "feature_reply": "カスタム返信",
+    "feature_roll": "ダイスコマンド",
+    "feature_plugin": "プラグイン",
+    "feature_group_only": "機能スイッチはグループ内で設定してください。",
+    "feature_state_on": "このグループの{feature}スイッチはオンです。",
+    "feature_state_off": "このグループの{feature}スイッチはオフです。",
+    "feature_already_on": "このグループの{feature}は既にオンです。",
+    "feature_already_off": "このグループの{feature}は既にオフです。",
+    "feature_on": "このグループの{feature}をオンにしました。bot 全体のスイッチも適用されます。",
+    "feature_off": "このグループの{feature}をオフにしました。",
+    "log_paused_notice": "未終了のログ「{name}」の記録を一時停止します。既存の内容は保持されます。"
   },
   "send": {
     "empty": "マスターへ何を伝えますか？ 使い方: .send <メッセージ>",
@@ -558,7 +571,7 @@
     "empty_list": "（空）"
   },
   "group": {
-    "private": "グループ設定はグループ内でのみ表示できます。",
+    "private": "グループ内で使うか、IDを指定してください：.group <ID> state / +項目 / clr。",
     "info": "------ グループ情報 ------\n名称: {name}\nグループ: {group}\nボット権限: {role}\n状態: {status}\n進行中ログ: {log}\nプレイヤー: {players}\nGM: {gm}\n観戦者: {observers}\nブラックリスト: {blacklist}\nブラックリスト退出レベル: {quitLevel}",
     "enabled": "有効",
     "disabled": "無効",
@@ -569,7 +582,7 @@
     "role_unknown": "不明",
     "quit_member": "全メンバー",
     "quit_admin": "管理者以上",
-    "cleared": "このグループの全設定（トグル/歓迎文/観戦者/停用項目など）をクリアしました。",
+    "cleared": "現在のボットアカウントのグループ設定をリセットしました。グループ識別情報、ハードロック、未終了ログは保持されます。",
     "term_set": "このグループで「{term}」を有効にしました。",
     "term_cleared": "このグループで「{term}」を無効にしました。",
     "term_unknown": "不明なグループ用語: {term}\n利用可能: 停用指令/禁用回复/禁用jrrp/禁用draw/禁用me/禁用help/禁用deck/禁用send",
@@ -586,7 +599,12 @@
       "kick_on": "自動キックオン：発言に「{kw}」が含まれる人をグループから退出させます。",
       "mute_off": "自動ミュートをオフにしました。",
       "mute_on": "自動ミュートオン：発言に「{kw}」が含まれる人を {min} 分間ミュートします。"
-    }
+    },
+    "usage": "使い方：.group [グループID] state/info\n.group [グループID] +禁用回复 -禁用help\n.group [グループID] clr\n.group all +項目 -項目（所有者または信頼≥5、現在のボットアカウントのみ）",
+    "clear_failed": "グループ設定のリセットを完了できませんでした。サーバーログを確認してください。",
+    "not_found": "このボットアカウントにはグループ {group} の記録がありません。",
+    "empty": "このボットアカウントには操作可能なグループがありません。",
+    "target_result": "グループ {group}：\n{result}"
   },
   "plugin": {
     "group_only": "プラグインの切替はグループチャットでのみ設定できます。",
@@ -760,7 +778,7 @@
   },
   "init": {
     "group_only": "イニシアチブはグループでのみ利用できます。",
-    "rolled": "{name} のイニシアチブ: {roll}={total}",
+    "rolled": "{name} のイニシアチブ: {roll}",
     "rolled_multi": "{base} × {count} のイニシアチブ:{detail}",
     "count_err": "イニシアチブ数は1以上でなければなりません。",
     "count_exceeded": "一度に追加できるイニシアチブは最大 {max} 件です。",

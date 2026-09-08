@@ -146,10 +146,11 @@
       "result_noloss": "{nick} 的理智檢定：1D100={res}/{san} {grade}\n無理智損失"
     },
     "en": {
-      "usage": "指令 .en 用法：.en 技能名（需已 .st 錄入該技能）",
+      "usage": "用法：.en偵查60 或 .en 偵查 60 -1/+1；失敗/成功成長分別保留符號，預設成功 +1d10，明示技能值為 0～999。",
       "success": "{nick} 的 {attr} 成長檢定：{res}\n成功！{attr} 成長 {change} 點 → {final}",
       "fail": "{nick} 的 {attr} 成長檢定：{res}\n未達成長，{attr} 無變化",
-      "fail_grow": "{nick} 的 {attr} 成長檢定：{res}\n雖未成功，按失敗成長 {change} → {final}"
+      "fail_grow": "{nick} 的 {attr} 成長檢定：{res}\n雖未成功，按失敗成長 {change} → {final}",
+      "default_name": "技能"
     },
     "insane": {
       "temp": "{nick} 的瘋狂發作-臨時症狀:\n{res}",
@@ -225,8 +226,8 @@
       "deck": "牌堆一覽 .deck\n.draw <牌堆> 抽牌\n.gacha 抽卡。",
       "jrrp": "人品 .jrrp：今日人品（每人每天固定）。",
       "bot": "骰娘 .bot：\n查看版本/狀態\n.bot on/off 啟用/停用本群（停用後僅 .bot 可用）。",
-      "group": "群設定 .group：查看本群設定（狀態/記錄/群名片/備註/旁觀）。編輯請到網頁後台。",
-      "ob": "旁觀 .ob：\n旁觀本群跑團\n.ob list 名單\n.ob exit 退出\n.ob clr 清空。",
+      "group": "用法：.group [群號] state/info\n.group [群號] +禁用回复 -禁用help\n.group [群號] clr\n.group all +詞條 -詞條（骰主或信任≥5，僅目前帳號）",
+      "ob": "旁觀 .ob：查看說明\n.ob join 加入旁觀\n.ob list 名單\n.ob exit 退出\n.ob on/off 群管開關\n.ob clr 群管或本團 GM 清空。",
       "send": "留言 .send <留言>：把留言轉交給 Master。Master 可用 .send group/user <號> <訊息> 主動發送。",
       "log": "日誌 .log new [名稱] 新建並開始記錄\n.log on/off 繼續/暫停\n.log end 結束並上傳（發連結+群文件）\n.log halt 強行結束不上傳\n.log list 日誌列表\n.log get [名稱] 重新上傳取連結\n.log del <名稱> 刪除\n.log stat [名稱] 統計\n.log export [名稱] 只發群文件\n.log type txt/html 群文件格式（群管）\n.log time/timer 計時\n.log masterget <群號> [名稱] 骰主跨群取連結。",
       "nn": "暱稱 .nn <新名>：設定在骰子裡顯示的名字；.nn 清除。",
@@ -329,9 +330,21 @@
   "bot": {
     "on": "成功開啟{self}√",
     "off": "成功關閉{self}√",
-    "usage": "用法：.bot on/off [骰子QQ]",
+    "usage": ".bot on/off [骰子QQ]：本群總開關\n.bot log/reply/roll/plugin on/off [骰子QQ]：日誌/自訂回覆/投擲指令/插件開關",
     "already_on": "{self}已經處於開啟狀態！",
-    "already_off": "{self}已經處於關閉狀態！"
+    "already_off": "{self}已經處於關閉狀態！",
+    "feature_log": "日誌",
+    "feature_reply": "自訂回覆",
+    "feature_roll": "投擲指令",
+    "feature_plugin": "插件",
+    "feature_group_only": "請在群聊中設定功能開關。",
+    "feature_state_on": "本群{feature}開關已開啟。",
+    "feature_state_off": "本群{feature}開關已關閉。",
+    "feature_already_on": "本群{feature}開關已經開啟。",
+    "feature_already_off": "本群{feature}開關已經關閉。",
+    "feature_on": "已開啟本群{feature}；實際執行仍受 bot 總開關控制。",
+    "feature_off": "已關閉本群{feature}。",
+    "log_paused_notice": "注意：尚有未結束的日誌「{name}」，將暫停記錄，已有內容會保留。"
   },
   "send": {
     "empty": "要轉交什麼給 Master 呢？用法：.send <留言>",
@@ -563,7 +576,7 @@
     "empty_list": "（空）"
   },
   "group": {
-    "private": "群設定只能在群裡查看哦。",
+    "private": "請在群中使用，或指定群號：.group <群號> state / +詞條 / clr。",
     "info": "------※群資訊------\n群名稱：{name}\n群號：{group}\n骰子權限：{role}\n狀態：{status}\n已啟用的記錄：{log}\n玩家：{players}名\n主持人：{gm}\n旁觀者：{observers}名\n黑名單：{blacklist}名\n黑名單豁免：{quitLevel}",
     "enabled": "已啟用",
     "disabled": "已停用",
@@ -574,7 +587,7 @@
     "role_unknown": "未知",
     "quit_member": "群成員",
     "quit_admin": "群管理",
-    "cleared": "已清空本群的所有設定（開關/歡迎詞/旁觀/停用項等）。",
+    "cleared": "已重設目前骰子帳號在本群的功能設定，保留群身分資訊、硬鎖與未結束日誌。",
     "term_set": "已為本群開啟「{term}」。",
     "term_cleared": "已為本群關閉「{term}」。",
     "term_unknown": "未知的群管詞條：{term}\n可用：停用指令/禁用回復/禁用jrrp/禁用draw/禁用me/禁用help/禁用deck/禁用send",
@@ -591,7 +604,12 @@
       "kick_on": "已開啟「自動踢出」：誰的發言含「{kw}」就移出本群。",
       "mute_off": "已關閉本群「自動禁言」。",
       "mute_on": "已開啟「自動禁言」：誰的發言含「{kw}」就禁言 {min} 分鐘。"
-    }
+    },
+    "usage": "用法：.group [群號] state/info\n.group [群號] +禁用回复 -禁用help\n.group [群號] clr\n.group all +詞條 -詞條（骰主或信任≥5，僅目前帳號）",
+    "clear_failed": "群設定重設失敗，未完成清空，請查看後台日誌。",
+    "not_found": "目前骰子帳號沒有群 {group} 的記錄。",
+    "empty": "目前骰子帳號沒有可操作的群。",
+    "target_result": "群 {group}：\n{result}"
   },
   "plugin": {
     "group_only": "插件開關只能在群聊中設定。",
@@ -765,7 +783,7 @@
   },
   "init": {
     "group_only": "先攻只能在群裡使用哦。",
-    "rolled": "{name} 的先攻：{roll}={total}",
+    "rolled": "{name} 的先攻：{roll}",
     "rolled_multi": "{base} × {count} 的先攻：{detail}",
     "count_err": "先攻數量必須至少為 1。",
     "count_exceeded": "一次最多加入 {max} 個先攻單位。",

@@ -24,6 +24,7 @@
 #include "master_delivery.h"
 #include "command_prefix_policy.h"
 #include "legacy_clock_command.h"
+#include "legacy_command_arguments.h"
 #include "../service/notice_manager.h"   // B：通知系统（权限变更等推送给骰主）
 #include "../service/sensitive_word_filter.h"
 
@@ -270,25 +271,19 @@ public:
             if (auto censored = filterSensitiveCommand(loc, msg, text)) return *censored;
             return handleLegacyMaster(loc, earlyArgs, msg);
         }
-        // Group-disabled gate (.bot off): bot, log and reply controls work; an explicit
+        // Group-disabled gate (.bot off): bot controls work; an explicit
         // @ to this bot is a deliberate wake-up and may run commands again. A hard
         // web-admin lock was already handled above and is never bypassed.
         if (isGroupDisabled(msg) && !isAtSelf(msg) && toLower(cmd).rfind("bot", 0) != 0) {
-            // Logging is independently controlled, including starting/resuming logs.
-            // Only the literal reply switch (not arbitrary reply/plugin commands) is exempt.
-            const auto word = toLower(earlyCmd);
-            const auto arg = toLower(trim(earlyArgs));
-            if (word == "log" || (word == "reply" && (arg.empty() || arg == "on" || arg == "off"))) {
-                const bool master = isMaster(msg);
-                if (silentGlobal(msg) && !master && senderTrust(msg) < 4) return "";
-                if (groupExternalMode(msg) && !master) return "";
-                if (auto censored = filterSensitiveCommand(loc, msg, text)) return *censored;
-                return word == "log" ? handleLog(loc, earlyArgs, msg) : handleReply(loc, earlyArgs, msg);
-            }
             return "";
         }
 
         if (auto censored = filterSensitiveCommand(loc, msg, text)) return *censored;
+
+        // Control commands must remain reachable even when the feature they
+        // configure is disabled, and may not be rewritten by a rule alias.
+        if (auto control = parseBotControlCommand(cmd); control && !control->feature.empty())
+            return *tryHandleBot(loc, msg, cmd);
 
         std::string cmdL0 = toLower(cmd);
         // ── 规则包指令层：本群激活规则的 别名重写 + 自定义指令 + 屏蔽 ──
@@ -304,7 +299,7 @@ public:
             }
             // 自定义指令（commands.add）。先于屏蔽判定，确保规则新增的指令
             // 不会被某条 disable 前缀误伤；按指令首词匹配（精确，其次忽略大小写）。
-            if (!rp->customCmds.empty()) {
+            if (!rp->customCmds.empty() && groupFeatureEnabled(msg, "plugin")) {
                 auto [w, rest] = splitCommand(cmd);
                 const std::string* tmpl = nullptr;
                 if (auto it = rp->customCmds.find(w); it != rp->customCmds.end()) tmpl = &it->second;
@@ -343,7 +338,7 @@ public:
         // exact built-in command names reserved. Returning empty here continues
         // into main.cpp's normal plugin fallback chain and does not execute plugin
         // code twice.
-        if (pluginCommandClaim_ && pluginCommandClaim_(msg, cmd)) return "";
+        if (groupFeatureEnabled(msg, "plugin") && pluginCommandClaim_ && pluginCommandClaim_(msg, cmd)) return "";
 
         // 代骰: a roll/check command that @s a real person (not the bot / not @all)
         // is rolled from THAT person's perspective — their nick + character card.
@@ -906,6 +901,7 @@ private:
             if (!ok) return std::nullopt;
         }
 
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
         const bool compact = j < cmd.size() &&
             !std::isspace(static_cast<unsigned char>(cmd[j]));
         std::string out = handleRoll(loc, msg, trim(cmd.substr(j)), shortForm, compact);
@@ -1128,6 +1124,7 @@ private:
 
     std::optional<std::string> tryHandleWW(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("ww", 0) != 0) return std::nullopt;
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
         std::string rest = trim(cmd.substr(2));
         const auto parsedPool = roll_command::parsePoolInput(rest);
         const std::string& poolSpec = parsedPool.expression;
@@ -1246,6 +1243,7 @@ private:
 
     std::optional<std::string> tryHandleDX(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("dx", 0) != 0) return std::nullopt;
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
         std::string rest = trim(cmd.substr(2));
         const auto parsedPool = roll_command::parsePoolInput(rest, true);
         const std::string& poolSpec = parsedPool.expression;
@@ -1341,6 +1339,7 @@ private:
     std::optional<std::string> tryHandleRAV(Locale loc, const Message& msg, const std::string& cmd) {
         std::string lc = toLower(cmd);
         if (lc.rfind("rav", 0) != 0 && lc.rfind("rcv", 0) != 0) return std::nullopt;
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
         std::string rest = trim(cmd.substr(3));
 
         std::vector<std::string> toks;
@@ -1408,10 +1407,12 @@ private:
         std::string lc = toLower(cmd);
         if (lc.rfind("bav", 0) == 0) {                 // .bav 对抗（抵抗表）
             if (lc.size() > 3 && std::isalpha(static_cast<unsigned char>(lc[3]))) return std::nullopt;
+            if (!groupFeatureEnabled(msg, "roll")) return std::string();
             return handleBrpResist(loc, msg, trim(cmd.substr(3)));
         }
         if (lc.rfind("ba", 0) == 0) {                  // .ba 检定
             if (lc.size() > 2 && std::isalpha(static_cast<unsigned char>(lc[2]))) return std::nullopt;
+            if (!groupFeatureEnabled(msg, "roll")) return std::string();
             return handleBrpCheck(loc, msg, trim(cmd.substr(2)));
         }
         return std::nullopt;
@@ -1479,6 +1480,7 @@ private:
         char c0 = static_cast<char>(std::tolower(static_cast<unsigned char>(cmd[0])));
         char c1 = static_cast<char>(std::tolower(static_cast<unsigned char>(cmd[1])));
         if (c0 != 'r' || (c1 != 'a' && c1 != 'c')) return std::nullopt;
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
 
         size_t j = 2;
         bool hidden = false;
@@ -2058,6 +2060,7 @@ private:
                                            const std::string& cmd) {
         std::string lc = toLower(cmd);
         if (lc != "rx" && lc.rfind("rx ", 0) != 0 && lc.rfind("rx@", 0) != 0) return std::nullopt;
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
         std::string rest = trim(cmd.size() > 2 ? cmd.substr(2) : "");
 
         // 仅限群聊（暗骰需要一个群上下文 + 私聊回 KP）。
@@ -2131,6 +2134,7 @@ private:
             unsigned char nx = static_cast<unsigned char>(cmd[2]);
             if (nx < 0x80 && std::isalpha(nx)) return std::nullopt;
         }
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
         bool bonus = (c1 == 'b');
 
         size_t j = 2;
@@ -2357,6 +2361,7 @@ private:
                                             const std::string& cmd) {
         std::string lc = toLower(cmd);
         if (lc.rfind("coc", 0) == 0) {
+            if (!groupFeatureEnabled(msg, "roll")) return std::string();
             std::string rest = trim(cmd.substr(3));
             bool edition6 = false, detailed = false;
             // Dice! spellings: coc/coc7, coc6, cocd/coc7d/coc6d.  The historical
@@ -2374,6 +2379,7 @@ private:
             return edition6 ? handleCOC6(loc, msg, count) : handleCOC(loc, msg, count);
         }
         if (lc.rfind("dnd", 0) == 0) {
+            if (!groupFeatureEnabled(msg, "roll")) return std::string();
             return handleDND(loc, msg, clampCount(parseIntOr(trim(cmd.substr(3)), 1)));
         }
         return std::nullopt;
@@ -2744,6 +2750,7 @@ private:
             if (la.rfind("f", 0) == 0 || a.rfind(fai, 0) == 0 || a.rfind(fai2, 0) == 0) { if (auto r = adjustKey("dsfail")) return *r; }
         }
 
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
         // Actual death-saving throw — HP must be 0.
         int hp = cards_.getAttr(user, group, "hp").value_or(-1);
         if (hp != 0) return i18n_.tr(loc, "dnd.ds.need_zero", {{"nick", nick}});
@@ -3105,6 +3112,7 @@ private:
     // floor((score - 10) / 2); non-ability names use the separate dndskill: store.
     std::optional<std::string> tryHandleRdc(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("rdc", 0) != 0) return std::nullopt;
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
         if (!dndModeOn(msg)) return i18n_.tr(loc, "dnd.rdc.mode_off");
         std::string s = trim(cmd.substr(3));
         if (s.empty()) return i18n_.tr(loc, "dnd.rdc.usage");
@@ -3756,6 +3764,7 @@ private:
     std::optional<std::string> tryHandleSC(Locale loc, const Message& msg,
                                            const std::string& cmd) {
         if (toLower(cmd).rfind("sc", 0) != 0) return std::nullopt;
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
         std::string rest = trim(cmd.substr(2));
 
         // Bonus/penalty sanity (青果/海豹 ".sc b ..." / ".scb ..."): leading b/p[count].
@@ -4310,15 +4319,31 @@ private:
         // .bot on/off 需群管权限（原版 DiceEvent.cpp:3216 canRoomHost 门控 on/off）。
         if (!action.empty() && !senderIsGroupAdmin(msg))
             return i18n_.tr(loc, "gate.no_perm");
+        if (!parsed->feature.empty()) {
+            if (msg.type == MessageType::kPrivate || msg.targetId.empty())
+                return i18n_.tr(loc, "bot.feature_group_only");
+            const auto& feature = parsed->feature;
+            const auto name = i18n_.tr(loc, "bot.feature_" + feature);
+            const bool enabled = groupFeatureEnabled(msg, feature);
+            if (action.empty())
+                return i18n_.tr(loc, enabled ? "bot.feature_state_on" : "bot.feature_state_off", {{"feature", name}});
+            const bool requested = action == "on";
+            if (enabled == requested)
+                return i18n_.tr(loc, enabled ? "bot.feature_already_on" : "bot.feature_already_off", {{"feature", name}});
+            const auto warning = updateGroupControl(loc, msg, feature, requested);
+            return i18n_.tr(loc, requested ? "bot.feature_on" : "bot.feature_off", {{"feature", name}})
+                + (warning.empty() ? "" : "\n" + warning);
+        }
         // Repeated on/off: tell the user it's already in that state (customizable).
         const bool currentlyOff = (getGroupSetting(msg, "enabled") == "0");
         if (action == "on") {
             if (!currentlyOff) return i18n_.tr(loc, "bot.already_on");
-            setGroupEnabled(msg, true);  return i18n_.tr(loc, "bot.on");
+            updateGroupControl(loc, msg, "", true);  return i18n_.tr(loc, "bot.on");
         }
         if (action == "off") {
             if (currentlyOff) return i18n_.tr(loc, "bot.already_off");
-            setGroupEnabled(msg, false); return i18n_.tr(loc, "bot.off");
+            const auto warning = updateGroupControl(loc, msg, "", false);
+            return i18n_.tr(loc, "bot.off") + (warning.empty() ? "" : "\n" + warning);
         }
         // 版本横幅，外加可配置的页眉/页脚（原版 strBotHeader / strBotMsg）。
         // {self} 等占位符由 main.cpp 的 applySelf 统一在最终回复里替换。
@@ -4347,7 +4372,52 @@ private:
     }
 
 public:
+    // These are stored preferences. The existing bot-off/@ and hard-lock gates
+    // are applied separately by each execution path; a sub-switch never wakes a bot.
+    static std::string groupFeatureKey(const std::string& feature) {
+        if (feature == "log") return "logEnabled";
+        if (feature == "reply") return "replyDisabled";
+        if (feature == "roll") return "rollEnabled";
+        if (feature == "plugin") return "pluginEnabled";
+        return "";
+    }
+    bool groupFeatureEnabled(const Message& msg, const std::string& feature) const {
+        if (msg.type == MessageType::kPrivate || msg.targetId.empty()) return true;
+        const auto key = groupFeatureKey(feature);
+        if (key.empty()) return false;
+        const auto value = getGroupSetting(msg, key);
+        return feature == "reply" ? value != "1" : value != "0";
+    }
+    bool isLogRecording(const Message& msg) const {
+        if (msg.type == MessageType::kPrivate || msg.targetId.empty()
+            || isGroupDisabled(msg) || !groupFeatureEnabled(msg, "log")) return false;
+        const int id = activeLogId(msg);
+        auto* st = db_.getLogStorage();
+        if (id <= 0 || !st) return false;
+        try { return st->get<GameLogRow>(id).status == 0; } catch (...) { return false; }
+    }
+    // Shared by chat and WebUI. Keep the active session and its user's pause
+    // state intact, but stop the timer while either controlling switch is off.
+    std::string updateGroupControl(Locale loc, const Message& msg, const std::string& feature, bool enabled) {
+        if (msg.type == MessageType::kPrivate || msg.targetId.empty()) return "";
+        const auto key = feature.empty() ? "enabled" : groupFeatureKey(feature);
+        if (key.empty()) return "";
+        const bool recording = isLogRecording(msg);
+        setGroupSetting(msg, key, (feature == "reply" ? !enabled : enabled) ? "1" : "0");
+        const bool nowRecording = isLogRecording(msg);
+        if (recording && !nowRecording) {
+            const int id = activeLogId(msg);
+            timerStop(msg, id);
+            auto name = getGroupSetting(msg, "activeLogName");
+            if (name.empty()) name = "log" + std::to_string(id);
+            return i18n_.tr(loc, "bot.log_paused_notice", {{"name", name}});
+        }
+        if (!recording && nowRecording && timerEnabled(msg)) timerStart(msg, activeLogId(msg));
+        return "";
+    }
+
     std::string rollExpressionForAi(const Message& msg, const std::string& expression) {
+        if (!groupFeatureEnabled(msg, "roll")) return "";
         auto result = evaluateExpression(msg, expression);
         return result.ok ? result.detail
                          : (std::string("表达式无效: ") + result.error);
@@ -5103,6 +5173,19 @@ public:
     }
     bool isPluginEnabledInGroup(const std::string& platform, const std::string& group,
                                 const std::string& pluginId, const std::string& adapterId = {}) const {
+        return isPluginAllowedInGroup(platform, group, adapterId)
+            && isPluginSelectedInGroup(platform, group, pluginId, adapterId);
+    }
+    bool isPluginAllowedInGroup(const std::string& platform, const std::string& group,
+                                const std::string& adapterId = {}) const {
+        Message context;
+        context.type = MessageType::kGroup; context.platform = platform;
+        context.targetId = group; context.adapterId = adapterId;
+        return groupFeatureEnabled(context, "plugin") && !isGroupLocked(context);
+    }
+    // Stored per-plugin selection, independent of the temporary master switch.
+    bool isPluginSelectedInGroup(const std::string& platform, const std::string& group,
+                                 const std::string& pluginId, const std::string& adapterId = {}) const {
         // pack-bound 插件（属于某规则包）→ 仅在本群激活了该包对应规则系统时生效。
         // 群的 ruleSystem 存的是「激活规则的名字」；该规则的 setKeys 与本包 setKeys 有交集 = 包已激活。
         {
@@ -5271,7 +5354,7 @@ public:
             for (auto& p : plugins) {
                 std::string state;
                 if (!p.enabledGlobal) state = i18n_.tr(loc, "plugin.state.global_off");
-                else state = isPluginEnabledInGroup(msg.platform, msg.targetId, p.id)
+                else state = isPluginEnabledInGroup(msg.platform, msg.targetId, p.id, msg.adapterId)
                            ? i18n_.tr(loc, "plugin.state.on") : i18n_.tr(loc, "plugin.state.off");
                 if (!list.empty()) list += "\n";
                 list += p.name + " [" + state + "]";
@@ -5348,8 +5431,9 @@ private:
     /// Whether custom replies are disabled in this group (原版「禁用回复」). Public so
     /// the message loop can suppress custom replies.
 public:
-    bool isReplyDisabledFor(const std::string& platform, const std::string& groupId) const {
-        Message m; m.platform = platform; m.targetId = groupId; m.type = MessageType::kGroup;
+    bool isReplyDisabledFor(const std::string& platform, const std::string& groupId,
+                           const std::string& adapterId = {}) const {
+        Message m; m.platform = platform; m.targetId = groupId; m.adapterId = adapterId; m.type = MessageType::kGroup;
         return getGroupSetting(m, "replyDisabled") == "1";
     }
 private:
@@ -5441,15 +5525,78 @@ private:
         }
         return i18n_.tr(loc, "group.term_unknown", {{"term", term}});
     }
-    /// .group clr — wipe this group's settings.
-    void clearGroupSettings(const Message& msg) {
-        auto* st = db_.getStorage(); if (!st) return;
+    /// Clear only this account's configuration. Empty overrides mask legacy
+    /// defaults without deleting settings still inherited by another account.
+    bool clearGroupSettings(const Message& msg) {
+        auto* st = db_.getStorage(); if (!st) return false;
         try {
             namespace orm = sqlite_orm;
-            st->remove_all<GroupSettingRow>(orm::where(
-                orm::c(&GroupSettingRow::platform) == msg.platform and
-                orm::c(&GroupSettingRow::groupId) == msg.targetId));
-        } catch (...) {}
+            auto preserve = [](const std::string& key) {
+                return key.rfind("__", 0) == 0 || key == "name" || key == "inviter"
+                    || key == "left" || key == "leaving" || key == "locked"
+                    || key == "activeLog" || key == "activeLogName" || key == "lastLogOffMsgId"
+                    || key.rfind("logTimerStart:", 0) == 0 || key.rfind("logTimerTotal:", 0) == 0
+                    || key.rfind("logTimerLastEnd:", 0) == 0;
+            };
+            st->transaction([&] {
+                const auto legacy = st->get_all<GroupSettingRow>(orm::where(
+                    orm::c(&GroupSettingRow::platform) == msg.platform and
+                    orm::c(&GroupSettingRow::groupId) == msg.targetId));
+                if (msg.adapterId.empty()) {
+                    for (const auto& row : legacy) if (!preserve(row.key)) st->remove<GroupSettingRow>(row.id);
+                } else {
+                    std::set<std::string> overridden;
+                    auto scoped = st->get_all<GroupAccountSettingRow>(orm::where(
+                        orm::c(&GroupAccountSettingRow::adapterId) == msg.adapterId and
+                        orm::c(&GroupAccountSettingRow::groupId) == msg.targetId));
+                    for (auto row : scoped) {
+                        overridden.insert(row.key);
+                        if (!preserve(row.key)) { row.value.clear(); st->update(row); }
+                    }
+                    for (const auto& row : legacy) if (!preserve(row.key) && !overridden.count(row.key)) {
+                        GroupAccountSettingRow blank;
+                        blank.adapterId = msg.adapterId; blank.platform = msg.platform;
+                        blank.groupId = msg.targetId;
+                        blank.endpointId = msg.extra.is_object()
+                            ? msg.extra.value("__identity_native_target", msg.targetId) : msg.targetId;
+                        blank.key = row.key; blank.value = ""; st->insert(blank);
+                    }
+                }
+                return true;
+            });
+            if (isLogRecording(msg) && timerEnabled(msg)) timerStart(msg, activeLogId(msg));
+            return true;
+        } catch (const std::exception& e) {
+            DICE_LOG_ERROR("Failed to clear group settings: {}", e.what());
+            return false;
+        }
+    }
+
+    std::map<std::string, std::string> groupCommandTargets(const Message& msg) const {
+        std::map<std::string, std::string> targets;
+        auto* st = db_.getStorage(); if (!st) return targets;
+        namespace orm = sqlite_orm;
+        std::set<std::string> accountKnownGroups;
+        if (!msg.adapterId.empty())
+            for (const auto& row : st->get_all<GroupAccountSettingRow>(orm::where(
+                     orm::c(&GroupAccountSettingRow::platform) == msg.platform))) {
+                accountKnownGroups.insert(row.groupId);
+                if (row.adapterId == msg.adapterId)
+                    targets[row.groupId] = row.endpointId.empty() ? row.groupId : row.endpointId;
+            }
+        // Legacy-only groups have no account owner yet. Once account-scoped
+        // presence exists, shared metadata must not invent membership for another bot.
+        for (const auto& row : st->get_all<GroupSettingRow>(orm::where(
+                 orm::c(&GroupSettingRow::platform) == msg.platform)))
+            if (!accountKnownGroups.count(row.groupId)) targets.emplace(row.groupId, row.groupId);
+        return targets;
+    }
+    static bool knownGroupTerm(const std::string& term) {
+        static const std::set<std::string> known = {
+            "停用指令", "外置", "禁用回复", "禁用jrrp", "禁用draw",
+            "禁用me", "禁用help", "禁用deck", "禁用send"
+        };
+        return known.count(toLower(term)) != 0;
     }
 
 
@@ -6607,28 +6754,84 @@ private:
         return i18n_.tr(loc, "send.done");
     }
 
-    // ─── .group 群设定（聊天里只读，编辑交给网页后台）────────
+    // ─── .group 群设定（查询、功能词条与按账号重置）────────
 
-    std::string handleGroup(Locale loc, const std::string& args, const Message& msg) {
-        if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "group.private");
-
-        // .group clr / .group +/-词条。门控对齐原版 getGroupTrust：群管(0) 或个人信任>0
-        // 均可管理本群（原版 DiceEvent.cpp:1980 getGroupTrust<0 → strGroupDenied）。
-        std::string at = trim(args);
-        if (!at.empty()) {
-            if (groupTrustOf(msg) < 0) return i18n_.tr(loc, "gate.no_perm");
-            std::string atl = toLower(at);
-            // 群自动化 .group auto pass/kick/mute ……
-            if (atl == "auto" || atl.rfind("auto ", 0) == 0)
-                return handleGroupAuto(loc, msg, trim(at.substr(4)));
-            if (atl == "clr" || atl == "clear") {
-                clearGroupSettings(msg);
-                return i18n_.tr(loc, "group.cleared");
+    std::string handleGroup(Locale loc, const std::string& args, const Message& source,
+                            const std::optional<std::pair<std::string, std::string>>& resolved = std::nullopt) {
+        std::string command = trim(args);
+        Message msg = source;
+        const auto [head, rest] = splitCommand(command);
+        const bool all = !resolved && toLower(head) == "all";
+        const bool targeted = resolved.has_value() || isAllDigits(head);
+        const auto targetId = resolved ? resolved->first : head;
+        if (all || targeted) {
+            if (all && !isMaster(source) && senderTrust(source) < 5)
+                return i18n_.tr(loc, "gate.no_perm");
+            const auto targets = resolved
+                ? std::map<std::string, std::string>{{resolved->first, resolved->second}}
+                : groupCommandTargets(source);
+            if (targeted && !targets.count(targetId))
+                return i18n_.tr(loc, "group.not_found", {{"group", targetId}});
+            if (all) {
+                const auto terms = legacy_args::groupTerms(rest);
+                if (!terms) return i18n_.tr(loc, "group.usage");
+                for (const auto& term : *terms)
+                    if (!knownGroupTerm(term.name)) return i18n_.tr(loc, "group.term_unknown", {{"term", term.name}});
+                std::string results;
+                for (const auto& [gid, endpoint] : targets) {
+                    if (getGroupSettingFor(source.platform, gid, "__removed", source.adapterId) == "1"
+                        || getGroupSettingFor(source.platform, gid, "left", source.adapterId) == "1") continue;
+                    if (!results.empty()) results += "\n";
+                    results += handleGroup(loc, rest, source, std::make_pair(gid, endpoint));
+                }
+                return results.empty() ? i18n_.tr(loc, "group.empty") : results;
             }
-            if (at[0] == '+' || at[0] == '-')
-                return handleGroupTerm(loc, msg, trim(at.substr(1)), at[0] == '+');
-            // 其它参数：忽略，继续展示群信息。
+            msg.type = MessageType::kGroup;
+            msg.targetId = targetId;
+            if (!msg.extra.is_object()) msg.extra = json::object();
+            if (source.type == MessageType::kPrivate || source.targetId != targetId) {
+                // A role from the sending group is not proof of authority in the target group.
+                msg.extra.erase("role");
+                msg.atList.clear();
+            }
+            msg.extra["__identity_native_target"] = targets.at(targetId);
+            if (!resolved) command = trim(rest);
         }
+        if (msg.type == MessageType::kPrivate || msg.targetId.empty()) return i18n_.tr(loc, "group.private");
+        auto targetResult = [&](const std::string& result) {
+            return targeted ? i18n_.tr(loc, "group.target_result", {{"group", msg.targetId}, {"result", result}}) : result;
+        };
+        if (targeted && (isGroupLocked(msg) || getGroupSetting(msg, "__removed") == "1"))
+            return targetResult(i18n_.tr(loc, "gate.no_perm"));
+        // Remote reads/writes check the target group; own-group bare queries stay available.
+        const bool remote = targeted && (source.type == MessageType::kPrivate || source.targetId != msg.targetId);
+        // QQ Official's local compatibility allowance is not evidence of a
+        // sender's role in some other group. Only verified privilege may cross groups.
+        const bool roomHost = !(remote && msg.platform == "qq_official" && !msg.fromSelf)
+            && senderIsGroupAdmin(msg);
+        const bool allowed = isMaster(msg) || senderTrust(msg) > 0 || roomHost;
+        const auto lower = toLower(command);
+        const bool query = command.empty() || lower == "state" || lower == "info";
+        if ((targeted || !query) && !allowed) return targetResult(i18n_.tr(loc, "gate.no_perm"));
+        if (lower == "auto" || lower.rfind("auto ", 0) == 0)
+            return targetResult(handleGroupAuto(loc, msg, trim(command.substr(4))));
+        if (lower == "clr" || lower == "clear") {
+            return targetResult(i18n_.tr(loc, clearGroupSettings(msg) ? "group.cleared" : "group.clear_failed"));
+        }
+        if (!command.empty() && (command[0] == '+' || command[0] == '-')) {
+            const auto terms = legacy_args::groupTerms(command);
+            if (!terms) return targetResult(i18n_.tr(loc, "group.usage"));
+            for (const auto& term : *terms)
+                if (!knownGroupTerm(term.name)) return targetResult(i18n_.tr(loc, "group.term_unknown", {{"term", term.name}}));
+            std::string result;
+            for (const auto& term : *terms) {
+                if (!result.empty()) result += "\n";
+                result += handleGroupTerm(loc, msg, term.name, term.on);
+            }
+            return targetResult(result);
+        }
+        if (!command.empty() && lower != "state" && lower != "info")
+            return targetResult(i18n_.tr(loc, "group.usage"));
 
         auto a = adapters_.getAdapter(msg.adapterId);
 
@@ -6825,7 +7028,7 @@ private:
             return i18n_.tr(loc, "ob.list", {{"count", std::to_string(ids.size())}, {"list", list}});
         }
         if (sub == "clr" || sub == "clear") {
-            if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
+            if (!senderIsGroupAdmin(msg) && !gameIsGm(msg, msg.senderId)) return i18n_.tr(loc, "gate.no_perm");
             setObservers(msg, {});
             return i18n_.tr(loc, "ob.cleared", {{"nick", nick}});
         }
@@ -6834,7 +7037,8 @@ private:
             ids.erase(it); setObservers(msg, ids);
             return i18n_.tr(loc, "ob.exit", {{"nick", nick}});
         }
-        // default / "join": join as observer（旁观功能被关时拒绝）
+        if (sub != "join") return i18n_.tr(loc, "help.topic.ob");
+        // Only an explicit join may change observer membership.
         if (obOff) return i18n_.tr(loc, "ob.disabled");
         if (present) return i18n_.tr(loc, "ob.already", {{"nick", nick}});
         ids.push_back(msg.senderId); setObservers(msg, ids);
@@ -7136,65 +7340,56 @@ private:
     }
     void saveInit(const Message& msg, const json& list) { setGroupSetting(msg, "init", list.dump()); }
 
+    DiceResult rollLegacyDice(const std::string& expression, int defaultFaces = 100) {
+        auto native = engine_.roll(expression);
+        if (native.ok() || native.failureKind != DiceFailureKind::kUnsupportedSyntax) return native;
+        // Legacy k/p and omitted-face dice need OneDice. Never reroll an
+        // evaluation failure (such as a randomly produced zero denominator).
+        const auto result = onedice::eval(expression, defaultFaces);
+        if (!result.ok) return DiceResult::failure(expression, result.error, 2001,
+            result.errorKind == onedice::ErrorKind::Evaluation
+                ? DiceFailureKind::kEvaluation : DiceFailureKind::kUnsupportedSyntax);
+        if (result.value < (std::numeric_limits<int>::min)() || result.value > (std::numeric_limits<int>::max)())
+            return DiceResult::failure(expression, "result outside integer range", 2001, DiceFailureKind::kEvaluation);
+        return DiceResult::success(expression, {}, static_cast<int>(result.value),
+            false, false, result.detail, result.detail);
+    }
+
     std::string handleRi(Locale loc, const std::string& args, const Message& msg) {
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
         if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "init.group_only");
-        std::string a = trim(args);
-        int adj = 0;
-        // optional leading adjust token: +N / -N / N
-        auto [t1, rest] = splitCommand(a);
-        if (!t1.empty()) {
-            std::string core = (t1[0] == '+' || t1[0] == '-') ? t1.substr(1) : t1;
-            if (!core.empty() && isAllDigits(core)) {
-                adj = (t1[0] == '-') ? -parseIntOr(core, 0) : parseIntOr(core, 0);
-                a = trim(rest);
-            }
-        }
-        std::string name = trim(a);
-
-        // 多轮先攻 `.ri [轮数]#怪物名`——为同种怪物自动编号（哥布林1/2/3），
-        // 每个各掷一次独立先攻（原版 DiceEvent.cpp:3810 table_add 循环，轮数≤10）。
-        if (size_t hp = name.find('#'); hp != std::string::npos) {
-            std::string cntTok = trim(name.substr(0, hp));
-            std::string base = trim(name.substr(hp + 1));
-            if (base.empty()) base = displayNameRaw(msg);
-            int cnt = 1;
-            if (!cntTok.empty()) {
-                // 轮数可为骰点表达式（如 1d4），也可为定数；对齐原版 RD rdTurnCnt。
-                if (isAllDigits(cntTok)) cnt = parseIntOr(cntTok, 1);
-                else { auto rc = engine_.roll(cntTok); if (rc.ok()) cnt = rc.modifiedTotal; }
-            }
-            if (cnt <= 0) return i18n_.tr(loc, "init.count_err");
-            if (cnt > 10) return i18n_.tr(loc, "init.count_exceeded", {{"max", "10"}});
-            json list = loadInit(msg);
-            std::string detail;
-            for (int no = 1; no <= cnt; ++no) {
-                int r = engine_.roll("1d20").modifiedTotal;
-                int tot = r + adj;
-                std::string ename = base + std::to_string(no);
-                bool found = false;
-                for (auto& e : list) if (e.value("name", "") == ename) { e["val"] = tot; found = true; break; }
-                if (!found) list.push_back({{"name", ename}, {"val", tot}});
-                std::string one = "1D20=" + std::to_string(r)
-                    + (adj > 0 ? "+" + std::to_string(adj) : adj < 0 ? std::to_string(adj) : "")
-                    + (adj != 0 ? "=" + std::to_string(tot) : "");
-                detail += "\n" + std::to_string(no) + ". " + ename + " " + one;
-            }
-            saveInit(msg, list);
-            s_replyCat = "roll";
-            return i18n_.tr(loc, "init.rolled_multi", {{"base", base}, {"count", std::to_string(cnt)}, {"detail", detail}});
-        }
-
-        if (name.empty()) name = displayNameRaw(msg);   // 先攻名：存储/比较用原始名
-        int roll = engine_.roll("1d20").modifiedTotal;
-        int total = roll + adj;
+        auto parsed = legacy_args::initiative(args);
+        if (parsed.name.empty()) parsed.name = displayNameRaw(msg);
+        auto count = rollLegacyDice(parsed.count, 20);
+        if (!count.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", count.error}});
+        if (count.modifiedTotal <= 0) return i18n_.tr(loc, "init.count_err");
+        if (count.modifiedTotal > 10) return i18n_.tr(loc, "init.count_exceeded", {{"max", "10"}});
         json list = loadInit(msg);
-        bool found = false;
-        for (auto& e : list) if (e.value("name", "") == name) { e["val"] = total; found = true; break; }
-        if (!found) list.push_back({{"name", name}, {"val", total}});
+        std::string detail;
+        int lastTotal = 0;
+        // Do not persist any entries until every roll succeeds.
+        for (int no = 1; no <= count.modifiedTotal; ++no) {
+            auto result = rollLegacyDice(parsed.expression, 20);
+            if (!result.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", result.error}});
+            lastTotal = result.modifiedTotal;
+            const auto name = parsed.name + (parsed.multiple ? std::to_string(no) : "");
+            bool found = false;
+            for (auto& entry : list) if (entry.value("name", "") == name) {
+                entry["val"] = result.modifiedTotal; found = true; break;
+            }
+            if (!found) list.push_back({{"name", name}, {"val", result.modifiedTotal}});
+            const auto trace = result.detail.empty()
+                ? parsed.expression + "=" + std::to_string(result.modifiedTotal) : result.detail;
+            if (parsed.multiple) detail += "\n" + std::to_string(no) + ". " + name + " " + trace;
+            else detail = trace;
+        }
         saveInit(msg, list);
         s_replyCat = "roll";
-        std::string detail = "1D20=" + std::to_string(roll) + (adj > 0 ? "+" + std::to_string(adj) : adj < 0 ? std::to_string(adj) : "");
-        return i18n_.tr(loc, "init.rolled", {{"name", name}, {"roll", detail}, {"total", std::to_string(total)}});
+        if (parsed.multiple)
+            return i18n_.tr(loc, "init.rolled_multi", {{"base", parsed.name},
+                {"count", std::to_string(count.modifiedTotal)}, {"detail", detail}});
+        return i18n_.tr(loc, "init.rolled", {{"name", parsed.name},
+            {"roll", detail}, {"total", std::to_string(lastTotal)}});
     }
     std::string handleInit(Locale loc, const std::string& args, const Message& msg) {
         if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "init.group_only");
@@ -8418,6 +8613,7 @@ private:
     }
 
     std::string handleLog(Locale loc, const std::string& args, const Message& msg) {
+        if (!groupFeatureEnabled(msg, "log")) return "";
         if (msg.type == MessageType::kPrivate)
             return i18n_.tr(loc, "log.group_only");
         auto* st = db_.getLogStorage();   // game_logs / game_log_messages live in logs.db
@@ -9295,9 +9491,9 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
 
     /// 入站消息落游戏日志。与骰娘回复拆开——回复可能经 AI 后台线程润色/翻译
     /// 后才定稿，入站部分必须在消息线程即时记录且只记一次。
-    /// 普通 .bot off 不停止已有日志；彻底禁用仍禁止写入。两种发送路径共用此门控。
+    /// 总开关、日志功能开关和会话状态共同决定是否写入，包括延迟生成的回复。
     void recordIncoming(const Message& msg) {
-        if (msg.type == MessageType::kPrivate || isGroupLocked(msg)) return;
+        if (!isLogRecording(msg)) return;
         int logId = activeLogId(msg);
         if (logId <= 0) return;
         auto* st = db_.getLogStorage();   // transcripts live in logs.db
@@ -9321,7 +9517,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
 
     /// 骰娘回复落游戏日志（最终发送文本，含润色/翻译后的版本）。
     void recordBotReply(const Message& msg, const std::string& reply) {
-        if (msg.type == MessageType::kPrivate || reply.empty() || isGroupLocked(msg)) return;
+        if (reply.empty() || !isLogRecording(msg)) return;
         int logId = activeLogId(msg);
         if (logId <= 0) return;
         auto* st = db_.getLogStorage();
@@ -11099,6 +11295,7 @@ private:
 
     std::optional<std::string> tryHandleEn(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("en", 0) != 0) return std::nullopt;
+        if (!groupFeatureEnabled(msg, "roll")) return std::string();
         std::string rest = trim(cmd.substr(2));      // 支持 ".en 侦查" 与 ".en侦查"
         if (rest.empty()) return i18n_.tr(loc, "card.en.usage");
 
@@ -11118,7 +11315,7 @@ private:
             { std::istringstream iss(rest); std::string t; while (iss >> t) toks.push_back(t); }
             bool allNames = toks.size() >= 2;
             for (auto& t : toks)
-                if (isAllDigits(t) || t[0] == '+' || t[0] == '-' || t.find('/') != std::string::npos) { allNames = false; break; }
+                if (t.find_first_of("0123456789+-/") != std::string::npos) { allNames = false; break; }
             if (allNames) specs = toks;           // 批量技能
             else specs.push_back(rest);           // 单条（可带技能值 / 成长值）
         }
@@ -11130,49 +11327,37 @@ private:
 
     // 单条成长检定：.en 技能 [技能值] [([失败成长]/)成功成长]；成长值以 +/- 开头。
     std::string runEnOne(Locale loc, const Message& msg, const std::string& spec) {
-        std::vector<std::string> toks;
-        { std::istringstream iss(spec); std::string t; while (iss >> t) toks.push_back(t); }
-        if (toks.empty()) return i18n_.tr(loc, "card.en.usage");
-        std::string attr = toks[0];
-        size_t i = 1;
-        std::optional<int> explicitVal;
-        if (i < toks.size() && isAllDigits(toks[i])) { explicitVal = parseIntOr(toks[i], 0); ++i; }
-        std::string growthSpec;
-        for (; i < toks.size(); ++i) if (toks[i][0] == '+' || toks[i][0] == '-') { growthSpec = toks[i]; break; }
-
+        const auto parsed = legacy_args::growth(spec);
+        if (!parsed.valid) return i18n_.tr(loc, "card.en.usage");
+        const auto attr = parsed.attr.empty() ? i18n_.tr(loc, "card.en.default_name") : parsed.attr;
         int skill;
-        if (explicitVal) skill = *explicitVal;
+        if (parsed.value) skill = *parsed.value;
         else {
-            auto v = cards_.getAttr(msg.senderId, cardScope(msg), attr);
-            if (!v) return i18n_.tr(loc, "dice.check.no_card", {{"attr", attr}});
-            skill = *v;
+            auto value = cards_.getAttr(msg.senderId, cardScope(msg), attr);
+            if (!value) return i18n_.tr(loc, "dice.check.no_card", {{"attr", attr}});
+            skill = *value;
         }
-        int r = engine_.roll("1d100").modifiedTotal;
-        const std::string nick = displayName(msg);
-        const bool ok = (r > skill || r > 95);
-        const char* cmp = ok ? ">" : "\xe2\x89\xa4";   // > / ≤
-        std::string res = "1D100=" + std::to_string(r) + cmp + std::to_string(skill);
-
-        // 解析成长值：先剥离符号，再按 '/' 拆成 失败/成功 两段。
-        int sign = 1; std::string body = growthSpec;
-        if (!body.empty() && (body[0] == '+' || body[0] == '-')) { sign = (body[0] == '-') ? -1 : 1; body = body.substr(1); }
-        std::string failExpr, succExpr;
-        if (body.empty()) { succExpr = "1d10"; }
-        else if (auto sl = body.find('/'); sl != std::string::npos) { failExpr = body.substr(0, sl); succExpr = body.substr(sl + 1); }
-        else { succExpr = body; }
-
-        auto upper = [](std::string s) { for (auto& c : s) if (c == 'd') c = 'D'; return s; };
-        auto grow = [&](const std::string& expr, const char* okKey) {
-            int g = engine_.roll(expr.empty() ? "1d10" : expr).modifiedTotal * sign;
-            int fin = skill + g;
-            cards_.setAttr(msg.senderId, cardScope(msg), attr, fin);
-            std::string change = (sign < 0 ? "-" : "") + upper(expr.empty() ? "1d10" : expr) + "=" + std::to_string(std::abs(g));
-            return i18n_.tr(loc, okKey, {{"nick", nick}, {"attr", attr}, {"res", res},
-                                        {"change", change}, {"final", std::to_string(fin)}});
-        };
-        if (ok) return grow(succExpr, "card.en.success");
-        if (!failExpr.empty()) return grow(failExpr, "card.en.fail_grow");
-        return i18n_.tr(loc, "card.en.fail", {{"nick", nick}, {"attr", attr}, {"res", res}});
+        auto check = engine_.roll("1d100");
+        if (!check.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", check.error}});
+        const int r = check.modifiedTotal;
+        const bool success = r > skill || r > 95;
+        const auto nick = displayName(msg);
+        const std::string res = "1D100=" + std::to_string(r) + "/" + std::to_string(skill);
+        const auto& expression = success ? parsed.success : parsed.failure;
+        if (expression.empty())
+            return i18n_.tr(loc, "card.en.fail", {{"nick", nick}, {"attr", attr}, {"res", res}});
+        // Each side keeps its own sign: -1/+1 means lose on failure, gain on success.
+        const auto growth = rollLegacyDice(
+            expression.front() == '+' || expression.front() == '-' ? "0" + expression : expression);
+        if (!growth.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", growth.error}});
+        const int64_t final = static_cast<int64_t>(skill) + growth.modifiedTotal;
+        if (final < (std::numeric_limits<int>::min)() || final > (std::numeric_limits<int>::max)())
+            return i18n_.tr(loc, "card.en.usage");
+        cards_.setAttr(msg.senderId, cardScope(msg), attr, static_cast<int>(final));
+        return i18n_.tr(loc, success ? "card.en.success" : "card.en.fail_grow",
+            {{"nick", nick}, {"attr", attr}, {"res", res},
+             {"change", growth.detail.empty() ? expression + "=" + std::to_string(growth.modifiedTotal) : growth.detail},
+             {"final", std::to_string(final)}});
     }
 
     // ─── .nn 改名 ────────────────────────────────────────────

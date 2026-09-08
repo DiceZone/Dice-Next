@@ -66,175 +66,175 @@ struct LogFixture {
 
 } // namespace
 
-TEST(LogBotOff, ActiveTranscriptKeepsIncomingAndFinalReplies) {
+TEST(LogBotOff, OverallOffPausesWithoutEndingAndWarnsOnce) {
     LogFixture f;
     ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
     f.msg.content = "关闭前";
     f.router.recordIncoming(f.msg);
-    ASSERT_EQ(f.run(".bot off"), "bot.off");
+    ASSERT_EQ(f.run(".bot off"), "bot.off\nbot.log_paused_notice");
+    ASSERT_EQ(f.run(".bot off"), "bot.already_off");
     ASSERT_TRUE(f.router.isGroupDisabled(f.msg));
     f.msg.content = "关闭后";
-    f.router.recordIncoming(f.msg);
-    f.router.recordBotReply(f.msg, "最终回复");
-    auto rows = f.messages();
-    ASSERT_EQ(rows.size(), size_t(3));
-    ASSERT_EQ(rows[1].content, "关闭后");
-    ASSERT_EQ(rows[2].content, "最终回复");
-    ASSERT_EQ(rows[0].logId, rows[2].logId);
-    ASSERT_EQ(rows[2].userId, "9000");
+    f.router.recordMessage(f.msg, "延迟回复");
+    ASSERT_EQ(f.messages().size(), size_t(1));
     ASSERT_EQ(f.logs().front().status, 0);
-}
-
-TEST(LogBotOff, ActiveLogManagementDoesNotWakeDiceCommands) {
-    LogFixture f;
-    ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
-    ASSERT_EQ(f.run(".bot off"), "bot.off");
-    ASSERT_EQ(f.run(".log"), "log.status");
-    ASSERT_EQ(f.run(".LOG on"), "log.already_on");
-    ASSERT_EQ(f.run(".log new 另一个"), "log.exists");
-    ASSERT_EQ(f.logs().size(), size_t(1));
-    ASSERT_EQ(f.run(".r 1d1"), "");
-    ASSERT_EQ(f.run(".logplugin"), "");
-    ASSERT_EQ(f.run(".help"), "");
-}
-
-TEST(LogBotOff, PauseAndResumeAreIndependentOfBotOn) {
-    LogFixture f;
-    ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
-    ASSERT_EQ(f.run(".bot off"), "bot.off");
-    ASSERT_EQ(f.run(".log off"), "log.off");
-    ASSERT_EQ(f.logs().front().status, 1);
-    f.msg.content = "暂停后不应记入";
-    f.router.recordMessage(f.msg, "不应记入");
-    ASSERT_TRUE(f.messages().empty());
-    ASSERT_EQ(f.run(".log on"), "log.on");
-    ASSERT_TRUE(f.router.isGroupDisabled(f.msg));
-    f.msg.content = "恢复记录";
-    f.router.recordMessage(f.msg, "恢复回复");
-    ASSERT_EQ(f.messages().size(), size_t(2));
-}
-
-TEST(LogBotOff, EndStopsRecordingUntilExplicitNewLog) {
-    LogFixture f;
-    ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
-    ASSERT_EQ(f.run(".bot off"), "bot.off");
-    // No recorded rows: shareLog returns before writing files or contacting a log site.
-    ASSERT_EQ(f.run(".log end"), "log.ended");
-    ASSERT_EQ(f.logs().front().status, 2);
-    f.msg.content = "结束后";
-    f.router.recordMessage(f.msg, "不应记录");
-    ASSERT_TRUE(f.messages().empty());
-    ASSERT_EQ(f.run(".log new 新记录"), "log.new");
-    ASSERT_EQ(f.run(".log on"), "log.already_on");
-    ASSERT_EQ(f.logs().size(), size_t(2));
-    ASSERT_TRUE(f.router.isGroupDisabled(f.msg));
-}
-
-TEST(LogBotOff, BotOffDoesNotStartRecordingUntilExplicitLogCommand) {
-    LogFixture f;
-    ASSERT_EQ(f.run(".bot off"), "bot.off");
-    ASSERT_EQ(f.run(".log"), "log.idle");
-    f.msg.content = "没有开启过记录";
-    f.router.recordMessage(f.msg, "回复");
-    ASSERT_TRUE(f.logs().empty());
-    ASSERT_TRUE(f.messages().empty());
-    ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
-    f.router.recordMessage(f.msg, "回复");
-    ASSERT_EQ(f.messages().size(), size_t(2));
-    ASSERT_TRUE(f.router.isGroupDisabled(f.msg));
-}
-
-TEST(LogBotOff, HardLockStillBlocksCommandsAndDelayedReplies) {
-    LogFixture f;
-    ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
-    ASSERT_EQ(f.run(".bot off"), "bot.off");
-    f.setting("locked", "1");
-    ASSERT_EQ(f.run(".log"), "");
-    ASSERT_EQ(f.run(".log end"), "");
-    f.msg.atList = {f.msg.selfId};
     ASSERT_EQ(f.run(".log off"), "");
-    f.msg.content = "彻底禁用后的消息";
-    f.router.recordMessage(f.msg, "禁用前已开始生成、禁用后才定稿的回复");
-    ASSERT_TRUE(f.messages().empty());
-    ASSERT_EQ(f.logs().front().status, 0);
+    ASSERT_EQ(f.run(".reply on"), "");
+    ASSERT_EQ(f.run(".bot on"), "bot.on");
+    f.router.recordMessage(f.msg, "恢复回复");
+    ASSERT_EQ(f.messages().size(), size_t(3));
+    ASSERT_EQ(f.messages()[0].logId, f.messages()[2].logId);
 }
 
-TEST(LogBotOff, GroupsAndAdapterAccountsKeepSeparateActiveLogs) {
+TEST(LogBotOff, FeaturePauseRequiresBothSwitchesToResume) {
     LogFixture f;
     ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
+    ASSERT_EQ(f.run(".bot log off"), "bot.feature_off\nbot.log_paused_notice");
+    ASSERT_EQ(f.run(".bot log off"), "bot.feature_already_off");
+    ASSERT_EQ(f.run(".log end"), "");
+    ASSERT_FALSE(f.router.isGroupDisabled(f.msg));
+    ASSERT_FALSE(f.router.isLogRecording(f.msg));
+    ASSERT_FALSE(f.run(".r 1d1").empty());
     ASSERT_EQ(f.run(".bot off"), "bot.off");
+    ASSERT_EQ(f.run(".bot log on"), "bot.feature_on");
+    ASSERT_FALSE(f.router.isLogRecording(f.msg));
+    ASSERT_EQ(f.run(".bot on"), "bot.on");
+    ASSERT_TRUE(f.router.isLogRecording(f.msg));
+    ASSERT_EQ(f.run(".bot log off"), "bot.feature_off\nbot.log_paused_notice");
+    ASSERT_EQ(f.run(".bot off"), "bot.off");
+    ASSERT_EQ(f.run(".bot on"), "bot.on");
+    ASSERT_FALSE(f.router.isLogRecording(f.msg));
+    ASSERT_EQ(f.run(".bot log on"), "bot.feature_on");
+    ASSERT_TRUE(f.router.isLogRecording(f.msg));
+    ASSERT_EQ(f.logs().size(), size_t(1));
+}
+
+TEST(LogBotOff, ExplicitSessionPauseIsNeverUndoneByFeatureSwitches) {
+    LogFixture f;
+    ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
+    ASSERT_EQ(f.run(".log off"), "log.off");
+    ASSERT_EQ(f.run(".bot off"), "bot.off");
+    ASSERT_EQ(f.run(".bot log off"), "bot.feature_off");
+    ASSERT_EQ(f.run(".bot on"), "bot.on");
+    ASSERT_EQ(f.run(".bot log on"), "bot.feature_on");
+    ASSERT_FALSE(f.router.isLogRecording(f.msg));
+    ASSERT_EQ(f.logs().front().status, 1);
+    ASSERT_EQ(f.run(".log on"), "log.on");
+    ASSERT_TRUE(f.router.isLogRecording(f.msg));
+}
+
+TEST(LogBotOff, NoSessionMeansNoWarningOrImplicitCreation) {
+    LogFixture f;
+    ASSERT_EQ(f.run(".bot off"), "bot.off");
+    ASSERT_EQ(f.run(".log on"), "");
+    ASSERT_EQ(f.run(".bot log off"), "bot.feature_off");
+    ASSERT_EQ(f.run(".bot log on"), "bot.feature_on");
+    ASSERT_EQ(f.run(".bot on"), "bot.on");
+    ASSERT_TRUE(f.logs().empty());
+    ASSERT_FALSE(f.router.isLogRecording(f.msg));
+}
+
+TEST(GroupFeatures, DefaultsAndAccountIsolationPersistAcrossReopen) {
+    LogFixture f;
+    for (const auto* feature : {"log", "reply", "roll", "plugin"}) {
+        ASSERT_TRUE(f.router.groupFeatureEnabled(f.msg, feature));
+        ASSERT_EQ(f.run(std::string(".bot ") + feature + " off"), "bot.feature_off");
+    }
     f.msg.adapterId = "other-account";
-    f.setting("enabled", "0");
-    ASSERT_EQ(f.run(".log"), "log.idle");
-    f.router.recordMessage(f.msg, "不应串入日志");
-    ASSERT_TRUE(f.messages().empty());
+    for (const auto* feature : {"log", "reply", "roll", "plugin"})
+        ASSERT_TRUE(f.router.groupFeatureEnabled(f.msg, feature));
     f.msg.adapterId = "log-test";
     f.msg.targetId = "other-group";
-    f.setting("enabled", "0");
-    ASSERT_EQ(f.run(".log"), "log.idle");
-    f.router.recordMessage(f.msg, "不应串群");
-    ASSERT_TRUE(f.messages().empty());
+    ASSERT_TRUE(f.router.groupFeatureEnabled(f.msg, "roll"));
     f.msg.targetId = "2000";
-    ASSERT_EQ(f.run(".log"), "log.status");
-    f.router.recordMessage(f.msg, "本群回复");
-    ASSERT_EQ(f.messages().size(), size_t(2));
-}
-
-TEST(LogBotOff, ActiveLogAndBotOffSurviveDatabaseReopen) {
-    LogFixture f;
-    ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
-    ASSERT_EQ(f.run(".bot off"), "bot.off");
     f.db.close();
     ASSERT_TRUE(f.db.open(u8str(f.dir.path / "test.db")));
-    ASSERT_TRUE(f.router.isGroupDisabled(f.msg));
-    ASSERT_EQ(f.run(".log"), "log.status");
-    f.msg.content = "重启后继续记录";
-    f.router.recordMessage(f.msg, "回复");
-    ASSERT_EQ(f.messages().size(), size_t(2));
+    for (const auto* feature : {"log", "reply", "roll", "plugin"})
+        ASSERT_FALSE(f.router.groupFeatureEnabled(f.msg, feature));
 }
 
-TEST(LogBotOff, LogExceptionDoesNotBypassOtherSilenceModes) {
+TEST(GroupFeatures, PermissionsTargetingAndPrivateScope) {
     LogFixture f;
-    ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
-    ASSERT_EQ(f.run(".bot off"), "bot.off");
-    f.cfg.set<bool>("dice/silent_global", true);
-    ASSERT_EQ(f.run(".log"), "");
-    f.cfg.set<bool>("dice/silent_global", false);
-    f.setting("externalMode", "1");
-    ASSERT_EQ(f.run(".log"), "");
-    f.setting("externalMode", "");
-    ASSERT_EQ(f.run(".log"), "log.status");
-}
-
-TEST(LogBotOff, PrivateMessagesNeverEnterGroupTranscript) {
-    LogFixture f;
-    ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
-    ASSERT_EQ(f.run(".bot off"), "bot.off");
+    f.msg.extra["role"] = "member";
+    ASSERT_EQ(f.run(".bot log off"), "gate.no_perm");
+    ASSERT_EQ(f.run(".bot log"), "bot.feature_state_on");
+    f.msg.extra["role"] = "admin";
+    ASSERT_EQ(f.run(".bot log off 1234"), "");
+    ASSERT_TRUE(f.router.groupFeatureEnabled(f.msg, "log"));
+    ASSERT_EQ(f.run(".BOT LOG OFF 9000"), "bot.feature_off");
+    ASSERT_FALSE(f.router.groupFeatureEnabled(f.msg, "log"));
+    f.setting("locked", "1");
+    ASSERT_EQ(f.run(".bot log on"), "");
+    ASSERT_FALSE(f.router.groupFeatureEnabled(f.msg, "log"));
     f.msg.type = MessageType::kPrivate;
-    f.msg.content = "私聊内容";
+    ASSERT_EQ(f.run(".bot log"), "bot.feature_group_only");
+    ASSERT_TRUE(f.router.groupFeatureEnabled(f.msg, "log"));
+}
+
+TEST(GroupFeatures, ReplyUsesExistingPreferenceWithoutDisablingPlugins) {
+    LogFixture f;
+    ASSERT_EQ(f.run(".reply off"), "reply.off");
+    ASSERT_FALSE(f.router.groupFeatureEnabled(f.msg, "reply"));
+    ASSERT_TRUE(f.router.isPluginEnabledInGroup(f.msg.platform, f.msg.targetId, "js:test.js", f.msg.adapterId));
+    ASSERT_EQ(f.run(".bot reply on"), "bot.feature_on");
+    ASSERT_FALSE(f.router.isReplyDisabledFor(f.msg.platform, f.msg.targetId, f.msg.adapterId));
+    ASSERT_EQ(f.run(".bot reply off"), "bot.feature_off");
+    ASSERT_EQ(f.run(".reply on"), "reply.on");
+    ASSERT_TRUE(f.router.groupFeatureEnabled(f.msg, "reply"));
+}
+
+TEST(GroupFeatures, PluginMasterPreservesIndividualSelections) {
+    LogFixture f;
+    f.setting("pluginsOff", "js:disabled.js");
+    ASSERT_EQ(f.run(".bot plugin off"), "bot.feature_off");
+    ASSERT_FALSE(f.router.isPluginEnabledInGroup(f.msg.platform, f.msg.targetId, "js:enabled.js", f.msg.adapterId));
+    ASSERT_TRUE(f.router.isPluginSelectedInGroup(f.msg.platform, f.msg.targetId, "js:enabled.js", f.msg.adapterId));
+    ASSERT_TRUE(f.router.isPluginEnabledInGroup(f.msg.platform, f.msg.targetId, "js:enabled.js", "other-account"));
+    ASSERT_EQ(f.run(".bot plugin on"), "bot.feature_on");
+    ASSERT_TRUE(f.router.isPluginEnabledInGroup(f.msg.platform, f.msg.targetId, "js:enabled.js", f.msg.adapterId));
+    ASSERT_FALSE(f.router.isPluginEnabledInGroup(f.msg.platform, f.msg.targetId, "js:disabled.js", f.msg.adapterId));
+}
+
+TEST(GroupFeatures, RollSwitchBlocksBuiltinsButNotCardManagement) {
+    LogFixture f;
+    ASSERT_EQ(f.run(".bot roll off"), "bot.feature_off");
+    for (const auto* command : {".r 1d1", ".rh 1d1", ".ra 50", ".rc 50", ".rav 50 50",
+            ".rb", ".rp", ".rx", ".ba 50", ".bav 50 50", ".sc 0/1", ".ww 3", ".dx 3",
+            ".rdx 3", ".rdc 10", ".en 侦查", ".ri", ".coc", ".dnd"}) {
+        ASSERT_EQ(f.run(command), "");
+    }
+    ASSERT_FALSE(f.run(".st hp:0 san:60").empty());
+    ASSERT_EQ(f.run(".ds"), "");
+    ASSERT_TRUE(f.router.groupFeatureEnabled(f.msg, "reply"));
+    ASSERT_TRUE(f.router.groupFeatureEnabled(f.msg, "plugin"));
+    ASSERT_EQ(f.run(".bot roll on"), "bot.feature_on");
+    ASSERT_FALSE(f.run(".r 1d1").empty());
+}
+
+TEST(LogBotOff, HardLockAndPrivateMessagesNeverRecord) {
+    LogFixture f;
+    ASSERT_EQ(f.run(".log new 测试记录"), "log.new");
+    f.setting("locked", "1");
+    f.msg.atList = {f.msg.selfId};
+    ASSERT_EQ(f.run(".bot log off"), "");
+    f.router.recordMessage(f.msg, "不应记录");
+    f.setting("locked", "0");
+    f.msg.type = MessageType::kPrivate;
     f.router.recordMessage(f.msg, "私聊回复");
     ASSERT_TRUE(f.messages().empty());
 }
 
-TEST(LogBotOff, LogOnCanStartFirstTranscriptWhileOff) {
+TEST(LogBotOff, SharedWebControlStopsTimerAndReportsActualTransition) {
     LogFixture f;
-    ASSERT_EQ(f.run(".bot off"), "bot.off");
-    ASSERT_EQ(f.run(".log on"), "log.new");
-    ASSERT_EQ(f.logs().size(), size_t(1));
-    ASSERT_EQ(f.run(".r 1d1"), "");
-}
-
-TEST(BotOffManagement, ReplySwitchKeepsItsOwnPermission) {
-    LogFixture f;
-    ASSERT_EQ(f.run(".bot off"), "bot.off");
-    ASSERT_EQ(f.run(".reply"), "reply.usage");
-    ASSERT_EQ(f.run(".reply off"), "reply.off");
-    ASSERT_EQ(f.run(".REPLY ON"), "reply.on");
-    ASSERT_EQ(f.run(".reply custom"), "");
-    ASSERT_EQ(f.run(".replyplugin"), "");
-    f.msg.extra["role"] = "member";
-    ASSERT_EQ(f.run(".reply off"), "gate.no_perm");
-    ASSERT_TRUE(f.router.isGroupDisabled(f.msg));
+    f.setting("logTimerOff", "");
+    f.run(".log new 测试记录");
+    const auto timer = "logTimerStart:" + std::to_string(f.logs().front().id);
+    ASSERT_FALSE(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, timer, f.msg.adapterId).empty());
+    ASSERT_EQ(f.router.updateGroupControl(Locale::kZhHans, f.msg, "log", false), "bot.log_paused_notice");
+    ASSERT_TRUE(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, timer, f.msg.adapterId).empty());
+    ASSERT_EQ(f.router.updateGroupControl(Locale::kZhHans, f.msg, "log", false), "");
+    f.router.updateGroupControl(Locale::kZhHans, f.msg, "log", true);
+    ASSERT_FALSE(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, timer, f.msg.adapterId).empty());
 }
 
 TEST(BotOffManagement, MasterReusesAdminAndBlacklistHandlers) {

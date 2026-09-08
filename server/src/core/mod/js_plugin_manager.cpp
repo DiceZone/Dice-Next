@@ -1601,7 +1601,7 @@ bool JsPluginManager::hasCommand(const Message& message, const std::string& word
     bool found = false;
     for (auto& e : exts_) {
         if (groupGate_ && !groupId.empty() && !e.second.empty()
-            && !groupGate_(message.platform, groupId, "js:" + e.second)) continue;
+            && !groupGate_(message.platform, groupId, "js:" + e.second, message.adapterId)) continue;
         JSValue cmdMap = JS_GetPropertyStr(ctx_, e.first, "cmdMap");
         if (JS_IsObject(cmdMap)) {
             for (const std::string& candidate : {word, "." + word, "。" + word, "!" + word, "！" + word}) {
@@ -2162,7 +2162,7 @@ void JsPluginManager::dispatchCommandHookLocked(const Message& message, JSValueC
     const std::string groupId = message.type == MessageType::kPrivate ? std::string() : message.targetId;
     for (auto& e : exts_) {
         if (groupGate_ && !groupId.empty() && !e.second.empty()
-            && !groupGate_(message.platform, groupId, "js:" + e.second)) continue;
+            && !groupGate_(message.platform, groupId, "js:" + e.second, message.adapterId)) continue;
         JSValue hook = JS_GetPropertyStr(ctx_, e.first, "onCommandReceived");
         if (JS_IsFunction(ctx_, hook)) {
             JSValue result = JS_Call(ctx_, hook, e.first, 3, args);
@@ -2205,7 +2205,7 @@ JsPluginManager::Result JsPluginManager::dispatchMessageHook(
     const std::string groupId = message.type == MessageType::kPrivate ? std::string() : message.targetId;
     for (auto& e : exts_) {
         if (groupGate_ && !groupId.empty() && !e.second.empty()
-            && !groupGate_(message.platform, groupId, "js:" + e.second)) continue;
+            && !groupGate_(message.platform, groupId, "js:" + e.second, message.adapterId)) continue;
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, hook);
         if (JS_IsFunction(ctx_, fn)) {
             JSValue r = JS_Call(ctx_, fn, e.first, 2, args);
@@ -2260,7 +2260,7 @@ void JsPluginManager::handleMessageSend(const Message& contextMessage,
         ? std::string() : sentMessage.targetId;
     for (auto& e : exts_) {
         if (groupGate_ && !groupId.empty() && !e.second.empty()
-            && !groupGate_(sentMessage.platform, groupId, "js:" + e.second)) continue;
+            && !groupGate_(sentMessage.platform, groupId, "js:" + e.second, sentMessage.adapterId)) continue;
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, "onMessageSend");
         if (JS_IsFunction(ctx_, fn)) {
             JSValue rv = JS_Call(ctx_, fn, e.first, 3, args);
@@ -2391,7 +2391,7 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
     JSValueConst args[2] = { jctx, hookArg };
     for (auto& e : exts_) {
         if (groupGate_ && !event.groupId.empty() && !e.second.empty()
-            && !groupGate_(event.platform, event.groupId, "js:" + e.second)) continue;
+            && !groupGate_(event.platform, event.groupId, "js:" + e.second, event.adapterId)) continue;
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, hook);
         if (JS_IsFunction(ctx_, fn)) {
             JSValue rv = JS_Call(ctx_, fn, e.first, 2, args);
@@ -2450,7 +2450,7 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
     for (auto& e : exts_) {
         // 插件分群启停（地基）：该源文件在本群被禁用 → 跳过其全部指令。
         if (groupGate_ && !groupId.empty() && !e.second.empty()
-            && !groupGate_(platform, groupId, "js:" + e.second)) continue;
+            && !groupGate_(platform, groupId, "js:" + e.second, message.adapterId)) continue;
         JSValue cmdMap = JS_GetPropertyStr(ctx_, e.first, "cmdMap");
         if (JS_IsObject(cmdMap)) {
             JSValue c = JS_GetPropertyStr(ctx_, cmdMap, word.c_str());

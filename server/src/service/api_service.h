@@ -5255,6 +5255,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                             {"loginName", loginName}, {"appId", appId},
                             {"platform", aplat}, {"endpointId", endpoint}, {"connected", connected},
                             {"enabled", value("enabled") != "0"}, {"ai_enabled", value("aiEnabled") != "0"},
+                            {"log_enabled", value("logEnabled") != "0"}, {"reply_enabled", value("replyDisabled") != "1"},
+                            {"roll_enabled", value("rollEnabled") != "0"}, {"plugin_enabled", value("pluginEnabled") != "0"},
                             {"locked", value("locked") == "1"}, {"card", value("card")},
                             {"activeLog", !value("activeLog").empty()}, {"activeLogId", value("activeLog")},
                             {"activeLogName", value("activeLogName")}, {"observers", observers},
@@ -5275,6 +5277,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     accounts.push_back(J{{"adapterId", ""}, {"adapterName", ""}, {"loginId", ""},
                         {"platform", plat}, {"endpointId", gid}, {"connected", false},
                         {"enabled", !kv.count("enabled") || kv["enabled"] != "0"},
+                        {"log_enabled", kv["logEnabled"] != "0"}, {"reply_enabled", kv["replyDisabled"] != "1"},
+                        {"roll_enabled", kv["rollEnabled"] != "0"}, {"plugin_enabled", kv["pluginEnabled"] != "0"},
                         {"ai_enabled", !kv.count("aiEnabled") || kv["aiEnabled"] != "0"},
                         {"locked", kv.count("locked") && kv["locked"] == "1"}, {"card", kv.count("card") ? kv["card"] : ""},
                         {"activeLog", kv.count("activeLog") && !kv["activeLog"].empty()},
@@ -5292,6 +5296,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 arr.push_back(J{
                     {"platform", selected.value("platform", plat)}, {"groupId", gid}, {"name", name},
                     {"enabled", selected.value("enabled", true)}, {"ai_enabled", selected.value("ai_enabled", true)},
+                    {"log_enabled", selected.value("log_enabled", true)}, {"reply_enabled", selected.value("reply_enabled", true)},
+                    {"roll_enabled", selected.value("roll_enabled", true)}, {"plugin_enabled", selected.value("plugin_enabled", true)},
                     {"locked", selected.value("locked", false)}, {"card", selected.value("card", std::string())},
                     {"remark", kv.count("remark") ? kv["remark"] : ""},
                     {"activeLog", selected.value("activeLog", false)}, {"observers", selected.value("observers", 0)},
@@ -5312,7 +5318,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // PUT/DELETE /api/groups/{platform}/{groupId}
     app.registerHandler("/api/groups/{1}/{2}",
-        [st, &adapterMgr, &cfg](Req req, CB&& cb, const std::string& plat, const std::string& gid) {
+        [st, &adapterMgr, &cfg, &cmdRouter](Req req, CB&& cb, const std::string& plat, const std::string& gid) {
         try {
             J j = J::object();
             if (!req->body().empty()) j = J::parse(req->body());
@@ -5343,7 +5349,21 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (!adapterId.empty()) agsSet(st, adapterId, plat, gid, endpointId, key, value);
                 else gsSet(st, plat, gid, key, value);
             };
-            if (j.contains("enabled")) setAccount("enabled", j["enabled"].get<bool>() ? "1" : "0");
+            Message control;
+            control.type = MessageType::kGroup; control.platform = plat;
+            control.targetId = gid; control.adapterId = adapterId;
+            control.extra = {{"__identity_native_target", endpointId}};
+            // Validate all switches before writing any of them.
+            for (const auto* field : {"enabled", "log_enabled", "reply_enabled", "roll_enabled", "plugin_enabled", "ai_enabled", "locked"})
+                if (j.contains(field) && !j[field].is_boolean()) throw std::invalid_argument(std::string(field) + " must be boolean");
+            const bool wasRecording = cmdRouter.isLogRecording(control);
+            if (j.contains("enabled")) cmdRouter.updateGroupControl(Locale::kZhHans, control, "", j["enabled"].get<bool>());
+            for (const auto* feature : {"log", "reply", "roll", "plugin"}) {
+                const std::string field = std::string(feature) + "_enabled";
+                if (j.contains(field)) cmdRouter.updateGroupControl(Locale::kZhHans, control, feature, j[field].get<bool>());
+            }
+            J controlResult = {{"logPaused", wasRecording && !cmdRouter.isLogRecording(control)},
+                {"logName", cmdRouter.getGroupSettingFor(plat, gid, "activeLogName", adapterId)}};
             if (j.contains("ai_enabled")) setAccount("aiEnabled", j["ai_enabled"].get<bool>() ? "1" : "0");
             if (j.contains("locked")) setAccount("locked", j["locked"].get<bool>() ? "1" : "0");
             if (j.contains("remark"))  gsSet(st, plat, gid, "remark", j["remark"].get<std::string>());
@@ -5369,7 +5389,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 std::string lc = j["locale"].get<std::string>();
                 if (!adapterId.empty()) { setAccount("locale", lc); }
                 std::string key = plat + ":" + gid;
-                if (!adapterId.empty()) { jsonReply(ok(nullptr), std::move(cb)); return; }
+                if (!adapterId.empty()) { jsonReply(ok(controlResult), std::move(cb)); return; }
                 st->remove_all<LocaleSettingRow>(
                     orm::where(orm::c(&LocaleSettingRow::scope) == std::string("group")
                         and orm::c(&LocaleSettingRow::scopeKey) == key));
@@ -5378,7 +5398,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     st->insert(r);
                 }
             }
-            jsonReply(ok(nullptr), std::move(cb));
+            jsonReply(ok(controlResult), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Put, drogon::Delete});
 
