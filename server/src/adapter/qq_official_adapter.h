@@ -9,6 +9,7 @@
 #include "../common/logger.h"
 #include "../common/markdown.h"
 
+#include <drogon/HttpAppFramework.h>   // drogon::app()：此前靠其他头间接带入，独立编译会缺
 #include <drogon/HttpClient.h>
 #include <drogon/utils/Utilities.h>
 #include <openssl/evp.h>
@@ -24,6 +25,7 @@
 #include <iterator>
 #include <iomanip>
 #include <sstream>
+#include <memory>
 #include <mutex>
 #include <map>
 #include <optional>
@@ -60,11 +62,39 @@ public:
     }
     std::string getLoginId() const override { return loginId_; }
     std::string getLoginName() const override { return loginName_; }
-    std::string getGroupName(const std::string&) const override { return {}; }
-    std::vector<std::string> getGroupMemberList(const std::string&) const override { return {}; }
-    bool isGroupAdmin(const std::string&, const std::string&) const override { return false; }
-    bool isGroupOwner(const std::string&, const std::string&) const override { return false; }
-    void setGroupKick(const std::string&, const std::string&) override {}
+    // 这几个通用接口要求同步返回，而官方查询全是异步的：读缓存，并在后台
+    // 按 TTL 刷新。群信息与群成员接口目前仍在内邀阶段，未获权限时缓存一直
+    // 为空，行为与接入前的空实现一致，不会把错误灌进调用方。
+    std::string getGroupName(const std::string& groupId) const override {
+        const std::string g = nativeId(groupId, identity::Kind::Group);
+        refreshGroupMeta(g);
+        std::lock_guard lock(metaMu_);
+        const auto it = groupMeta_.find(g);
+        return it == groupMeta_.end() ? std::string() : it->second.name;
+    }
+    std::vector<std::string> getGroupMemberList(const std::string& groupId) const override {
+        const std::string g = nativeId(groupId, identity::Kind::Group);
+        refreshGroupMeta(g);
+        std::lock_guard lock(metaMu_);
+        const auto it = groupMeta_.find(g);
+        return it == groupMeta_.end() ? std::vector<std::string>() : it->second.memberIds;
+    }
+    bool isGroupAdmin(const std::string& groupId, const std::string& userId) const override {
+        const std::string role = memberRole(groupId, userId);
+        return role == "admin" || role == "owner";
+    }
+    bool isGroupOwner(const std::string& groupId, const std::string& userId) const override {
+        return memberRole(groupId, userId) == "owner";
+    }
+    void setGroupKick(const std::string& groupId, const std::string& userId) override {
+        if (groupId.empty() || userId.empty()) return;
+        officialApi(drogon::Post,
+                    "/v2/groups/" + nativeId(groupId, identity::Kind::Group) + "/batch_remove_members",
+                    json{{"member_openids", json::array({nativeId(userId, identity::Kind::User)})}},
+            [self = shared_from_this()](json result) {
+                if (!result.value("ok", false)) self->lastError_ = result.value("message", std::string("移出官方群成员失败"));
+            });
+    }
     void setGroupBan(const std::string& groupId, const std::string& userId, int durationSec) override {
         if (groupId.empty() || userId.empty()) return;
         std::string nativeGroup = groupId, nativeUser = userId;
@@ -103,11 +133,31 @@ public:
         caps["qq_group_admin"] = true;
         caps["group_join_requests"] = true;
         caps["group_join_strategy"] = true;
+        // 以下几项官方接口存在但按机器人逐个放开（内邀/白名单）。声明为可用，
+        // 未获权限的机器人在调用时拿到官方错误码，而不是被我们提前拒掉——
+        // 否则已获权限的机器人也永远用不上。
+        caps["kick"] = true;
+        caps["member_list"] = true;
+        caps["group_info"] = true;
+        caps["group_blacklist"] = true;
+        caps["message_recall"] = true;
+        caps["rich_media"] = true;      // 图片 / 视频 / 语音 / 文件
+        caps["stream_message"] = true;  // 单聊流式输出
+        caps["custom_menu"] = true;
+        caps["command_panel"] = true;
         return caps;
     }
     void invokeActionAsync(const std::string& action, const json& params, ActionCallback cb) override {
         const std::string groupId = params.value("groupId", std::string());
         const std::string strategyId = params.value("strategyId", std::string());
+        const std::string userOpenId = params.value("userOpenId", std::string());
+        const std::string panelId = params.value("panelId", std::string());
+        const std::string messageId = params.value("messageId", std::string());
+        const std::string guildId = params.value("guildId", std::string());
+        const std::string channelId = params.value("channelId", std::string());
+        // 撤回等接口群聊/单聊两侧路径不同，按调用方给的是群还是人来选。
+        const std::string peerBase = groupId.empty() ? ("/v2/users/" + userOpenId) : ("/v2/groups/" + groupId);
+        const bool hasPeer = !groupId.empty() || !userOpenId.empty();
         if (action == "qq_get_mute" && !groupId.empty()) {
             officialApi(drogon::Get, "/v2/groups/" + groupId + "/restrict_chat_setting", json::object(), std::move(cb));
         } else if (action == "qq_set_mute" && !groupId.empty()) {
@@ -143,6 +193,89 @@ public:
             officialApi(drogon::Post, "/v2/groups/join_approval_strategy/" + strategyId + "/whitelist_users",
                         json{{"op", params.value("op", std::string("add"))},
                              {"whitelist_users", params.value("whitelistUsers", json::array())}}, std::move(cb));
+        // ── 群信息查询 ──────────────────────────────────────────
+        } else if (action == "qq_group_info" && !groupId.empty()) {
+            officialApi(drogon::Get, "/v2/groups/" + groupId + "/info", json::object(), std::move(cb));
+        } else if (action == "qq_bot_state" && !groupId.empty()) {
+            officialApi(drogon::Get, "/v2/groups/" + groupId + "/bot_state", json::object(), std::move(cb));
+        } else if (action == "qq_group_members" && !groupId.empty()) {
+            json query;
+            if (params.contains("cursor")) query["cursor"] = params["cursor"];
+            officialApi(drogon::Get, "/v2/groups/" + groupId + "/members", query, std::move(cb));
+        } else if (action == "qq_group_member" && !groupId.empty()) {
+            const std::string member = params.value("memberOpenId", std::string());
+            if (member.empty()) { cb(apiResult(false, 0, "memberOpenId required")); return; }
+            officialApi(drogon::Get, "/v2/groups/" + groupId + "/members/" + member, json::object(), std::move(cb));
+        // ── 群管理 ────────────────────────────────────────────
+        } else if (action == "qq_blacklist" && !groupId.empty()) {
+            json query;
+            if (params.contains("cursor")) query["cursor"] = params["cursor"];
+            if (params.contains("limit")) query["limit"] = params["limit"];
+            officialApi(drogon::Get, "/v2/groups/" + groupId + "/member_blacklist", query, std::move(cb));
+        } else if (action == "qq_set_blacklist" && !groupId.empty()) {
+            officialApi(drogon::Post, "/v2/groups/" + groupId + "/member_blacklist",
+                        json{{"op", params.value("op", std::string("add"))},
+                             {"member_openids", params.value("memberOpenIds", json::array())}}, std::move(cb));
+        } else if (action == "qq_remove_members" && !groupId.empty()) {
+            json body{{"member_openids", params.value("memberOpenIds", json::array())}};
+            if (params.contains("addToMemberBlacklist")) body["add_to_member_blacklist"] = params["addToMemberBlacklist"];
+            officialApi(drogon::Post, "/v2/groups/" + groupId + "/batch_remove_members", body, std::move(cb));
+        // ── 消息撤回 ──────────────────────────────────────────
+        } else if (action == "qq_recall") {
+            if (!hasPeer || messageId.empty()) { cb(apiResult(false, 0, "groupId/userOpenId and messageId required")); return; }
+            officialApi(drogon::Delete, peerBase + "/messages/" + messageId, json::object(), std::move(cb));
+        // ── 流式消息（AI 逐段输出）──────────────────────────────
+        } else if (action == "qq_stream_message" && !userOpenId.empty()) {
+            officialApi(drogon::Post, "/v2/users/" + userOpenId + "/stream_messages",
+                        params.value("body", json::object()), std::move(cb));
+        // ── 全局自定义菜单 ─────────────────────────────────────
+        } else if (action == "qq_get_menu") {
+            officialApi(drogon::Get, "/v2/menu", json::object(), std::move(cb));
+        } else if (action == "qq_set_menu") {
+            officialApi(drogon::Put, "/v2/menu", params.value("body", json::object()), std::move(cb));
+        // ── 指令面板 ──────────────────────────────────────────
+        } else if (action == "qq_list_panels") {
+            json query;
+            if (params.contains("scope")) query["scope"] = params["scope"];
+            if (params.contains("cursor")) query["cursor"] = params["cursor"];
+            if (params.contains("limit")) query["limit"] = params["limit"];
+            officialApi(drogon::Get, "/v2/panels", query, std::move(cb));
+        } else if (action == "qq_create_panel") {
+            officialApi(drogon::Post, "/v2/panels", params.value("body", json::object()), std::move(cb));
+        } else if (action == "qq_get_panel" && !panelId.empty()) {
+            officialApi(drogon::Get, "/v2/panels/" + panelId, json::object(), std::move(cb));
+        } else if (action == "qq_update_panel" && !panelId.empty()) {
+            officialApi(drogon::Put, "/v2/panels/" + panelId, params.value("body", json::object()), std::move(cb));
+        } else if (action == "qq_delete_panel" && !panelId.empty()) {
+            officialApi(drogon::Delete, "/v2/panels/" + panelId, json::object(), std::move(cb));
+        } else if (action == "qq_panel_target" && !panelId.empty()) {
+            json body{{"op", params.value("op", std::string("add"))}};
+            if (params.contains("userOpenIds")) body["user_openids"] = params["userOpenIds"];
+            if (params.contains("groupOpenIds")) body["group_openids"] = params["groupOpenIds"];
+            officialApi(drogon::Put, "/v2/panels/" + panelId + "/target", body, std::move(cb));
+        // ── 频道（guild/channel）侧 ────────────────────────────
+        } else if (action == "qq_me") {
+            officialApi(drogon::Get, "/users/@me", json::object(), std::move(cb));
+        } else if (action == "qq_my_guilds") {
+            json query;
+            for (const char* key : {"before", "after", "limit"}) if (params.contains(key)) query[key] = params[key];
+            officialApi(drogon::Get, "/users/@me/guilds", query, std::move(cb));
+        } else if (action == "qq_guild" && !guildId.empty()) {
+            officialApi(drogon::Get, "/guilds/" + guildId, json::object(), std::move(cb));
+        } else if (action == "qq_guild_channels" && !guildId.empty()) {
+            officialApi(drogon::Get, "/guilds/" + guildId + "/channels", json::object(), std::move(cb));
+        } else if (action == "qq_create_channel" && !guildId.empty()) {
+            officialApi(drogon::Post, "/guilds/" + guildId + "/channels", params.value("body", json::object()), std::move(cb));
+        } else if (action == "qq_channel" && !channelId.empty()) {
+            officialApi(drogon::Get, "/channels/" + channelId, json::object(), std::move(cb));
+        } else if (action == "qq_update_channel" && !channelId.empty()) {
+            officialApi(drogon::Patch, "/channels/" + channelId, params.value("body", json::object()), std::move(cb));
+        } else if (action == "qq_delete_channel" && !channelId.empty()) {
+            officialApi(drogon::Delete, "/channels/" + channelId, json::object(), std::move(cb));
+        } else if (action == "qq_interaction") {
+            const std::string interactionId = params.value("interactionId", std::string());
+            if (interactionId.empty()) { cb(apiResult(false, 0, "interactionId required")); return; }
+            officialApi(drogon::Put, "/interactions/" + interactionId, params.value("body", json::object()), std::move(cb));
         } else {
             cb(apiResult(false, 0, "unsupported QQ Official action or missing parameter"));
         }
@@ -263,6 +396,24 @@ public:
         });
     }
 
+    // 纯函数测试入口：这几段没有网络依赖，但错了会静默走偏（查询串丢参数、
+    // 文件名没后缀、媒体码切错），值得单独钉住。
+    static std::string queryStringForTest(const json& params) { return queryString(params); }
+    static std::string urlEncodeForTest(const std::string& value) { return urlEncode(value); }
+    static int fileTypeForTest(int kind, const std::string& name) { return fileTypeFor(kind, name); }
+    static std::string mediaFileNameForTest(const std::string& name, int kind, const std::string& localPath) {
+        MediaItem item; item.kind = kind; item.name = name;
+        return mediaFileName(item, localPath);
+    }
+    static json splitMediaForTest(const std::string& text) {
+        const SplitText parts = splitMedia(text);
+        json media = json::array();
+        for (const auto& entry : parts.media)
+            media.push_back({{"kind", entry.kind}, {"ref", entry.ref}, {"name", entry.name}});
+        return {{"text", parts.text}, {"media", std::move(media)}};
+    }
+    static size_t mediaHardLimitForTest() { return kMediaHardLimitBytes; }
+
 private:
     static constexpr int kMarkdownRejectThreshold = 2;
     static constexpr int64_t kMarkdownCooldownSeconds = 10 * 60;
@@ -318,17 +469,142 @@ private:
         out << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
         return out.str();
     }
+    // ── 群信息缓存 ────────────────────────────────────────────
+    struct GroupMeta {
+        std::string name;
+        std::vector<std::string> memberIds;
+        std::unordered_map<std::string, std::string> roles;   // openid → member / admin / owner
+        std::time_t refreshedAt = 0;
+        bool refreshing = false;
+    };
+    static constexpr int kGroupMetaTtlSeconds = 300;
+    static constexpr size_t kGroupMemberCap = 3000;   // 每页 30 条，给翻页设个上限
+
+    /// 骰子内部 ID → 官方 openid。未绑定时原样返回。
+    std::string nativeId(const std::string& value, identity::Kind kind) const {
+        if (!db_ || value.empty()) return value;
+        const auto native = identity::BindingStore::instance().officialTransport(*db_, appId_, value, kind);
+        return native.empty() ? value : native;
+    }
+
+    std::string memberRole(const std::string& groupId, const std::string& userId) const {
+        const std::string g = nativeId(groupId, identity::Kind::Group);
+        refreshGroupMeta(g);
+        std::lock_guard lock(metaMu_);
+        const auto it = groupMeta_.find(g);
+        if (it == groupMeta_.end()) return {};
+        const auto role = it->second.roles.find(nativeId(userId, identity::Kind::User));
+        return role == it->second.roles.end() ? std::string() : role->second;
+    }
+
+    void refreshGroupMeta(const std::string& groupId) const {
+        if (groupId.empty() || accessToken_.empty()) return;
+        {
+            std::lock_guard lock(metaMu_);
+            auto& meta = groupMeta_[groupId];
+            if (meta.refreshing) return;
+            if (meta.refreshedAt && std::time(nullptr) - meta.refreshedAt < kGroupMetaTtlSeconds) return;
+            meta.refreshing = true;
+        }
+        auto self = std::const_pointer_cast<QQOfficialAdapter>(shared_from_this());
+        self->officialApi(drogon::Get, "/v2/groups/" + groupId + "/info", json::object(),
+            [self, groupId](json result) {
+                if (result.value("ok", false)) {
+                    const json data = result.value("data", json::object());
+                    std::lock_guard lock(self->metaMu_);
+                    self->groupMeta_[groupId].name = data.value("group_name", std::string());
+                }
+                self->refreshGroupMembers(groupId, std::string(), {});
+            });
+    }
+
+    void refreshGroupMembers(const std::string& groupId, const std::string& cursor,
+                             std::vector<std::pair<std::string, std::string>> collected) {
+        json query;
+        if (!cursor.empty()) query["cursor"] = cursor;
+        auto self = shared_from_this();
+        officialApi(drogon::Get, "/v2/groups/" + groupId + "/members", query,
+            [self, groupId, collected = std::move(collected)](json result) mutable {
+                if (!result.value("ok", false)) { self->finishGroupMeta(groupId, std::move(collected), false); return; }
+                const json data = result.value("data", json::object());
+                if (data.contains("members") && data["members"].is_array()) {
+                    for (const auto& entry : data["members"]) {
+                        if (!entry.is_object()) continue;
+                        const std::string openid = entry.value("member_openid", std::string());
+                        if (openid.empty()) continue;
+                        collected.emplace_back(openid, entry.value("member_role", std::string("member")));
+                    }
+                }
+                const std::string next = data.value("next_cursor", std::string());
+                if (!next.empty() && collected.size() < kGroupMemberCap) {
+                    self->refreshGroupMembers(groupId, next, std::move(collected));
+                    return;
+                }
+                self->finishGroupMeta(groupId, std::move(collected), true);
+            });
+    }
+
+    /// 失败时保留上一次的成员表：半份名单比空名单更糟，会让权限判断忽然失灵。
+    void finishGroupMeta(const std::string& groupId, std::vector<std::pair<std::string, std::string>> members, bool ok) {
+        std::lock_guard lock(metaMu_);
+        auto& meta = groupMeta_[groupId];
+        meta.refreshing = false;
+        meta.refreshedAt = std::time(nullptr);
+        if (!ok) return;
+        meta.memberIds.clear();
+        meta.roles.clear();
+        meta.memberIds.reserve(members.size());
+        for (auto& entry : members) {
+            meta.memberIds.push_back(entry.first);
+            meta.roles[entry.first] = entry.second;
+        }
+    }
+
+    static std::string urlEncode(const std::string& value) {
+        static const char* kHex = "0123456789ABCDEF";
+        std::string out;
+        for (unsigned char c : value) {
+            if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += static_cast<char>(c);
+            else { out += '%'; out += kHex[c >> 4]; out += kHex[c & 0x0F]; }
+        }
+        return out;
+    }
+
+    /// 平铺 JSON 对象 → 查询串。官方 GET 接口的分页游标等参数走 query，读不到请求体。
+    static std::string queryString(const json& params) {
+        if (!params.is_object()) return {};
+        std::string out;
+        for (const auto& item : params.items()) {
+            const json& value = item.value();
+            std::string text;
+            if (value.is_string()) text = value.get<std::string>();
+            else if (value.is_boolean()) text = value.get<bool>() ? "true" : "false";
+            else if (value.is_number()) text = value.dump();
+            else continue;   // 对象/数组无法出现在查询串里
+            if (!out.empty()) out += "&";
+            out += urlEncode(item.key()) + "=" + urlEncode(text);
+        }
+        return out;
+    }
+
     void officialApi(drogon::HttpMethod method, const std::string& path, const json& body, ActionCallback cb) {
         if (accessToken_.empty()) { cb(apiResult(false, 0, "QQ 官方机器人尚未取得 AccessToken")); return; }
         auto client = httpsClient("api.bot.qq.com");
         if (!client) { cb(apiResult(false, 0, "无法解析 api.bot.qq.com")); return; }
         auto request = drogon::HttpRequest::newHttpRequest();
         request->setMethod(method);
-        request->setPath(path);
+        if (method == drogon::Get) {
+            // 查询串已逐段编码，关掉 drogon 的整体编码，否则 ? 与 & 会被转义。
+            const std::string query = queryString(body);
+            request->setPathEncode(false);
+            request->setPath(query.empty() ? path : path + "?" + query);
+        } else {
+            request->setPath(path);
+            if (!body.is_null() && !body.empty()) request->setBody(body.dump());
+        }
         request->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         request->addHeader("Host", "api.bot.qq.com");
         request->addHeader("Authorization", "QQBot " + accessToken_);
-        if (!body.is_null() && !body.empty()) request->setBody(body.dump());
         client->sendRequest(request, [self = shared_from_this(), method, path, cb = std::move(cb)](
             drogon::ReqResult result, const drogon::HttpResponsePtr& response) mutable {
             if (result != drogon::ReqResult::Ok || !response) {
@@ -481,6 +757,10 @@ private:
     //   · 公网 URL 直传：POST /v2/{groups|users}/{id}/files {url,...} → file_info；
     //   · 本地文件分片：upload_prepare → PUT 预签名分片 → upload_part_finish → /files 合并。
     // 本地图片不再依赖图床，直接走官方分片上传。
+    // 官方硬上限：任何类型超过 200MB 直接报 850031。软上限（图 20MB / 视频 30MB /
+    // 语音 20MB）只是被降级成文件类型上传，不必我们拦。
+    static constexpr size_t kMediaHardLimitBytes = 200ull * 1024 * 1024;
+
     struct MediaItem { int kind = 4; std::string ref; std::string name; };   // 1=图 2=视频 3=语音 4=文件
     struct SplitText { std::string text; std::vector<MediaItem> media; };
 
@@ -757,6 +1037,13 @@ private:
             if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
             const std::string data = readLocalFile(localPath);
             if (data.empty()) { DICE_LOG_WARN("QQOfficial '{}': 本地媒体文件不存在或为空，跳过: {}", name_, localPath); return; }
+            // 先量大小再上传：超过硬上限的文件官方会在最后一步才报 850031，
+            // 此前的分片全部白传。
+            if (data.size() > kMediaHardLimitBytes) {
+                lastError_ = "媒体文件超过官方 200MB 上限";
+                DICE_LOG_WARN("QQOfficial '{}': 本地媒体 {} 为 {} 字节，超过官方 200MB 硬上限，跳过", name_, localPath, data.size());
+                return;
+            }
             DICE_LOG_INFO("QQOfficial '{}': 本地媒体 {} ({} bytes, kind={})，开始官方分片上传", name_, localPath, data.size(), item.kind);
             const bool priv = m.type == MessageType::kPrivate;
             const std::string fname = mediaFileName(item, localPath);
@@ -774,7 +1061,8 @@ private:
             r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
             r->addHeader("Host", "api.bot.qq.com");
             r->addHeader("Authorization", "QQBot " + accessToken_);
-            r->setBody(json{{"file_type", ftype}, {"file_size", data.size()}, {"file_name", fname},
+            // file_size / block_size 在官方规格里是字符串，不是数字。
+            r->setBody(json{{"file_type", ftype}, {"file_size", std::to_string(data.size())}, {"file_name", fname},
                             {"md5", md5}, {"sha1", sha1}, {"md5_10m", md5_10m}}.dump());
             DICE_LOG_INFO("QQOfficial '{}': 发起 upload_prepare {} file_type={} file_name={}", name_, prepPath, ftype, fname);
             auto self = shared_from_this();
@@ -855,7 +1143,8 @@ private:
                     r2->setContentTypeCode(drogon::CT_APPLICATION_JSON);
                     r2->addHeader("Host", "api.bot.qq.com");
                     r2->addHeader("Authorization", "QQBot " + self->accessToken_);
-                    r2->setBody(json{{"upload_id", uploadId}, {"part_index", p.index}, {"block_size", p.size}, {"md5", partMd5}}.dump());
+                    r2->setBody(json{{"upload_id", uploadId}, {"part_index", p.index},
+                                     {"block_size", std::to_string(p.size)}, {"md5", partMd5}}.dump());
                     c2->sendRequest(r2, [self, m, target, priv, data, uploadId, fname, ftype, parts, idx, p, finishPath](drogon::ReqResult rr2, const drogon::HttpResponsePtr& resp2) {
                         self->safeMediaStep("upload_part_finish 回调", [&] {
                             if (rr2 != drogon::ReqResult::Ok || !resp2 || resp2->statusCode() >= 300) {
@@ -1011,6 +1300,6 @@ private:
     }
     void fail(const std::string&e){lastError_=e;connecting_=false;connected_=false;DICE_LOG_ERROR("QQOfficial '{}': {}",name_,e);}
     inline static std::function<std::string(const std::string&)> imagePublisher_;   // 本地图 → 公网 URL（图床）
-    std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,accessToken_,loginId_,loginName_,sessionId_,gatewayUrl_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{identity::BindingStore::instance().database()}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; int64_t seq_=-1; std::shared_ptr<QQGatewaySocket> gateway_; std::optional<trantor::TimerId> heartbeatTimer_,accessTokenTimer_; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::unordered_map<std::string,int> replySeq_; std::unordered_map<std::string,std::pair<std::string,std::time_t>> pendingEvents_;
+    std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,accessToken_,loginId_,loginName_,sessionId_,gatewayUrl_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{identity::BindingStore::instance().database()}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; int64_t seq_=-1; std::shared_ptr<QQGatewaySocket> gateway_; std::optional<trantor::TimerId> heartbeatTimer_,accessTokenTimer_; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::unordered_map<std::string,int> replySeq_; std::unordered_map<std::string,std::pair<std::string,std::time_t>> pendingEvents_; mutable std::mutex metaMu_; mutable std::unordered_map<std::string,GroupMeta> groupMeta_;
 };
 }

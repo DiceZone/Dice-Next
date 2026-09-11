@@ -5657,6 +5657,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (section == "mute") action = "qq_get_mute";
                 else if (section == "requests") action = "qq_join_requests";
                 else if (section == "strategies") action = "qq_list_join_strategies";
+                else if (section == "info") action = "qq_group_info";
+                else if (section == "botState") action = "qq_bot_state";
+                else if (section == "members") action = "qq_group_members";
+                else if (section == "blacklist") action = "qq_blacklist";
                 else { jsonReply(fail("unknown section"), std::move(cb)); return; }
                 const std::string cursor = req->getParameter("cursor");
                 if (!cursor.empty()) params["cursor"] = cursor;
@@ -5671,6 +5675,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 else if (op == "deleteStrategy") action = "qq_delete_join_strategy";
                 else if (op == "executeStrategy") action = "qq_execute_join_strategy";
                 else if (op == "updateWhitelist") action = "qq_update_join_whitelist";
+                else if (op == "setBlacklist") action = "qq_set_blacklist";
+                else if (op == "removeMembers") action = "qq_remove_members";
+                else if (op == "recall") action = "qq_recall";
                 else { jsonReply(fail("unknown action"), std::move(cb)); return; }
             }
             a->invokeActionAsync(action, params, [cb = std::move(cb)](J result) mutable {
