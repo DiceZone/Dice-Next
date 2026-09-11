@@ -86,6 +86,42 @@ public:
     bool isGroupOwner(const std::string& groupId, const std::string& userId) const override {
         return memberRole(groupId, userId) == "owner";
     }
+    /// `.log export` 一类功能走这里，而不是消息里的媒体码。官方没有独立的"群文件"
+    /// 接口，按文件类型（file_type=4）发富媒体到群里，落到群聊里就是一个文件。
+    void uploadGroupFile(const std::string& groupId, const std::string& name,
+                         const std::string& content, const std::string& localPath = "") override {
+        if (groupId.empty()) return;
+        std::string path = localPath;
+        if (path.empty()) {
+            // 官方接口只收公网 URL 或本地分片，拿不到内存里的内容流：调用方没落地
+            // 文件时自己写一份。
+            try {
+                std::filesystem::create_directories("data/assets");
+                const std::string fname = name.empty() ? std::string("upload.bin") : name;
+                const auto full = std::filesystem::absolute(
+                    std::filesystem::path("data/assets") / std::filesystem::path(std::u8string(fname.begin(), fname.end())));
+                std::ofstream out(full, std::ios::binary);
+                if (!out) throw std::runtime_error("open failed");
+                out.write(content.data(), static_cast<std::streamsize>(content.size()));
+                out.close();
+                const auto u8 = full.u8string();
+                path.assign(u8.begin(), u8.end());
+            } catch (const std::exception& e) {
+                lastError_ = "群文件落地失败";
+                DICE_LOG_WARN("QQOfficial '{}': 群文件落地失败，跳过 {}：{}", name_, name, e.what());
+                return;
+            }
+        }
+        Message m;
+        m.type = MessageType::kGroup;
+        m.targetId = groupId;
+        m.adapterId = id_;
+        MediaItem item;
+        item.kind = 4;           // 文件
+        item.name = name;
+        item.ref = path;
+        sendMediaTo(m, item);
+    }
     void setGroupKick(const std::string& groupId, const std::string& userId) override {
         if (groupId.empty() || userId.empty()) return;
         officialApi(drogon::Post,
@@ -138,6 +174,7 @@ public:
         // 否则已获权限的机器人也永远用不上。
         caps["kick"] = true;
         caps["member_list"] = true;
+        caps["group_file"] = true;   // 没有独立群文件接口，按 file_type=4 富媒体发送
         caps["group_info"] = true;
         caps["group_blacklist"] = true;
         caps["message_recall"] = true;
