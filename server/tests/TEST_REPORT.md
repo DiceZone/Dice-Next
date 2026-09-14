@@ -2,6 +2,52 @@
 
 Date: 2026-09-03
 
+## 2026-09-14: BDC cloud character cards
+
+Protocol baseline: `ShiaNyaa/Better-Dice-Control` commit `b894848`, verified
+against GitHub HEAD and the local `cloud_cards.py`, `oauth_device.py`, and
+`cards/document.py` implementations. No BDC source or production player data
+was modified during this adaptation.
+
+Final verification:
+
+- Release server and test executables build successfully.
+- Full CTest: 381 core cases / 1863 assertions and 9 Lua cases / 71 assertions pass.
+- Cloud-card filter: 17 registered cases (including the opt-in live probe),
+  118 offline assertions pass. The separately enabled live probe passes 2/2
+  assertions using the actual production HTTPS transport and public Discovery.
+- Documentation-site `npm run docs:build` passes. Changes remain local/unpublished.
+
+Coverage includes schema/type rejection, numeric/text/lock/unknown-field
+conversion, least-privilege authorization, pending/slow-down/denied/expired
+device states, adapter/player/native-identity isolation, key rotation/removal,
+read-only scopes, revocation, restart without credential persistence, local
+name collisions and ambiguous legacy rows, stable cloud IDs after rename,
+offline bindings, server merge responses, 409 without retry or base revision
+advancement, compare-and-swap protection against edits during HTTP requests,
+and the bounded background queue.
+
+The public BDC Discovery currently omits the device authorization endpoint.
+After checking the official issuer, the client uses the verified same-origin
+compatibility path `/api/oauth/device_authorization`; token endpoint discovery
+still rejects other origins. API keys, access tokens and device codes never
+enter ordinary reply logging or on-disk sync state.
+
+Scope/remaining integration checks:
+
+- This release provides explicit private-chat `.pc cloud` commands, not
+  automatic background card synchronization or a WebUI conflict editor.
+- BDC's current device grant returns no Refresh Token. Expiry/restart requires
+  reauthorization; local cards and persistent ID mappings survive.
+- Tests do not grant consent on a real player's behalf, access real private
+  cloud cards, or prove authenticated production round trips. A user must
+  complete the website consent flow with a verified adapter API key for that
+  final end-to-end check.
+- Separately stored local formula/weapon shortcuts are outside BDC schema v1;
+  unknown fields in the card document are retained, not executed as commands.
+
+Usage and compatibility boundaries: [cloud-cards.md](../../docs/cloud-cards.md).
+
 ## 2026-09-07: bot-off logging and operational command regression
 
 Full local Release regression: 343 core cases / 1485 assertions and 9 Lua cases /

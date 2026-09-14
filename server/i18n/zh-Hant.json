@@ -1,4 +1,33 @@
 {
+  "cloud_card": {
+    "queued": "正在背景處理雲人物卡請求，結果會私發給你，不影響普通擲骰。",
+    "usage": "雲人物卡（請私聊）：.pc cloud auth [read|write] 授權；網頁同意後 .pc cloud confirm；list 查看雲卡；pull 雲卡ID [本地卡名] 拉取；push 本地卡名 首次上傳；sync 本地卡名 同步；status 查看授權；logout 清除本機授權。預設唯讀，寫入須明確 auth write；不會自動同步。",
+    "private_only": "雲人物卡僅供玩家本人私聊操作，請私聊本骰使用 .pc cloud；不能代他人授權或同步。",
+    "no_adapter": "目前不是可用的真實私聊連線，請在平台上私聊本骰操作。",
+    "no_key": "目前骰娘未設定有效的 BDC 骰娘 API Key。請骰主在帳號中心驗證綁定後，在此適配器填寫 heart_api_key；未驗證心跳 Key 不能用於雲卡。",
+    "auth_code": "請由你本人開啟 {url}，輸入驗證碼 {code}（{seconds} 秒內有效）。核對骰娘及骰主身分，按需勾選寫入權限。同意後回到本私聊發送 .pc cloud confirm。不要轉發驗證碼或替他人授權。",
+    "auth_sent": "授權說明已單獨私發。網頁同意後發送 .pc cloud confirm；未收到可先 .pc cloud logout 再重新授權。",
+    "authorized": "雲人物卡授權已就緒。使用 .pc cloud list 查看；令牌過期或程式重啟後需重新授權。",
+    "pending": "仍在等待網頁授權；請完成同意後發送 .pc cloud confirm。驗證碼遺失可先 logout 再重新授權。",
+    "wait": "請求過於頻繁，請稍等再發送 .pc cloud confirm 或重試原指令。",
+    "denied": "此次授權已拒絕或取消。未讀取或改動雲人物卡。",
+    "expired": "尚未授權，或授權已過期、撤銷／骰娘金鑰已更換。請重新 .pc cloud auth；本地卡不受影響。",
+    "logout": "已清除本機暫存令牌與待授權碼，本地卡和雲卡均保留。如需徹底撤銷，請到帳號中心「已授權應用」撤銷該骰娘。",
+    "readonly": "本次授權缺少所需的雲卡讀寫權限。上傳或同步需先 .pc cloud auth write 並在網頁同意寫入。",
+    "busy": "另一個雲卡操作正在處理，請稍後重試。",
+    "network": "雲卡請求未能確認成功，請稍後重試；本地卡保持不變。若剛執行首次上傳，請先 list 檢查是否已建立，避免重複。",
+    "bad_response": "雲卡格式／版本不支援、回應異常或本地同步狀態無法儲存。本地既有卡不會被強制覆蓋，請檢查後再試。",
+    "not_found": "雲卡不存在，或不屬於本次授權帳號。",
+    "conflict": "雲端同一欄位也被修改，或基礎修訂已過期；已停止同步，未覆蓋任一方。可用 pull 雲卡ID 新卡名 保留雲端副本對照；不會自動強制覆蓋。",
+    "list": "你的雲人物卡（ID | 名稱 | 修訂）：\n{list}",
+    "pulled": "已拉取雲卡 {id} 到本地「{name}」。在跑團群使用 .pc tag {name} 即可；尚未自動綁定。",
+    "synced": "本地「{name}」已同步到雲卡 {id}，修訂 {rev}。",
+    "local_changes": "本地卡已存在、被修改／鎖定或映射失效，已拒絕覆蓋。請先備份並用 sync 同步；也可 pull 雲卡ID 新卡名 拉取到新的名字。",
+    "local_missing": "本地卡不存在、名稱為空，或同名歷史記錄無法唯一確定。請先用 .pc list 核對並整理卡名。",
+    "locked": "本地卡有讀鎖或寫鎖，不能透過雲同步繞過。請按原有權限解鎖後再操作。",
+    "not_linked": "該本地卡尚未關聯雲卡，請先用 push 本地卡名 上傳，或 pull 雲卡ID 拉取。",
+    "remote_saved": "雲端已儲存，但請求期間本地卡發生變化或被鎖定；本地新改動已保留，請檢查後再次 sync。"
+  },
   "_meta": {
     "name": "繁體中文",
     "keywords": [
@@ -458,7 +487,7 @@
     "usage": "用法：.reply on/off"
   },
   "pc": {
-    "usage": "指令 .pc 用法：\n.pc new <名字> 新建人物卡\n.pc tag <名字> 綁定到該群\n.pc rename <名字> 給目前卡更名\n.pc untag 解除目前綁定\n.pc list 人物卡列表\n.pc del <名字> 刪除人物卡\n.pc @某人 查看他人卡",
+    "usage": "指令 .pc 用法：\n.pc new <名字> 新建人物卡\n.pc tag <名字> 綁定到該群\n.pc rename <名字> 給目前卡更名\n.pc untag 解除目前綁定\n.pc list 人物卡列表\n.pc del <名字> 刪除人物卡\n.pc @某人 查看他人卡\n.pc cloud 雲人物卡（私聊授權／拉取／同步）",
     "list": "{nick} 的人物卡（共 {count} 張）：\n{list}",
     "list_empty": "{nick} 還沒有人物卡，用 .pc new <名字> 新建一張吧。",
     "new": "{nick} 已新建並綁定人物卡：{name}",

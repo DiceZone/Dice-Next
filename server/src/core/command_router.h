@@ -27,6 +27,7 @@
 #include "legacy_command_arguments.h"
 #include "../service/notice_manager.h"   // B：通知系统（权限变更等推送给骰主）
 #include "../service/sensitive_word_filter.h"
+#include "../service/cloud_card_service.h"
 
 #include <sqlite_orm/sqlite_orm.h>
 #include <ctime>
@@ -91,7 +92,7 @@ public:
                   I18n& i18n, LocaleResolver& resolver, CharacterCardStore& cards,
                   CardDeck& deck, AdapterManager& adapters)
         : db_(db), cfg_(cfg), engine_(engine), i18n_(i18n), resolver_(resolver),
-          cards_(cards), deck_(deck), adapters_(adapters) {
+          cards_(cards), deck_(deck), adapters_(adapters), cloudCards_(db, cfg, cards) {
         reloadSensitiveWordRules();
         cfg_.onConfigChanged([this] { reloadSensitiveWordRules(); });
     }
@@ -10159,6 +10160,22 @@ private:
         std::string sub = toLower(trim(subRaw));
         std::string name = trim(rest);
 
+        if (sub == "cloud") {
+            if (msg.type != MessageType::kPrivate || !target.empty() || msg.fromSelf)
+                return i18n_.tr(loc, "cloud_card.private_only");
+            // Authorization codes must never flow through reply logging, AI, plugins,
+            // chat history or game-log persistence. Deliver on the originating adapter.
+            auto adapter = adapters_.getAdapter(msg.adapterId);
+            if (!adapter || !adapter->isConnected()) return i18n_.tr(loc, "cloud_card.no_adapter");
+            if (name.empty() || name == "help") return i18n_.tr(loc, "cloud_card.usage");
+            auto* translations = &i18n_;
+            const bool queued = cloudCards_.dispatch(msg, name,
+                [adapter, msg, loc, translations](cloud_cards::Result res) {
+                    if (adapter->isConnected()) adapter->sendReply(msg, translations->tr(loc, res.key, res.args));
+                });
+            return i18n_.tr(loc, queued ? "cloud_card.queued" : "cloud_card.busy");
+        }
+
         // Bare ".pc": view the @'d user's card; otherwise show usage (use .pc list
         // to list your cards) — per user feedback, bare .pc returning help is clearer.
         if (sub.empty()) {
@@ -11462,6 +11479,7 @@ private:
     CharacterCardStore& cards_;
     CardDeck& deck_;
     AdapterManager& adapters_;
+    cloud_cards::Service cloudCards_;
     censor::Matcher sensitiveWordMatcher_;
     PersonaManager* personaMgr_ = nullptr;  // set via setPersonaManager()
     LuaTaskExistsFn luaTaskExists_;

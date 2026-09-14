@@ -1,4 +1,33 @@
 {
+  "cloud_card": {
+    "queued": "Processing your cloud card request in the background. Results will be sent privately; ordinary rolls are unaffected.",
+    "usage": "Private chat: .pc cloud auth [read|write]; approve on the website, then .pc cloud confirm. Commands: list; pull CLOUD_ID [LOCAL_NAME]; push LOCAL_NAME; sync LOCAL_NAME; status; logout. Read-only by default; write access requires auth write and consent. No automatic sync.",
+    "private_only": "Use .pc cloud in your own private chat with this bot. Proxy authorization/synchronization is not allowed.",
+    "no_adapter": "Use a real, connected platform private chat for cloud cards.",
+    "no_key": "This adapter needs its verified BDC dice API key (heart_api_key). An unverified heartbeat key is not sufficient.",
+    "auth_code": "Open {url} yourself and enter {code} within {seconds} seconds. Verify the bot and owner, and consent to write access only if wanted. Then send .pc cloud confirm here. Do not forward this code or approve someone else's request.",
+    "auth_sent": "Authorization details were sent separately in private. After website approval, send .pc cloud confirm. If missing, use logout and authorize again.",
+    "authorized": "Cloud card authorization is ready. Use .pc cloud list. Reauthorize after token expiry or a program restart.",
+    "pending": "Waiting for website approval. Approve, then send .pc cloud confirm. If you lost the code, logout and authorize again.",
+    "wait": "Please wait before confirming or retrying the command.",
+    "denied": "Authorization denied/cancelled. No cloud cards were accessed or changed.",
+    "expired": "Authorization is missing, expired, revoked, or the bot key changed. Run .pc cloud auth again. Local cards are unaffected.",
+    "logout": "Local tokens and pending codes cleared. Local/cloud cards remain. Revoke the bot in the account website's authorized applications to withdraw consent completely.",
+    "readonly": "Required cloud card scope missing. Upload/sync requires .pc cloud auth write and explicit website approval.",
+    "busy": "Another cloud card operation is running; retry shortly.",
+    "network": "The cloud request could not be confirmed. Local cards are unchanged. After a first-upload error, check list before retrying to avoid duplicates.",
+    "bad_response": "Unsupported/malformed cloud data or local sync-state storage failure. Existing local cards are not forcibly overwritten.",
+    "not_found": "Cloud card not found or not owned by the authorized account.",
+    "conflict": "Concurrent edits or expired merge base: sync stopped without overwriting either side. Pull CLOUD_ID NEW_LOCAL_NAME to inspect a separate cloud copy. No forced overwrite is attempted.",
+    "list": "Your cloud cards (ID | name | revision):\n{list}",
+    "pulled": "Cloud card {id} imported as '{name}'. Use .pc tag {name} in your game group; no automatic binding was changed.",
+    "synced": "'{name}' synchronized with cloud card {id}, revision {rev}.",
+    "local_changes": "Local card exists, changed, is locked, or its link is invalid; overwrite refused. Back up and sync, or pull CLOUD_ID NEW_LOCAL_NAME into a separate card.",
+    "local_missing": "Local card missing, unnamed, or ambiguous legacy duplicates exist. Check .pc list and resolve names first.",
+    "locked": "Local read/write locks cannot be bypassed by cloud synchronization.",
+    "not_linked": "No cloud link for this local card. Push it first, or pull a cloud card.",
+    "remote_saved": "Cloud saved, but the local card changed/was locked during the request. New local edits are retained; review and sync again."
+  },
   "_meta": {
     "name": "English",
     "keywords": [
@@ -452,7 +481,7 @@
     "usage": "Usage: .reply on/off"
   },
   "pc": {
-    "usage": "Command .pc usage:\n.pc new <name> create a card\n.pc tag <name> bind to this group\n.pc rename <name> rename current card\n.pc untag unbind current card\n.pc list list cards\n.pc del <name> delete a card\n.pc @someone view their card",
+    "usage": "Command .pc usage:\n.pc new <name> create a card\n.pc tag <name> bind to this group\n.pc rename <name> rename current card\n.pc untag unbind current card\n.pc list list cards\n.pc del <name> delete a card\n.pc @someone view their card\n.pc cloud Cloud cards (authorize/pull/sync in private chat)",
     "list": "{nick}'s cards ({count}):\n{list}",
     "list_empty": "{nick} has no character cards yet. Use .pc new <name> to create one.",
     "new": "{nick} created and bound card: {name}",

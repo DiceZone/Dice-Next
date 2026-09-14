@@ -139,6 +139,14 @@ public:
     /// Stable JSON export for legacy ".pc tojson".
     nlohmann::json exportCard(const std::string& user, const std::string& name) const;
 
+    // Cloud sync uses a stable local row identity and compare-and-swap snapshots.
+    // Ambiguous legacy duplicates are rejected, never silently merged/uploaded.
+    struct Snapshot { int id = 0; std::string name; nlohmann::json data; };
+    std::optional<Snapshot> snapshot(const std::string& user, const std::string& name) const;
+    std::optional<Snapshot> snapshotById(const std::string& user, int id) const;
+    std::optional<Snapshot> importSnapshot(const std::string& user, const std::string& name,
+        const nlohmann::json& data, const std::optional<Snapshot>& expected = std::nullopt);
+
 private:
     // Internal helpers keyed by (user, cardName).
     std::map<std::string, int> attrsOf(const std::string& user,

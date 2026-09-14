@@ -76,6 +76,7 @@ set(SOURCES
     src/common/hot_reload.cpp
     src/common/subprocess.cpp
     src/service/update_service.cpp
+    src/service/cloud_card_service.cpp
     src/config/config_manager.cpp
     src/storage/database.cpp
     src/storage/migration.cpp

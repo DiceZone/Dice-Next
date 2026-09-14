@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 
 namespace dice {
 
@@ -540,6 +541,67 @@ nlohmann::json CharacterCardStore::exportCard(const std::string& user,
                                                const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return nlohmann::json{{"name", name}, {"data", rawCardJson(user, name)}};
+}
+
+std::optional<CharacterCardStore::Snapshot> CharacterCardStore::snapshot(
+        const std::string& user, const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto* st = db_.getCardStorage(); if (!st) return std::nullopt;
+    auto rows = st->get_all<CharacterCardRow>(orm::where(
+        orm::c(&CharacterCardRow::userId) == user and orm::c(&CharacterCardRow::name) == name));
+    if (rows.size() != 1) return std::nullopt;
+    auto data = json::parse(rows.front().attrs, nullptr, false);
+    if (!data.is_object()) return std::nullopt;
+    return Snapshot{rows.front().id, rows.front().name, std::move(data)};
+}
+
+std::optional<CharacterCardStore::Snapshot> CharacterCardStore::snapshotById(
+        const std::string& user, int id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto* st = db_.getCardStorage(); if (!st) return std::nullopt;
+    auto rows = st->get_all<CharacterCardRow>(orm::where(
+        orm::c(&CharacterCardRow::userId) == user and orm::c(&CharacterCardRow::id) == id));
+    if (rows.size() != 1) return std::nullopt;
+    auto data = json::parse(rows.front().attrs, nullptr, false);
+    if (!data.is_object()) return std::nullopt;
+    return Snapshot{rows.front().id, rows.front().name, std::move(data)};
+}
+
+std::optional<CharacterCardStore::Snapshot> CharacterCardStore::importSnapshot(
+        const std::string& user, const std::string& name, const json& data,
+        const std::optional<Snapshot>& expected) {
+    if (name.empty() || !data.is_object()) return std::nullopt;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto* st = db_.getCardStorage(); if (!st) return std::nullopt;
+    auto rows = st->get_all<CharacterCardRow>(orm::where(
+        orm::c(&CharacterCardRow::userId) == user and orm::c(&CharacterCardRow::name) == name));
+    CharacterCardRow row;
+    if (expected) {
+        if (rows.size() != 1 || rows.front().id != expected->id || name != expected->name ||
+            json::parse(rows.front().attrs, nullptr, false) != expected->data) return std::nullopt;
+        row = rows.front();
+        // Cloud import must not bypass a local write lock.
+        auto meta = expected->data.value("__meta", json::object());
+        if (meta.is_object() && meta.contains("locks") && meta["locks"].is_string()) {
+            std::istringstream locks(meta["locks"].get<std::string>()); std::string key;
+            while (std::getline(locks, key, ',')) if (key == "w") return std::nullopt;
+        }
+    } else {
+        if (!rows.empty()) return std::nullopt;
+        row.userId = user; row.name = name;
+    }
+    row.attrs = data.dump(); row.updatedAt = nowIso();
+    if (expected) {
+        // Also defend against writers outside this store's mutex (e.g. WebUI).
+        st->update_all(orm::set(orm::c(&CharacterCardRow::attrs) = row.attrs,
+                              orm::c(&CharacterCardRow::updatedAt) = row.updatedAt),
+            orm::where(orm::c(&CharacterCardRow::id) == row.id and
+                       orm::c(&CharacterCardRow::userId) == user and
+                       orm::c(&CharacterCardRow::name) == name and
+                       orm::c(&CharacterCardRow::attrs) == rows.front().attrs));
+        if (st->changes() != 1) return std::nullopt;
+    } else row.id = st->insert(row);
+    return Snapshot{row.id, row.name, data};
 }
 
 }  // namespace dice

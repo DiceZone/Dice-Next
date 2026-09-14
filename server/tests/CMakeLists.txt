@@ -26,6 +26,7 @@ set(TEST_SOURCES
     test_check_roll_override.cpp
     test_markdown.cpp
     test_heart_debounce.cpp
+    test_cloud_cards.cpp
     test_command_prefix_policy.cpp
     test_me_command.cpp
     test_log_bot_off.cpp
@@ -49,6 +50,7 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/version.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/subprocess.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_service.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/cloud_card_service.cpp
     ${VERSION_BUILD_SOURCE}
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/markdown.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/markdown_md4c.cpp
