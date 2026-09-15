@@ -177,6 +177,8 @@ static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std:
         {"appId", official && cfg.is_object() ? cfg.value("appId", std::string()) : std::string()},
         {"qqNumber", official && cfg.is_object() ? cfg.value("qqNumber", std::string()) : std::string()},
         {"forceVerifyImageResource", official && cfg.is_object() ? cfg.value("forceVerifyImageResource", false) : false},
+        {"qqRichReplies", official ? qq_rich::style(cfg.value("qqRichReplies", std::string("off"))) : "off"},
+        {"qqInteractions", official ? qq_rich::interaction(cfg.value("qqInteractions", std::string("links"))) : "off"},
         {"heartApiKeyConfigured", !heartApiKey.empty()},
         {"heartApiKeyTail", heartApiKey.size() > 4 ? heartApiKey.substr(heartApiKey.size() - 4) : std::string()},
         {"enabled", a.enabled},
@@ -197,6 +199,8 @@ static J adapterToConfigJson(const AdapterRow& a) {
         out["app_secret"] = extra.value("appSecret", std::string());
         out["qq_number"] = extra.value("qqNumber", std::string());
         out["force_verify_image_resource"] = extra.value("forceVerifyImageResource", false);
+        out["qq_rich_replies"] = extra.value("qqRichReplies", std::string("off"));
+        out["qq_interactions"] = extra.value("qqInteractions", std::string("links"));
     }
     if (a.type == static_cast<int>(AdapterType::kMilky)) {
         out["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));
@@ -221,6 +225,8 @@ static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
                             {"appSecret", cfg.value("appSecret", std::string())},
                             {"qqNumber", cfg.value("qqNumber", std::string())},
                             {"forceVerifyImageResource", cfg.value("forceVerifyImageResource", false)},
+                            {"qqRichReplies", cfg.value("qqRichReplies", std::string("off"))},
+                            {"qqInteractions", cfg.value("qqInteractions", std::string("links"))},
                             {"message_format", cfg.value("message_format", std::string())}});
         return adapter;
     }
@@ -2333,6 +2339,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     a.config = J{{"appId", appId}, {"appSecret", appSecret},
                                  {"qqNumber", j.value("qqNumber", std::string())},
                                  {"forceVerifyImageResource", j.value("forceVerifyImageResource", false)},
+                                 {"qqRichReplies", qq_rich::style(j.value("qqRichReplies", std::string("off")))},
+                                 {"qqInteractions", qq_rich::interaction(j.value("qqInteractions", std::string("links")))},
                                  {"heartApiKey", heartApiKey}}.dump();
                 } else if (a.type == static_cast<int>(AdapterType::kDiscord)
                            || a.type == static_cast<int>(AdapterType::kKook)) {
@@ -2399,6 +2407,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         adapterCfg["forceVerifyImageResource"] = j["forceVerifyImageResource"];
                     }
                     if (adapterCfg.value("appId", std::string()).empty() || adapterCfg.value("appSecret", std::string()).empty()) throw std::runtime_error("QQ 官方机器人需要 AppID 和 AppSecret");
+                    for (const auto* key : {"qqRichReplies", "qqInteractions"}) if (j.contains(key)) {
+                        const auto raw = j.at(key).get<std::string>();
+                        const auto value = std::string(key) == "qqRichReplies" ? qq_rich::style(raw) : qq_rich::interaction(raw);
+                        if (raw != value) throw std::runtime_error("Invalid QQ rich-message option");
+                        runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value(key, std::string()) != value;
+                        adapterCfg[key] = value;
+                    }
                 } else {
                     if (a.type == static_cast<int>(AdapterType::kMilky)) {
                         const bool hadWebhookConfig = adapterCfg.contains("webhookBaseUrl") || adapterCfg.contains("webhook_base_url") ||

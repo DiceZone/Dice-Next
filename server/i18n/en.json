@@ -1,4 +1,16 @@
 {
+  "qq_rich": {
+    "title": "{name} · Character status",
+    "bound": "✓ Character card bound",
+    "unbound": "No named card bound; using current session data",
+    "changes": "Actual attribute changes",
+    "status": "View status",
+    "show": "View character",
+    "edit": "Edit attributes",
+    "check": "Make a check",
+    "empty": "No HP, SAN or MP recorded. Use .st hp14/14 san65/99 mp12/12 with your character's values.",
+    "status_usage": "Usage: .pc status (view your current status)"
+  },
   "cloud_card": {
     "queued": "Processing your cloud card request in the background. Results will be sent privately; ordinary rolls are unaffected.",
     "usage": "Private chat: .pc cloud auth [read|write]; approve on the website, then .pc cloud confirm. Commands: list; pull CLOUD_ID [LOCAL_NAME]; push LOCAL_NAME; sync LOCAL_NAME; status; logout. Read-only by default; write access requires auth write and consent. No automatic sync.",
@@ -351,6 +363,9 @@
     "list": "Account aliases:\n{list}"
   },
   "bot": {
+    "text_usage": "This conversation: {state}\n.bot text plain: use plain text\n.bot text rich: follow the bot owner's settings (global/account restrictions still apply)",
+    "text_plain": "plain text",
+    "text_follow": "follow the bot owner's settings",
     "on": "{self} enabled √",
     "off": "{self} disabled √",
     "usage": ".bot on/off [bot ID]: overall group switch\n.bot log/reply/roll/plugin on/off [bot ID]: feature switches",

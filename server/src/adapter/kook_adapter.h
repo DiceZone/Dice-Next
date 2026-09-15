@@ -108,7 +108,7 @@ public:
         const std::string content = translateCQ(text);
         if (native.empty() || content.empty()) return;
         restRequest(drogon::Post, "/api/v3/message/create",
-                    outboundPayload(native, content, format), nullptr);
+                    outboundPayload(native, content, format, destinationPlainText(channelId, MessageType::kGroup)), nullptr);
     }
     void sendPrivateMessage(const std::string& userId, const std::string& text) override {
         sendPrivateMessageFormatted(userId, text, ContentFormat::kPlainText);
@@ -118,17 +118,21 @@ public:
         const std::string content = translateCQ(text);
         if (native.empty() || content.empty()) return;
         restRequest(drogon::Post, "/api/v3/direct-message/create",
-                    outboundPayload(native, content, format), nullptr);
+                    outboundPayload(native, content, format, destinationPlainText(userId, MessageType::kPrivate)), nullptr);
     }
 
 private:
+    bool destinationPlainText(const std::string& target, MessageType type) const {
+        Message m; m.targetId = target; m.type = type;
+        return forcePlainTextFor(m);
+    }
     /// KOOK CardMessage is a documented rich-message type.  Keep oversized
     /// messages in the existing KMarkdown/text path so no reply is truncated.
-    json outboundPayload(const std::string& target, const std::string& content, ContentFormat format) {
+    json outboundPayload(const std::string& target, const std::string& content, ContentFormat format, bool forcePlain = false) {
         const bool isMarkdown = format == ContentFormat::kMarkdown;
         if (content.size() > 5000)
             return json{{"type", 1}, {"target_id", target}, {"content", isMarkdown ? markdown::toPlainText(content) : content}};
-        if (!effectiveCardMode())
+        if (forcePlain || !effectiveCardMode())
             return json{{"type", 1}, {"target_id", target},
                         {"content", isMarkdown ? markdown::toPlainText(content) : content}};
         const std::string wire = isMarkdown ? content : markdown::escapeLiteral(content);
@@ -374,15 +378,12 @@ private:
         if (m.extra.is_object()) native = m.extra.value("__identity_native_target", std::string());
         const std::string content = translateCQ(text);
         if (content.empty()) return;
-        if (m.type == MessageType::kPrivate) {
-            if (!native.empty()) restRequest(drogon::Post, "/api/v3/direct-message/create",
-                                             outboundPayload(native, content, format), nullptr);
-            else sendPrivateMessageFormatted(m.targetId, text, format);
-        } else {
-            if (!native.empty()) restRequest(drogon::Post, "/api/v3/message/create",
-                                             outboundPayload(native, content, format), nullptr);
-            else sendGroupMessageFormatted(m.targetId, text, format);
-        }
+        if (native.empty()) native = nativeId(m.targetId,
+            m.type == MessageType::kPrivate ? identity::Kind::User : identity::Kind::Group);
+        if (native.empty()) return;
+        restRequest(drogon::Post, m.type == MessageType::kPrivate
+            ? "/api/v3/direct-message/create" : "/api/v3/message/create",
+            outboundPayload(native, content, format, forcePlainTextFor(m)), nullptr);
     }
 
     void fail(const std::string& e) {

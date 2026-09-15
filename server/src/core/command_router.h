@@ -9,6 +9,7 @@
 // tr(locale, key, args). No hardcoded natural-language strings here.
 
 #include "../adapter/adapter_interface.h"
+#include "../common/qq_rich_reply.h"
 #include "../common/subprocess.h"
 #include "../adapter/adapter_manager.h"
 #include "../core/dice/dice_engine.h"
@@ -170,6 +171,8 @@ public:
     inline static thread_local std::string s_replyCat;
     const std::string& lastReplyCategory() const { return s_replyCat; }
     bool lastReplyWasRoll() const { return s_replyCat == "roll"; }
+    inline static thread_local std::shared_ptr<const qq_rich::Card> officialCard_;
+    std::shared_ptr<const qq_rich::Card> lastOfficialCard() const { return officialCard_; }
 
     /// Process an incoming message and return the response (or empty string if no match).
     /// Called by adapter message callbacks.
@@ -178,6 +181,7 @@ public:
         quoteOverride_.clear();   // reset per-message reply-quote override (#10)
         forwardNodes_.clear();    // reset per-message 合并转发节点 (#6)
         s_replyCat.clear();       // 每条消息重置回复类别
+        officialCard_.reset();
         const std::string personaGroupId =
             (msg.type == MessageType::kGroup || msg.type == MessageType::kChannel)
                 ? msg.targetId : std::string();
@@ -3266,6 +3270,52 @@ private:
             {"threshold", threshold >= 0 ? std::to_string(threshold) : ""}});
     }
 
+    qq_rich::Card characterStatus(Locale loc, const Message& msg) const {
+        qq_rich::Card card;
+        const auto bound = cards_.boundCard(msg.senderId, cardScope(msg));
+        card.title = i18n_.tr(loc, "qq_rich.title", {{"name", bound.empty() ? personName(msg) : bound}});
+        card.footer = i18n_.tr(loc, bound.empty() ? "qq_rich.unbound" : "qq_rich.bound");
+        card.changeLabel = i18n_.tr(loc, "qq_rich.changes");
+        for (const auto& [label, attr] : std::vector<std::pair<std::string, std::string>>{
+                 {"HP", "生命"}, {"SAN", "理智"}, {"MP", "魔法"}}) {
+            // Missing data stays missing; maxima follow the existing card rules.
+            const auto canon = CharacterCardStore::canonical(attr);
+            if (auto current = cards_.getAttr(msg.senderId, cardScope(msg), canon)) {
+                auto maximum = attrMax(canon, msg);
+                if (!maximum) maximum = derivedAttr(msg, label == "HP" ? "最大生命值"
+                    : label == "SAN" ? "最大理智值" : "最大魔法值");
+                card.vitals.push_back({label, *current, maximum});
+            }
+        }
+        const auto prefixes = commandPrefixes();
+        const auto prefix = prefixes.empty() ? "." : prefixes.front();
+        card.commands = {
+            {i18n_.tr(loc, "qq_rich.status"), prefix + "pc status"},
+            {i18n_.tr(loc, "qq_rich.show"), prefix + "pc show"},
+            {i18n_.tr(loc, "qq_rich.edit"), prefix + "st "},
+            {i18n_.tr(loc, "qq_rich.check"), prefix + (dndModeOn(msg) ? "rc " : "ra ")}
+        };
+        return card;
+    }
+    std::string withOfficialCard(Locale loc, const Message& msg, std::string reply,
+                                const std::map<std::string, int>& before = {},
+                                const std::map<std::string, int>& changes = {},
+                                std::optional<std::string> compactBody = std::nullopt) {
+        if (msg.platform != "qq_official" || msg.type == MessageType::kChannel
+            || cards_.cardLocked(msg.senderId, cardScope(msg), "r")) return reply;
+        auto card = characterStatus(loc, msg);
+        card.original = reply;
+        for (const auto& [label, requestedAfter] : changes) {
+            const auto after = cards_.getAttr(msg.senderId, cardScope(msg), label).value_or(requestedAfter);
+            const auto it = before.find(label);
+            if (it != before.end() && it->second == after) continue;
+            card.changes.push_back({label, it == before.end() ? std::nullopt : std::optional<int>(it->second), after});
+        }
+        if (!card.changes.empty()) card.body = std::move(compactBody);
+        officialCard_ = std::make_shared<const qq_rich::Card>(std::move(card));
+        return reply;
+    }
+
     // ─── .st — character card set/show/clear/del ─────────────
 
     // 清空该用户在本卡作用域下所有「卡相关」user_settings（关联属性 sattr: /
@@ -3328,7 +3378,7 @@ private:
                     detail += "技能." + k + ":" + std::to_string(v);
                 }
                 if (detail.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
-                return i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail", detail}});
+                return withOfficialCard(loc, msg, i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail", detail}}));
             }
             // SealDice compat: ".st show <数字>" → attributes ≥ N.
             if (isAllDigits(attr)) {
@@ -3428,6 +3478,7 @@ private:
         }
 
         // Attribute entry: "力量50 敏捷60 hp-2 理智+1d3" ...
+        const auto originalAttrs = msg.platform == "qq_official" ? cards_.getAttrs(user, group) : std::map<std::string, int>{};
         std::map<std::string, int> changes;
         std::map<std::string, std::string> formulaChanges;   // 公式属性（伤害加值）：存原文
         std::map<std::string, std::string> strChanges;       // 关联/表达式属性：存原文
@@ -3709,6 +3760,7 @@ private:
             }
         }
         std::string reply = i18n_.tr(loc, "card.st.done", {{"nick", nick}, {"detail", fdetail}});
+        const auto baseReceipt = reply;
         if (!recalcDetail.empty()) {
             // 列出本次触发重算的基础属性。
             std::string causes;
@@ -3724,7 +3776,20 @@ private:
         if (!dbDetail.empty())   // 告知自动算出的 DB
             reply += "\n" + i18n_.tr(loc, "card.db.auto", {{"db", dbDetail}});
         maybeAutoSn(msg);   // .sn auto：属性变化后实时刷新群名片
-        return reply;
+        std::optional<std::string> compactBody;
+        if (msg.platform == "qq_official" && formulaChanges.empty() && strChanges.empty()
+            && !changes.empty() && changes.size() <= 12 && beforeAllChanged(originalAttrs, changes)
+            && baseReceipt == I18n::interpolate(i18n_.getDefault(loc, "card.st.done"), {{"nick", nick}, {"detail", fdetail}}))
+            compactBody = trim(reply.substr(baseReceipt.size()));
+        return withOfficialCard(loc, msg, std::move(reply), originalAttrs, changes, std::move(compactBody));
+    }
+
+    static bool beforeAllChanged(const std::map<std::string, int>& before, const std::map<std::string, int>& changes) {
+        for (const auto& [key, value] : changes) {
+            const auto it = before.find(key);
+            if (it != before.end() && it->second == value) return false;
+        }
+        return true;
     }
 
     static std::string joinAttrs(const std::map<std::string, int>& attrs) {
@@ -4303,6 +4368,25 @@ private:
         return i18n_.tr(loc, "helpdoc.list", {{"list", list}});
     }
 
+    bool senderIsOfficialGroupInviter(const Message& msg) const {
+        if (msg.platform != "qq_official" || msg.type != MessageType::kGroup
+            || msg.adapterId.empty() || msg.targetId.empty() || !msg.extra.is_object()) return false;
+        const auto native = msg.extra.value("__identity_native_sender", std::string());
+        auto* st = db_.getStorage();
+        if (!st || native.empty()) return false;
+        try {
+            // GROUP_ADD_ROBOT stores op_member_openid for this specific bot/group.
+            // The normalized public sender ID is not the invitation identity.
+            namespace orm = sqlite_orm;
+            const auto rows = st->get_all<GroupAccountSettingRow>(orm::where(
+                orm::c(&GroupAccountSettingRow::adapterId) == msg.adapterId
+                and orm::c(&GroupAccountSettingRow::platform) == msg.platform
+                and orm::c(&GroupAccountSettingRow::groupId) == msg.targetId
+                and orm::c(&GroupAccountSettingRow::key) == std::string("inviter")));
+            return !rows.empty() && rows.front().value == native;
+        } catch (...) { return false; }
+    }
+
     /// .bot / .bot on / .bot off, with account targeting for multi-bot groups:
     ///   .bot5080  /  .bot on 5080  → only the bot whose id ends with 5080 responds.
     std::optional<std::string> tryHandleBot(Locale loc, const Message& msg,
@@ -4317,6 +4401,17 @@ private:
             return std::string();
         }
 
+        if (parsed->feature == "text") {
+            if (action == "plain" || action == "rich") {
+                const bool allowed = msg.type == MessageType::kPrivate || msg.fromSelf || isMaster(msg)
+                    || senderIsOfficialGroupInviter(msg)
+                    || (msg.platform != "qq_official" && senderIsGroupAdmin(msg));
+                if (!allowed) return i18n_.tr(loc, "gate.no_perm");
+                setGroupSetting(msg, conversationTextKey(msg), action == "plain" ? "1" : "");
+            }
+            return i18n_.tr(loc, "bot.text_usage", {{"state", i18n_.tr(loc,
+                conversationPlainText(msg) ? "bot.text_plain" : "bot.text_follow")}});
+        }
         // .bot on/off 需群管权限（原版 DiceEvent.cpp:3216 canRoomHost 门控 on/off）。
         if (!action.empty() && !senderIsGroupAdmin(msg))
             return i18n_.tr(loc, "gate.no_perm");
@@ -4373,6 +4468,18 @@ private:
     }
 
 public:
+    static std::string conversationTextKey(const Message& msg) {
+        return msg.type == MessageType::kPrivate ? "replyTextPrivate" : "replyTextGroup";
+    }
+    bool conversationPlainText(const Message& msg) const {
+        return getGroupSetting(msg, conversationTextKey(msg)) == "1";
+    }
+    bool isTextControl(const Message& msg) const {
+        auto body = commandBody(msg.content);
+        if (!body) body = forcedSafetyCommandBody(msg.content);
+        const auto control = body ? parseBotControlCommand(*body) : std::nullopt;
+        return control && control->feature == "text";
+    }
     // These are stored preferences. The existing bot-off/@ and hard-lock gates
     // are applied separately by each execution path; a sub-switch never wakes a bot.
     static std::string groupFeatureKey(const std::string& feature) {
@@ -10185,6 +10292,20 @@ private:
 
         if (sub == "list") return listMyCards(loc, msg);
 
+        if (sub == "status") {
+            // Self-only entry point: never expose someone else's card through a shortcut.
+            if (!target.empty() || !name.empty()) return i18n_.tr(loc, "qq_rich.status_usage");
+            if (cards_.cardLocked(user, scope, "r")) return i18n_.tr(loc, "card.locked_r");
+            auto card = characterStatus(loc, msg);
+            if (card.vitals.empty()) return i18n_.tr(loc, "qq_rich.empty");
+            card.statusOnly = true;
+            card.original = qq_rich::statusText(card);
+            const auto reply = card.original;
+            if (msg.platform == "qq_official" && msg.type != MessageType::kChannel)
+                officialCard_ = std::make_shared<const qq_rich::Card>(std::move(card));
+            return reply;
+        }
+
         // ".pc rename <新名>"（重命名当前卡）或 ".pc rename <旧名> <新名>"。
         if (sub == "rename" || sub == "rn" || sub == "nn") {
             auto [a1, a2] = splitCommand(name);
@@ -10235,7 +10356,8 @@ private:
         if (sub == "show") {
             // ".pc show" / ".pc show @某人" → view current (or target) card.
             if (!target.empty()) return renderCard(loc, target, scope, personNameOf(msg, target));
-            return renderCard(loc, user, scope, nick);
+            if (cards_.cardLocked(user, scope, "r")) return i18n_.tr(loc, "card.locked_r");
+            return withOfficialCard(loc, msg, renderCard(loc, user, scope, nick));
         }
         if (sub == "stat") return handleHiy(loc, name, msg);
 

@@ -1328,10 +1328,13 @@ static int realMain(int argc, char* argv[]) {
             receivedHook = jsMod.handleMessageReceived(msg, cmdRouter.jsPrivilegeLevel(msg));
 
         dice::ContentFormat preferredReplyFormat = dice::ContentFormat::kPlainText;
+        const bool forcePlainText = cmdRouter.conversationPlainText(msg) || cmdRouter.isTextControl(msg);
         if (auto sourceAdapter = adapterMgr.getAdapter(msg.adapterId))
             preferredReplyFormat = sourceAdapter->preferredReplyFormat(msg);
+        if (forcePlainText) preferredReplyFormat = dice::ContentFormat::kPlainText;
         dice::I18n::beginOutboundCapture(preferredReplyFormat);
         auto reply = cmdRouter.handleMessage(msg);
+        const auto officialCard = cmdRouter.lastOfficialCard();
         dice::ContentFormat replyFormat = dice::I18n::endOutboundCapture();
         bool didCommand = !reply.empty();
         dice::JsPluginManager::Result commandHook;
@@ -1405,7 +1408,7 @@ static int realMain(int argc, char* argv[]) {
         // AI 网关是同步 curl（最长 30s），此前润色/翻译/对话都直接跑在适配器消息线程
         // 上，一次超时全部指令失效 30 秒。需要 AI 后处理的回复把这一整段投给
         // aiwork::Worker 后台执行；不需要 AI 时原地执行，行为与旧版完全一致。
-        auto finishReply = [&adapterMgr, &cmdRouter, &configMgr, &db, &jsMod](
+        auto finishReply = [&adapterMgr, &cmdRouter, &configMgr, &db, &jsMod, officialCard, forcePlainText](
             const dice::Message& msg, std::string reply, std::string broadcast,
             const std::string& aiCat, const std::string& quoteId,
             std::vector<std::string> fwdNodes, bool linkReplyOk,
@@ -1490,6 +1493,14 @@ static int realMain(int argc, char* argv[]) {
                 // A handler may ask to quote a DIFFERENT message (e.g. .log on quotes
                 // the previous .log off). Override the quoted id on a copy of msg.
                 dice::Message replyMsg = msg;
+                replyMsg.forcePlainText = forcePlainText;
+                replyMsg.textPreferenceCaptured = true;
+                // Only the unchanged built-in reply may use its structured snapshot.
+                // AI/plugin replacement, forwarding and other adapters keep normal text.
+                replyMsg.qqRichReply.reset();
+                if (!forcePlainText && msg.platform == "qq_official" && officialCard && reply == officialCard->original
+                    && replyFormat == dice::ContentFormat::kPlainText)
+                    replyMsg.qqRichReply = officialCard;
                 if (!quoteId.empty()) replyMsg.id = quoteId;
                 // 分段发送：超长回复切成多段；首段引用回复，其余作为普通消息（避免 N 次引用）。
                 // 引用开关：骰主关「引用投掷对象发言」后，首段也不引用（但 .log on 等指定引用
@@ -1500,7 +1511,7 @@ static int realMain(int argc, char* argv[]) {
                 // #6 合并转发(聊天记录)：仅群消息、开关开启、且**回复字符数超过阈值**(默认1200，
                 // 应用于所有回复内容)时强制转发。节点也遵守分段设置：有显式节点(.coc/.dnd 每条
                 // 结果)就逐个再按分段切，否则整段按分段切。适配器不支持则回退普通分段发送。
-                bool wantForward = !priv && !msg.targetId.empty() && cmdRouter.forwardEnabled()
+                bool wantForward = !forcePlainText && !priv && !msg.targetId.empty() && cmdRouter.forwardEnabled()
                     && dice::CommandRouter::textCharCount(reply) > cmdRouter.forwardThreshold();
                 if (wantForward) {
                     if (!fwdNodes.empty()) {
@@ -1524,7 +1535,13 @@ static int realMain(int argc, char* argv[]) {
                     for (size_t k = 0; k < segs.size(); ++k) {
                         // 分段之间留几毫秒，避免同一适配器并发发消息导致客户端乱序。
                         if (k > 0) std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                        if (k == 0 && quoteFirst) a->sendReplyFormatted(replyMsg, segs[0], replyFormat);
+                        if (forcePlainText || a->platform() == "qq_official"
+                            || a->platform() == "kook" || a->platform() == "discord") {
+                            auto part = replyMsg;
+                            if (!(k == 0 && quoteFirst) && a->platform() != "qq_official") part.id.clear();
+                            a->sendReplyFormatted(part, segs[k], replyFormat);
+                        }
+                        else if (k == 0 && quoteFirst) a->sendReplyFormatted(replyMsg, segs[0], replyFormat);
                         // 私聊回复发到 targetId（普通私聊=对方=senderId；自身消息自控时
                         // =对话对方，避免回复发给骰娘自己）。sendReply 亦用 targetId，一致。
                         else if (priv) a->sendPrivateMessageFormatted(msg.targetId, segs[k], replyFormat);
@@ -2405,6 +2422,8 @@ static int realMain(int argc, char* argv[]) {
                 extra["appSecret"] = a.value("app_secret", a.value("appSecret", std::string()));
                 extra["qqNumber"] = a.value("qq_number", a.value("qqNumber", std::string()));
                 extra["forceVerifyImageResource"] = a.value("force_verify_image_resource", a.value("forceVerifyImageResource", false));
+                extra["qqRichReplies"] = dice::qq_rich::style(a.value("qq_rich_replies", a.value("qqRichReplies", std::string("off"))));
+                extra["qqInteractions"] = dice::qq_rich::interaction(a.value("qq_interactions", a.value("qqInteractions", std::string("links"))));
             }
             row.config = extra.dump();
             return row;
@@ -2421,6 +2440,8 @@ static int realMain(int argc, char* argv[]) {
                 a["app_secret"] = extra.value("appSecret", std::string());
                 a["qq_number"] = extra.value("qqNumber", std::string());
                 a["force_verify_image_resource"] = extra.value("forceVerifyImageResource", false);
+                a["qq_rich_replies"] = extra.value("qqRichReplies", std::string("off"));
+                a["qq_interactions"] = extra.value("qqInteractions", std::string("links"));
             }
             if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
                 a["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));

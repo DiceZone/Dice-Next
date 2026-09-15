@@ -27,6 +27,21 @@ public:
     void registerAdapter(AdapterPtr adapter) {
         std::lock_guard lock(mutex_);
         adapters_[adapter->id()] = adapter;
+        adapter->plainTextResolver = [this](const Message& m) {
+            auto* st = db_.getStorage();
+            if (!st || m.targetId.empty()) return false;
+            const std::string key = m.type == MessageType::kPrivate ? "replyTextPrivate" : "replyTextGroup";
+            namespace orm = sqlite_orm;
+            try {
+                auto rows = st->get_all<GroupAccountSettingRow>(orm::where(
+                    orm::c(&GroupAccountSettingRow::adapterId) == m.adapterId
+                    and orm::c(&GroupAccountSettingRow::key) == key
+                    and (orm::c(&GroupAccountSettingRow::groupId) == m.targetId
+                        or orm::c(&GroupAccountSettingRow::endpointId) == m.targetId)));
+                if (!rows.empty()) return rows.front().value == "1";
+            } catch (...) {}
+            return false;
+        };
         // Wire adapter's incoming messages → manager's routeMessage
         adapter->onMessage([this](const Message& msg) {
             routeMessage(msg);

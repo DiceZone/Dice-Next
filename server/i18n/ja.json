@@ -1,4 +1,16 @@
 {
+  "qq_rich": {
+    "title": "{name} · キャラクター状態",
+    "bound": "✓ キャラクターシート連携済み",
+    "unbound": "名前付きシート未連携・現在のセッションのデータを使用",
+    "changes": "実際の能力値の変化",
+    "status": "状態を見る",
+    "show": "シートを見る",
+    "edit": "能力値を編集",
+    "check": "判定する",
+    "empty": "HP・SAN・MP が未登録です。.st hp14/14 san65/99 mp12/12 に自分のキャラクターの値を指定してください。",
+    "status_usage": "使い方：.pc status（自分の現在の状態を表示）"
+  },
   "cloud_card": {
     "queued": "クラウドカードをバックグラウンドで処理中です。結果は個別に送ります。通常のダイス処理には影響しません。",
     "usage": "個別チャット：.pc cloud auth [read|write] → Web で承認 → .pc cloud confirm。list 一覧、pull クラウドID [ローカル名] 取得、push ローカル名 初回送信、sync ローカル名 同期、status 状態、logout 解除。既定は読み取り専用。自動同期はしません。",
@@ -352,6 +364,9 @@
     "list": "アカウント別名：\n{list}"
   },
   "bot": {
+    "text_usage": "この会話：{state}\n.bot text plain：プレーンテキストを使用\n.bot text rich：管理者の設定に従う（全体・アカウントの無効設定は優先されます）",
+    "text_plain": "プレーンテキスト",
+    "text_follow": "管理者の設定に従う",
     "on": "{self} を有効にしました √",
     "off": "{self} を無効にしました √",
     "usage": ".bot on/off [bot ID]：グループ全体のスイッチ\n.bot log/reply/roll/plugin on/off [bot ID]：機能別スイッチ",

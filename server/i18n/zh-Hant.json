@@ -1,4 +1,16 @@
 {
+  "qq_rich": {
+    "title": "{name} · 人物狀態",
+    "bound": "✓ 已綁定人物卡",
+    "unbound": "未綁定具名人物卡，使用目前會話資料",
+    "changes": "實際屬性變化",
+    "status": "查看狀態",
+    "show": "查看人物卡",
+    "edit": "修改屬性",
+    "check": "發起檢定",
+    "empty": "尚未錄入 HP、SAN 或 MP。可用 .st hp14/14 san65/99 mp12/12 錄入你的人物資料。",
+    "status_usage": "用法：.pc status（查看自己的目前狀態）"
+  },
   "cloud_card": {
     "queued": "正在背景處理雲人物卡請求，結果會私發給你，不影響普通擲骰。",
     "usage": "雲人物卡（請私聊）：.pc cloud auth [read|write] 授權；網頁同意後 .pc cloud confirm；list 查看雲卡；pull 雲卡ID [本地卡名] 拉取；push 本地卡名 首次上傳；sync 本地卡名 同步；status 查看授權；logout 清除本機授權。預設唯讀，寫入須明確 auth write；不會自動同步。",
@@ -357,6 +369,9 @@
     "list": "賬號別名：\n{list}"
   },
   "bot": {
+    "text_usage": "目前會話：{state}\n.bot text plain：使用普通文字\n.bot text rich：恢復跟隨骰主設定（不會繞過全域或帳號的關閉設定）",
+    "text_plain": "普通文字",
+    "text_follow": "跟隨骰主設定",
     "on": "成功開啟{self}√",
     "off": "成功關閉{self}√",
     "usage": ".bot on/off [骰子QQ]：本群總開關\n.bot log/reply/roll/plugin on/off [骰子QQ]：日誌/自訂回覆/投擲指令/插件開關",

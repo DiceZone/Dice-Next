@@ -15,6 +15,8 @@
 
 namespace dice {
 
+namespace qq_rich { struct Card; } // Opaque QQ-only presentation; generic adapters never render it.
+
 using json = nlohmann::json;
 
 /// Platform transports must never drop a whole event because a plugin or an
@@ -50,6 +52,10 @@ struct Message {
     int64_t timestamp = 0;
     bool fromSelf = false;    // 本消息由骰娘账号自身发出（post_type=message_sent，自控开关开启时才进管线）
     json extra;               // 平台特定附加数据（CQ码、附件等）
+    // Outbound-only structured presentation; never deserialized from gateway data.
+    std::shared_ptr<const qq_rich::Card> qqRichReply;
+    bool forcePlainText = false; // Outbound conversation preference, captured before async work.
+    bool textPreferenceCaptured = false;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -93,6 +99,16 @@ struct BotEvent {
 class IAdapter {
 public:
     virtual ~IAdapter() = default;
+    // Installed before registration; direct/plugin sends resolve their destination too.
+    std::function<bool(const Message&)> plainTextResolver;
+    bool forcePlainTextFor(const Message& message) const {
+        if (message.textPreferenceCaptured || message.forcePlainText) return message.forcePlainText;
+        if (!plainTextResolver) return false;
+        Message context = message;
+        context.adapterId = id();
+        context.platform = platform();
+        return plainTextResolver(context);
+    }
 
     /// Global outbound presentation selected by the dice owner.  Adapters that
     /// have no rich-message equivalent simply keep sending traditional text.

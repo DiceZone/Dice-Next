@@ -8,6 +8,7 @@
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
 #include "../common/markdown.h"
+#include "../common/qq_rich_reply.h"
 
 #include <drogon/HttpAppFramework.h>   // drogon::app()：此前靠其他头间接带入，独立编译会缺
 #include <drogon/HttpClient.h>
@@ -326,6 +327,8 @@ public:
         appSecret_ = cfg.value("appSecret", std::string());
         displayQQ_ = cfg.value("qqNumber", std::string());
         forceVerifyImageResource_ = cfg.value("forceVerifyImageResource", cfg.value("force_verify_image_resource", false));
+        richStyle_ = qq_rich::style(cfg.value("qqRichReplies", std::string("off")));
+        interactions_ = qq_rich::interaction(cfg.value("qqInteractions", std::string("links")));
         setMessageFormatOverride(parseFormatOverride(cfg.value("message_format", std::string())));
         if (appId_.empty() || appSecret_.empty()) { lastError_ = "QQ 官方机器人需要 AppID 和 AppSecret"; return false; }
         return true;
@@ -1253,6 +1256,13 @@ private:
 
     /// 出站入口：拆出媒体标记走富媒体（限 3 条防刷频），剩余文本走文字消息。
     void sendTo(const Message& m, const std::string& text, ContentFormat format) {
+        // Structured replies contain literal card names/attributes, not media directives.
+        // Preserve their exact original text for safe fallback and payload matching.
+        if (m.platform == "qq_official" && format == ContentFormat::kPlainText
+            && richStyle_ != "off" && m.qqRichReply && m.qqRichReply->original == text) {
+            sendTextTo(m, text, format);
+            return;
+        }
         auto parts = splitMedia(text);
         for (size_t i = 0; i < parts.media.size() && i < 3; ++i) sendMediaTo(m, parts.media[i]);
         std::string plain = parts.text;
@@ -1261,10 +1271,39 @@ private:
         if (plain.empty()) { if (parts.media.empty()) sendTextTo(m, text, format); return; }   // 纯媒体不再发空文本
         sendTextTo(m, plain, format);
     }
+public:
+    // Pure payload assembly also lets regression tests exercise the exact wire data.
+    json textPayload(const Message& m, const std::string& text, ContentFormat format, int fallbackLevel = 0) const {
+        const bool useMarkdown = !forcePlainTextFor(m) && fallbackLevel < 2 && effectiveCardMode()
+            && m.type != MessageType::kChannel && markdownCardReady();
+        const bool rich = useMarkdown && m.platform == "qq_official" && format == ContentFormat::kPlainText
+            && richStyle_ != "off" && m.qqRichReply
+            && m.qqRichReply->original == text;
+        std::string wireText = useMarkdown
+            ? (format == ContentFormat::kMarkdown ? text : markdown::escapeQQMarkdownLiteral(text))
+            : (format == ContentFormat::kMarkdown ? markdown::toPlainText(text) : text);
+        if (rich) wireText = qq_rich::render(*m.qqRichReply,
+            fallbackLevel == 0 && richStyle_ == "math", fallbackLevel == 0 && interactions_ == "links");
+        // Large cards use the existing plain reply/segmentation path, never send a truncated formula.
+        if (rich && wireText.size() > 3500) return textPayload(m, text, format, 2);
+        json body = useMarkdown
+            ? json{{"content", " "}, {"msg_type", 2}, {"markdown", {{"content", wireText}, {"force_verify_image_resource", forceVerifyImageResource_}}}}
+            : json{{"content", wireText.empty() && !text.empty() ? text : wireText}};
+        if (!useMarkdown && m.type != MessageType::kChannel) body["msg_type"] = 0;
+        if (rich && fallbackLevel == 0 && interactions_ == "buttons") {
+            // Use the source transport OpenID, never its bound/canonical QQ identity.
+            const auto nativeUser = m.extra.is_object()
+                ? m.extra.value("__identity_native_sender", std::string()) : std::string();
+            auto keys = qq_rich::keyboard(*m.qqRichReply, nativeUser);
+            if (!keys.is_null()) body["keyboard"] = std::move(keys);
+        }
+        return body;
+    }
+private:
     /// QQ 官方机器人支持 Markdown，但它仍受机器人后台能力开关约束。卡片模式
     /// 下优先以 Markdown 发送；收到明确 HTTP 拒绝后自动用传统文本重试一次。
     void sendTextTo(const Message& m, const std::string& text, ContentFormat format,
-                    bool forceTraditional = false) {
+                    int fallbackLevel = 0) {
         if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
         std::string target;
         if (m.extra.is_object()) target = m.extra.value("__identity_native_target", std::string());
@@ -1282,23 +1321,14 @@ private:
         if (!client) { lastError_ = "无法解析 api.bot.qq.com"; return; }
         // Only explicit Markdown is rich text. Card mode can place literal text
         // in a Markdown container, but escapes it first so punctuation survives.
-        const bool explicitMarkdown = format == ContentFormat::kMarkdown;
-        const bool useMarkdown = !forceTraditional && effectiveCardMode() &&
-                                 m.type != MessageType::kChannel && markdownCardReady();
-        std::string wireText = useMarkdown
-            ? (explicitMarkdown ? text : markdown::escapeQQMarkdownLiteral(text))
-            : (explicitMarkdown ? markdown::toPlainText(text) : text);
-        if (wireText.empty() && !text.empty()) wireText = text;
+        json body = textPayload(m, text, format, fallbackLevel);
+        const bool useMarkdown = body.contains("markdown");
 
         auto request = drogon::HttpRequest::newHttpRequest();
         request->setMethod(drogon::Post); request->setPath(path);
         request->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         request->addHeader("Host", "api.bot.qq.com");
         request->addHeader("Authorization", "QQBot " + accessToken_);
-        json body = useMarkdown
-            ? json{{"content", " "}, {"msg_type", 2}, {"markdown", {{"content", wireText}, {"force_verify_image_resource", forceVerifyImageResource_}}}}
-            : json{{"content", wireText}};
-        if (!useMarkdown && m.type != MessageType::kChannel) body["msg_type"] = 0;
         if (!m.id.empty()) {
             body["msg_id"] = m.id;
             const int seq = nextReplySeq(m.id);
@@ -1308,11 +1338,19 @@ private:
             if (!eventId.empty()) body["event_id"] = eventId;
         }
         request->setBody(dumpJsonUtf8Safe(body));
-        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, format, useMarkdown](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
+        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, format, useMarkdown, fallbackLevel](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
             const bool httpRejected = response && response->statusCode() >= 300;
             if (useMarkdown && !httpRejected && result == drogon::ReqResult::Ok && response)
                 self->markdownRejectStreak_.store(0);
-            if (useMarkdown && httpRejected) {
+            // Only explicit validation/permission rejection is safe to retry.
+            // Timeouts/5xx may already have delivered the message; don't duplicate it.
+            const bool rejectedFormat = response && (response->statusCode() == 400
+                || response->statusCode() == 403 || response->statusCode() == 422);
+            if (useMarkdown && rejectedFormat) {
+                if (fallbackLevel == 0 && message.qqRichReply && self->richStyle_ != "off") {
+                    self->sendTextTo(message, text, format, 1); // Drop TeX/interaction first, preserve the card.
+                    return;
+                }
                 const int streak = self->markdownRejectStreak_.fetch_add(1) + 1;
                 if (streak >= kMarkdownRejectThreshold) {
                     self->markdownDisabledUntil_.store(
@@ -1323,7 +1361,7 @@ private:
                 } else {
                     DICE_LOG_WARN("QQOfficial '{}': Markdown/card message rejected by {}, retrying traditional text", self->name_, path);
                 }
-                self->sendTextTo(message, text, format, true);
+                self->sendTextTo(message, text, format, 2);
                 return;
             }
             if (result != drogon::ReqResult::Ok || !response || httpRejected) {
@@ -1336,6 +1374,7 @@ private:
         });
     }
     void fail(const std::string&e){lastError_=e;connecting_=false;connected_=false;DICE_LOG_ERROR("QQOfficial '{}': {}",name_,e);}
+    std::string richStyle_ = "off", interactions_ = "links";
     inline static std::function<std::string(const std::string&)> imagePublisher_;   // 本地图 → 公网 URL（图床）
     std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,accessToken_,loginId_,loginName_,sessionId_,gatewayUrl_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{identity::BindingStore::instance().database()}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; int64_t seq_=-1; std::shared_ptr<QQGatewaySocket> gateway_; std::optional<trantor::TimerId> heartbeatTimer_,accessTokenTimer_; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::unordered_map<std::string,int> replySeq_; std::unordered_map<std::string,std::pair<std::string,std::time_t>> pendingEvents_; mutable std::mutex metaMu_; mutable std::unordered_map<std::string,GroupMeta> groupMeta_;
 };

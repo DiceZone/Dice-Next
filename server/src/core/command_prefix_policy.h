@@ -41,6 +41,22 @@ inline std::optional<BotControlCommand> parseBotControlCommand(const std::string
     if (lowered.rfind("bot", 0) != 0) return std::nullopt;
 
     BotControlCommand result;
+    // Reserve only the separate `text` subcommand; malformed modes show usage.
+    if (normalized.size() > 3 && std::isspace(static_cast<unsigned char>(normalized[3]))) {
+        std::istringstream words(trimCommandText(normalized.substr(3)));
+        std::string sub, mode, target, extra;
+        words >> sub;
+        if (lowerCommandText(sub) == "text") {
+            result.feature = "text";
+            words >> mode >> target >> extra;
+            result.action = lowerCommandText(mode);
+            if ((!mode.empty() && result.action != "plain" && result.action != "rich")
+                || (!target.empty() && !commandTokenIsDigits(target)) || !extra.empty())
+                result.action = "invalid";
+            else result.target = target;
+            return result;
+        }
+    }
     std::istringstream input(trimCommandText(normalized.substr(3)));
     std::string token;
     while (input >> token) {

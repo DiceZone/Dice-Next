@@ -129,7 +129,7 @@ public:
         sendGroupMessageFormatted(channelId, text, ContentFormat::kPlainText);
     }
     void sendGroupMessageFormatted(const std::string& channelId, const std::string& text, ContentFormat format) override {
-        const std::string wire = outboundText(text, format);
+        const std::string wire = outboundText(text, format, destinationPlainText(channelId, MessageType::kGroup));
         postChannelMessage(nativeId(channelId, identity::Kind::Group), wire);
     }
     void sendPrivateMessage(const std::string& userId, const std::string& text) override {
@@ -137,7 +137,11 @@ public:
     }
     void sendPrivateMessageFormatted(const std::string& userId, const std::string& text, ContentFormat format) override {
         const std::string native = nativeId(userId, identity::Kind::User);
-        const std::string wire = outboundText(text, format);
+        const std::string wire = outboundText(text, format, destinationPlainText(userId, MessageType::kPrivate));
+        sendPrivateWire(native, wire);
+    }
+private:
+    void sendPrivateWire(const std::string& native, const std::string& wire) {
         // 需要先建 DM 频道（有缓存则直发）。
         {
             std::lock_guard lock(dmMutex_);
@@ -155,9 +159,14 @@ public:
     }
 
 private:
-    std::string outboundText(const std::string& text, ContentFormat format) const {
+    bool destinationPlainText(const std::string& target, MessageType type) const {
+        Message m; m.targetId = target; m.type = type;
+        return forcePlainTextFor(m);
+    }
+    std::string outboundText(const std::string& text, ContentFormat format, bool forcePlain = false) const {
         if (format == ContentFormat::kMarkdown)
-            return effectiveCardMode() ? text : markdown::toPlainText(text);
+            return forcePlain ? markdown::escapeLiteral(markdown::toPlainText(text))
+                : (effectiveCardMode() ? text : markdown::toPlainText(text));
         return markdown::escapeLiteral(text);
     }
 
@@ -438,9 +447,13 @@ private:
     void sendTo(const Message& m, const std::string& text, ContentFormat format) {
         std::string channel;
         if (m.extra.is_object()) channel = m.extra.value("channel_id", std::string());   // 入站原生频道
-        if (channel.empty() && m.type == MessageType::kPrivate) { sendPrivateMessageFormatted(m.targetId, text, format); return; }
+        if (channel.empty() && m.type == MessageType::kPrivate) {
+            sendPrivateWire(nativeId(m.targetId, identity::Kind::User),
+                outboundText(text, format, forcePlainTextFor(m)));
+            return;
+        }
         if (channel.empty()) channel = nativeId(m.targetId, identity::Kind::Group);
-        postChannelMessage(channel, outboundText(text, format));
+        postChannelMessage(channel, outboundText(text, format, forcePlainTextFor(m)));
     }
 
     void fail(const std::string& e) {
