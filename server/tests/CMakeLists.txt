@@ -81,6 +81,10 @@ target_include_directories(dice-next-tests PRIVATE
 # Link against the same dependencies as the main server
 target_link_libraries(dice-next-tests PRIVATE
     OpenSSL::Crypto
+    # qq_gateway_socket.h 是 header-only 的 TLS 客户端，直接用 libssl。测试一旦
+    # 构造 QQOfficialAdapter，这些符号就会落进测试的目标文件里，和服务端一样需要
+    # 显式连 OpenSSL::SSL——靠 Drogon 传递过来在部分三元组上并不成立。
+    OpenSSL::SSL
     Drogon::Drogon
     nlohmann_json::nlohmann_json
     sqlite_orm::sqlite_orm
