@@ -1,6 +1,20 @@
 #include "test_framework.h"
 #include "../src/core/command_prefix_policy.h"
 
+TEST(CommandPrefixPolicy, TextModesAndUsageDoNotToggleBotPower) {
+    for (const auto* mode : {"plain", "rich"}) {
+        auto parsed = dice::parseBotControlCommand(std::string("bot text ") + mode + " 9000");
+        ASSERT_TRUE(parsed.has_value());
+        ASSERT_EQ(parsed->feature, "text");
+        ASSERT_EQ(parsed->action, mode);
+        ASSERT_EQ(parsed->target, "9000");
+    }
+    ASSERT_TRUE(dice::forcedSafetyCommandBody("。bot text").has_value());
+    ASSERT_EQ(dice::parseBotControlCommand("bot text on")->action, "invalid");
+    ASSERT_EQ(dice::parseBotControlCommand("bot text rich plain")->action, "invalid");
+    ASSERT_FALSE(dice::parseBotControlCommand("bottext plain").has_value());
+}
+
 TEST(CommandPrefixPolicy, ScopedBotControlsRemainEmergencyCommands) {
     for (const auto* feature : {"log", "reply", "roll", "plugin"}) {
         const auto parsed = dice::parseBotControlCommand(std::string("bot ") + feature + " off 9000");

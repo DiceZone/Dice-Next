@@ -66,6 +66,101 @@ struct LegacyFixture {
 
 } // namespace
 
+TEST(BotText, PersistsPerAccountAndConversationAndShowsUsageWithoutChangingState) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    ASSERT_TRUE(f.run(".bot text").find(".bot text plain") != std::string::npos);
+    ASSERT_FALSE(f.router.conversationPlainText(f.msg));
+    f.run("。bot text plain");
+    ASSERT_TRUE(f.router.conversationPlainText(f.msg));
+    f.run(".bot text invalid");
+    ASSERT_TRUE(f.router.conversationPlainText(f.msg));
+    f.run(".bot text rich 9999"); // Another bot's setting must stay untouched.
+    ASSERT_TRUE(f.router.conversationPlainText(f.msg));
+    auto other = f.msg;
+    other.adapterId = "other-bot";
+    ASSERT_FALSE(f.router.conversationPlainText(other));
+    other = f.msg; other.targetId = "other-group";
+    ASSERT_FALSE(f.router.conversationPlainText(other));
+    other = f.msg; other.type = MessageType::kPrivate;
+    ASSERT_FALSE(f.router.conversationPlainText(other));
+    f.msg.type = MessageType::kPrivate;
+    f.run(".bot text plain");
+    ASSERT_TRUE(f.router.conversationPlainText(f.msg));
+    f.run(".bot text rich");
+    ASSERT_FALSE(f.router.conversationPlainText(f.msg));
+    f.msg.type = MessageType::kGroup;
+    ASSERT_TRUE(f.router.conversationPlainText(f.msg));
+    CommandRouter reloaded(f.db, f.cfg, f.engine, f.i18n, f.resolver, f.cards, f.deck, f.adapters);
+    ASSERT_TRUE(reloaded.conversationPlainText(f.msg));
+    f.run(".bot off");
+    f.run(".bot text rich");
+    ASSERT_FALSE(f.router.conversationPlainText(f.msg));
+    ASSERT_TRUE(f.router.isGroupDisabled(f.msg));
+}
+
+TEST(BotText, PermissionChecksIncludeOfficialGroupsWithoutTrustedRoles) {
+    LegacyFixture f;
+    f.msg.extra = {{"role", "member"}};
+    f.run(".bot text plain");
+    ASSERT_FALSE(f.router.conversationPlainText(f.msg));
+    f.msg.platform = "qq_official";
+    f.run(".bot text plain");
+    ASSERT_FALSE(f.router.conversationPlainText(f.msg));
+    f.master();
+    f.msg.extra["__identity_native_sender"] = f.msg.senderId;
+    f.run(".bot text plain");
+    ASSERT_TRUE(f.router.conversationPlainText(f.msg));
+}
+
+TEST(BotText, CustomMarkdownTemplateDowngradesBeforeDiceValuesAreInserted) {
+    LegacyFixture f;
+    f.i18n.load();
+    f.i18n.setOverride(Locale::kZhHans, "dice.roll.result", "**{nick}**：`{res}`", ContentFormat::kMarkdown);
+    f.run(".bot text plain");
+    I18n::beginOutboundCapture(f.router.conversationPlainText(f.msg)
+        ? ContentFormat::kPlainText : ContentFormat::kMarkdown);
+    const auto reply = f.run(".r 1d1");
+    const auto format = I18n::endOutboundCapture();
+    ASSERT_TRUE(reply.find("**") == std::string::npos);
+    ASSERT_TRUE(reply.find('`') == std::string::npos);
+    ASSERT_EQ(static_cast<int>(format), static_cast<int>(ContentFormat::kPlainText));
+    f.run(".bot text rich");
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown);
+    ASSERT_TRUE(f.run(".r 1d1").find("**") != std::string::npos);
+    ASSERT_EQ(static_cast<int>(I18n::endOutboundCapture()), static_cast<int>(ContentFormat::kMarkdown));
+}
+
+TEST(BotText, OfficialInviterUsesNativeIdentityAndOnlyControlsTheInvitedBotAndGroup) {
+    LegacyFixture f;
+    f.msg.platform = "qq_official";
+    f.msg.extra = {{"__identity_native_sender", "inviter-openid"}};
+    f.setting("inviter", "inviter-openid");
+    f.run(".bot text plain");
+    ASSERT_TRUE(f.router.conversationPlainText(f.msg));
+    f.run(".bot text rich");
+    ASSERT_FALSE(f.router.conversationPlainText(f.msg));
+
+    f.msg.extra["__identity_native_sender"] = "another-openid";
+    f.run(".bot text plain");
+    ASSERT_FALSE(f.router.conversationPlainText(f.msg));
+    f.msg.senderId = "inviter-openid"; // A public ID must not substitute for the native identity.
+    f.run(".bot text plain");
+    ASSERT_FALSE(f.router.conversationPlainText(f.msg));
+    f.msg.extra.erase("__identity_native_sender");
+    f.run(".bot text plain");
+    ASSERT_FALSE(f.router.conversationPlainText(f.msg));
+
+    f.msg.extra["__identity_native_sender"] = "inviter-openid";
+    f.msg.adapterId = "another-bot";
+    f.run(".bot text plain");
+    ASSERT_FALSE(f.router.conversationPlainText(f.msg));
+    f.msg.adapterId = "log-test";
+    f.msg.targetId = "another-group";
+    f.run(".bot text plain");
+    ASSERT_FALSE(f.router.conversationPlainText(f.msg));
+}
+
 
 TEST(LegacyCommands, GrowthParsesCompactValuesAndWritesTheCorrectSign) {
     LegacyFixture f;
@@ -78,6 +173,73 @@ TEST(LegacyCommands, GrowthParsesCompactValuesAndWritesTheCorrectSign) {
     ASSERT_EQ(f.cards.getAttr(f.msg.senderId, f.msg.targetId, "侦查").value_or(-999), 2);
     ASSERT_EQ(f.run(".en侦查0+2d1k1"), "card.en.success");
     ASSERT_EQ(f.cards.getAttr(f.msg.senderId, f.msg.targetId, "侦查").value_or(-999), 1);
+}
+
+TEST(QQCharacterStatus, UsesStoredValuesAndActualAttributeChanges) {
+    LegacyFixture f;
+    f.msg.platform = "qq_official";
+    f.cfg.set<bool>("dice/auto_card", false);
+    f.run(".pc new 调查员");
+    f.run(".st hp14/14 san65/99 mp12/12");
+    auto reply = f.run(".st hp-2");
+    auto card = f.router.lastOfficialCard();
+    ASSERT_TRUE(card != nullptr);
+    ASSERT_EQ(card->original, reply);
+    ASSERT_EQ(card->vitals[0].current, 12);
+    ASSERT_EQ(card->vitals[0].maximum.value_or(-1), 14);
+    ASSERT_EQ(card->changes[0].before.value_or(-1), 14);
+    ASSERT_EQ(card->changes[0].after, 12);
+    const auto before = f.cards.getAttrs(f.msg.senderId, f.msg.targetId);
+    reply = f.run(".pc status");
+    ASSERT_TRUE(reply.find("12/14") != std::string::npos);
+    ASSERT_TRUE(f.cards.getAttrs(f.msg.senderId, f.msg.targetId) == before);
+    ASSERT_TRUE(f.router.lastOfficialCard()->statusOnly);
+    f.run(".pc nonsense");
+    ASSERT_TRUE(f.router.lastOfficialCard() == nullptr);
+    f.msg.platform = "onebot_v11";
+    ASSERT_TRUE(f.run(".pc status").find("12/14") != std::string::npos);
+    ASSERT_TRUE(f.router.lastOfficialCard() == nullptr);
+}
+
+TEST(QQCharacterStatus, ShortcutsFollowConfiguredPrefixAndNeverIncludeUserText) {
+    LegacyFixture f;
+    f.msg.platform = "qq_official";
+    f.cfg.set<bool>("dice/auto_card", false);
+    f.run(".st hp10/10");
+    f.cfg.set<json>("dice/command_prefixes", json::array({"!"}));
+    f.run("!pc status");
+    auto card = f.router.lastOfficialCard();
+    ASSERT_TRUE(card != nullptr);
+    ASSERT_EQ(card->commands[0].text, "!pc status");
+    ASSERT_EQ(card->commands[2].text, "!st ");
+    f.msg.atList = {"other-user"};
+    ASSERT_EQ(f.run("!pc status"), "qq_rich.status_usage");
+    ASSERT_TRUE(f.router.lastOfficialCard() == nullptr);
+}
+
+TEST(QQCharacterStatus, CompactionPreservesCustomRepliesAndOtherPlatforms) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    f.cfg.set<bool>("dice/auto_card", false);
+    for (const auto* platform : {"qq_official", "onebot_v11", "milky", "discord", "kook"}) {
+        f.msg.platform = platform;
+        f.run(".st hp14/14");
+        const auto reply = f.run(".st hp-2");
+        ASSERT_EQ(reply, f.i18n.tr(Locale::kZhHans, "card.st.done", {{"nick", "<玩家>"}, {"detail", "生命值:12"}}));
+        auto card = f.router.lastOfficialCard();
+        if (f.msg.platform == "qq_official") {
+            ASSERT_TRUE(card != nullptr);
+            ASSERT_TRUE(card->body.has_value());
+            ASSERT_TRUE(card->body->empty());
+            ASSERT_EQ(card->original, reply);
+        } else ASSERT_TRUE(card == nullptr);
+    }
+    f.msg.platform = "qq_official";
+    f.i18n.setOverride(Locale::kZhHans, "card.st.done", "自定义回执：{detail}；请记入跑团笔记");
+    const auto custom = f.run(".st hp+1");
+    ASSERT_FALSE(f.router.lastOfficialCard()->body.has_value());
+    ASSERT_TRUE(qq_rich::render(*f.router.lastOfficialCard(), true, false).find("请记入跑团笔记") != std::string::npos);
+    ASSERT_EQ(f.router.lastOfficialCard()->original, custom);
 }
 
 TEST(LegacyCommands, InvalidGrowthNeverWritesTheCard) {
