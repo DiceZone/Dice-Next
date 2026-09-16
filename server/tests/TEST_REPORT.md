@@ -2,6 +2,23 @@
 
 Date: 2026-09-03
 
+## 2026-09-16: Legacy Dice sample reply templates
+
+- Compared with `Dice-Old/Dice-dev/Dice/DiceFormatter.cpp` (`MarkSampleNode`):
+  uniformly choose a top-level option and expand only its selected subtree.
+- Added `{sample:a|b}` to localized command/roll replies and persona templates,
+  custom replies, and `.text`; retained existing custom-reply `{a|b}` syntax.
+- Supports nested choices and existing placeholders; sampling precedes value
+  interpolation, so player names and regex captures cannot inject sample macros.
+- Uses an independent thread-local random source for cosmetic choices and keeps
+  the existing cached Markdown-to-plain conversion. Recursion is bounded.
+- Targeted regression: 8 cases / 68 assertions passed, including actual `.r 1d1`,
+  nested variables, empty choices, deterministic option boundaries, malformed
+  input, persona/fallback, and explicit Markdown/plain reply rendering.
+- Full CTest: 405 core cases / 2078 assertions and 9 Lua cases / 71 assertions
+  passed. Release server build and documentation-site build passed.
+- Local implementation only; no release package, commit, or push performed.
+
 ## 2026-09-14: BDC cloud character cards
 
 Protocol baseline: `ShiaNyaa/Better-Dice-Control` commit `b894848`, verified

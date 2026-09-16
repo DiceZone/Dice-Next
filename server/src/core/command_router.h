@@ -10,6 +10,7 @@
 
 #include "../adapter/adapter_interface.h"
 #include "../common/qq_rich_reply.h"
+#include "../common/sample_template.h"
 #include "../common/subprocess.h"
 #include "../adapter/adapter_manager.h"
 #include "../core/dice/dice_engine.h"
@@ -9083,7 +9084,7 @@ public:
         }
         // Pre-process legacy variable aliases ({pc}→{nick}, {char}→{nick}, etc.)
         // so that original-Dice! flavor texts work with DiceNext's variable system.
-        std::string processed = applyLegacyVarAliases(tmpl);
+        std::string processed = applyLegacyVarAliases(sample_template::expand(tmpl));
         std::string out; out.reserve(processed.size() + 32);
         for (size_t i = 0; i < processed.size();) {
             if (processed[i] == '{') {
@@ -9100,6 +9101,8 @@ private:
     std::string resolveReplyToken(const Message& msg, const std::string& tok,
                                   const std::vector<std::string>& groups) {
         // Random choice: {a|b|c}
+        // Unexpanded sample syntax is escaped or malformed, not shorthand.
+        if (tok.rfind("sample:", 0) == 0) return "{" + tok + "}";
         if (tok.find('|') != std::string::npos) {
             std::vector<std::string> opts;
             std::string cur;
@@ -10120,6 +10123,7 @@ private:
     std::string handleText(Locale loc, const std::string& args, const Message& msg) {
         std::string tmpl = trim(args);
         if (tmpl.empty()) return i18n_.tr(loc, "fun.text.usage");
+        tmpl = sample_template::expand(tmpl);
         std::string out; out.reserve(tmpl.size() + 16);
         for (size_t i = 0; i < tmpl.size();) {
             if (tmpl[i] == '{') {

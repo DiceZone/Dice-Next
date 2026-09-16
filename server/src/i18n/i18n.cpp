@@ -1,6 +1,7 @@
 #include "i18n.h"
 #include "../common/logger.h"
 #include "../common/markdown.h"
+#include "../common/sample_template.h"
 #include <algorithm>
 
 #include <fstream>
@@ -332,7 +333,10 @@ std::string I18n::renderTemplate(const TemplateValue& value, const Args& args) {
         outboundCaptureActive_ && outboundPreferredOutput_ == ContentFormat::kPlainText;
     const ContentFormat outputFormat = usePreparedPlain
         ? ContentFormat::kPlainText : value.format;
-    const std::string& tmpl = usePreparedPlain ? value.plainValue : value.value;
+    const std::string& cached = usePreparedPlain ? value.plainValue : value.value;
+    const bool hasSample = cached.find("{sample:") != std::string::npos;
+    const std::string sampled = hasSample ? sample_template::expand(cached) : std::string();
+    const std::string& tmpl = hasSample ? sampled : cached;
     noteOutboundFormat(outputFormat);
     if (outputFormat != ContentFormat::kMarkdown || args.empty())
         return interpolate(tmpl, args);

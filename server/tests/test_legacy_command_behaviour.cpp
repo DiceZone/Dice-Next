@@ -66,6 +66,32 @@ struct LegacyFixture {
 
 } // namespace
 
+TEST(SampleTemplate, RollReplyUsesChosenTextAndActualResult) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    f.i18n.setOverride(Locale::kZhHans, "dice.roll.result", "{res} {sample:效果拔群|干得漂亮}");
+    const auto reply = f.run(".r 1d1");
+    ASSERT_TRUE(reply.find("1") != std::string::npos);
+    ASSERT_TRUE(reply.find("效果拔群") != std::string::npos || reply.find("干得漂亮") != std::string::npos);
+    ASSERT_TRUE(reply.find("sample:") == std::string::npos);
+}
+
+TEST(SampleTemplate, CustomReplyRetainsShorthandAndSelectedVariables) {
+    LegacyFixture f;
+    ASSERT_EQ(f.router.renderReply(f.msg, "{sample:{user}|{user}}", "", MatchType::kKeyword), "1000");
+    ASSERT_EQ(f.router.renderReply(f.msg, "{甲|甲}", "", MatchType::kKeyword), "甲");
+    ASSERT_EQ(f.router.renderReply(f.msg, "{sample:{roll:1d1}|{roll:1d1}}", "", MatchType::kKeyword), "1");
+    ASSERT_EQ(f.router.renderReply(f.msg, "{sample:{$1}}", "^(.+)$", MatchType::kRegex), "");
+    f.msg.content = "{sample:不执行|不执行}";
+    ASSERT_EQ(f.router.renderReply(f.msg, "{sample:{$1}}", "^(.+)$", MatchType::kRegex), f.msg.content);
+}
+
+TEST(SampleTemplate, TextCommandSupportsNestedChoicesAndDice) {
+    LegacyFixture f;
+    ASSERT_EQ(f.run(".text {sample:{sample:{user}}}"), "1000");
+    ASSERT_EQ(f.run(".text {sample:{1d1}|{1d1}}"), "1");
+}
+
 TEST(BotText, PersistsPerAccountAndConversationAndShowsUsageWithoutChangingState) {
     LegacyFixture f;
     ASSERT_TRUE(f.i18n.load());

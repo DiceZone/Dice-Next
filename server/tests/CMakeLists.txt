@@ -13,6 +13,7 @@ set(TEST_SOURCES
     test_config_manager.cpp
     test_persona_manager.cpp
     test_i18n_persona.cpp
+    test_sample_template.cpp
     test_import_v2.cpp
     test_group_account_scoping.cpp
     test_master_delivery.cpp
