@@ -18,6 +18,7 @@
 #include "../core/dice/madness_data.h"
 #include "../core/reply/reply_manager.h"
 #include "character/card_store.h"
+#include "identity/avatar_identity.h"
 #include "deck/card_deck.h"
 #include "../storage/legacy_message_keys.h"
 #include "../storage/database.h"
@@ -620,6 +621,13 @@ private:
                 "开启后，任何人都可能冒认 QQ，导致人物卡或其他用户数据被错误关联。");
         };
 
+        // 默认头像与商城头像由腾讯统一下发，多人共用同一份字节，比对不出归属。
+        const auto avatarSharedHint = [] {
+            return std::string(
+                "头像核验无法完成：当前使用的是默认头像或商城头像，很多账号共用同一张。\n"
+                "请换一张自己的图片作为头像，待头像更新后再执行一次本指令。");
+        };
+
         // 群标识必须在待绑定的 OneBot 群内由群管理发起；私聊无法验证一个群的归属。
         if (kind == Kind::Group && msg.type != MessageType::kGroup)
             return "QQ群绑定必须在目标群内执行。";
@@ -636,6 +644,36 @@ private:
                 return "请在 OneBot 窗口填写官方标识进行反向绑定：\n.bind "
                     + std::string(kind == Kind::Group ? "qqgroup " : "qq ")
                     + "QQ-Official-机器人ID:OpenID";
+            // 头像核验能当场证明这个 OpenID 背后就是这个 QQ 号：腾讯在两个端点上返回
+            // 同一份头像文件，而同一张图被不同账号设为头像时字节并不相同。证到了就
+            // 不必再退回高风险直绑开关。只对用户有效——群没有对应的 OpenID 头像端点。
+            if (kind == Kind::User) {
+                const std::string officialApp = exval("official_bot_id");
+                const std::string officialOpenId = exval("__identity_native_sender");
+                if (!officialApp.empty() && !officialOpenId.empty()) {
+                    const auto proof = identity::proveOpenIdIsQQ(officialApp, officialOpenId, arg);
+                    if (proof.status == identity::AvatarProof::kSharedAvatar)
+                        return avatarSharedHint();
+                    if (proof.status == identity::AvatarProof::kMismatch)
+                        return "头像核验未通过：该 QQ 号的头像与当前账号不一致。\n"
+                               "请确认号码无误；也可以把两边的头像都换成同一张自己的图片后重试。";
+                    if (proof.ok()) {
+                        // 商城头像同样是多人共用，但没法凭一张图看出来：改为记住每个
+                        // 通过验证的哈希属于谁，再次出现在别的身份上就拒绝。
+                        if (identity::avatarClaimedByOther(db_, proof.openIdSha256, officialApp,
+                                                           officialOpenId, arg))
+                            return avatarSharedHint();
+                        std::string proofError;
+                        if (!bindings.bindOfficialToQQ(db_, local, arg, kind, proofError))
+                            return "绑定失败：\n" + proofError;
+                        identity::rememberAvatarProof(db_, proof.openIdSha256, officialApp,
+                                                      officialOpenId, arg);
+                        return "绑定成功（已通过头像核验）。\n当前官方用户已关联到真实 QQ "
+                            + arg + "。\n未连接 OneBot 时也会保留该真实 QQ 身份。";
+                    }
+                    // 取不到图（网络异常等）时不下结论，落回原有的开关判断。
+                }
+            }
             if (!cfg_.get<bool>("dice/allow_official_direct_bind", false))
                 return officialDirectBindHint();
             std::string error;

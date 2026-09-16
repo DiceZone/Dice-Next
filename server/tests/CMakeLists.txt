@@ -37,6 +37,7 @@ set(TEST_SOURCES
     test_friend_approval_policy.cpp
     test_sensitive_word_filter.cpp
     test_qq_official_adapter.cpp
+    test_avatar_identity.cpp
     test_milky_adapter.cpp
 
     # Project source files needed by tests

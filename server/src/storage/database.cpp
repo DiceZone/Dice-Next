@@ -89,6 +89,14 @@ bool Database::open(const std::string& path) {
                     orm::make_column("endpoint_id", &IdentityEndpointRow::endpointId),
                     orm::make_column("created_at", &IdentityEndpointRow::createdAt)
                 ),
+                orm::make_table("identity_avatar_proofs",
+                    orm::make_column("id", &AvatarProofRow::id, orm::primary_key().autoincrement()),
+                    orm::make_column("avatar_sha256", &AvatarProofRow::avatarSha256),
+                    orm::make_column("adapter_account", &AvatarProofRow::adapterAccount),
+                    orm::make_column("open_id", &AvatarProofRow::openId),
+                    orm::make_column("qq", &AvatarProofRow::qq),
+                    orm::make_column("created_at", &AvatarProofRow::createdAt)
+                ),
                 // ── decks ──
                 orm::make_table("decks",
                     orm::make_column("id", &DeckRow::id,
