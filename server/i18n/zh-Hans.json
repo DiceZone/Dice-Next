@@ -20,6 +20,7 @@
     "auth_code": "请由你本人打开 {url}，输入验证码 {code}（{seconds} 秒内有效）。核对骰娘及骰主身份，按需勾选写入权限。同意后回到本私聊发送 .pc cloud confirm。不要转发验证码或替他人授权。",
     "auth_sent": "授权说明已单独私发。网页同意后发送 .pc cloud confirm；未收到可先 .pc cloud logout 再重新授权。",
     "authorized": "云人物卡授权已就绪。使用 .pc cloud list 查看；令牌过期或程序重启后需重新授权。",
+    "authorized_bound": "云人物卡授权已就绪，并已核验你的真实 QQ {{qq}}：当前账号已与该 QQ 关联，人物卡、好感等数据互通。使用 .pc cloud list 查看云卡。",
     "pending": "仍在等待网页授权；请完成同意后发送 .pc cloud confirm。验证码遗失可先 logout 再重新授权。",
     "wait": "请求过于频繁，请稍等再发送 .pc cloud confirm 或重试原指令。",
     "denied": "此次授权已拒绝或取消。未读取或改动云人物卡。",

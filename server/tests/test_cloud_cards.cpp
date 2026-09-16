@@ -4,6 +4,7 @@
 #include "config/config_manager.h"
 #include "storage/database.h"
 #include "adapter/adapter_interface.h"
+#include "core/identity/identity_binding.h"
 #include <filesystem>
 #include <chrono>
 #include <future>
@@ -291,4 +292,79 @@ TEST(CloudCards, BackgroundQueueIsBoundedAndDoesNotBlockCaller) {
     f.service.reset();
     ASSERT_TRUE(started); ASSERT_TRUE(inTransport); ASSERT_TRUE(queued); ASSERT_FALSE(overflow); ASSERT_TRUE(finished);
     auto r = done.get(); ASSERT_EQ(r.key, "cloud_card.auth_code"); ASSERT_TRUE(r.secret);
+}
+
+
+namespace {
+// 带 userinfo 的发现文档 + 一个已验证的 QQ 邮箱：BDC 注册只收纯数字 QQ 邮箱且
+// 必须过验证码，所以邮箱前缀就是真实 QQ 号。
+std::function<Response(const Request&)> withVerifiedEmail(const std::string& email) {
+    return [email](const Request& r) -> Response {
+        if (r.path == "/.well-known/openid-configuration")
+            return Response{200, {{"issuer", "https://account.dice.zone"},
+                {"token_endpoint", "https://account.dice.zone/api/oauth/token"},
+                {"userinfo_endpoint", "https://account.dice.zone/api/oauth/userinfo"}}};
+        if (r.path == "/api/oauth/userinfo") return Response{200, {{"email", email}}};
+        return Response{0, Json::object()};
+    };
+}
+void asOfficialSession(Fixture& f, const std::string& bot, const std::string& openId) {
+    auto& bindings = identity::BindingStore::instance();
+    bindings.observeOfficial(f.db, bot, openId, identity::Kind::User);
+    f.msg.platform = "qq_official";
+    f.msg.senderId = bindings.publicForOfficial(f.db, bot, openId, identity::Kind::User);
+    f.msg.targetId = f.msg.senderId;
+    f.msg.extra = Json{{"__identity_transport", "qq_official"},
+                       {"__identity_native_sender", openId},
+                       {"official_bot_id", bot}};
+}
+}   // namespace
+
+TEST(CloudCards, VerifiedEmailBindsOfficialOpenIdToTheRealQQ) {
+    Fixture f;
+    f.scope = "cards.read email";
+    f.custom = withVerifiedEmail("10001@qq.com");
+    asOfficialSession(f, "app-bind", "openid-bind");
+    auto& bindings = identity::BindingStore::instance();
+    // 绑定前是虚拟号：官方 OpenID 背后的真实 QQ 还不知道。
+    ASSERT_FALSE(identity::BindingStore::isRealQQ(f.msg.senderId));
+
+    ASSERT_EQ(f.run("auth").key, std::string("cloud_card.auth_code"));
+    f.now += std::chrono::seconds(6);
+    auto confirmed = f.run("confirm");
+    ASSERT_EQ(confirmed.key, std::string("cloud_card.authorized_bound"));
+    ASSERT_EQ(confirmed.args.at("qq"), std::string("10001"));
+    // 含真实 QQ 号，只能私发，不进普通回复留存。
+    ASSERT_TRUE(confirmed.secret);
+    ASSERT_EQ(bindings.publicForOfficial(f.db, "app-bind", "openid-bind", identity::Kind::User),
+              std::string("10001"));
+}
+
+TEST(CloudCards, EmailIsOnlyReadWhenThatScopeWasGranted) {
+    Fixture f;
+    f.scope = "cards.read cards.write";   // 服务端没给 email
+    f.custom = withVerifiedEmail("10002@qq.com");
+    asOfficialSession(f, "app-noscope", "openid-noscope");
+
+    ASSERT_EQ(f.run("auth").key, std::string("cloud_card.auth_code"));
+    f.now += std::chrono::seconds(6);
+    ASSERT_EQ(f.run("confirm").key, std::string("cloud_card.authorized"));
+    // 没拿到 scope 就不该去碰 userinfo，更不该凭它绑定。
+    for (const auto& call : f.calls) ASSERT_TRUE(call.path != "/api/oauth/userinfo");
+    ASSERT_FALSE(identity::BindingStore::isRealQQ(
+        identity::BindingStore::instance().publicForOfficial(f.db, "app-noscope", "openid-noscope",
+                                                             identity::Kind::User)));
+}
+
+TEST(CloudCards, AnAlreadyRealQQSessionIsNeverRepointedAtAnotherAccount) {
+    Fixture f;
+    f.scope = "cards.read email";
+    f.custom = withVerifiedEmail("10003@qq.com");
+    // OneBot 会话本来就带着真实 QQ 1000，而 BDC 说的是 10003——两边都"是真的"，
+    // 静默合并会把两个人的人物卡搅在一起，所以什么都不做。
+    ASSERT_EQ(f.msg.senderId, std::string("1000"));
+
+    ASSERT_EQ(f.run("auth").key, std::string("cloud_card.auth_code"));
+    f.now += std::chrono::seconds(6);
+    ASSERT_EQ(f.run("confirm").key, std::string("cloud_card.authorized"));
 }

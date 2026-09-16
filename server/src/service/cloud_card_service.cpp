@@ -2,6 +2,7 @@
 #include "../adapter/adapter_interface.h"
 #include "../config/config_manager.h"
 #include "../core/character/card_store.h"
+#include "../core/identity/identity_binding.h"
 #include "../storage/database.h"
 #include <drogon/HttpClient.h>
 #include <trantor/net/EventLoopThread.h>
@@ -177,7 +178,7 @@ struct Service::Impl {
         int interval = 5;
     };
     std::unordered_map<std::string, Session> sessions;
-    std::string devicePath, tokenPath;
+    std::string devicePath, tokenPath, userinfoPath;
     Impl(Database& d, ConfigManager& c, CharacterCardStore& s, Transport t, Now n)
         : db(d), cfg(c), cards(s), transport(t ? std::move(t) : http), now(n ? std::move(n) : Clock::now) {}
 
@@ -206,12 +207,55 @@ struct Service::Impl {
             return url.substr(std::char_traits<char>::length(origin));
         };
         auto device = path("device_authorization_endpoint"), token = path("token_endpoint");
+        userinfoPath = path("userinfo_endpoint");
         // BDC b894848 serves RFC 8628 but does not yet advertise the device
         // endpoint in discovery. This compatibility fallback is same-origin only.
         if (!r.body.contains("device_authorization_endpoint")) device = "/api/oauth/device_authorization";
         if (device.empty() || token.empty()) return false;
         devicePath = device; tokenPath = token; return true;
     }
+    // 本站注册只收纯数字 QQ 邮箱且必须过验证码，所以注册邮箱的前缀就是一个已验证
+    // 的真实 QQ 号——QQ 互联的 openid 给不了这个。拿到之后把当前平台身份关联过去，
+    // 人物卡与好感随之互通。
+    //
+    // 会话已经带着另一个真实 QQ 时什么都不做：两边都"是真的"，静默合并会把两个人
+    // 的人物卡搅在一起，宁可不动，留给 .bind 让人自己看清楚再决定。
+    std::string bindVerifiedQQ(const Message& msg, const std::string& access) {
+        if (userinfoPath.empty() || access.empty()) return {};
+        auto r = request({userinfoPath, "GET", "", "", access});
+        if (r.status != 200 || !r.body.is_object()) return {};
+        const auto email = r.body.value("email", std::string());
+        const auto at = email.find("@qq.com");
+        if (at == std::string::npos || at == 0) return {};
+        const std::string qq = email.substr(0, at);
+        using identity::BindingStore;
+        using identity::Kind;
+        if (!BindingStore::isRealQQ(qq)) return {};
+
+        // 已是真实 QQ 的会话（OneBot，或此前已绑定过的官方会话）没有可绑的东西；
+        // 对不上就更不能动。
+        if (BindingStore::isRealQQ(msg.senderId)) return msg.senderId == qq ? qq : std::string();
+
+        const auto exval = [&msg](const char* key) {
+            return msg.extra.is_object() ? msg.extra.value(key, std::string()) : std::string();
+        };
+        const std::string transportName = exval("__identity_transport");
+        const std::string native = exval("__identity_native_sender");
+        if (transportName.empty() || native.empty()) return {};
+
+        auto& bindings = BindingStore::instance();
+        std::string error;
+        if (transportName == "qq_official") {
+            const std::string bot = exval("official_bot_id");
+            if (bot.empty()) return {};
+            if (!bindings.bindOfficialToQQ(db, BindingStore::officialId(bot, native), qq, Kind::User, error))
+                return {};
+        } else if (!bindings.bindPlatformToQQ(db, transportName, native, qq, Kind::User, error)) {
+            return {};
+        }
+        return qq;
+    }
+
     std::vector<UserSettingRow> links(const Message& msg, const std::string& ctx) {
         auto* st = db.getStorage(); if (!st) throw std::runtime_error("no storage");
         namespace orm = sqlite_orm;
@@ -261,7 +305,9 @@ struct Service::Impl {
             if (sessions.count(ctx) && sessions.at(ctx).access.empty()) return result("pending");
             if (sessions.size() >= 1024) return result("busy");
             if (!discovery()) return result("network");
-            auto scopes = std::string("cards.read") + (rest == "write" ? " cards.write" : "");
+            // email 是本站已验证的真实 QQ 号（注册只收纯数字 QQ 邮箱且必须过验证码），
+            // 授权后据此把当前平台身份关联到该 QQ。
+            auto scopes = std::string("cards.read email") + (rest == "write" ? " cards.write" : "");
             // Do not assert a public QQ identity for an application-scoped OpenID.
             auto native = msg.extra.is_object() ? msg.extra.value("__identity_native_sender", msg.senderId) : msg.senderId;
             Request req{devicePath, "POST", "scope=" + encode(scopes) + "&platform=" + encode(msg.platform) +
@@ -302,7 +348,7 @@ struct Service::Impl {
             const auto granted = " " + r.body.value("scope", std::string()) + " ";
             const auto requested = " " + s.scope + " ";
             s.scope.clear();
-            for (const auto* allowed : {"cards.read", "cards.write"}) {
+            for (const auto* allowed : {"cards.read", "cards.write", "email"}) {
                 const auto term = std::string(" ") + allowed + " ";
                 if (granted.find(term) != std::string::npos && requested.find(term) != std::string::npos)
                     s.scope += (s.scope.empty() ? "" : " ") + std::string(allowed);
@@ -310,6 +356,10 @@ struct Service::Impl {
             const int ttl = std::clamp(r.body.value("expires_in", 0), 0, 86400);
             if (!ttl) { sessions.erase(ctx); return result("expired"); }
             s.expires = now() + std::chrono::seconds(ttl);
+            if ((" " + s.scope + " ").find(" email ") != std::string::npos) {
+                const auto boundQQ = bindVerifiedQQ(msg, s.access);
+                if (!boundQQ.empty()) return {"cloud_card.authorized_bound", {{"qq", boundQQ}}, true};
+            }
             return result("authorized");
         }
         if (action == "confirm") return result("authorized");

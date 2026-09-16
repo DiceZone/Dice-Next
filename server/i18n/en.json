@@ -20,6 +20,7 @@
     "auth_code": "Open {url} yourself and enter {code} within {seconds} seconds. Verify the bot and owner, and consent to write access only if wanted. Then send .pc cloud confirm here. Do not forward this code or approve someone else's request.",
     "auth_sent": "Authorization details were sent separately in private. After website approval, send .pc cloud confirm. If missing, use logout and authorize again.",
     "authorized": "Cloud card authorization is ready. Use .pc cloud list. Reauthorize after token expiry or a program restart.",
+    "authorized_bound": "Cloud card authorization is ready and your QQ {{qq}} is verified: this account is now linked to that QQ, so cards and affinity carry over. Use .pc cloud list to see your cloud cards.",
     "pending": "Waiting for website approval. Approve, then send .pc cloud confirm. If you lost the code, logout and authorize again.",
     "wait": "Please wait before confirming or retrying the command.",
     "denied": "Authorization denied/cancelled. No cloud cards were accessed or changed.",
