@@ -47,8 +47,11 @@ TEST(I18nBundles, LocaleLeafKeysStayInSyncAndLegacyKeysAreTopLevel) {
         ASSERT_TRUE(leaves(bundle) == expected);
     }
 
-    for (const char* key : {"legacy_user", "legacy_cloud", "legacy_str"})
+    // legacy_cloud 随 .cloud 改为账号授权入口一并删除：原版的 update / black 只能
+    // 报告状态并把人指向网页，留着只是死键。
+    for (const char* key : {"legacy_user", "legacy_str"})
         ASSERT_TRUE(baseline.contains(key));
+    ASSERT_FALSE(baseline.contains("legacy_cloud"));
     ASSERT_FALSE(baseline.at("system").contains("legacy_user"));
     for (const char* key : {"rolled_multi", "count_err", "count_exceeded"})
         ASSERT_TRUE(baseline.at("init").contains(key));

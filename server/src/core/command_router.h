@@ -6475,15 +6475,31 @@ public:
         return i18n_.tr(loc, "legacy_user.usage");
     }
 
+    /// 账号中心授权与云人物卡。`.cloud <子指令>` 与 `.pc cloud <子指令>` 共用同一条
+    /// 通道和同一份令牌：授权一次，云卡读写与真实 QQ 核验都随之生效。
+    ///
+    /// 授权码不得流经回复日志、AI、插件加工、模拟聊天或跑团日志落库，因此结果由
+    /// 原适配器私发，不走普通回复。
+    std::string cloudAccountCommand(Locale loc, const std::string& args, const Message& msg) {
+        if (msg.type != MessageType::kPrivate || msg.fromSelf)
+            return i18n_.tr(loc, "cloud_card.private_only");
+        auto adapter = adapters_.getAdapter(msg.adapterId);
+        if (!adapter || !adapter->isConnected()) return i18n_.tr(loc, "cloud_card.no_adapter");
+        const std::string name = trim(args);
+        if (name.empty() || toLower(name) == "help") return i18n_.tr(loc, "cloud_card.usage");
+        auto* translations = &i18n_;
+        const bool queued = cloudCards_.dispatch(msg, name,
+            [adapter, msg, loc, translations](cloud_cards::Result res) {
+                if (adapter->isConnected()) adapter->sendReply(msg, translations->tr(loc, res.key, res.args));
+            });
+        return i18n_.tr(loc, queued ? "cloud_card.queued" : "cloud_card.busy");
+    }
+
+    /// 原版 .cloud 的 update / black 只能报告状态并把人指向网页，本体从不在聊天里
+    /// 执行；这两个子指令已移除，版本号看 .bot，云黑开关在网页「系统设置」。
+    /// 该拼法现在整条让给账号中心授权与云人物卡。
     std::string handleLegacyCloud(Locale loc, const std::string& args, const Message& msg) {
-        if (!isMaster(msg)) return i18n_.tr(loc, "gate.not_master");
-        auto [actionRaw, rest] = splitCommand(trim(args));
-        const std::string action = toLower(actionRaw);
-        if (action == "black") return i18n_.tr(loc, "legacy_cloud.disabled");
-        if (action == "update")
-            return i18n_.tr(loc, "legacy_cloud.update_web", {{"version", dice::versionString()}});
-        (void)rest;
-        return i18n_.tr(loc, "legacy_cloud.usage");
+        return cloudAccountCommand(loc, trim(args), msg);
     }
 
     // Original `.strXXX <text|show|reset|NULL>` writes the same override table
@@ -10309,20 +10325,11 @@ private:
         std::string sub = toLower(trim(subRaw));
         std::string name = trim(rest);
 
+        // `.cloud` 是主拼法。这一支静默转发过去：少了它，`.pc cloud` 会落到末尾
+        // 「按名字绑定卡片」那条路——谁有一张叫 cloud 的卡就会被无声绑上。
         if (sub == "cloud") {
-            if (msg.type != MessageType::kPrivate || !target.empty() || msg.fromSelf)
-                return i18n_.tr(loc, "cloud_card.private_only");
-            // Authorization codes must never flow through reply logging, AI, plugins,
-            // chat history or game-log persistence. Deliver on the originating adapter.
-            auto adapter = adapters_.getAdapter(msg.adapterId);
-            if (!adapter || !adapter->isConnected()) return i18n_.tr(loc, "cloud_card.no_adapter");
-            if (name.empty() || name == "help") return i18n_.tr(loc, "cloud_card.usage");
-            auto* translations = &i18n_;
-            const bool queued = cloudCards_.dispatch(msg, name,
-                [adapter, msg, loc, translations](cloud_cards::Result res) {
-                    if (adapter->isConnected()) adapter->sendReply(msg, translations->tr(loc, res.key, res.args));
-                });
-            return i18n_.tr(loc, queued ? "cloud_card.queued" : "cloud_card.busy");
+            if (!target.empty()) return i18n_.tr(loc, "cloud_card.private_only");
+            return cloudAccountCommand(loc, name, msg);
         }
 
         // Bare ".pc": view the @'d user's card; otherwise show usage (use .pc list

@@ -14,16 +14,16 @@
 所有云卡操作在玩家与骰娘的**私聊**中进行：
 
 ```text
-.pc cloud auth             # 默认请求 cards.read
-.pc cloud auth write       # 需要上传/同步时主动申请写入；网页仍须明确同意
-.pc cloud confirm          # 网页输码同意后确认，服务端会限制确认频率
-.pc cloud list             # 列出本人授权账号的云卡 ID、名称、版本
-.pc cloud pull 云卡ID       # 创建同名本地卡；不会覆盖无关同名卡
-.pc cloud pull 云卡ID 新名  # 使用指定本地名；已有映射时新名字作为独立对照副本
-.pc cloud push 本地卡名     # 首次上传；已关联则按原 card_id 同步
-.pc cloud sync 本地卡名     # 按上次同步版本提交，接受云端三方合并结果
-.pc cloud status
-.pc cloud logout
+.cloud auth             # 默认请求 cards.read
+.cloud auth write       # 需要上传/同步时主动申请写入；网页仍须明确同意
+.cloud confirm          # 网页输码同意后确认，服务端会限制确认频率
+.cloud list             # 列出本人授权账号的云卡 ID、名称、版本
+.cloud pull 云卡ID       # 创建同名本地卡；不会覆盖无关同名卡
+.cloud pull 云卡ID 新名  # 使用指定本地名；已有映射时新名字作为独立对照副本
+.cloud push 本地卡名     # 首次上传；已关联则按原 card_id 同步
+.cloud sync 本地卡名     # 按上次同步版本提交，接受云端三方合并结果
+.cloud status
+.cloud logout
 ```
 
 拉取后，在跑团群 `.pc tag 本地卡名` 绑定，原有 `.st/.ra/.sc`、Lua/JS 读卡继续使用
