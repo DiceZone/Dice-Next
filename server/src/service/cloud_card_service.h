@@ -40,9 +40,11 @@ public:
     ~Service();
     Service(const Service&) = delete;
     Service& operator=(const Service&) = delete;
-    Result handle(const Message&, const std::string& args);
+    Result handle(const Message&, const std::string& args, const std::string& expectedQQ = {});
+    bool hasClientKey(const Message&) const;
     // Bounded, single-worker queue. Never run cloud I/O on adapter event threads.
-    bool dispatch(Message, std::string args, std::function<void(Result)> completed);
+    bool dispatch(Message, std::string args, std::function<void(Result)> completed,
+                  std::string expectedQQ = {});
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

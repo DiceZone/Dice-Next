@@ -75,6 +75,8 @@ static json makeDefaultConfig() {
         {"webui", {
             {"password", ""}
         }},
+        {"identity_email", {{"enabled", false}, {"host", ""}, {"port", 465}, {"ssl", true},
+                            {"user", ""}, {"pass", ""}, {"from", ""}}},
         {"i18n", {
             {"resource_dir", "i18n"},
             {"default_locale", "zh-Hans"}

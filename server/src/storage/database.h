@@ -73,17 +73,6 @@ struct IdentityEndpointRow {
     std::string createdAt;
 };
 
-/// 通过头像比对验证过的哈希归属。同一个哈希出现在另一个身份上，说明这张头像
-/// 是多人共用的（默认图或商城头像），不能再拿来证明身份。
-struct AvatarProofRow {
-    int id = 0;
-    std::string avatarSha256;
-    std::string adapterAccount;// QQ Official AppID
-    std::string openId;
-    std::string qq;
-    std::string createdAt;
-};
-
 /// Deck / card collection table.
 struct DeckRow {
     int id = 0;
@@ -530,14 +519,6 @@ private:
             orm::make_column("adapter_account", &IdentityEndpointRow::adapterAccount),
             orm::make_column("endpoint_id", &IdentityEndpointRow::endpointId),
             orm::make_column("created_at", &IdentityEndpointRow::createdAt)
-        ),
-        orm::make_table("identity_avatar_proofs",
-            orm::make_column("id", &AvatarProofRow::id, orm::primary_key().autoincrement()),
-            orm::make_column("avatar_sha256", &AvatarProofRow::avatarSha256),
-            orm::make_column("adapter_account", &AvatarProofRow::adapterAccount),
-            orm::make_column("open_id", &AvatarProofRow::openId),
-            orm::make_column("qq", &AvatarProofRow::qq),
-            orm::make_column("created_at", &AvatarProofRow::createdAt)
         ),
         orm::make_table("decks",
             orm::make_column("id", &DeckRow::id,

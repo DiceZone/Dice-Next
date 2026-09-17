@@ -77,6 +77,7 @@ set(SOURCES
     src/common/subprocess.cpp
     src/service/update_service.cpp
     src/service/cloud_card_service.cpp
+    src/service/identity_email_service.cpp
     src/config/config_manager.cpp
     src/storage/database.cpp
     src/storage/migration.cpp

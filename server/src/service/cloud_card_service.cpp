@@ -166,14 +166,14 @@ Json fromDocument(const Json& doc) {
 struct Service::Impl {
     Database& db; ConfigManager& cfg; CharacterCardStore& cards; Transport transport; Now now;
     std::mutex mutex;
-    struct Job { Message msg; std::string args; std::function<void(Result)> completed; };
+    struct Job { Message msg; std::string args; std::function<void(Result)> completed; std::string expectedQQ; };
     std::mutex queueMutex;
     std::condition_variable wake;
     std::deque<Job> jobs;
     bool stopping = false;
     std::thread worker;
     struct Session {
-        std::string device, access, scope, apiHash;
+        std::string device, access, scope, apiHash, expectedQQ;
         Clock::time_point expires{}, nextPoll{};
         int interval = 5;
     };
@@ -220,17 +220,18 @@ struct Service::Impl {
     //
     // 会话已经带着另一个真实 QQ 时什么都不做：两边都"是真的"，静默合并会把两个人
     // 的人物卡搅在一起，宁可不动，留给 .bind 让人自己看清楚再决定。
-    std::string bindVerifiedQQ(const Message& msg, const std::string& access) {
+    std::string bindVerifiedQQ(const Message& msg, const std::string& access, const std::string& expectedQQ = {}) {
         if (userinfoPath.empty() || access.empty()) return {};
         auto r = request({userinfoPath, "GET", "", "", access});
         if (r.status != 200 || !r.body.is_object()) return {};
         const auto email = r.body.value("email", std::string());
-        const auto at = email.find("@qq.com");
-        if (at == std::string::npos || at == 0) return {};
+        const auto at = email.find('@');
+        if (at == std::string::npos || at == 0 || email.substr(at) != "@qq.com") return {};
         const std::string qq = email.substr(0, at);
         using identity::BindingStore;
         using identity::Kind;
         if (!BindingStore::isRealQQ(qq)) return {};
+        if (!expectedQQ.empty() && qq != expectedQQ) return {};
 
         // 已是真实 QQ 的会话（OneBot，或此前已绑定过的官方会话）没有可绑的东西；
         // 对不上就更不能动。
@@ -248,9 +249,9 @@ struct Service::Impl {
         if (transportName == "qq_official") {
             const std::string bot = exval("official_bot_id");
             if (bot.empty()) return {};
-            if (!bindings.bindOfficialToQQ(db, BindingStore::officialId(bot, native), qq, Kind::User, error))
+            if (!bindings.bindVerifiedOfficialToQQ(db, BindingStore::officialId(bot, native), qq, error))
                 return {};
-        } else if (!bindings.bindPlatformToQQ(db, transportName, native, qq, Kind::User, error)) {
+        } else if (!bindings.bindVerifiedPlatformToQQ(db, transportName, native, qq, error)) {
             return {};
         }
         return qq;
@@ -281,7 +282,7 @@ struct Service::Impl {
         auto id = doc.at("card_id").get<std::string>();
         return validId(id) && (expectedId.empty() || id == expectedId) && doc.at("rev").is_number_integer() && doc.at("rev").get<int64_t>() > 0;
     }
-    Result handle(const Message& msg, const std::string& args) {
+    Result handle(const Message& msg, const std::string& args, const std::string& expectedQQ) {
         if (msg.type != MessageType::kPrivate || msg.fromSelf || msg.senderId.empty() || msg.adapterId.empty())
             return result("private_only");
         auto [action, rest] = split(args);
@@ -289,7 +290,7 @@ struct Service::Impl {
         if (action.empty() || action == "help") return result("usage");
         if (action != "auth" && action != "confirm" && action != "status" && action != "logout" &&
             action != "list" && action != "pull" && action != "push" && action != "sync") return result("usage");
-        auto ctx = context(msg);
+        auto ctx = (expectedQQ.empty() ? std::string() : std::string("bind:")) + context(msg);
         if (action == "logout") { sessions.erase(ctx); return result("logout"); }
         for (auto it = sessions.begin(); it != sessions.end();) {
             if (it->second.expires <= now()) it = sessions.erase(it); else ++it;
@@ -302,12 +303,17 @@ struct Service::Impl {
             (sessions.at(ctx).access.empty() ? "pending" : "authorized") : "expired");
         if (action == "auth") {
             if (!rest.empty() && rest != "read" && rest != "write") return result("usage");
+            if (!expectedQQ.empty() && !identity::BindingStore::isRealQQ(expectedQQ)) return result("usage");
+            // Binding is a fresh identity-only authorization, not permission to read/write cloud cards.
+            if (!expectedQQ.empty() && sessions.count(ctx) && sessions.at(ctx).expectedQQ != expectedQQ)
+                sessions.erase(ctx);
             if (sessions.count(ctx) && sessions.at(ctx).access.empty()) return result("pending");
             if (sessions.size() >= 1024) return result("busy");
             if (!discovery()) return result("network");
             // email 是本站已验证的真实 QQ 号（注册只收纯数字 QQ 邮箱且必须过验证码），
             // 授权后据此把当前平台身份关联到该 QQ。
-            auto scopes = std::string("cards.read email") + (rest == "write" ? " cards.write" : "");
+            auto scopes = expectedQQ.empty() ? std::string("cards.read email") + (rest == "write" ? " cards.write" : "")
+                                             : std::string("email");
             // Do not assert a public QQ identity for an application-scoped OpenID.
             auto native = msg.extra.is_object() ? msg.extra.value("__identity_native_sender", msg.senderId) : msg.senderId;
             Request req{devicePath, "POST", "scope=" + encode(scopes) + "&platform=" + encode(msg.platform) +
@@ -318,7 +324,7 @@ struct Service::Impl {
             if (!safeSecret(device) || code.empty() || code.size() > 16 ||
                 !std::all_of(code.begin(), code.end(), [](unsigned char c) { return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'; }) ||
                 r.body.value("verification_uri", "") != std::string(origin) + "/device") return result("bad_response");
-            Session s; s.device = device; s.apiHash = hash(key); s.scope = scopes;
+            Session s; s.device = device; s.apiHash = hash(key); s.scope = scopes; s.expectedQQ = expectedQQ;
             s.interval = std::clamp(r.body.value("interval", 5), 5, 60);
             const int ttl = std::clamp(r.body.value("expires_in", 0), 0, 900);
             if (!ttl) return result("bad_response");
@@ -328,6 +334,7 @@ struct Service::Impl {
         }
         if (!sessions.count(ctx)) return result("expired");
         auto& s = sessions.at(ctx);
+        if (!expectedQQ.empty() && expectedQQ != s.expectedQQ) return result("expired");
         if (s.access.empty()) {
             if (now() < s.nextPoll) return result("wait");
             auto r = request({tokenPath, "POST", "grant_type=" + encode("urn:ietf:params:oauth:grant-type:device_code") +
@@ -357,9 +364,15 @@ struct Service::Impl {
             if (!ttl) { sessions.erase(ctx); return result("expired"); }
             s.expires = now() + std::chrono::seconds(ttl);
             if ((" " + s.scope + " ").find(" email ") != std::string::npos) {
-                const auto boundQQ = bindVerifiedQQ(msg, s.access);
+                const auto boundQQ = bindVerifiedQQ(msg, s.access, s.expectedQQ);
+                if (!s.expectedQQ.empty()) {
+                    sessions.erase(ctx); // Identity-only tokens are single-use and never retained for cloud access.
+                    if (boundQQ.empty()) return {"identity_email.oauth_not_verified", {}, true};
+                    return {"identity_email.success", {{"qq", boundQQ}}, true};
+                }
                 if (!boundQQ.empty()) return {"cloud_card.authorized_bound", {{"qq", boundQQ}}, true};
             }
+            if (!s.expectedQQ.empty()) { sessions.erase(ctx); return {"identity_email.oauth_not_verified", {}, true}; }
             return result("authorized");
         }
         if (action == "confirm") return result("authorized");
@@ -441,6 +454,7 @@ struct Service::Impl {
 
 Service::Service(Database& db, ConfigManager& cfg, CharacterCardStore& cards, Transport transport, Now now)
     : impl_(std::make_unique<Impl>(db, cfg, cards, std::move(transport), std::move(now))) {}
+bool Service::hasClientKey(const Message& msg) const { return impl_->apiKey(msg).rfind("bdc_", 0) == 0; }
 Service::~Service() {
     {
         std::lock_guard<std::mutex> lock(impl_->queueMutex);
@@ -449,7 +463,7 @@ Service::~Service() {
     impl_->wake.notify_all();
     if (impl_->worker.joinable()) impl_->worker.join();
 }
-bool Service::dispatch(Message msg, std::string args, std::function<void(Result)> completed) {
+bool Service::dispatch(Message msg, std::string args, std::function<void(Result)> completed, std::string expectedQQ) {
     std::lock_guard<std::mutex> lock(impl_->queueMutex);
     if (impl_->stopping || impl_->jobs.size() >= 16) return false;
     if (!impl_->worker.joinable()) {
@@ -462,19 +476,19 @@ bool Service::dispatch(Message msg, std::string args, std::function<void(Result)
                     if (impl_->stopping) return;
                     job = std::move(impl_->jobs.front()); impl_->jobs.pop_front();
                 }
-                auto out = handle(job.msg, job.args);
+                auto out = handle(job.msg, job.args, job.expectedQQ);
                 try { job.completed(std::move(out)); } catch (...) { /* Never log authorization data. */ }
             }
         });
     }
-    impl_->jobs.push_back({std::move(msg), std::move(args), std::move(completed)});
+    impl_->jobs.push_back({std::move(msg), std::move(args), std::move(completed), std::move(expectedQQ)});
     impl_->wake.notify_one();
     return true;
 }
-Result Service::handle(const Message& msg, const std::string& args) {
+Result Service::handle(const Message& msg, const std::string& args, const std::string& expectedQQ) {
     std::unique_lock<std::mutex> lock(impl_->mutex, std::try_to_lock);
     if (!lock.owns_lock()) return result("busy");
-    try { return impl_->handle(msg, args); }
+    try { return impl_->handle(msg, args, expectedQQ); }
     catch (...) { return result("bad_response"); } // No token/document contents in logs or exceptions.
 }
 } // namespace dice::cloud_cards

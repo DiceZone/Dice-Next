@@ -1308,6 +1308,12 @@ static int realMain(int argc, char* argv[]) {
             (cmdRouter.isForAnotherBot(msg) && !pluginCommandMatches(jsMod, luaMod, cmdRouter, msg))) return;
         // Black/white-list: ignore blacklisted users/groups (and non-whitelisted in whitelist mode).
         if (cmdRouter.isBlocked(msg)) return;
+        if (cmdRouter.isIdentityEmailCommand(msg)) {
+            const auto reply = cmdRouter.handleMessage(msg);
+            if (!reply.empty()) if (auto adapter = adapterMgr.getAdapter(msg.adapterId))
+                adapter->sendReply(msg, reply);
+            return; // Never expose the code to plugins, AI, simulated chat or transcripts.
+        }
         // 群自动化：消息命中「自动踢出/禁言」关键字则执行并跳过后续处理。
         {
             std::string act = cmdRouter.applyGroupAutoModeration(msg);

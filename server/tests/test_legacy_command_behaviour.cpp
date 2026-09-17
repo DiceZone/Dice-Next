@@ -4,6 +4,7 @@
 #include "storage/group_account_settings.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 
 using namespace dice;
@@ -32,7 +33,8 @@ struct LegacyFixture {
     CommandRouter router{db, cfg, engine, i18n, resolver, cards, deck, adapters};
     Message msg;
 
-    LegacyFixture() {
+    explicit LegacyFixture(identity_email::Sender sender = {}, cloud_cards::Transport cloud = {})
+        : router{db, cfg, engine, i18n, resolver, cards, deck, adapters, std::move(sender), std::move(cloud)} {
         if (!db.open(u8str(dir.path / "test.db"))) throw std::runtime_error("cannot open test database");
         cfg.resetDefault();
         msg.platform = "onebot_v11";
@@ -64,7 +66,175 @@ struct LegacyFixture {
     }
 };
 
+class BindingAdapter final : public IAdapter {
+public:
+    std::mutex mu; std::condition_variable cv; bool replied = false;
+    std::string id() const override { return "log-test"; }
+    std::string name() const override { return id(); }
+    std::string platform() const override { return "qq_official"; }
+    std::string version() const override { return "test"; }
+    bool configure(const json&) override { return true; }
+    bool start() override { return true; }
+    void stop() override {}
+    bool isConnected() const override { return true; }
+    std::string lastError() const override { return {}; }
+    void sendMessage(const Message&) override {}
+    void sendReply(const Message&, const std::string&) override {
+        std::lock_guard lock(mu); replied = true; cv.notify_all();
+    }
+    void onMessage(MessageCallback) override {}
+    std::string getLoginId() const override { return "9000"; }
+    std::string getLoginName() const override { return "骰娘"; }
+    std::string getGroupName(const std::string&) const override { return {}; }
+    std::vector<std::string> getGroupMemberList(const std::string&) const override { return {}; }
+    bool isGroupAdmin(const std::string&, const std::string&) const override { return false; }
+    bool isGroupOwner(const std::string&, const std::string&) const override { return false; }
+    void setGroupKick(const std::string&, const std::string&) override {}
+    void setGroupBan(const std::string&, const std::string&, int) override {}
+};
 } // namespace
+
+TEST(IdentityBind, EmailFlowBindsOnlyTheRequestingNativeIdentityOnAllSupportedPlatforms) {
+    for (const auto* platform : {"qq_official", "discord", "kook"}) {
+        std::string deliveredCode, recipient;
+        auto adapter = std::make_shared<BindingAdapter>();
+        LegacyFixture f{[&](const json&, const std::string& to, const std::string& body) {
+            std::lock_guard lock(adapter->mu); recipient = to;
+            std::istringstream input(body.substr(body.find(".bind confirm ")));
+            std::string cmd, sub; input >> cmd >> sub >> deliveredCode; return true;
+        }};
+        f.adapters.registerAdapter(adapter);
+        f.cfg.set<json>("identity_email", {{"enabled", true}, {"host", "smtp.example.com"}, {"port", 465}, {"ssl", true},
+            {"user", "dice@example.com"}, {"pass", "test-only"}, {"from", "dice@example.com"}});
+        f.msg.platform = platform; f.msg.type = MessageType::kPrivate;
+        auto& store = identity::BindingStore::instance();
+        const bool official = f.msg.platform == "qq_official";
+        const auto setNative = [&](const std::string& native) {
+            f.msg.senderId = official ? store.observeOfficial(f.db, "test", native, identity::Kind::User)
+                : store.observeVirtual(f.db, platform, f.msg.adapterId, native, identity::Kind::User);
+            f.msg.targetId = f.msg.senderId;
+            f.msg.extra = {{"__identity_transport", platform}, {"__identity_native_sender", native},
+                {"official_bot_id", "test"}, {"__identity_local_sender", "QQ-Official-test:" + native}};
+        };
+        setNative("requester");
+        ASSERT_EQ(f.run(".bind qq 160703953"), "identity_email.queued");
+        {
+            std::unique_lock lock(adapter->mu);
+            ASSERT_TRUE(adapter->cv.wait_for(lock, std::chrono::seconds(5), [&] { return adapter->replied; }));
+            ASSERT_EQ(recipient, std::string("160703953@qq.com"));
+        }
+        setNative("other-user");
+        ASSERT_EQ(f.run(".bind confirm " + deliveredCode), "identity_email.missing");
+        setNative("requester");
+        ASSERT_EQ(f.run(".bind confirm"), "identity_email.email_confirm_usage");
+        ASSERT_EQ(f.run(".bind qq 160703954 " + deliveredCode), "identity_email.missing");
+        ASSERT_EQ(f.run(".bind confirm " + deliveredCode), "identity_email.success");
+        setNative("requester");
+        ASSERT_EQ(f.msg.senderId, std::string("160703953"));
+        ASSERT_EQ(f.run(".bind email 160703954"), "identity_email.conflict");
+    }
+}
+
+TEST(IdentityBind, BareCommandUsesCurrentHelpInEveryLocale) {
+    LegacyFixture f;
+    f.msg.extra["__identity_transport"] = "onebot_v11";
+    ASSERT_TRUE(f.i18n.load());
+    for (auto loc : {Locale::kZhHans, Locale::kZhHant, Locale::kEn, Locale::kJa}) {
+        for (const auto* command : {".bind", ".bind help", ".bind qq", ".bind qqgroup", ".bind confirm"}) {
+            f.msg.content = command;
+            const auto reply = f.router.handleMessage(f.msg, loc);
+            ASSERT_EQ(reply, f.i18n.tr(loc, "help.topic.bind"));
+            ASSERT_TRUE(reply.find(".cloud auth") != std::string::npos);
+            ASSERT_TRUE(reply.find(".bind qq <") != std::string::npos);
+            ASSERT_TRUE(reply.find("安全绑定用法（在 OneBot") == std::string::npos);
+        }
+    }
+}
+
+TEST(IdentityBind, ExplicitEmailAndLegacyAliasesWorkWithAClientKeyWithoutOAuthIO) {
+    for (bool legacy : {false, true}) {
+        std::string code;
+        std::atomic<int> cloudCalls{0};
+        auto adapter = std::make_shared<BindingAdapter>();
+        LegacyFixture f{[&](const json&, const std::string&, const std::string& body) {
+            std::lock_guard lock(adapter->mu);
+            std::istringstream input(body.substr(body.find(".bind confirm ")));
+            std::string command, sub; input >> command >> sub >> code; return true;
+        }, [&](const cloud_cards::Request&) { ++cloudCalls; return cloud_cards::Response{}; }};
+        f.adapters.registerAdapter(adapter);
+        f.cfg.set<json>("adapters", json::array({{{"id", f.msg.adapterId}, {"heart_api_key", "bdc_test_key"}}}));
+        f.cfg.set<json>("identity_email", {{"enabled", true}, {"host", "smtp.example.com"}, {"port", 465}, {"ssl", true},
+            {"user", "dice@example.com"}, {"pass", "test-only"}, {"from", "dice@example.com"}});
+        f.msg.platform = "qq_official"; f.msg.type = MessageType::kPrivate;
+        auto& bindings = identity::BindingStore::instance();
+        f.msg.senderId = bindings.observeOfficial(f.db, "aliases", "native", identity::Kind::User);
+        f.msg.extra = {{"__identity_transport", "qq_official"}, {"__identity_native_sender", "native"},
+            {"official_bot_id", "aliases"}, {"__identity_local_sender", "QQ-Official-aliases:native"}};
+        ASSERT_EQ(f.run(legacy ? ".bind email 160703953" : ".bind qq 160703953 email"), "identity_email.queued");
+        {
+            std::unique_lock lock(adapter->mu);
+            ASSERT_TRUE(adapter->cv.wait_for(lock, std::chrono::seconds(5), [&] { return adapter->replied; }));
+        }
+        ASSERT_EQ(f.run(std::string(legacy ? ".bind email 160703953 " : ".bind qq 160703953 ") + code), "identity_email.success");
+        ASSERT_EQ(cloudCalls.load(), 0);
+    }
+}
+
+TEST(IdentityBind, MissingNativeIdentityDoesNotBind) {
+    LegacyFixture f;
+    f.msg.type = MessageType::kPrivate;
+    f.msg.platform = "qq_official";
+    f.msg.extra = {{"__identity_transport", "qq_official"},
+        {"__identity_local_sender", "QQ-Official-test:missing"}};
+    const auto before = f.db.getStorage()->get_all<IdentityEndpointRow>().size();
+    const auto reply = f.run(".bind qq 160703953");
+    ASSERT_EQ(reply, "identity_email.no_identity");
+    ASSERT_EQ(f.db.getStorage()->get_all<IdentityEndpointRow>().size(), before);
+}
+
+TEST(IdentityBind, GroupCodesStayOutOfTranscriptsAndNeverBind) {
+    LegacyFixture f;
+    f.msg.platform = "qq_official";
+    f.msg.extra["__identity_transport"] = "qq_official";
+    ASSERT_EQ(f.run(".bind qq 160703953 12345678"), "identity_email.private_only");
+    ASSERT_TRUE(f.router.isIdentityEmailCommand(f.msg));
+    f.router.recordMessage(f.msg, "private only");
+    ASSERT_TRUE(f.messages().empty());
+    f.msg.content = ".bind email 160703953 12345678";
+    ASSERT_TRUE(f.router.isIdentityEmailCommand(f.msg));
+    ASSERT_EQ(f.run(".bind confirm 12345678"), "identity_email.private_only");
+    ASSERT_TRUE(f.router.isIdentityEmailCommand(f.msg));
+    f.router.recordMessage(f.msg, "private only");
+    ASSERT_TRUE(f.messages().empty());
+}
+
+TEST(IdentityBind, ClientKeyPrefersOAuthWithoutSendingMail) {
+    LegacyFixture f{{}, [](const cloud_cards::Request&) { return cloud_cards::Response{0, json::object()}; }};
+    f.adapters.registerAdapter(std::make_shared<BindingAdapter>());
+    f.cfg.set<json>("adapters", json::array({{{"id", f.msg.adapterId}, {"heart_api_key", "bdc_test_key"}}}));
+    f.msg.type = MessageType::kPrivate; f.msg.platform = "qq_official";
+    auto& bindings = identity::BindingStore::instance();
+    f.msg.senderId = bindings.observeOfficial(f.db, "test", "native", identity::Kind::User);
+    f.msg.extra = {{"__identity_transport", "qq_official"}, {"__identity_local_sender", "QQ-Official-test:native"},
+        {"__identity_native_sender", "native"}, {"official_bot_id", "test"}};
+    ASSERT_EQ(f.run(".bind qq 160703953"), "identity_email.oauth_queued");
+    ASSERT_EQ(f.run(".bind confirm 12345678"), "identity_email.oauth_confirm_usage");
+    ASSERT_EQ(f.run(".bind qq 160703953 email"), "identity_email.disabled");
+    ASSERT_EQ(f.run(".bind email 160703953"), "identity_email.disabled");
+}
+
+TEST(IdentityBind, InfoDoesNotRecommendUnsafeDirectOfficialGroupBinding) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    f.msg.platform = "qq_official";
+    f.msg.extra = {{"__identity_transport", "qq_official"}, {"official_bot_id", "test"},
+        {"__identity_native_target", "group-openid"}, {"__identity_native_sender", "user-openid"}};
+    auto groupInfo = f.run(".info qqgroup");
+    ASSERT_TRUE(groupInfo.find(".bind qqgroup QQ-Official-test:group-openid") != std::string::npos);
+    ASSERT_TRUE(groupInfo.find(".bind qqgroup <真实QQ号>") == std::string::npos);
+    auto userInfo = f.run(".info qq");
+    ASSERT_TRUE(userInfo.find(".bind confirm") != std::string::npos);
+}
 
 TEST(SampleTemplate, RollReplyUsesChosenTextAndActualResult) {
     LegacyFixture f;

@@ -368,3 +368,51 @@ TEST(CloudCards, AnAlreadyRealQQSessionIsNeverRepointedAtAnotherAccount) {
     f.now += std::chrono::seconds(6);
     ASSERT_EQ(f.run("confirm").key, std::string("cloud_card.authorized"));
 }
+
+TEST(CloudCards, ExplicitBindingChecksTargetAndDiscardsIdentityOnlyTokens) {
+    for (const auto* email : {"10004@qq.com", "10005@qq.com", "10004@qq.com.invalid"}) {
+        Fixture f;
+        f.scope = "cards.read cards.write email";
+        f.custom = withVerifiedEmail(email);
+        asOfficialSession(f, "app-target", "openid-target");
+        ASSERT_EQ(f.service->handle(f.msg, "auth", "10004").key, "cloud_card.auth_code");
+        ASSERT_TRUE(f.calls.back().body.find("scope=email&") != std::string::npos);
+        ASSERT_TRUE(f.calls.back().body.find("cards.") == std::string::npos);
+        f.now += std::chrono::seconds(6);
+        ASSERT_EQ(f.service->handle(f.msg, "confirm", "10005").key, "cloud_card.expired");
+        auto confirmed = f.service->handle(f.msg, "confirm", "10004");
+        ASSERT_TRUE(confirmed.secret);
+        const bool matches = std::string(email) == "10004@qq.com";
+        ASSERT_EQ(confirmed.key, matches ? "identity_email.success" : "identity_email.oauth_not_verified");
+        const auto current = identity::BindingStore::instance().publicForOfficial(
+            f.db, "app-target", "openid-target", identity::Kind::User);
+        ASSERT_EQ(identity::BindingStore::isRealQQ(current), matches);
+        ASSERT_EQ(f.run("status").key, "cloud_card.expired");
+    }
+}
+
+TEST(CloudCards, BindingRefusesIdentityChangedWhileAuthorizationWasPending) {
+    Fixture f;
+    f.scope = "email"; f.custom = withVerifiedEmail("10006@qq.com");
+    asOfficialSession(f, "app-race", "openid-race");
+    ASSERT_EQ(f.service->handle(f.msg, "auth", "10006").key, "cloud_card.auth_code");
+    std::string error;
+    auto& bindings = identity::BindingStore::instance();
+    ASSERT_TRUE(bindings.bindVerifiedOfficialToQQ(f.db, "QQ-Official-app-race:openid-race", "10007", error));
+    f.now += std::chrono::seconds(6);
+    ASSERT_EQ(f.service->handle(f.msg, "confirm", "10006").key, "identity_email.oauth_not_verified");
+    ASSERT_EQ(bindings.publicForOfficial(f.db, "app-race", "openid-race", identity::Kind::User), "10007");
+}
+
+TEST(CloudCards, BindingDoesNotReplaceExistingCloudAuthorization) {
+    Fixture f;
+    f.scope = "cards.read";
+    f.custom = withVerifiedEmail("10008@qq.com");
+    asOfficialSession(f, "app-separate", "openid-separate");
+    ASSERT_TRUE(f.auth(false));
+    ASSERT_EQ(f.service->handle(f.msg, "auth", "10009").key, "cloud_card.auth_code");
+    ASSERT_EQ(f.run("status").key, "cloud_card.authorized");
+    f.now += std::chrono::seconds(6); f.scope = "email";
+    ASSERT_EQ(f.service->handle(f.msg, "confirm", "10009").key, "identity_email.oauth_not_verified");
+    ASSERT_EQ(f.run("list").key, "cloud_card.list");
+}

@@ -37,7 +37,7 @@ set(TEST_SOURCES
     test_friend_approval_policy.cpp
     test_sensitive_word_filter.cpp
     test_qq_official_adapter.cpp
-    test_avatar_identity.cpp
+    test_identity_email.cpp
     test_milky_adapter.cpp
 
     # Project source files needed by tests
@@ -53,6 +53,7 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/subprocess.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/cloud_card_service.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/identity_email_service.cpp
     ${VERSION_BUILD_SOURCE}
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/markdown.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/markdown_md4c.cpp

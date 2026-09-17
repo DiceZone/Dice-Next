@@ -161,12 +161,15 @@ public:
     }
     /// 把平台原生 id 绑定到真实 QQ/群号（虚拟数据合并迁移）。
     bool bindPlatformToQQ(Database& db, const std::string& type, const std::string& raw,
-                          const std::string& real, Kind kind, std::string& error) {
+                          const std::string& real, Kind kind, std::string& error, bool rejectRebind = false) {
         if (!isRealQQ(real)) { error = "绑定标识格式无效"; return false; }
         std::lock_guard lock(mu_);
         auto sourceEp = findEndpointAnyAccount(db, type, raw, kind);
         if (!sourceEp.id) { error = "未发现该平台身份；请先让机器人在该平台收到对方的一条消息"; return false; }
         auto source = entity(db, sourceEp.identityId);
+        if (rejectRebind && !source.isVirtual && source.publicId != real) {
+            error = "当前平台账号已绑定其他 QQ，不能覆盖已有绑定"; return false;
+        }
         auto target = findByPublic(db, real, kind);
         if (!target.id) target = createEntity(db, kind, real, false);
         if (source.id != target.id) merge(db, source, target, kind);
@@ -176,19 +179,30 @@ public:
     // Bind an observed QQ Official endpoint to a real QQ/群号. The real number
     // may be reserved before OneBot sees it. Existing virtual data is migrated.
     bool bindOfficialToQQ(Database& db, const std::string& official, const std::string& real,
-                          Kind kind, std::string& error) {
+                          Kind kind, std::string& error, bool rejectRebind = false) {
         std::string bot, open;
         if (!parseOfficial(official, bot, open) || !isRealQQ(real)) { error = "绑定标识格式无效"; return false; }
         std::lock_guard lock(mu_);
         auto sourceEp = findEndpoint(db, "qq_official", bot, open, kind);
         if (!sourceEp.id) { error = "未发现该官方身份，不能空绑定 QQ-Official-xxx"; return false; }
         auto source = entity(db, sourceEp.identityId);
+        if (rejectRebind && !source.isVirtual && source.publicId != real) {
+            error = "当前官方账号已绑定其他 QQ，不能覆盖已有绑定"; return false;
+        }
         auto target = findByPublic(db, real, kind);
         if (!target.id) target = createEntity(db, kind, real, false);
         if (source.id != target.id) merge(db, source, target, kind);
         migrateLegacyRows(db, kind, official, real);
         migrateLegacyRows(db, kind, qualified(kind, real), real);
         return true;
+    }
+    bool bindVerifiedOfficialToQQ(Database& db, const std::string& official,
+                                  const std::string& real, std::string& error) {
+        return bindOfficialToQQ(db, official, real, Kind::User, error, true);
+    }
+    bool bindVerifiedPlatformToQQ(Database& db, const std::string& type, const std::string& raw,
+                                  const std::string& real, std::string& error) {
+        return bindPlatformToQQ(db, type, raw, real, Kind::User, error, true);
     }
     // Reverse binding from a real QQ/群 window to an already observed official endpoint.
     bool bindOfficialToCurrentQQ(Database& db, const std::string& official, const std::string& current,

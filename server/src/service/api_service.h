@@ -2559,6 +2559,21 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
+    // Identity verification SMTP is global and separate from owner notification SMTP.
+    app.registerHandler("/api/system/identity-email", [&cfg](Req req, CB&& cb) {
+        try {
+            const auto saved = cfg.get<J>("identity_email", J::object());
+            if (req->method() == drogon::Put) {
+                J updated;
+                if (!identity_email::updateSettings(saved, J::parse(req->body()), updated)) {
+                    jsonReply(fail("SMTP 设置无效；启用时须填写服务器、端口、账号、密码/授权码及发件人"), std::move(cb)); return;
+                }
+                cfg.set<J>("identity_email", updated); cfg.save();
+                jsonReply(ok(identity_email::publicSettings(updated)), std::move(cb));
+            } else jsonReply(ok(identity_email::publicSettings(saved)), std::move(cb));
+        } catch (...) { jsonReply(fail("身份验证邮件设置无效"), std::move(cb)); }
+    }, {drogon::Get, drogon::Put});
+
     // ── 可分作用域的系统设置 ────────────────────────────────────
     // 名称保留 /global 以兼容旧 WebUI；实际支持 global / adapter / account，
     // 解析优先级为帐号 > 适配器类型 > 全局。废弃的原 Dice 记录项不再暴露或写回。

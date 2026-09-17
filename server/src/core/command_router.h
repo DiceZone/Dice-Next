@@ -18,7 +18,7 @@
 #include "../core/dice/madness_data.h"
 #include "../core/reply/reply_manager.h"
 #include "character/card_store.h"
-#include "identity/avatar_identity.h"
+#include "../service/identity_email_service.h"
 #include "deck/card_deck.h"
 #include "../storage/legacy_message_keys.h"
 #include "../storage/database.h"
@@ -93,15 +93,25 @@ class CommandRouter {
 public:
     CommandRouter(Database& db, ConfigManager& cfg, DiceEngine& engine,
                   I18n& i18n, LocaleResolver& resolver, CharacterCardStore& cards,
-                  CardDeck& deck, AdapterManager& adapters)
+                  CardDeck& deck, AdapterManager& adapters, identity_email::Sender emailSender = {},
+                  cloud_cards::Transport cloudTransport = {})
         : db_(db), cfg_(cfg), engine_(engine), i18n_(i18n), resolver_(resolver),
-          cards_(cards), deck_(deck), adapters_(adapters), cloudCards_(db, cfg, cards) {
+          cards_(cards), deck_(deck), adapters_(adapters), cloudCards_(db, cfg, cards, std::move(cloudTransport)), identityEmail_(std::move(emailSender)) {
         reloadSensitiveWordRules();
         cfg_.onConfigChanged([this] { reloadSensitiveWordRules(); });
     }
 
     void reloadSensitiveWordRules() {
         sensitiveWordMatcher_.replace(censor::load(cfg_));
+    }
+
+    // Binding codes must bypass chat persistence, plugin hooks and AI processing, even in a group.
+    bool isIdentityEmailCommand(const Message& msg) const {
+        auto body = commandBody(msg.content);
+        if (!body) return false;
+        std::istringstream input(*body); std::string cmd, sub, qq;
+        input >> cmd >> sub >> qq;
+        return toLower(cmd) == "bind" && (toLower(sub) == "qq" || toLower(sub) == "email" || toLower(sub) == "confirm");
     }
 
     /// Set the PersonaManager (called after construction from main.cpp).
@@ -459,8 +469,8 @@ public:
         if (cmdLower == "cloud")   return handleLegacyCloud(loc, args, msg);
         if (cmdLower == "notice")  return handleNotice(loc, args, msg); // B：通知窗口注册
         if (cmdLower == "alias")   return handleAlias(loc, args, msg);  // C：账号别名（TinyList）
-        if (cmdLower == "bind")    return handleIdentityBind(args, msg);
-        if (cmdLower == "info")    return handleIdentityInfo(args, msg);
+        if (cmdLower == "bind")    return handleIdentityBind(loc, args, msg);
+        if (cmdLower == "info")    return handleIdentityInfo(loc, args, msg);
         if (cmdLower == "help")    return handleHelp(loc, args, msg);
         if (cmdLower == "helpdoc") return handleHelpDoc(loc, args, msg);
         if (cmdLower == "text")    return handleText(loc, args, msg);
@@ -543,13 +553,14 @@ private:
 
     // ─── Command Handlers ────────────────────────────────────
 
-    std::string handleIdentityBind(const std::string& rawArgs, const Message& msg) {
+    std::string handleIdentityBind(Locale loc, const std::string& rawArgs, const Message& msg) {
         using identity::BindingStore;
         using identity::Kind;
-        std::istringstream input(trim(rawArgs)); std::string first, arg; input >> first >> arg;
+        std::istringstream input(trim(rawArgs)); std::string first, arg, code, extra; input >> first >> arg >> code >> extra;
+        if (!extra.empty()) return i18n_.tr(loc, "help.topic.bind");
         Kind kind = msg.type == MessageType::kPrivate ? Kind::User : Kind::Group;
         const std::string firstL = toLower(first);
-        if (firstL == "qq") { kind = Kind::User; }
+        if (firstL == "qq" || firstL == "email" || firstL == "confirm") { kind = Kind::User; }
         else if (firstL == "qqgroup") { kind = Kind::Group; }
         else if (firstL != "discord" && firstL != "kook") { arg = first; }
         // 测试台等来源的 extra 可能是 null（非对象），value() 会抛 —— 统一安全读取。
@@ -558,6 +569,7 @@ private:
         };
         const std::string transport = exval("__identity_transport");
         auto& bindings = BindingStore::instance();
+        if (firstL == "help") return i18n_.tr(loc, "help.topic.bind");
 
         // Discord/KOOK 用户互通：在 OneBot（真实 QQ）窗口执行，把该平台账号并入
         // 当前发送者的真实 QQ（虚拟数据合并，人物卡/好感即互通）。
@@ -577,56 +589,105 @@ private:
                 + "，人物卡、好感等数据互通。";
         }
 
-        if (arg.empty())
-            return "安全绑定用法（在 OneBot 窗口执行）：\n"
-                ".bind qq QQ-Official-机器人ID:OpenID\n"
-                ".bind qqgroup QQ-Official-机器人ID:OpenID\n"
-                ".bind discord <Discord用户ID> / .bind kook <KOOK用户ID>\n"
-                "QQ群绑定须由该群群主或管理在目标群内执行。\n"
-                "官方窗口直绑真实 QQ 默认关闭，可由骰主在网页系统设置中临时开启。";
+        if (arg.empty() && firstL != "confirm") return i18n_.tr(loc, "help.topic.bind");
 
         const bool sourceOfficial = transport == "qq_official";
         const bool sourceOneBot = transport == "onebot_v11" || transport == "milky";
         const bool sourcePlatform = transport == "discord" || transport == "kook";
         if (!sourceOfficial && !sourceOneBot && !sourcePlatform)
             return "当前适配器不支持 QQ 身份绑定。";
+        if (firstL == "confirm" && sourceOneBot) return i18n_.tr(loc, "help.topic.bind");
 
-        // Discord/KOOK 窗口内直绑真实 QQ：与官方窗口同一风险模型（无法验证发言者
-        // 真实 QQ），共用「身份绑定（高风险）」开关。
-        if (sourcePlatform) {
-            if (kind != Kind::User || !BindingStore::isRealQQ(arg))
-                return "本平台仅支持 .bind qq <真实QQ号>（骰主需在网页系统设置开启高风险直绑），\n"
-                    "或改在 OneBot 窗口执行 .bind " + transport + " <你的平台用户ID>。";
-            if (!cfg_.get<bool>("dice/allow_official_direct_bind", false))
-                return "安全模式已开启：本平台无法验证发言者的真实 QQ 身份。\n"
-                    "请改在 OneBot（真实 QQ）窗口执行：.bind " + transport + " <你的平台用户ID>\n"
-                    "或由骰主在网页「系统设置 → 身份绑定（高风险）」临时开启直绑。";
-            const std::string nativeSender = exval("__identity_native_sender");
-            if (nativeSender.empty()) return "未取得当前平台身份，无法绑定。";
-            std::string error;
-            if (!bindings.bindPlatformToQQ(db_, transport, nativeSender, arg, Kind::User, error))
-                return "绑定失败：\n" + error;
-            return "绑定成功。\n当前账号已关联到真实 QQ " + arg + "，人物卡、好感等数据互通。";
+        if ((sourceOfficial || sourcePlatform) && kind == Kind::User &&
+            (firstL == "confirm" || BindingStore::isRealQQ(arg))) {
+            if (firstL != "qq" && firstL != "email" && firstL != "confirm") return i18n_.tr(loc, "help.topic.bind");
+            if (msg.type != MessageType::kPrivate || msg.fromSelf) return i18n_.tr(loc, "identity_email.private_only");
+            const std::string native = exval("__identity_native_sender");
+            const std::string localUser = exval("__identity_local_sender");
+            if (native.empty() || (sourceOfficial && localUser.empty())) return i18n_.tr(loc, "identity_email.no_identity");
+            if (sourceOfficial ? !bindings.isKnownOfficial(db_, localUser, Kind::User)
+                               : !bindings.isKnownPlatform(db_, transport, native, Kind::User))
+                return i18n_.tr(loc, "identity_email.no_identity");
+            const std::string context = json::array({transport, msg.adapterId, exval("official_bot_id"), native}).dump();
+            std::unique_lock pendingLock(identityBindMutex_);
+            const auto now = std::chrono::steady_clock::now();
+            for (auto it = identityBindPending_.begin(); it != identityBindPending_.end();) {
+                if (it->second.expires <= now) it = identityBindPending_.erase(it); else ++it;
+            }
+            auto pending = identityBindPending_.find(context);
+            bool confirming = firstL == "confirm";
+            bool forceEmail = firstL == "email" || toLower(code) == "email";
+            if (confirming) {
+                if (!code.empty()) return i18n_.tr(loc, "help.topic.bind");
+                code = arg;
+                if (pending == identityBindPending_.end()) return i18n_.tr(loc, "identity_email.missing");
+                arg = pending->second.qq;
+            } else if (!code.empty() && toLower(code) != "email") {
+                // Compatibility with the previously documented confirmation syntax.
+                confirming = true;
+                if (pending == identityBindPending_.end() || pending->second.qq != arg)
+                    return i18n_.tr(loc, "identity_email.missing");
+            }
+            if (!identity_email::validQQ(arg)) return i18n_.tr(loc, "identity_email.bad_qq");
+            if (BindingStore::isRealQQ(msg.senderId)) return i18n_.tr(loc,
+                msg.senderId == arg ? "identity_email.already_bound" : "identity_email.conflict");
+            if (!confirming && pending == identityBindPending_.end() && identityBindPending_.size() >= 1000)
+                return i18n_.tr(loc, "identity_email.busy");
+            auto adapter = adapters_.getAdapter(msg.adapterId);
+            if (!adapter || !adapter->isConnected()) return i18n_.tr(loc, "cloud_card.no_adapter");
+            auto* translations = &i18n_;
+            const bool oauth = confirming ? pending->second.oauth : !forceEmail && cloudCards_.hasClientKey(msg);
+            if (oauth) {
+                if (confirming && !code.empty()) return i18n_.tr(loc, "identity_email.oauth_confirm_usage");
+                const bool queued = cloudCards_.dispatch(msg, confirming ? "confirm" : "auth",
+                    [adapter, msg, loc, translations, arg](cloud_cards::Result res) {
+                        if (!adapter->isConnected()) return;
+                        if (res.key == "cloud_card.auth_code") res.key = "identity_email.oauth_auth_code";
+                        auto text = translations->tr(loc, res.key, res.args);
+                        if (res.key == "cloud_card.network" || res.key == "cloud_card.no_key" ||
+                            res.key == "cloud_card.denied" || res.key == "cloud_card.expired" ||
+                            res.key == "cloud_card.bad_response" || res.key == "identity_email.oauth_not_verified")
+                            text += "\n" + translations->tr(loc, "identity_email.email_fallback", {{"qq", arg}});
+                        adapter->sendReply(msg, text);
+                    }, arg);
+                if (queued && !confirming) {
+                    identityEmail_.cancel(context);
+                    identityBindPending_[context] = {arg, true, now + std::chrono::minutes(15)};
+                }
+                return i18n_.tr(loc, queued ? "identity_email.oauth_queued" : "cloud_card.busy", {{"qq", arg}});
+            }
+            const auto smtp = cfg_.get<json>("identity_email", json::object());
+            if (!smtp.value("enabled", false)) return i18n_.tr(loc, "identity_email.disabled");
+            if (confirming) {
+                if (code.empty()) return i18n_.tr(loc, "identity_email.email_confirm_usage");
+                const auto status = identityEmail_.verify(context, arg, code);
+                if (status == identity_email::Status::Verified || status == identity_email::Status::Locked ||
+                    status == identity_email::Status::Missing) identityBindPending_.erase(context);
+                if (status != identity_email::Status::Verified)
+                    return i18n_.tr(loc, "identity_email." + identity_email::statusKey(status));
+                std::string error;
+                const bool bound = sourceOfficial ? bindings.bindVerifiedOfficialToQQ(db_, localUser, arg, error)
+                    : bindings.bindVerifiedPlatformToQQ(db_, transport, native, arg, error);
+                if (!bound) return i18n_.tr(loc, "identity_email.bind_failed", {{"error", error}});
+                return i18n_.tr(loc, "identity_email.success", {{"qq", arg}});
+            }
+            // Invalidate the identity-only OAuth session before switching; ordinary cloud access is independent.
+            if (pending != identityBindPending_.end() && pending->second.oauth) {
+                if (!cloudCards_.dispatch(msg, "logout", [](cloud_cards::Result) {}, pending->second.qq))
+                    return i18n_.tr(loc, "cloud_card.busy");
+                identityBindPending_.erase(pending);
+            }
+            const auto status = identityEmail_.begin(context, arg, smtp,
+                [adapter, msg, loc, translations, arg](identity_email::Status result) {
+                    if (adapter->isConnected()) adapter->sendReply(msg,
+                        translations->tr(loc, "identity_email." + identity_email::statusKey(result), {{"qq", arg}}));
+                });
+            if (status == identity_email::Status::Queued)
+                identityBindPending_[context] = {arg, false, now + std::chrono::minutes(15)};
+            return i18n_.tr(loc, "identity_email." + identity_email::statusKey(status), {{"qq", arg}});
         }
-
-        // QQ 官方机器人只提供隔离的 OpenID，无法验证它背后的真实 QQ 与群管理身份。
-        // 默认仅接受 OneBot 会话发起的绑定：该会话的发送者/群号可由 OneBot 提供并校验。
-        const auto officialDirectBindHint = [] {
-            return std::string(
-                "安全模式已开启：QQ 官方机器人无法验证发言者的真实 QQ 身份。\n"
-                "请在 OneBot 窗口中使用：\n"
-                ".bind qq QQ-Official-机器人ID:OpenID\n"
-                ".bind qqgroup QQ-Official-机器人ID:OpenID\n"
-                "骰主可在网页「系统设置 → 身份绑定（高风险）」临时开启官方窗口直绑。\n"
-                "开启后，任何人都可能冒认 QQ，导致人物卡或其他用户数据被错误关联。");
-        };
-
-        // 默认头像与商城头像由腾讯统一下发，多人共用同一份字节，比对不出归属。
-        const auto avatarSharedHint = [] {
-            return std::string(
-                "头像核验无法完成：当前使用的是默认头像或商城头像，很多账号共用同一张。\n"
-                "请换一张自己的图片作为头像，待头像更新后再执行一次本指令。");
-        };
+        if (sourcePlatform) return i18n_.tr(loc, "help.topic.bind");
+        const auto officialDirectBindHint = [&] { return i18n_.tr(loc, "help.topic.bind"); };
 
         // 群标识必须在待绑定的 OneBot 群内由群管理发起；私聊无法验证一个群的归属。
         if (kind == Kind::Group && msg.type != MessageType::kGroup)
@@ -644,36 +705,6 @@ private:
                 return "请在 OneBot 窗口填写官方标识进行反向绑定：\n.bind "
                     + std::string(kind == Kind::Group ? "qqgroup " : "qq ")
                     + "QQ-Official-机器人ID:OpenID";
-            // 头像核验能当场证明这个 OpenID 背后就是这个 QQ 号：腾讯在两个端点上返回
-            // 同一份头像文件，而同一张图被不同账号设为头像时字节并不相同。证到了就
-            // 不必再退回高风险直绑开关。只对用户有效——群没有对应的 OpenID 头像端点。
-            if (kind == Kind::User) {
-                const std::string officialApp = exval("official_bot_id");
-                const std::string officialOpenId = exval("__identity_native_sender");
-                if (!officialApp.empty() && !officialOpenId.empty()) {
-                    const auto proof = identity::proveOpenIdIsQQ(officialApp, officialOpenId, arg);
-                    if (proof.status == identity::AvatarProof::kSharedAvatar)
-                        return avatarSharedHint();
-                    if (proof.status == identity::AvatarProof::kMismatch)
-                        return "头像核验未通过：该 QQ 号的头像与当前账号不一致。\n"
-                               "请确认号码无误；也可以把两边的头像都换成同一张自己的图片后重试。";
-                    if (proof.ok()) {
-                        // 商城头像同样是多人共用，但没法凭一张图看出来：改为记住每个
-                        // 通过验证的哈希属于谁，再次出现在别的身份上就拒绝。
-                        if (identity::avatarClaimedByOther(db_, proof.openIdSha256, officialApp,
-                                                           officialOpenId, arg))
-                            return avatarSharedHint();
-                        std::string proofError;
-                        if (!bindings.bindOfficialToQQ(db_, local, arg, kind, proofError))
-                            return "绑定失败：\n" + proofError;
-                        identity::rememberAvatarProof(db_, proof.openIdSha256, officialApp,
-                                                      officialOpenId, arg);
-                        return "绑定成功（已通过头像核验）。\n当前官方用户已关联到真实 QQ "
-                            + arg + "。\n未连接 OneBot 时也会保留该真实 QQ 身份。";
-                    }
-                    // 取不到图（网络异常等）时不下结论，落回原有的开关判断。
-                }
-            }
             if (!cfg_.get<bool>("dice/allow_official_direct_bind", false))
                 return officialDirectBindHint();
             std::string error;
@@ -698,7 +729,7 @@ private:
         return officialDirectBindHint();
     }
 
-    std::string handleIdentityInfo(const std::string& args, const Message& msg) {
+    std::string handleIdentityInfo(Locale loc, const std::string& args, const Message& msg) {
         using identity::BindingStore; using identity::Kind;
         const std::string selector = toLower(trim(args));
         const Kind scope = selector == "qq" ? Kind::User : selector == "qqgroup" ? Kind::Group
@@ -730,11 +761,13 @@ private:
             const std::string official = BindingStore::officialId(bot, raw);
             out << "官方来源：QQ 官方机器人 / " << bot << " / " << raw << "\n";
             out << "官方标识：" << official << "\n";
-            out << "绑定指引：\n.bind " << (scope == Kind::Group ? "qqgroup " : "qq ") << "<真实QQ号>\n";
+            out << i18n_.tr(loc, scope == Kind::Group ? "identity_email.group_guide" : "identity_email.user_guide",
+                {{"official", official}}) << "\n";
             out << "提示：群内用 .info qq 查看当前发言者的官方 OpenID。";
         } else {
             out << "来源适配器：" << (transport.empty() ? msg.platform : transport) << "\n";
-            out << "反向绑定示例：\n.bind " << (scope == Kind::Group ? "qqgroup " : "qq ") << "QQ-Official-机器人ID:OpenID";
+            if (transport == "discord" || transport == "kook") out << i18n_.tr(loc, "identity_email.user_guide");
+            else out << "反向绑定示例：\n.bind " << (scope == Kind::Group ? "qqgroup " : "qq ") << "QQ-Official-机器人ID:OpenID";
         }
         return out.str();
     }
@@ -9658,6 +9691,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     /// 后才定稿，入站部分必须在消息线程即时记录且只记一次。
     /// 总开关、日志功能开关和会话状态共同决定是否写入，包括延迟生成的回复。
     void recordIncoming(const Message& msg) {
+        if (isIdentityEmailCommand(msg)) return;
         if (!isLogRecording(msg)) return;
         int logId = activeLogId(msg);
         if (logId <= 0) return;
@@ -9682,6 +9716,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
 
     /// 骰娘回复落游戏日志（最终发送文本，含润色/翻译后的版本）。
     void recordBotReply(const Message& msg, const std::string& reply) {
+        if (isIdentityEmailCommand(msg)) return;
         if (reply.empty() || !isLogRecording(msg)) return;
         int logId = activeLogId(msg);
         if (logId <= 0) return;
@@ -11651,6 +11686,14 @@ private:
     CardDeck& deck_;
     AdapterManager& adapters_;
     cloud_cards::Service cloudCards_;
+    identity_email::Service identityEmail_;
+    struct IdentityBindPending {
+        std::string qq;
+        bool oauth;
+        std::chrono::steady_clock::time_point expires;
+    };
+    std::mutex identityBindMutex_;
+    std::unordered_map<std::string, IdentityBindPending> identityBindPending_;
     censor::Matcher sensitiveWordMatcher_;
     PersonaManager* personaMgr_ = nullptr;  // set via setPersonaManager()
     LuaTaskExistsFn luaTaskExists_;
