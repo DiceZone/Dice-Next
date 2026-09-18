@@ -1,6 +1,8 @@
 #include "reply_manager.h"
 #include "../../common/logger.h"
 #include "../../common/utils.h"
+#include "../../common/weighted_reply.h"
+#include "reply_definition.h"
 
 #include <algorithm>
 #include <ctime>
@@ -22,6 +24,8 @@ static void normalizeRule(ReplyRule& rule, const std::string& conditionsJson,
                           const std::string& logic, const std::string& resultsJson) {
     rule.conditions.clear();
     rule.results.clear();
+    rule.resultWeights.clear();
+    rule.legacyReferences = false;
     rule.logic = (logic == "and") ? "and" : "or";
     try {
         if (!conditionsJson.empty()) {
@@ -38,16 +42,17 @@ static void normalizeRule(ReplyRule& rule, const std::string& conditionsJson,
     try {
         if (!resultsJson.empty()) {
             json arr = json::parse(resultsJson);
-            if (arr.is_array())
-                for (auto& r : arr) if (r.is_string() && !r.get<std::string>().empty())
-                    rule.results.push_back(r.get<std::string>());
+            reply_definition::decodeResults(arr, rule.results, rule.resultWeights);
+            rule.legacyReferences = reply_definition::legacyReferences(arr);
         }
     } catch (...) {}
     // Legacy fallbacks + keep the back-compat scalar fields aligned to [0].
     if (rule.conditions.empty()) rule.conditions.push_back({rule.matchType, rule.matchContent});
     else { rule.matchType = rule.conditions[0].type; rule.matchContent = rule.conditions[0].content; }
-    if (rule.results.empty()) rule.results.push_back(rule.replyContent);
-    else rule.replyContent = rule.results[0];
+    if (rule.results.empty()) {
+        reply_definition::decodeResults(json::array({rule.replyContent}), rule.results, rule.resultWeights);
+    }
+    if (!rule.results.empty()) rule.replyContent = rule.results[0];
 }
 
 // Serialize a rule's conditions/results into the row's JSON columns, keeping the
@@ -60,7 +65,18 @@ static void serializeRule(const ReplyRule& rule, ReplyRuleRow& row) {
         row.conditions = arr.dump();
     } else row.conditions = "";   // single → use legacy column only
     row.logic = (rule.logic == "and") ? "and" : "or";
-    if (rule.results.size() > 1) { json a = rule.results; row.results = a.dump(); }
+    if ((rule.resultWeights.size() == rule.results.size() || rule.legacyReferences) && !rule.results.empty()) {
+        json a = json::array();
+        for (size_t i = 0; i < rule.results.size(); ++i) {
+            const auto parsed = weighted_reply::parse(rule.results[i]);
+            const bool formal = rule.resultWeights.size() == rule.results.size();
+            json value = {{"text", formal ? rule.results[i] : std::string(parsed.text)},
+                          {"weight", formal ? rule.resultWeights[i] : static_cast<int>(parsed.weight)}};
+            if (rule.legacyReferences) value["legacyReferences"] = true;
+            a.push_back(std::move(value));
+        }
+        row.results = a.dump();
+    } else if (rule.results.size() > 1) { json a = rule.results; row.results = a.dump(); }
     else row.results = "";
     // back-compat scalars
     if (!rule.conditions.empty()) {
@@ -312,8 +328,18 @@ bool ReplyManager::userAllows(const ReplyRule& rule, const ReplyCtx& ctx) {
 }
 
 ReplyPick ReplyManager::pickReply(const std::string& msg, const ReplyCtx& ctx, bool commit) {
+    return pickCandidates(matchMessage(msg), ctx, commit);
+}
+
+ReplyPick ReplyManager::pickEventReply(const ReplyRule& rule, const ReplyCtx& ctx,
+                                     const std::string& eventKey, bool commit) {
+    if (!rule.enabled) return {};
+    return pickCandidates({rule}, ctx, commit, eventKey);
+}
+
+ReplyPick ReplyManager::pickCandidates(std::vector<ReplyRule> matches, const ReplyCtx& ctx,
+                                     bool commit, const std::string& eventKey) {
     ReplyPick pick;
-    auto matches = matchMessage(msg);
     if (matches.empty()) return pick;
 
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
@@ -324,7 +350,7 @@ ReplyPick ReplyManager::pickReply(const std::string& msg, const ReplyCtx& ctx, b
     for (auto& r : matches) {
         if (!scopeAllows(r, ctx)) { pick.skipped.push_back({r.id, "scope"}); continue; }
         if (!userAllows(r, ctx))  { pick.skipped.push_back({r.id, "scope"}); continue; }
-        const std::string key = std::to_string(r.id) + "|"
+        const std::string key = eventKey + std::to_string(r.id) + "|" + ctx.platform + "|"
             + (ctx.groupId.empty() ? ("u" + ctx.userId) : ("g" + ctx.groupId));
         // 冷却：冷却中 → 有提示语则回提示语（原版 cd@echo），否则沉默让下条接话。
         if (r.cooldownSec > 0) {
@@ -332,7 +358,7 @@ ReplyPick ReplyManager::pickReply(const std::string& msg, const ReplyCtx& ctx, b
             auto it = cooldownAt_.find(key);
             if (it != cooldownAt_.end() && now - it->second < r.cooldownSec) {
                 pick.skipped.push_back({r.id, "cooldown"});
-                if (!r.cooldownNotice.empty()) { pick.notice = r.cooldownNotice; pick.noticeRuleId = r.id; return pick; }
+                if (!r.cooldownNotice.empty()) { pick.notice = r.cooldownNotice; pick.noticeRuleId = r.id; pick.noticeLegacyReferences = r.legacyReferences; return pick; }
                 continue;
             }
         }
@@ -343,7 +369,7 @@ ReplyPick ReplyManager::pickReply(const std::string& msg, const ReplyCtx& ctx, b
             auto it = dayCount_.find(key);
             if (it != dayCount_.end() && it->second >= r.dayLimit) {
                 pick.skipped.push_back({r.id, "daylimit"});
-                if (!r.dayLimitNotice.empty()) { pick.notice = r.dayLimitNotice; pick.noticeRuleId = r.id; return pick; }
+                if (!r.dayLimitNotice.empty()) { pick.notice = r.dayLimitNotice; pick.noticeRuleId = r.id; pick.noticeLegacyReferences = r.legacyReferences; return pick; }
                 continue;
             }
         }
@@ -414,10 +440,19 @@ std::vector<ReplyRule> ReplyManager::matchMessage(const std::string& msg) const 
 
 std::string ReplyManager::pickResult(const ReplyRule& rule) const {
     if (rule.results.empty()) return rule.replyContent;
-    if (rule.results.size() == 1) return rule.results[0];
-    static thread_local std::mt19937 gen(std::random_device{}());
-    std::uniform_int_distribution<size_t> dist(0, rule.results.size() - 1);
-    return rule.results[dist(gen)];
+    if (rule.resultWeights.size() == rule.results.size()) {
+        if (!reply_definition::validateWeights(rule).empty()) return {};
+        uint64_t total = 0;
+        for (int weight : rule.resultWeights) total += weight;
+        static thread_local std::mt19937_64 random(std::random_device{}());
+        auto ticket = std::uniform_int_distribution<uint64_t>(0, total - 1)(random);
+        for (size_t i = 0; i < rule.results.size(); ++i) {
+            if (ticket < static_cast<uint64_t>(rule.resultWeights[i])) return rule.results[i];
+            ticket -= rule.resultWeights[i];
+        }
+        return {};
+    }
+    return weighted_reply::pick(rule.results);
 }
 
 }  // namespace dice

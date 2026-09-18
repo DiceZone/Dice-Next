@@ -9146,10 +9146,11 @@ private:
 public:
     /// Render a custom-reply template, substituting {variables}:
     ///   {nick}/{user}/{self}/{group}/{date}/{time}, {roll:EXPR} (dice total),
-    ///   {draw:DECK} (deck draw), {$N} (regex capture group N), {a|b|c} (random).
+    ///   {draw:DECK}/{DECK}/{%DECK} (deck draw), {$N} (regex capture group N),
+    ///   {a|b|c} (random).
     /// @p matchContent/@p type are used to extract regex capture groups.
     std::string renderReply(const Message& msg, const std::string& tmpl,
-                            const std::string& matchContent, MatchType type) {
+                            const std::string& matchContent, MatchType type, bool legacyReferences = false) {
         std::vector<std::string> groups;
         if (type == MatchType::kRegex) {
             try {
@@ -9172,12 +9173,14 @@ public:
         // Pre-process legacy variable aliases ({pc}→{nick}, {char}→{nick}, etc.)
         // so that original-Dice! flavor texts work with DiceNext's variable system.
         std::string processed = applyLegacyVarAliases(sample_template::expand(tmpl));
+        CardDeck::ReferenceContext deckReferences;
         std::string out; out.reserve(processed.size() + 32);
         for (size_t i = 0; i < processed.size();) {
             if (processed[i] == '{') {
                 size_t end = processed.find('}', i + 1);
                 if (end == std::string::npos) { out += processed[i++]; continue; }
-                out += resolveReplyToken(msg, processed.substr(i + 1, end - i - 1), groups);
+                out += resolveReplyToken(msg, processed.substr(i + 1, end - i - 1), groups,
+                    deckReferences, sample_template::escaped(processed, i), legacyReferences);
                 i = end + 1;
             } else { out += processed[i++]; }
         }
@@ -9185,8 +9188,27 @@ public:
     }
 
 private:
+    std::optional<std::string> replyGlobalTextContent(const std::string& name) const {
+        const auto legacyKey = "legacy." + name;
+        if (i18n_.hasOverride(Locale::kZhHans, legacyKey)) return i18n_.tr(Locale::kZhHans, legacyKey);
+        const auto mapped = legacyv2::msgKeyMap().find(name);
+        if (mapped != legacyv2::msgKeyMap().end() && i18n_.hasOverride(Locale::kZhHans, mapped->second))
+            return i18n_.tr(Locale::kZhHans, mapped->second);
+        return std::nullopt;
+    }
+
+    std::optional<std::string> replyHelpEntryContent(const std::string& name) const {
+        if (auto content = helpEntryContent(name)) return content;
+        const auto key = "help.topic." + name;
+        if (i18n_.hasOverride(Locale::kZhHans, key)) return i18n_.tr(Locale::kZhHans, key);
+        for (const auto& entry : allHelp(Locale::kZhHans))
+            if (toLower(trim(entry.key)) == toLower(trim(name)) && !entry.content.empty()) return entry.content;
+        return std::nullopt;
+    }
+
     std::string resolveReplyToken(const Message& msg, const std::string& tok,
-                                  const std::vector<std::string>& groups) {
+                                  const std::vector<std::string>& groups,
+                                  CardDeck::ReferenceContext& deckReferences, bool escapedDeck, bool legacyReferences) {
         // Random choice: {a|b|c}
         // Unexpanded sample syntax is escaped or malformed, not shorthand.
         if (tok.rfind("sample:", 0) == 0) return "{" + tok + "}";
@@ -9237,6 +9259,23 @@ private:
             if (!deck_.has(name)) return std::string("?");
             return deck_.drawFromDeck(name).value_or("");
         }
+        // Explicit migrated references preserve file-only and per-reply depletion semantics.
+        if (tok.rfind("deck:", 0) == 0) {
+            if (escapedDeck) return "{" + tok + "}";
+            const auto token = tok.substr(5);
+            const auto name = !token.empty() && token.front() == '%' ? token.substr(1) : token;
+            return deck_.has(name) ? deck_.expandReference(token, deckReferences) : "{" + tok + "}";
+        }
+        if (tok.rfind("help:", 0) == 0) {
+            if (escapedDeck) return "{" + tok + "}";
+            if (auto help = replyHelpEntryContent(tok.substr(5))) return expandHelpRefs(*help, msg);
+            return "{" + tok + "}";
+        }
+        if (tok.rfind("text:", 0) == 0) {
+            if (escapedDeck) return "{" + tok + "}";
+            if (auto content = replyGlobalTextContent(tok.substr(5))) return expandHelpRefs(*content, msg);
+            return "{" + tok + "}";
+        }
         if (tok.rfind("api:", 0) == 0) return fetchApi(trim(tok.substr(4)));   // {api:URL} 外部请求
         // {counter:name} — resolves to the current counter value (set by CausalRuleManager)
         if (tok.rfind("counter:", 0) == 0) {
@@ -9250,13 +9289,17 @@ private:
             return "";
         }
         // 通用引用（对齐旧版 Dice 语义）：上下文变量未命中后依次尝试
-        // 全局文案（CustomMsg.json 导入的 legacy.* 覆盖）→ 帮助词条 →
+        // 全局文案（CustomMsg.json 导入的 legacy.* 覆盖）→ 牌堆 → 帮助词条 →
         // 内联骰子算式（{%_1D3} 这类）；都不命中才原样保留。
         {
             const std::string legacyKey = "legacy." + tok;
             if (i18n_.hasOverride(dice::Locale::kZhHans, legacyKey))
                 return expandHelpRefs(i18n_.tr(dice::Locale::kZhHans, legacyKey), msg);
+            if (legacyReferences) if (auto content = replyGlobalTextContent(tok)) return expandHelpRefs(*content, msg);
+            const std::string deckName = !tok.empty() && tok.front() == '%' ? tok.substr(1) : tok;
+            if (legacyReferences && !escapedDeck && deck_.has(deckName)) return deck_.expandReference(tok, deckReferences);
             if (auto h = helpEntryContent(tok)) return expandHelpRefs(*h, msg);
+            if (legacyReferences) if (auto h = replyHelpEntryContent(tok)) return expandHelpRefs(*h, msg);
             std::string dx = tok;
             while (!dx.empty() && (dx.front() == '%' || dx.front() == '_')) dx.erase(dx.begin());
             if (looksDiceExpr(dx)) { auto r = engine_.roll(dx); if (r.ok()) return std::to_string(r.modifiedTotal); }

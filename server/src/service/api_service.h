@@ -51,6 +51,8 @@
 #include "../core/causal/cooldown_manager.h"
 #include "../core/causal/counter_store.h"
 #include "../core/persona/persona_manager.h"
+#include "../core/reply/reply_definition.h"
+#include "../core/reply/poke_reply.h"
 
 #include <drogon/HttpAppFramework.h>
 #include <drogon/HttpRequest.h>
@@ -120,14 +122,10 @@ static ReplyRule replyRuleFromJson(const J& j) {
     if (rule.conditions.empty())
         rule.conditions.push_back({matchTypeFromStr(j.value("matchType", std::string("keyword"))),
                                    j.value("matchContent", std::string())});
-    if (j.contains("results") && j["results"].is_array() && !j["results"].empty()) {
-        for (auto& r : j["results"]) if (r.is_string() && !r.get<std::string>().empty())
-            rule.results.push_back(r.get<std::string>());
-    }
-    if (rule.results.empty()) rule.results.push_back(j.value("replyContent", std::string()));
+    reply_definition::readResults(j, rule);
+    rule.legacyReferences = j.value("legacyReferences", false);
     rule.matchType = rule.conditions[0].type;
     rule.matchContent = rule.conditions[0].content;
-    rule.replyContent = rule.results[0];
     // 触发限制（原版 DiceTriggerLimit 常用子集）。
     rule.prob        = (std::clamp)(j.value("prob", 100), 0, 100);
     rule.cooldownSec = (std::max)(0, j.value("cooldownSec", 0));
@@ -145,6 +143,7 @@ static ReplyRule replyRuleFromJson(const J& j) {
 
 // 保存前校验规则（返回空串=通过）。正则写错以前会静默存库，变成永不命中的死规则。
 static std::string replyRuleValidate(const ReplyRule& rule) {
+    if (auto error = reply_definition::validateWeights(rule); !error.empty()) return error;
     for (const auto& c : rule.conditions) {
         if (c.type == MatchType::kRegex) {
             std::string err;
@@ -288,14 +287,19 @@ static J replyToJson(const ReplyRuleRow& r) {
         try { J a = J::parse(r.results); if (a.is_array()) results = a; } catch (...) {}
     }
     if (results.empty()) results.push_back(r.replyContent);
+    std::vector<std::string> resultTexts;
+    std::vector<int> resultWeights;
+    reply_definition::decodeResults(results, resultTexts, resultWeights);
     return J{
         {"id", std::to_string(r.id)},
         {"matchType", modes[static_cast<size_t>(r.matchType) % 4]},
         {"matchContent", r.matchContent},
-        {"replyContent", r.replyContent},
+        {"replyContent", resultTexts.empty() ? "" : resultTexts.front()},
         {"conditions", conditions},
         {"logic", r.logic == "and" ? "and" : "or"},
-        {"results", results},
+        {"results", resultTexts},
+        {"resultWeights", resultWeights},
+        {"legacyReferences", reply_definition::legacyReferences(results)},
         {"priority", r.priority},
         {"enabled", r.enabled},
         {"prob", r.prob},
@@ -1822,7 +1826,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (dir.empty()) { jsonReply(fail("dir required"), std::move(cb)); return; }
             legacyv2::ImportOptions opts;
             opts.overwrite = j.value("overwrite", false);
-            J report = legacyv2::runImport(db, cfg, i18n, replyMgr, dir, &cardDeck, &luaMod, opts);
+            std::vector<std::string> availableHelp;
+            for (const auto& entry : cmdRouter.allHelp(Locale::kZhHans)) if (!entry.content.empty()) availableHelp.push_back(entry.key);
+            J report = legacyv2::runImport(db, cfg, i18n, replyMgr, dir, &cardDeck, &luaMod, opts, availableHelp);
             if (report.value("ok", false)) {
                 cmdRouter.reloadSensitiveWordRules();
                 if (j.value("remove_marker_on_success", false)) {
@@ -3069,14 +3075,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Get, drogon::Put});
 
     // ── 好友/加群邀请 审批策略 ─────────────────────────────────
-    app.registerHandler("/api/system/events", [&cfg, st](Req req, CB&& cb) {
+    app.registerHandler("/api/system/events", [&cfg, &i18n, st](Req req, CB&& cb) {
         try {
             static const std::set<std::string> kFriend = {"manual", "all", "keyword", "whitelist", "group_used", "nonblacklist", "reject"};
             static const std::set<std::string> kGroup  = {"manual", "all", "whitelist", "ignore", "reject"};
             static const std::set<std::string> kScopedKeys = {
                 "friend_policy", "friend_keyword", "group_invite_policy",
                 "group_invite_reject_blacklist", "group_invite_reject_nonfriend",
-                "group_name_keyword_leave", "poke", "poke_command", "poke_enabled",
+                "group_name_keyword_leave", "poke", "poke_command", "poke_enabled", "poke_reply",
                 "welcome_min_delay", "welcome_min_cooldown"
             };
             auto platformForAccount = [&](const std::string& id) -> std::string {
@@ -3107,9 +3113,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 const J all = cfg.getAll();
                 J ev;
                 if (scope == "adapter")
-                    ev = scoped_settings::resolveSection(all, "events", platform, "");
+                    ev = poke_reply::resolveEvents(all, platform, "");
                 else if (scope == "account")
-                    ev = scoped_settings::resolveSection(all, "events", platform, target);
+                    ev = poke_reply::resolveEvents(all, platform, target);
                 else
                     ev = all.value("events", J::object());
                 if (!ev.is_object()) ev = J::object();
@@ -3136,6 +3142,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"poke", ev.value("poke", std::string())},
                     {"poke_command", ev.value("poke_command", std::string())},
                     {"poke_enabled", ev.value("poke_enabled", true)},
+                    {"poke_reply", ev.value("poke_reply", J())},
+                    {"poke_default", i18n.tr(localeFromString(req->getParameter("lang")), "event.poke")},
                     {"welcome_min_delay", ev.value("welcome_min_delay", 0)},
                     {"welcome_min_cooldown", ev.value("welcome_min_cooldown", 0)},
                     {"scope", scope}, {"target", target}, {"platform", platform},
@@ -3169,6 +3177,19 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 J values = j.contains("values") && j["values"].is_object() ? j["values"] : j;
                 J clear = j.value("clear", J::array());
 
+                if (values.contains("poke_reply")) {
+                    if (!values["poke_reply"].is_object()) { jsonReply(fail("poke_reply must be an object"), std::move(cb)); return; }
+                    auto rule = reply_definition::replyRuleFromJson(values["poke_reply"]);
+                    if (auto error = reply_definition::replyRuleValidate(rule, true); !error.empty()) {
+                        jsonReply(fail(error), std::move(cb)); return;
+                    }
+                    // Preserve mapped-command compatibility without treating it
+                    // as a text trigger. New replies have one unique poke trigger.
+                    if (values["poke_reply"].contains("command") && !values["poke_reply"]["command"].is_string()) {
+                        jsonReply(fail("poke command must be text"), std::move(cb)); return;
+                    }
+                }
+
                 if (values.contains("friend_policy")) {
                     std::string v = values["friend_policy"].get<std::string>();
                     if (!kFriend.count(v)) { jsonReply(fail("无效的好友策略"), std::move(cb)); return; }
@@ -3191,6 +3212,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         if (!values.contains(key)) continue;
                         if (values[key].is_boolean()) cfg.set<bool>("events/" + key, values[key].get<bool>());
                         else if (values[key].is_string()) cfg.set<std::string>("events/" + key, values[key].get<std::string>());
+                        else if (key == "poke_reply") cfg.set<J>("events/" + key, values[key]);
                     }
                     if (values.contains("welcome_min_delay") && values["welcome_min_delay"].is_number()) {
                         int newMin = values["welcome_min_delay"].get<int>();
@@ -3724,6 +3746,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             } else if (req->method() == drogon::Post) {
                 auto j = J::parse(req->body());
                 ReplyRule rule = replyRuleFromJson(j);
+                rule.legacyReferences = false; // new rules never silently opt into legacy name lookup
                 if (auto err = replyRuleValidate(rule); !err.empty()) { jsonReply(fail(err), std::move(cb)); return; }
                 int id = replyMgr.addRule(rule);
                 if (id < 0) { jsonReply(fail("add failed"), std::move(cb)); return; }
@@ -3744,7 +3767,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 // 以前只回填 matchContent 等五个旧标量：网页开关一下（PUT {enabled}）
                 // 就把多条件/多回复规则静默塌成单条件，触发限制也被重置。
                 J base = replyToJson(existing);
+                const bool legacyReferences = base.value("legacyReferences", false);
                 for (auto& [k, v] : j.items()) base[k] = v;
+                base["legacyReferences"] = legacyReferences;
+                if (j.contains("results") && !j.contains("resultWeights")) base.erase("resultWeights");
                 ReplyRule rule = replyRuleFromJson(base);
                 if (auto err = replyRuleValidate(rule); !err.empty()) { jsonReply(fail(err), std::move(cb)); return; }
                 if (!replyMgr.updateRule(rid, rule)) { jsonReply(fail("not found"), std::move(cb)); return; }

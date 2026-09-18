@@ -52,6 +52,13 @@ public:
     /// Draw one (fully expanded) card from the named deck. nullopt if no such deck.
     std::optional<std::string> drawFromDeck(const std::string& name);
 
+    // One authored reply shares depletion state across its legacy references.
+    // Keeping the context local prevents state leaking between users/messages.
+    struct ReferenceContext {
+        std::unordered_map<std::string, std::vector<std::string>> decks;
+    };
+    std::string expandReference(const std::string& token, ReferenceContext& context);
+
 private:
     using Deck = std::vector<std::string>;
     using TempMap = std::unordered_map<std::string, Deck>;

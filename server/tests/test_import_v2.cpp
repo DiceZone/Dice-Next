@@ -18,7 +18,7 @@
 // legacy_import_v2.h's runImport() body compiles. These are stubs —
 // the import tests only test utility functions + importDecks/importMods.
 namespace dice {
-class CardDeck { public: void loadDir(const std::string&) {} };
+class CardDeck { public: void loadDir(const std::string&) {} std::vector<std::string> deckNames() const { return {}; } };
 class LuaPluginManager {
 public:
     void reload() {}
@@ -282,6 +282,122 @@ static void cleanupTempDir(const fs::path& p) {
     // Change to a safe directory before removing
     fs::current_path(fs::temp_directory_path());
     fs::remove_all(p);
+}
+
+TEST(ImportReplies, LegacyDeckAnswerRetainsAndUsesNumericWeight) {
+    const auto root = makeTempDir("reply_weights");
+    {
+        Database db;
+        ASSERT_TRUE(db.open((root / "test.db").string()));
+        ConfigManager cfg((root / "config").string());
+        cfg.resetDefault();
+        ReplyManager replies(db, cfg);
+        std::ofstream(root / "CustomMsgReply.json") <<
+            R"({"旧版回复":{"match":["hello"],"echo":"Deck","answer":["::5::你好"]}})";
+        ASSERT_EQ(importReplies(replies, root), 1);
+        const auto matched = replies.matchMessage("hello");
+        ASSERT_EQ(matched.size(), size_t(1));
+        ASSERT_EQ(matched.front().results.front(), "你好");
+        ASSERT_EQ(matched.front().resultWeights.front(), 5);
+        ASSERT_EQ(replies.pickResult(matched.front()), "你好");
+    }
+    cleanupTempDir(root);
+}
+
+TEST(ReplyReferenceMigration, ConvertsUniqueReferencesWithoutEvaluatingOrTouchingVariables) {
+    using namespace legacy_reply_references;
+    Catalog catalog{{"牌堆"}, {"词条"}, {"strHello"}, {}};
+    Report report; bool compatibility = false;
+    ASSERT_EQ(migrate("{牌堆}/{%牌堆}/{词条}/{strHello}/{nick}/{$1}/{draw:牌堆}", catalog, report, "r", "results[0]", compatibility),
+        "{deck:牌堆}/{deck:%牌堆}/{help:词条}/{text:strHello}/{nick}/{$1}/{draw:牌堆}");
+    ASSERT_EQ(report.converted, 4);
+    ASSERT_FALSE(compatibility);
+    ASSERT_EQ(report.details.front()["target"].get<std::string>(), "{deck:牌堆}");
+    ASSERT_EQ(migrate("{%_1D3}/{1++}", catalog, report, "r", "results[1]", compatibility), "{%_1D3}/{1++}");
+    ASSERT_EQ(report.ambiguous, 2); ASSERT_TRUE(compatibility);
+}
+
+TEST(ReplyReferenceMigration, PreservesAmbiguityEscapesAndMigratesEveryNestedBranch) {
+    using namespace legacy_reply_references;
+    Catalog catalog{{"同名", "user", "1d3", "牌堆"}, {"同名"}, {}, {}};
+    Report report; bool compatibility = false;
+    const std::string text = "{同名}/{user}/{1d3}/{未知}/\\{牌堆}/{sample:{牌堆}|{sample:{%牌堆}|字}}";
+    ASSERT_EQ(migrate(text, catalog, report, "r", "results[1]", compatibility),
+        "{同名}/{user}/{1d3}/{未知}/\\{牌堆}/{sample:{deck:牌堆}|{sample:{deck:%牌堆}|字}}");
+    ASSERT_EQ(report.ambiguous, 3);
+    ASSERT_EQ(report.unresolved, 1);
+    ASSERT_EQ(report.converted, 2);
+    ASSERT_TRUE(compatibility);
+    Report escaped; bool flag = false;
+    ASSERT_EQ(migrate("\\{sample:{牌堆}|{%牌堆}}/{a|b}/{}", catalog, escaped, "r", "f", flag),
+        "\\{sample:{牌堆}|{%牌堆}}/{a|b}/{}");
+    ASSERT_EQ(escaped.converted, 0);
+}
+
+TEST(ImportReplies, MigrationIsIdempotentAndUpgradesExactOldDefinitionsWithoutResettingOwnerSettings) {
+    const auto root = makeTempDir("reply_references");
+    {
+        Database db; ASSERT_TRUE(db.open((root / "test.db").string()));
+        ConfigManager cfg((root / "config").string()); cfg.resetDefault();
+        ReplyManager replies(db, cfg);
+        std::ofstream(root / "CustomMsgReply.json") << R"({"旧规则":{"match":["hello"],"answer":["::3::{牌堆}","{歧义}"],"limit":"cd:15&@echo={词条};today:2&@echo={牌堆}"}})";
+        ASSERT_EQ(importReplies(replies, root), 1);
+        auto old = replies.matchMessage("hello").front();
+        const auto id = old.id;
+        old.enabled = false; old.priority = 777; ASSERT_TRUE(replies.updateRule(id, old));
+        legacy_reply_references::Catalog catalog{{"牌堆", "歧义"}, {"词条", "歧义"}, {}, {}};
+        legacy_reply_references::Report report;
+        ASSERT_EQ(importReplies(replies, root, catalog, &report), 0);
+        auto snapshot = replies.listRules(); ASSERT_EQ(snapshot->size(), size_t(1));
+        auto rule = snapshot->front();
+        ASSERT_EQ(rule.id, id); ASSERT_FALSE(rule.enabled); ASSERT_EQ(rule.priority, 777);
+        ASSERT_EQ(rule.results[0], "{deck:牌堆}"); ASSERT_EQ(rule.results[1], "{歧义}");
+        ASSERT_EQ(rule.resultWeights[0], 3); ASSERT_TRUE(rule.legacyReferences);
+        ASSERT_EQ(rule.cooldownNotice, "{help:词条}"); ASSERT_EQ(rule.dayLimitNotice, "{deck:牌堆}");
+        ASSERT_EQ(report.converted, 3); ASSERT_EQ(report.ambiguous, 1);
+        replies.loadRules(); ASSERT_TRUE(replies.listRules()->front().legacyReferences);
+        ASSERT_EQ(importReplies(replies, root, catalog), 0);
+        ASSERT_EQ(replies.listRules()->size(), size_t(1));
+        catalog.help.erase("歧义");
+        ASSERT_EQ(importReplies(replies, root, catalog), 0);
+        ASSERT_EQ(replies.listRules()->size(), size_t(1));
+        const auto resolved = replies.listRules()->front();
+        ASSERT_EQ(resolved.id, id); ASSERT_FALSE(resolved.enabled); ASSERT_EQ(resolved.priority, 777);
+        ASSERT_EQ(resolved.results[1], "{deck:歧义}"); ASSERT_FALSE(resolved.legacyReferences);
+    }
+    cleanupTempDir(root);
+}
+
+TEST(ReplyReferenceMigration, OrchestratorUsesActualDestinationAndImportsHelpAndTextsBeforeReplies) {
+    const auto root = makeTempDir("reply_reference_orchestrator");
+    const auto legacy = root / "DiceData";
+    const auto runtime = root / "runtime";
+    fs::create_directories(legacy / "conf"); fs::create_directories(legacy / "PublicDeck");
+    fs::create_directories(runtime / "data/decks");
+    std::ofstream(legacy / "PublicDeck/same.json") << R"({"源新增":["新"],"冲突":["新"]})";
+    std::ofstream(runtime / "data/decks/same.json") << R"({"旧目标":["保留"],"冲突":["保留"]})";
+    std::ofstream(legacy / "conf/CustomHelp.json") << R"({"帮助":"说明"})";
+    std::ofstream(legacy / "conf/CustomMsg.json") << R"({"strDemo":"文案","strRollCriticalSuccess":"优秀"})";
+    std::ofstream(legacy / "conf/CustomMsgReply.json") << R"({"规则":{"match":["hello"],"answer":"{旧目标}/{源新增}/{冲突}/{帮助}/{strDemo}/{strRollCriticalSuccess}"}})";
+    {
+        struct RestoreDirectory { fs::path path = fs::current_path(); ~RestoreDirectory() { fs::current_path(path); } } restore;
+        fs::current_path(runtime);
+        Database db; ASSERT_TRUE(db.open((runtime / "test.db").string()));
+        ConfigManager cfg((runtime / "config").string()); cfg.resetDefault();
+        I18n i18n((fs::path(__FILE__).parent_path().parent_path() / "i18n").string());
+        ReplyManager replies(db, cfg);
+        const auto report = runImport(db, cfg, i18n, replies, legacy.string());
+        ASSERT_TRUE(report["ok"].get<bool>());
+        ASSERT_EQ(report["decks"]["skipped"].get<int>(), 1);
+        ASSERT_EQ(report["replyReferences"]["converted"].get<int>(), 5);
+        ASSERT_EQ(report["replyReferences"]["unresolved"].get<int>(), 1);
+        const auto rule = replies.matchMessage("hello").front();
+        ASSERT_EQ(rule.results.front(), "{deck:旧目标}/{源新增}/{deck:冲突}/{help:帮助}/{text:strDemo}/{text:strRollCriticalSuccess}");
+        ASSERT_TRUE(rule.legacyReferences);
+        ASSERT_EQ(runImport(db, cfg, i18n, replies, legacy.string())["replies"].get<int>(), 0);
+        ASSERT_EQ(replies.listRules()->size(), size_t(1));
+    }
+    cleanupTempDir(root);
 }
 
 // Small writers for authentic Dice! V2 binary containers.  Keeping these in

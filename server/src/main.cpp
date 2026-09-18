@@ -1055,11 +1055,11 @@ static int realMain(int argc, char* argv[]) {
             auto pk = replyManager.pickReply(m.content, rctx);
             if (pk.rule) {
                 reply = cmdRouter.renderReply(m, replyManager.pickResult(*pk.rule),
-                                              pk.rule->matchContent, pk.rule->matchType);
+                                              pk.rule->matchContent, pk.rule->matchType, pk.rule->legacyReferences);
                 if (!reply.empty()) replySrc = "reply";
             } else if (!pk.notice.empty()) {
                 // 冷却/日限提示语（原版 cd@echo / 限额回复）。
-                reply = cmdRouter.renderReply(m, pk.notice, "", dice::MatchType::kKeyword);
+                reply = cmdRouter.renderReply(m, pk.notice, "", dice::MatchType::kKeyword, pk.noticeLegacyReferences);
                 if (!reply.empty()) replySrc = "reply";
             }
         }
@@ -1764,7 +1764,7 @@ static int realMain(int argc, char* argv[]) {
     });
 
     // Non-message events: 入群欢迎词、被加好友欢迎、加好友/加群条件自动同意。
-    adapterMgr.onEvent([&adapterMgr, &configMgr, &i18n, &localeResolver, &cmdRouter, &jsMod, &db, replyFallback](const dice::BotEvent& e) {
+    adapterMgr.onEvent([&adapterMgr, &configMgr, &i18n, &localeResolver, &cmdRouter, &jsMod, &db, &replyManager, replyFallback](const dice::BotEvent& e) {
         using ET = dice::EventType;
         nlohmann::json cfgAll = configMgr.getAll();
         auto a = adapterMgr.getAdapter(e.adapterId);
@@ -1784,8 +1784,7 @@ static int realMain(int argc, char* argv[]) {
         auto diceStr = [&](const char* k) -> std::string {
             return diceSettings.value(k, std::string());
         };
-        nlohmann::json ev = dice::scoped_settings::resolveSection(
-            cfgAll, "events", a->platform(), e.adapterId);
+        nlohmann::json ev = dice::poke_reply::resolveEvents(cfgAll, a->platform(), e.adapterId);
 
         // 从适配器成员缓存取用户显示名（群名片 > QQ昵称 > userid）。
         // 解析昵称：群名片 > QQ昵称 > 记录的昵称 > QQ号（用户规范）。类型安全：user_id
@@ -2211,57 +2210,46 @@ static int realMain(int argc, char* argv[]) {
                     "\xe9\xaa\xb0\xe5\xa8\x98\xe5\xb7\xb2\xe7\xa6\xbb\xe5\xbc\x80\xe7\xbe\xa4 " + groupLabel(e.groupId) + who, "group_left", e.adapterId);
             }
         } else if (e.type == ET::kPoke) {
-            if (!ev.value("poke_enabled", true)) return;   // 戳一戳回复总开关（默认开）
-            // 戳一戳: only react when WE were the one poked (target == self).
+            // Poke is a unique event, never an artificial text keyword.
             if (e.selfId.empty() || e.userId != e.selfId) return;
-            // 映射：events.poke_command 设了就把它当「被戳者发的消息」跑完整回复管线
-            //（内置指令 / JS插件 / Lua插件 / 自定义回复），实现戳一戳→任意功能。
-            std::string runMsg = ev.value("poke_command", std::string());
-            if (!runMsg.empty()) {
-                dice::Message pm;
-                pm.platform = e.platform; pm.adapterId = e.adapterId; pm.selfId = e.selfId;
-                pm.senderId = e.operatorId;
-                pm.senderName = resolveUserNick(e.operatorId, e.groupId);   // 群名片>QQ昵称>记录>QQ号
-                pm.content = runMsg; pm.rawContent = runMsg; pm.displayContent = runMsg;
-                bool pv = e.groupId.empty();
-                pm.type = pv ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
-                pm.targetId = pv ? e.operatorId : e.groupId;
-                std::string reply = cmdRouter.handleMessage(pm);
-                if (reply.empty() && !cmdRouter.isGroupDisabled(pm)) {
-                    std::string src;
-                    reply = replyFallback(pm, src);
+            dice::Message pm;
+            pm.platform = e.platform; pm.adapterId = e.adapterId; pm.selfId = e.selfId;
+            pm.senderId = e.operatorId;
+            pm.senderName = resolveUserNick(e.operatorId, e.groupId);
+            const bool pv = e.groupId.empty();
+            pm.type = pv ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
+            pm.targetId = pv ? e.operatorId : e.groupId;
+            if (cmdRouter.isGroupDisabled(pm) || !cmdRouter.groupFeatureEnabled(pm, "reply")) return;
+
+            const auto definition = dice::poke_reply::definition(ev, i18n.tr(loc, "event.poke"));
+            const auto rule = dice::reply_definition::replyRuleFromJson(definition);
+            const auto key = "poke|" + e.adapterId + "|" +
+                std::to_string(std::hash<std::string>{}(definition.dump())) + "|";
+            dice::ReplyCtx ctx{pm.platform, pv ? "" : pm.targetId, pm.senderId};
+            const auto pick = replyManager.pickEventReply(rule, ctx, key);
+            std::string reply;
+            if (pick.rule) {
+                const auto command = definition.value("command", std::string());
+                if (!command.empty()) {
+                    pm.content = command; pm.rawContent = command; pm.displayContent = command;
+                    reply = cmdRouter.handleMessage(pm);
+                    if (reply.empty()) { std::string source; reply = replyFallback(pm, source); }
+                } else {
+                    auto text = replyManager.pickResult(*pick.rule);
+                    size_t pos = 0;
+                    const auto at = "[CQ:at,qq=" + e.operatorId + "]";
+                    while ((pos = text.find("{at}", pos)) != std::string::npos) {
+                        text.replace(pos, 4, at); pos += at.size();
+                    }
+                    reply = cmdRouter.renderReply(pm, text, "", dice::MatchType::kKeyword);
                 }
-                if (!reply.empty()) {
-                    reply = cmdRouter.applySelf(pm, reply);
-                    if (pv) a->sendPrivateMessage(e.operatorId, reply);
-                    else a->sendGroupMessageCQ(e.groupId, reply);
-                }
-                DICE_LOG_INFO("event: poke->run '{}' by {} in group {}", runMsg, e.operatorId, e.groupId);
-                return;
+            } else if (!pick.notice.empty()) {
+                reply = cmdRouter.renderReply(pm, pick.notice, "", dice::MatchType::kKeyword);
             }
-            // 回退：发一段文本（原行为）。{at} 戳回操作者；其他变量走 applySelf。
-            std::string poke = ev.value("poke", std::string());
-            if (poke.empty()) poke = i18n.tr(loc, "event.poke");
-            if (poke.empty()) return;
-            {
-                auto rep = [&](const std::string& tok, const std::string& val) {
-                    size_t p; while ((p = poke.find(tok)) != std::string::npos) poke.replace(p, tok.size(), val);
-                };
-                rep("{at}", "[CQ:at,qq=" + e.operatorId + "]");
-            }
-            // 用 applySelf 统一处理 {name}/{nick}/{user}/{group} 等变量
-            {
-                dice::Message pm2;
-                pm2.platform = e.platform; pm2.adapterId = e.adapterId; pm2.selfId = e.selfId;
-                pm2.senderId = e.operatorId;
-                pm2.senderName = resolveUserNick(e.operatorId, e.groupId);
-                bool pv2 = e.groupId.empty();
-                pm2.type = pv2 ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
-                pm2.targetId = pv2 ? e.operatorId : e.groupId;
-                poke = cmdRouter.applySelf(pm2, poke);
-            }
-            if (e.groupId.empty()) a->sendPrivateMessage(e.operatorId, poke);
-            else a->sendGroupMessageCQ(e.groupId, poke);
+            if (reply.empty()) return;
+            reply = cmdRouter.applySelf(pm, reply);
+            if (pv) a->sendPrivateMessage(e.operatorId, reply);
+            else a->sendGroupMessageCQ(e.groupId, reply);
             DICE_LOG_INFO("event: poked by {} in group {}", e.operatorId, e.groupId);
         } else if (e.type == ET::kFriendAdd) {
             a->refreshGroupList();   // 同步刷新好友列表缓存（非好友邀请判定依赖它）
@@ -2395,12 +2383,6 @@ static int realMain(int argc, char* argv[]) {
                 a->setGroupRequest(e.flag, e.subType, true);
                 DICE_LOG_INFO("event: auto-approved group join request for group {}", e.groupId);
             }
-        } else if (e.type == ET::kPoke) {
-            if (!ev.value("poke_enabled", true)) return;   // 戳一戳回复总开关（默认开）
-            // Only react when the BOT itself is poked, in a group.
-            if (e.userId != e.selfId || e.groupId.empty()) return;
-            if (cmdRouter.isGroupDisabledFor(e.platform, e.groupId, e.adapterId)) return;
-            a->sendGroupMessage(e.groupId, i18n.tr(loc, "event.poke"));
         }
     });
 
@@ -2991,9 +2973,9 @@ static int realMain(int argc, char* argv[]) {
                 std::string rendered;
                 if (pk.rule)
                     rendered = cmdRouter.renderReply(msg, replyManager.pickResult(*pk.rule),
-                                                     pk.rule->matchContent, pk.rule->matchType);
+                                                     pk.rule->matchContent, pk.rule->matchType, pk.rule->legacyReferences);
                 else if (!pk.notice.empty())
-                    rendered = cmdRouter.renderReply(msg, pk.notice, "", dice::MatchType::kKeyword);
+                    rendered = cmdRouter.renderReply(msg, pk.notice, "", dice::MatchType::kKeyword, pk.noticeLegacyReferences);
                 out = {{"code", 0}, {"data", {
                     {"matched", pk.rule.has_value()},
                     {"ruleId", pk.rule ? nlohmann::json(pk.rule->id) : nlohmann::json()},

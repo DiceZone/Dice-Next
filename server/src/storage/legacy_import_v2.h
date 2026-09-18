@@ -22,6 +22,8 @@
 #include "../core/reply/reply_manager.h"
 #include "../common/utils.h"
 #include "../common/logger.h"
+#include "../common/legacy_reply_references.h"
+#include "../core/reply/reply_definition.h"
 #include "../service/sensitive_word_filter.h"
 
 #include <nlohmann/json.hpp>
@@ -393,7 +395,11 @@ inline int importBlacklist(Database& db, const fs::path& confDir) {
 //   limit: "prob:30;cd:15;grp_id:!123&456;…"  触发限制串
 // 以前只认 match[]（完全匹配）：原版的前缀/包含/正则规则、mode 写法、触发限制
 // 全部被丢弃。Lua/JS/Py 代码型回复无法转成文本规则，跳过并留日志。
-inline int importReplies(ReplyManager& reply, const fs::path& confDir) {
+inline int importReplies(ReplyManager& reply, const fs::path& confDir,
+                         const legacy_reply_references::Catalog& catalog = {},
+                         legacy_reply_references::Report* migrationReport = nullptr) {
+    legacy_reply_references::Report localReport;
+    auto& report = migrationReport ? *migrationReport : localReport;
     // 与旧版源码（DiceMod.cpp custom_reply 段）一致：
     // CustomMsgReply.json 非空才读取；不存在或为空时回退迁移 CustomReply.json
     // （完全匹配）与 CustomRegexReply.json（正则），迁移后旧版会写回
@@ -432,23 +438,37 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir) {
         // 也不会像旧的“只按首条件”那样误杀“同匹配词、不同回复”的规则；
         // 同时剔除历史 Dice 文件里因旧版 bug 产生的完全重复条目。
         auto fingerprint = [](const ReplyRule& r) -> std::string {
-            std::string fp;
             std::vector<std::pair<int, std::string>> conds;
             conds.reserve(r.conditions.size());
             for (const auto& c : r.conditions) conds.emplace_back(static_cast<int>(c.type), c.content);
-            std::sort(conds.begin(), conds.end());
-            for (const auto& [t, c] : conds) { fp += std::to_string(t); fp += ':'; fp += c; fp += '\x1f'; }
-            fp += '|';
-            std::vector<std::string> rs = r.results; std::sort(rs.begin(), rs.end());
-            for (const auto& x : rs) { fp += x; fp += '\x1f'; }
-            fp += '|' + std::to_string(r.prob) + '|' + std::to_string(r.cooldownSec)
-                + '|' + std::to_string(r.dayLimit) + '|' + r.scopeMode + '|' + r.scopeIds
-                + '|' + r.scopeUsersMode + '|' + r.scopeUsers + '|' + r.cooldownNotice
-                + '|' + r.dayLimitNotice + '|' + r.logic;
-            return fp;
+            // Condition order affects which prefix/regex supplies captures.
+            std::vector<std::pair<std::string, int>> rs;
+            for (size_t i = 0; i < r.results.size(); ++i) {
+                const auto parsed = weighted_reply::parse(r.results[i]);
+                const bool formal = r.resultWeights.size() == r.results.size();
+                rs.emplace_back(formal ? r.results[i] : std::string(parsed.text), formal ? r.resultWeights[i] : static_cast<int>(parsed.weight));
+            }
+            std::sort(rs.begin(), rs.end());
+            // Structured encoding avoids collisions with delimiters in authored text.
+            return json{{"conditions", conds}, {"results", rs}, {"prob", r.prob},
+                {"cooldownSec", r.cooldownSec}, {"dayLimit", r.dayLimit}, {"scopeMode", r.scopeMode},
+                {"scopeIds", r.scopeIds}, {"scopeUsersMode", r.scopeUsersMode}, {"scopeUsers", r.scopeUsers},
+                {"cooldownNotice", r.cooldownNotice}, {"dayLimitNotice", r.dayLimitNotice}, {"logic", r.logic}}.dump();
         };
         std::set<std::string> existing;
-        for (auto& er : *reply.listRules()) existing.insert(fingerprint(er));
+        std::map<std::string, ReplyRule> existingRules;
+        std::map<std::string, ReplyRule> pendingRules;
+        for (auto& er : *reply.listRules()) {
+            existing.insert(fingerprint(er)); existingRules.emplace(fingerprint(er), er);
+            if (er.legacyReferences) {
+                auto normalized = er; normalized.legacyReferences = false;
+                legacy_reply_references::Report ignored;
+                for (auto& text : normalized.results) text = legacy_reply_references::migrate(text, catalog, ignored, "", "", normalized.legacyReferences);
+                normalized.cooldownNotice = legacy_reply_references::migrate(normalized.cooldownNotice, catalog, ignored, "", "", normalized.legacyReferences);
+                normalized.dayLimitNotice = legacy_reply_references::migrate(normalized.dayLimitNotice, catalog, ignored, "", "", normalized.legacyReferences);
+                pendingRules.emplace(fingerprint(normalized), er);
+            }
+        }
         int skippedDup = 0;
         for (auto& [key, r] : obj.items()) {
             if (!r.is_object()) continue;
@@ -479,7 +499,6 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir) {
                 }
             }
             if (rule.conditions.empty()) continue;
-            if (existing.count(fingerprint(rule))) { ++skippedDup; continue; }   // 完整重复 → 跳过
             // echo Deck = random-pick among answers (the answers ARE the deck);
             // echo Text = the answer template. Either way the answer strings become
             // our results (multi-result = random pick).
@@ -488,6 +507,9 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir) {
                 else if (r["answer"].is_string() && !r["answer"].get<std::string>().empty()) rule.results.push_back(r["answer"].get<std::string>());
             }
             if (rule.results.empty()) continue;
+            // Convert old numeric markers into formal metadata before rewriting text.
+            auto answers = rule.results;
+            reply_definition::decodeResults(json(answers), rule.results, rule.resultWeights);
             // 触发限制串 → 概率/冷却(+提示语)/每日上限(+提示语)/群范围/用户范围。
             if (r.contains("limit") && r["limit"].is_string()) {
                 std::stringstream ls(r["limit"].get<std::string>()); std::string seg;
@@ -524,7 +546,30 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir) {
                     }
                 }
             }
-            if (reply.addRule(rule) >= 0) { existing.insert(fingerprint(rule)); ++imported; }
+            const auto originalFingerprint = fingerprint(rule);
+            for (size_t i = 0; i < rule.results.size(); ++i)
+                rule.results[i] = legacy_reply_references::migrate(rule.results[i], catalog, report, key,
+                    "results[" + std::to_string(i) + "]", rule.legacyReferences);
+            rule.cooldownNotice = legacy_reply_references::migrate(rule.cooldownNotice, catalog, report, key, "cooldownNotice", rule.legacyReferences);
+            rule.dayLimitNotice = legacy_reply_references::migrate(rule.dayLimitNotice, catalog, report, key, "dayLimitNotice", rule.legacyReferences);
+            const auto migratedFingerprint = fingerprint(rule);
+            // Re-import can identify previously imported bare templates by a full
+            // definition match. Preserve owner-enabled/priority settings when upgrading.
+            if (auto old = existingRules.find(originalFingerprint); old != existingRules.end()) {
+                if (originalFingerprint == migratedFingerprint && old->second.legacyReferences == rule.legacyReferences) {
+                    ++skippedDup; continue;
+                }
+                rule.enabled = old->second.enabled; rule.priority = old->second.priority;
+                if (reply.updateRule(old->second.id, rule)) existing.insert(migratedFingerprint);
+                ++skippedDup; continue;
+            }
+            if (existing.count(migratedFingerprint)) { ++skippedDup; continue; }
+            if (auto old = pendingRules.find(migratedFingerprint); old != pendingRules.end()) {
+                rule.enabled = old->second.enabled; rule.priority = old->second.priority;
+                if (reply.updateRule(old->second.id, rule)) existing.insert(migratedFingerprint);
+                ++skippedDup; continue;
+            }
+            if (reply.addRule(rule) >= 0) { existing.insert(migratedFingerprint); ++imported; }
         }
         if (skippedDup > 0)
             DICE_LOG_INFO("importReplies: 跳过 {} 条完全重复的自定义回复（历史重复/重复导入）", skippedDup);
@@ -1474,7 +1519,7 @@ inline int importChatConf(Database& db, const fs::path& userDir, int& groups, Lu
 inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager& reply,
                       const std::string& diceDataDir,
                       CardDeck* deck = nullptr, LuaPluginManager* luaMod = nullptr,
-                      const ImportOptions& opts = {}) {
+                      const ImportOptions& opts = {}, const std::vector<std::string>& availableHelp = {}) {
     fs::path root(diceDataDir);
     fs::path userDir = root / "user";
     fs::path confDir = root / "conf";
@@ -1495,7 +1540,6 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
     int cards = timed("cards", [&] { return importCards(db, userDir, users); });
     int profiles = timed("users", [&] { return importUsers(db, userDir, luaMod); });
     int black = timed("blacklist", [&] { return importBlacklist(db, confDir); });
-    int replies = timed("reply rules", [&] { return importReplies(reply, confDir); });
     int help = timed("help", [&] { return importHelp(db, i18n, confDir); });
     int orphans = 0;
     int msgs = timed("custom messages", [&] { return importCustomMsg(db, i18n, confDir, orphans); });
@@ -1507,6 +1551,39 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
     // Structured deck/mod/plugin import results.  Old `plugin/` is distinct
     // from `mod/` and must not be silently ignored.
     auto deckResult = timed("decks", [&] { return importDecks(root, opts); });
+    // Inventory the destination actually selected by skip/overwrite, not the
+    // source files that might have been rejected or shadowed by existing files.
+    if (deckResult.success > 0 && deck) deck->loadDir("data/decks");
+    legacy_reply_references::Catalog references;
+    auto addHelp = [&](const std::string& name) {
+        const auto normalized = legacy_reply_references::lower(legacy_reply_references::trim(name));
+        if (normalized.empty()) return;
+        references.help.insert(normalized); references.helpTargets[normalized] = name;
+    };
+    for (const auto& name : availableHelp) addHelp(name);
+    if (deck) for (const auto& name : deck->deckNames()) references.decks.insert(legacy_reply_references::lower(name));
+    fs::path deckDir = "data/decks";
+    if (!fs::exists(deckDir) && fs::exists("../data/decks")) deckDir = "../data/decks";
+    if (fs::exists(deckDir)) for (const auto& entry : fs::directory_iterator(deckDir)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".json") continue;
+        try {
+            const auto values = json::parse(readFile(entry.path()));
+            if (!values.is_object()) continue;
+            for (const auto& [name, cards] : values.items())
+                if (cards.is_array() && std::any_of(cards.begin(), cards.end(), [](const auto& card) { return card.is_string(); }))
+                    references.decks.insert(legacy_reply_references::lower(name));
+        } catch (...) {}
+    }
+    for (const auto& [key, value] : i18n.flatten(Locale::kZhHans))
+        if (key.rfind("help.topic.", 0) == 0 && !value.empty()) addHelp(key.substr(11));
+    if (auto* storage = db.getStorage()) for (const auto& row : storage->get_all<I18nOverrideRow>()) {
+        if (row.locale == "zh-Hans" && row.key.rfind("help.topic.", 0) == 0 && !row.value.empty()) addHelp(row.key.substr(11));
+        if (row.locale == "zh-Hans" && row.key.rfind("legacy.", 0) == 0) references.texts.insert(row.key.substr(7));
+    }
+    for (const auto& [original, mapped] : msgKeyMap())
+        if (i18n.hasOverride(Locale::kZhHans, mapped)) references.texts.insert(original);
+    legacy_reply_references::Report referenceReport;
+    int replies = timed("reply rules", [&] { return importReplies(reply, confDir, references, &referenceReport); });
     auto modResult = timed("Lua mods", [&] { return importMods(root, opts); });
     auto pluginResult = timed("Lua plugins", [&] { return importPlugins(root, opts); });
 
@@ -1517,7 +1594,6 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
 
     // Reload engines if import succeeded and pointers are provided
     if (deckResult.success > 0 && deck) {
-        deck->loadDir("data/decks");
         DICE_LOG_INFO("LegacyImport: reloaded card decks after import");
     }
     if ((modResult.success > 0 || pluginResult.success > 0) && luaMod) {
@@ -1542,6 +1618,7 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
         {"ok", true},
         {"cards", cards}, {"cardUsers", users}, {"profiles", profiles},
         {"blacklist", black}, {"replies", replies}, {"help", help}, {"msgs", msgs},
+        {"replyReferences", referenceReport.toJSON()},
         {"orphans", orphans}, {"masters", masters}, {"links", links}, {"notices", notices}, {"censorWords", censorWords},
         {"decks", deckResult.toJSON()}, {"mods", modResult.toJSON()}, {"plugins", pluginResult.toJSON()},
         {"sessions", sessions}, {"logs", logs}, {"logMessages", logMessages},

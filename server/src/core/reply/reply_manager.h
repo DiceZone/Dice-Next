@@ -41,6 +41,8 @@ struct ReplyRule {
     std::vector<ReplyCondition> conditions;      // ≥1 condition
     std::string logic = "or";                    // "and" | "or"
     std::vector<std::string> results;            // ≥1 result (random pick on hit)
+    std::vector<int> resultWeights;             // per-result relative weight; 0 disables
+    bool legacyReferences = false;             // only imported unresolved/ambiguous templates
     // 触发限制（原版 DiceTriggerLimit 常用子集）：
     int prob = 100;              // 触发概率 0-100（100=必回）
     int cooldownSec = 0;         // 冷却秒（同一规则×同一群/私聊按人；0=无冷却）
@@ -67,6 +69,8 @@ struct ReplyRule {
         for (const auto& c : conditions)
             j["conditions"].push_back({{"type", matchTypeToString(c.type)}, {"content", c.content}});
         j["results"]       = results;
+        j["resultWeights"] = resultWeights;
+        j["legacyReferences"] = legacyReferences;
         j["prob"]          = prob;
         j["cooldown_sec"]  = cooldownSec;
         j["scope_mode"]    = scopeMode;
@@ -97,6 +101,7 @@ struct ReplyPick {
     std::vector<ReplyPick::Skip> skipped;
     std::string notice;
     int noticeRuleId = 0;
+    bool noticeLegacyReferences = false;
 };
 
 /**
@@ -172,8 +177,11 @@ public:
      *                false=网页测试（冷却只检查不消耗、概率不掷，只报告）。
      */
     ReplyPick pickReply(const std::string& msg, const ReplyCtx& ctx, bool commit = true);
+    // Unique event trigger, using the SAME limits/selection pipeline as text replies.
+    ReplyPick pickEventReply(const ReplyRule& rule, const ReplyCtx& ctx,
+        const std::string& eventKey, bool commit = true);
 
-    /// Pick one result template for a matched rule (random among results).
+    /// Pick a result template, honoring legacy ::N:: numeric weights.
     std::string pickResult(const ReplyRule& rule) const;
 
     // ─── Queries ─────────────────────────────────────────────
@@ -185,6 +193,8 @@ public:
     std::shared_ptr<const std::vector<ReplyRule>> listRules() const { return snapshot(); }
 
 private:
+    ReplyPick pickCandidates(std::vector<ReplyRule> candidates, const ReplyCtx& ctx,
+        bool commit, const std::string& eventKey = "");
     Database& db_;
     ConfigManager& configMgr_;
     ReplyMatcher matcher_;

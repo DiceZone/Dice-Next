@@ -129,6 +129,11 @@ std::optional<std::string> CardDeck::drawFromDeck(const std::string& name) {
     return drawCard(working, /*back=*/false, temp, 0);
 }
 
+std::string CardDeck::expandReference(const std::string& token, ReferenceContext& context) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return expand("{" + token + "}", context.decks, 0);
+}
+
 std::string CardDeck::drawCard(Deck& deck, bool back, TempMap& temp, int depth) {
     if (deck.empty() || depth > 50) return "";
 

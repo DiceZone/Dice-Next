@@ -2,6 +2,8 @@
 #include "core/command_router.h"
 #include "core/plugin_command_priority.h"
 #include "storage/group_account_settings.h"
+#include "common/weighted_reply.h"
+#include "core/reply/poke_reply.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -254,6 +256,172 @@ TEST(SampleTemplate, CustomReplyRetainsShorthandAndSelectedVariables) {
     ASSERT_EQ(f.router.renderReply(f.msg, "{sample:{$1}}", "^(.+)$", MatchType::kRegex), "");
     f.msg.content = "{sample:不执行|不执行}";
     ASSERT_EQ(f.router.renderReply(f.msg, "{sample:{$1}}", "^(.+)$", MatchType::kRegex), f.msg.content);
+}
+
+TEST(LegacyReply, WeightedAnswersStripTheMarkerAfterDatabaseReload) {
+    LegacyFixture f;
+    ReplyManager replies{f.db, f.cfg};
+    ReplyRule rule;
+    rule.matchContent = "hello";
+    rule.results = {"::5::你好"};
+    ASSERT_TRUE(replies.addRule(rule) > 0);
+    replies.loadRules();
+    const auto matched = replies.matchMessage("hello");
+    ASSERT_EQ(matched.size(), size_t(1));
+    ASSERT_EQ(replies.pickResult(matched.front()), "你好");
+}
+
+TEST(LegacyReply, WeightTicketsAndInvalidMarkersMatchLegacyNumericSemantics) {
+    const std::vector<std::string> answers = {"::2::甲", "乙", "::3::丙"};
+    const std::vector<std::string> expected = {"甲", "甲", "乙", "丙", "丙", "丙"};
+    for (uint64_t ticket = 0; ticket < expected.size(); ++ticket) {
+        uint64_t totalSeen = 0;
+        const auto result = weighted_reply::pick(answers, [&](uint64_t total) { totalSeen = total; return ticket; });
+        ASSERT_EQ(totalSeen, uint64_t(6));
+        ASSERT_EQ(result, expected[ticket]);
+    }
+    for (const auto* literal : {"::0::甲", "::-1::甲", "::abc::甲", "::2x::甲", "::1000000::甲", "::2甲"})
+        ASSERT_EQ(weighted_reply::pick({literal}), literal);
+    ASSERT_EQ(weighted_reply::pick({"::999999::甲"}), "甲");
+    ASSERT_EQ(weighted_reply::pick({"前缀::2::甲"}), "甲");
+    ASSERT_EQ(weighted_reply::pick({}), "");
+}
+
+TEST(LegacyReply, BareDeckReferencesWorkWithoutChangingVariablesOrUnknownText) {
+    LegacyFixture f;
+    std::ofstream(f.dir.path / "deck.json") << R"({"测试牌堆":["牌面"],"嵌套牌堆":["{测试牌堆}"],"user":["不应覆盖变量"]})";
+    f.deck.loadDir(u8str(f.dir.path));
+    ASSERT_EQ(f.deck.drawFromDeck("嵌套牌堆").value_or(""), "牌面");
+    ASSERT_EQ(f.router.renderReply(f.msg, "{测试牌堆}/{%测试牌堆}/{嵌套牌堆}", "", MatchType::kKeyword, true), "牌面/牌面/牌面");
+    ASSERT_EQ(f.router.renderReply(f.msg, "{测试牌堆}", "", MatchType::kKeyword), "{测试牌堆}");
+    ASSERT_EQ(f.router.renderReply(f.msg, "{deck:测试牌堆}/{deck:%测试牌堆}/{deck:嵌套牌堆}", "", MatchType::kKeyword), "牌面/牌面/牌面");
+    ASSERT_EQ(f.router.renderReply(f.msg, "{draw:测试牌堆}/{user}/{不存在的牌堆}", "", MatchType::kKeyword), "牌面/1000/{不存在的牌堆}");
+    f.msg.content = "{测试牌堆}";
+    ASSERT_EQ(f.router.renderReply(f.msg, "{$1}", "(.+)", MatchType::kRegex), "{测试牌堆}");
+    ASSERT_EQ(f.router.renderReply(f.msg, "\\{测试牌堆}", "", MatchType::kKeyword), "\\{测试牌堆}");
+}
+
+TEST(LegacyReply, BareDeckReferencesShareDepletionOnlyWithinOneReply) {
+    LegacyFixture f;
+    std::ofstream(f.dir.path / "deck.json") << R"({"双牌":["甲","乙"],"单牌":["甲"]})";
+    f.deck.loadDir(u8str(f.dir.path));
+    for (int i = 0; i < 5; ++i) {
+        const auto reply = f.router.renderReply(f.msg, "{双牌}{双牌}", "", MatchType::kKeyword, true);
+        ASSERT_TRUE(reply == "甲乙" || reply == "乙甲");
+        const auto explicitReply = f.router.renderReply(f.msg, "{deck:双牌}{deck:双牌}", "", MatchType::kKeyword);
+        ASSERT_TRUE(explicitReply == "甲乙" || explicitReply == "乙甲");
+    }
+    ASSERT_EQ(f.router.renderReply(f.msg, "{%单牌}{%单牌}", "", MatchType::kKeyword, true), "甲甲");
+    ASSERT_EQ(f.router.renderReply(f.msg, "{deck:%单牌}{deck:%单牌}", "", MatchType::kKeyword), "甲甲");
+    ASSERT_EQ(f.router.renderReply(f.msg, "\\{deck:单牌}", "", MatchType::kKeyword), "\\{deck:单牌}");
+}
+
+TEST(LegacyReply, ImportedCompatibilityFlagPersistsAndNoticesCarryIt) {
+    LegacyFixture f;
+    ReplyManager replies{f.db, f.cfg};
+    ReplyRule old;
+    old.conditions = {{MatchType::kKeyword, "hello"}};
+    old.results = {"::3::{旧牌堆}"}; old.legacyReferences = true;
+    old.cooldownSec = 60; old.cooldownNotice = "{旧牌堆}";
+    const auto id = replies.addRule(old);
+    replies.loadRules();
+    auto rules = replies.matchMessage("hello");
+    ASSERT_EQ(rules.size(), size_t(1));
+    ASSERT_TRUE(rules.front().legacyReferences);
+    ASSERT_EQ(rules.front().resultWeights.front(), 3);
+    ReplyCtx ctx{"onebot_v11", "123", "1000"};
+    ASSERT_TRUE(replies.pickReply("hello", ctx).rule.has_value());
+    const auto pick = replies.pickReply("hello", ctx);
+    ASSERT_TRUE(pick.noticeLegacyReferences);
+    ASSERT_EQ(pick.noticeRuleId, id);
+}
+
+TEST(LegacyReply, ExplicitHelpAndGlobalTextUseTheirOwnNamespaces) {
+    LegacyFixture f;
+    std::ofstream(f.dir.path / "deck.json") << R"({"同名":["牌面"]})";
+    f.deck.loadDir(u8str(f.dir.path));
+    f.i18n.setOverride(Locale::kZhHans, "help.topic.同名", "帮助内容");
+    f.i18n.setOverride(Locale::kZhHans, "legacy.同名", "全局内容");
+    f.i18n.setOverride(Locale::kZhHans, "dice.crit", "优秀");
+    ASSERT_EQ(f.router.renderReply(f.msg, "{text:strRollCriticalSuccess}", "", MatchType::kKeyword), "优秀");
+    ASSERT_EQ(f.router.renderReply(f.msg, "{deck:同名}/{help:同名}/{text:同名}", "", MatchType::kKeyword), "牌面/帮助内容/全局内容");
+    ASSERT_EQ(f.router.renderReply(f.msg, "{help:缺失}/{text:缺失}/{deck:缺失}", "", MatchType::kKeyword), "{help:缺失}/{text:缺失}/{deck:缺失}");
+    ASSERT_EQ(f.router.renderReply(f.msg, "\\{help:同名}/\\{text:同名}", "", MatchType::kKeyword), "\\{help:同名}/\\{text:同名}");
+}
+
+TEST(ReplyWeights, FormalWeightsPersistZeroAndDoNotParseLiteralMarkers) {
+    LegacyFixture f;
+    ReplyManager replies{f.db, f.cfg};
+    auto rule = reply_definition::replyRuleFromJson({{"matchContent", "hello"},
+        {"results", {"不抽取", "::5::原文"}}, {"resultWeights", {0, 3}}});
+    ASSERT_EQ(reply_definition::replyRuleValidate(rule), "");
+    const auto id = replies.addRule(rule);
+    ASSERT_TRUE(id > 0);
+    replies.loadRules();
+    const auto loaded = replies.matchMessage("hello");
+    ASSERT_EQ(loaded.size(), size_t(1));
+    ASSERT_EQ(loaded.front().resultWeights[0], 0);
+    ASSERT_EQ(loaded.front().resultWeights[1], 3);
+    ASSERT_EQ(replies.pickResult(loaded.front()), "::5::原文");
+    auto row = f.db.getStorage()->get<ReplyRuleRow>(id);
+    ASSERT_TRUE(json::parse(row.results).front().is_object());
+}
+
+TEST(ReplyWeights, InvalidWeightsAndEmptyAnswersAreRejected) {
+    auto rule = reply_definition::replyRuleFromJson({{"matchContent", "hello"}, {"results", {"甲", "乙"}}, {"resultWeights", {3, 1}}});
+    ASSERT_EQ(reply_definition::replyRuleValidate(rule), "");
+    rule.resultWeights = {0, 0};
+    ASSERT_FALSE(reply_definition::replyRuleValidate(rule).empty());
+    rule.resultWeights = {1};
+    ASSERT_FALSE(reply_definition::replyRuleValidate(rule).empty());
+    rule.resultWeights = {-1, 1};
+    ASSERT_FALSE(reply_definition::replyRuleValidate(rule).empty());
+    rule.resultWeights = {1000000, 1};
+    ASSERT_FALSE(reply_definition::replyRuleValidate(rule).empty());
+    rule.results = {"", "乙"}; rule.resultWeights = {1, 1};
+    ASSERT_FALSE(reply_definition::replyRuleValidate(rule).empty());
+    bool rejected = false;
+    try { reply_definition::replyRuleFromJson({{"results", {"甲"}}, {"resultWeights", {1.5}}}); }
+    catch (const std::exception&) { rejected = true; }
+    ASSERT_TRUE(rejected);
+    rule = reply_definition::replyRuleFromJson({{"matchContent", "hello"}, {"results", {""}}});
+    ASSERT_FALSE(reply_definition::replyRuleValidate(rule).empty());
+}
+
+TEST(PokeReply, UsesAdvancedLimitsWithoutTextMatchingAndSeparatesAccounts) {
+    LegacyFixture f;
+    ReplyManager replies{f.db, f.cfg};
+    auto rule = reply_definition::replyRuleFromJson({{"results", {"甲", "乙"}}, {"resultWeights", {0, 1}},
+        {"cooldownSec", 30}, {"cooldownNotice", "冷却"}, {"dayLimit", 1}});
+    ASSERT_EQ(reply_definition::replyRuleValidate(rule, true), "");
+    ASSERT_FALSE(reply_definition::replyRuleValidate(rule).empty());
+    const ReplyCtx ctx{f.msg.platform, f.msg.targetId, f.msg.senderId};
+    auto first = replies.pickEventReply(rule, ctx, "poke|account-1|");
+    ASSERT_TRUE(first.rule.has_value());
+    ASSERT_EQ(replies.pickResult(*first.rule), "乙");
+    ASSERT_EQ(replies.pickEventReply(rule, ctx, "poke|account-1|").notice, "冷却");
+    ASSERT_TRUE(replies.pickEventReply(rule, ctx, "poke|account-2|").rule.has_value());
+    ASSERT_TRUE(replies.matchMessage("戳一戳").empty());
+    rule.enabled = false;
+    ASSERT_FALSE(replies.pickEventReply(rule, ctx, "disabled|").rule.has_value());
+    rule.enabled = true; rule.prob = 0;
+    ASSERT_FALSE(replies.pickEventReply(rule, ctx, "prob-zero|").rule.has_value());
+    rule.prob = 100; rule.scopeMode = "allow"; rule.scopeIds = "9999";
+    ASSERT_FALSE(replies.pickEventReply(rule, ctx, "outside|").rule.has_value());
+}
+
+TEST(PokeReply, CloserLegacyConfigurationStillOverridesInheritedNewReply) {
+    json all = {{"events", {{"poke_reply", {{"results", {"全局"}}, {"resultWeights", {1}}}}}}};
+    all["dice"]["scoped_overrides"]["account"]["1"]["events"] = {{"poke", "旧账号"}, {"poke_command", ".jrrp"}};
+    all["dice"]["scoped_overrides"]["account"]["2"]["events"] = {{"poke_enabled", false}};
+    auto ev = poke_reply::resolveEvents(all, "onebot_v11", "1");
+    ASSERT_FALSE(ev.contains("poke_reply"));
+    auto definition = poke_reply::definition(ev, "默认");
+    ASSERT_EQ(definition["results"][0].get<std::string>(), "旧账号");
+    ASSERT_EQ(definition["command"].get<std::string>(), ".jrrp");
+    ev = poke_reply::resolveEvents(all, "onebot_v11", "2");
+    ASSERT_TRUE(ev.contains("poke_reply"));
+    ASSERT_FALSE(poke_reply::definition(ev, "默认")["enabled"].get<bool>());
 }
 
 TEST(SampleTemplate, TextCommandSupportsNestedChoicesAndDice) {
