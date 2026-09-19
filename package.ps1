@@ -45,6 +45,9 @@ foreach ($requiredDir in 'decks','helpdoc','plugins\js') {
         Fail "默认发行资源不完整：缺少 server\resources\default-data\$requiredDir"
     }
 }
+if (-not (Test-Path (Join-Path $defaultData 'decks\legacy-builtins.json'))) {
+    Fail '默认发行资源不完整：缺少内置牌堆 legacy-builtins.json'
+}
 if (-not (Test-Path (Join-Path $server 'resources\update-mirrors.json'))) {
     Fail "默认发行资源不完整：缺少 server\resources\update-mirrors.json"
 }
@@ -174,7 +177,7 @@ Copy-Item $webDist (Join-Path $stage 'web\dist') -Recurse
 # Keep this in sync with the updater's package validation. Dependencies moved
 # from lib\ to app\ in the self-contained Windows layout. Newly built packages
 # must contain the three bundled MSVC runtime DLLs beside the core executable.
-foreach ($requiredPath in 'dice-next.exe','app\dice-next-core.exe','lib\README.txt','i18n','web\dist\index.html','docs\roadmap.md') {
+foreach ($requiredPath in 'dice-next.exe','app\dice-next-core.exe','lib\README.txt','i18n','decks\legacy-builtins.json','web\dist\index.html','docs\roadmap.md') {
     if (-not (Test-Path (Join-Path $stage $requiredPath))) {
         Fail "Windows 更新包缺少必需路径：$requiredPath"
     }

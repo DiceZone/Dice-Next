@@ -38,6 +38,7 @@ set(TEST_SOURCES
     test_legacy_command_behaviour.cpp
     test_friend_approval_policy.cpp
     test_sensitive_word_filter.cpp
+    test_builtin_decks.cpp
     test_qq_official_adapter.cpp
     test_identity_email.cpp
     test_milky_adapter.cpp

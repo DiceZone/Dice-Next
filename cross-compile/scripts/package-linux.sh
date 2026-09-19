@@ -36,6 +36,7 @@ VERSION_SOURCE="$SERVER_DIR/$BUILD_DIR/generated/version_build.cpp"
 for required in decks helpdoc plugins/js; do
     [[ -d "$DEFAULT_DATA/$required" ]] || { echo "Missing bundled resource: server/resources/default-data/$required" >&2; exit 1; }
 done
+[[ -f "$DEFAULT_DATA/decks/legacy-builtins.json" ]] || { echo "Missing bundled deck: legacy-builtins.json" >&2; exit 1; }
 for demo in seal_demo.js checkin.js cfg_deck_demo.js; do
     [[ -f "$DEFAULT_DATA/plugins/js/$demo" ]] || { echo "Missing bundled example plugin: $demo" >&2; exit 1; }
 done

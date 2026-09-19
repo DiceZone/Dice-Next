@@ -20,7 +20,8 @@ CardDeck::CardDeck() {
     seedBuiltins();
 }
 
-// A small built-in set (the original ships many more; users add JSON files).
+// Minimal emergency fallbacks. Complete bundled decks are loaded from the
+// release decks/ directory, followed by user overrides from data/decks/.
 // Caller holds mutex_ (or single-thread construction). Reload re-seeds these.
 void CardDeck::seedBuiltins() {
     decks_[lower("数字")]     = {"0","1","2","3","4","5","6","7","8","9"};
