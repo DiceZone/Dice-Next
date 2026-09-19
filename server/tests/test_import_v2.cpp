@@ -13,12 +13,12 @@
 #include <vector>
 #include <cstdint>
 #include <sqlite_orm/sqlite_orm.h>
+#include "../src/core/deck/card_deck.h"
 
-// Provide complete definitions for forward-declared classes so that
-// legacy_import_v2.h's runImport() body compiles. These are stubs —
-// the import tests only test utility functions + importDecks/importMods.
+// Provide a complete LuaPluginManager definition so that legacy_import_v2.h's
+// runImport() body compiles. CardDeck uses the real project implementation,
+// which is already linked into the test target.
 namespace dice {
-class CardDeck { public: void loadDir(const std::string&) {} std::vector<std::string> deckNames() const { return {}; } };
 class LuaPluginManager {
 public:
     void reload() {}
