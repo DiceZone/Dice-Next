@@ -133,17 +133,21 @@ public:
     /**
      * @brief Add a new reply rule (persists to DB).
      * @param rule  The rule to add (id will be auto-generated).
-     * @return The newly assigned rule id.
+     * @param deduplicated  Optional output; true when an identical rule already
+     *                      existed and its id was returned instead.
+     * @return The newly assigned rule id, or the existing identical rule id.
      */
-    int addRule(const ReplyRule& rule);
+    int addRule(const ReplyRule& rule, bool* deduplicated = nullptr);
 
     /**
      * @brief Update an existing rule by id.
      * @param id    Rule id.
      * @param rule  New rule data.
+     * @param deduplicated  Optional output; true when identical sibling rows
+     *                      were merged into the edited rule.
      * @return true if the rule was found and updated.
      */
-    bool updateRule(int id, const ReplyRule& rule);
+    bool updateRule(int id, const ReplyRule& rule, bool* deduplicated = nullptr);
 
     /**
      * @brief Delete a rule by id.
@@ -222,10 +226,6 @@ private:
     /// 规则是否对该用户生效（用户 allow/deny 名单）。
     static bool userAllows(const ReplyRule& rule, const ReplyCtx& ctx);
 
-    /**
-     * @brief Helper to read a single rule row from the database.
-     */
-    ReplyRule readRuleFromRow(const struct ReplyRuleRow& row);
 };
 
 }  // namespace dice

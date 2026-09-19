@@ -55,6 +55,88 @@ static void normalizeRule(ReplyRule& rule, const std::string& conditionsJson,
     if (!rule.results.empty()) rule.replyContent = rule.results[0];
 }
 
+static ReplyRule ruleFromRow(const ReplyRuleRow& row) {
+    ReplyRule rule;
+    rule.id             = row.id;
+    rule.matchType      = static_cast<MatchType>(row.matchType);
+    rule.matchContent   = row.matchContent;
+    rule.replyContent   = row.replyContent;
+    rule.enabled        = row.enabled;
+    rule.priority       = row.priority;
+    rule.createdAt      = row.createdAt;
+    rule.updatedAt      = row.updatedAt;
+    rule.prob           = row.prob;
+    rule.cooldownSec    = row.cooldownSec;
+    rule.scopeMode      = row.scopeMode;
+    rule.scopeIds       = row.scopeIds;
+    rule.cooldownNotice = row.cooldownNotice;
+    rule.dayLimit       = row.dayLimit;
+    rule.dayLimitNotice = row.dayLimitNotice;
+    rule.scopeUsersMode = row.scopeUsersMode;
+    rule.scopeUsers     = row.scopeUsers;
+    normalizeRule(rule, row.conditions, row.logic, row.results);
+    return rule;
+}
+
+// Normalize the legacy scalar representation to the same semantic shape used
+// after a database round-trip. IDs and timestamps are deliberately excluded:
+// two rows that only differ in storage metadata are the same reply rule.
+static ReplyRule canonicalRule(ReplyRule rule) {
+    if (rule.conditions.empty()) rule.conditions.push_back({rule.matchType, rule.matchContent});
+    if (!rule.conditions.empty()) {
+        rule.matchType = rule.conditions.front().type;
+        rule.matchContent = rule.conditions.front().content;
+    }
+    rule.logic = rule.logic == "and" ? "and" : "or";
+
+    if (rule.results.empty() && !rule.replyContent.empty()) rule.results.push_back(rule.replyContent);
+    if (rule.resultWeights.size() != rule.results.size()) {
+        std::vector<std::string> texts;
+        std::vector<int> weights;
+        texts.reserve(rule.results.size());
+        weights.reserve(rule.results.size());
+        for (const auto& value : rule.results) {
+            if (value.empty()) continue;
+            const auto parsed = weighted_reply::parse(value);
+            texts.emplace_back(parsed.text);
+            weights.push_back(static_cast<int>(parsed.weight));
+        }
+        rule.results = std::move(texts);
+        rule.resultWeights = std::move(weights);
+    }
+    rule.replyContent = rule.results.empty() ? std::string() : rule.results.front();
+    return rule;
+}
+
+static std::string semanticFingerprint(const ReplyRule& source) {
+    const auto rule = canonicalRule(source);
+    json conditions = json::array();
+    for (const auto& condition : rule.conditions) {
+        conditions.push_back({
+            {"type", static_cast<int>(condition.type)},
+            {"content", condition.content},
+        });
+    }
+    return json{
+        {"conditions", std::move(conditions)},
+        {"logic", rule.logic},
+        {"results", rule.results},
+        {"resultWeights", rule.resultWeights},
+        {"legacyReferences", rule.legacyReferences},
+        {"enabled", rule.enabled},
+        {"priority", rule.priority},
+        {"prob", rule.prob},
+        {"cooldownSec", rule.cooldownSec},
+        {"scopeMode", rule.scopeMode},
+        {"scopeIds", rule.scopeIds},
+        {"cooldownNotice", rule.cooldownNotice},
+        {"dayLimit", rule.dayLimit},
+        {"dayLimitNotice", rule.dayLimitNotice},
+        {"scopeUsersMode", rule.scopeUsersMode},
+        {"scopeUsers", rule.scopeUsers},
+    }.dump();
+}
+
 // Serialize a rule's conditions/results into the row's JSON columns, keeping the
 // legacy scalar columns pointed at the first condition/result.
 static void serializeRule(const ReplyRule& rule, ReplyRuleRow& row) {
@@ -117,33 +199,41 @@ void ReplyManager::loadRules() {
     }
 
     try {
-        auto rows = storage->get_all<ReplyRuleRow>();
+        auto rows = storage->get_all<ReplyRuleRow>(orm::order_by(&ReplyRuleRow::id));
 
         // 在本地建好完整列表再整体换指针——正在遍历旧快照的消息线程不受影响。
         auto next = std::make_shared<std::vector<ReplyRule>>();
         next->reserve(rows.size());
 
+        std::map<std::string, int> fingerprints;
+        std::vector<int> duplicateIds;
         for (const auto& row : rows) {
-            ReplyRule rule;
-            rule.id             = row.id;
-            rule.matchType      = static_cast<MatchType>(row.matchType);
-            rule.matchContent   = row.matchContent;
-            rule.replyContent   = row.replyContent;
-            rule.enabled        = row.enabled;
-            rule.priority       = row.priority;
-            rule.createdAt      = row.createdAt;
-            rule.updatedAt      = row.updatedAt;
-            rule.prob           = row.prob;
-            rule.cooldownSec    = row.cooldownSec;
-            rule.scopeMode      = row.scopeMode;
-            rule.scopeIds       = row.scopeIds;
-            rule.cooldownNotice = row.cooldownNotice;
-            rule.dayLimit       = row.dayLimit;
-            rule.dayLimitNotice = row.dayLimitNotice;
-            rule.scopeUsersMode = row.scopeUsersMode;
-            rule.scopeUsers     = row.scopeUsers;
-            normalizeRule(rule, row.conditions, row.logic, row.results);
+            auto rule = ruleFromRow(row);
+            const auto [_, inserted] = fingerprints.emplace(semanticFingerprint(rule), rule.id);
+            if (!inserted) {
+                duplicateIds.push_back(rule.id);
+                continue;
+            }
             next->push_back(std::move(rule));
+        }
+
+        // Historical builds allowed repeated imports to create identical rows.
+        // Keep the oldest id and remove only exact semantic duplicates.
+        if (!duplicateIds.empty()) {
+            try {
+                storage->transaction([&] {
+                    for (const int id : duplicateIds) {
+                        storage->remove_all<ReplyRuleRow>(
+                            orm::where(orm::c(&ReplyRuleRow::id) == id));
+                    }
+                    return true;
+                });
+                DICE_LOG_WARN("ReplyManager: removed {} duplicate rules", duplicateIds.size());
+            } catch (const std::exception& e) {
+                // Runtime matching still uses the de-duplicated snapshot. Retry
+                // persistent cleanup on the next reload rather than failing all rules.
+                DICE_LOG_WARN("ReplyManager: failed to remove duplicate rows: {}", e.what());
+            }
         }
 
         // 匹配模式特异度（同优先级时精确的先赢，对齐原版 Match→Prefix→Search→Regex
@@ -179,7 +269,8 @@ void ReplyManager::loadRules() {
     }
 }
 
-int ReplyManager::addRule(const ReplyRule& rule) {
+int ReplyManager::addRule(const ReplyRule& rule, bool* deduplicated) {
+    if (deduplicated) *deduplicated = false;
     auto* storage = db_.getStorage();
     if (!storage) {
         DICE_LOG_ERROR("ReplyManager: database not open");
@@ -187,6 +278,14 @@ int ReplyManager::addRule(const ReplyRule& rule) {
     }
 
     try {
+        const auto fingerprint = semanticFingerprint(rule);
+        for (const auto& existing : *snapshot()) {
+            if (semanticFingerprint(existing) != fingerprint) continue;
+            if (deduplicated) *deduplicated = true;
+            DICE_LOG_INFO("ReplyManager: identical rule already exists as id={}", existing.id);
+            return existing.id;
+        }
+
         ReplyRuleRow row;
         row.matchType    = static_cast<int>(rule.matchType);
         row.matchContent = rule.matchContent;
@@ -219,7 +318,8 @@ int ReplyManager::addRule(const ReplyRule& rule) {
     }
 }
 
-bool ReplyManager::updateRule(int id, const ReplyRule& rule) {
+bool ReplyManager::updateRule(int id, const ReplyRule& rule, bool* deduplicated) {
+    if (deduplicated) *deduplicated = false;
     auto* storage = db_.getStorage();
     if (!storage) {
         DICE_LOG_ERROR("ReplyManager: database not open");
@@ -254,7 +354,26 @@ bool ReplyManager::updateRule(int id, const ReplyRule& rule) {
         row.scopeUsers     = rule.scopeUsers;
         serializeRule(rule, row);
 
-        storage->update(row);
+        const auto targetFingerprint = semanticFingerprint(rule);
+        std::vector<int> duplicateIds;
+        for (const auto& candidate : storage->get_all<ReplyRuleRow>()) {
+            if (candidate.id == id) continue;
+            if (semanticFingerprint(ruleFromRow(candidate)) == targetFingerprint)
+                duplicateIds.push_back(candidate.id);
+        }
+
+        storage->transaction([&] {
+            storage->update(row);
+            for (const int duplicateId : duplicateIds) {
+                storage->remove_all<ReplyRuleRow>(
+                    orm::where(orm::c(&ReplyRuleRow::id) == duplicateId));
+            }
+            return true;
+        });
+        if (!duplicateIds.empty()) {
+            if (deduplicated) *deduplicated = true;
+            DICE_LOG_INFO("ReplyManager: merged {} duplicate rules into id={}", duplicateIds.size(), id);
+        }
 
         // Reload to keep cache consistent
         loadRules();

@@ -3748,10 +3748,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 ReplyRule rule = replyRuleFromJson(j);
                 rule.legacyReferences = false; // new rules never silently opt into legacy name lookup
                 if (auto err = replyRuleValidate(rule); !err.empty()) { jsonReply(fail(err), std::move(cb)); return; }
-                int id = replyMgr.addRule(rule);
+                bool deduplicated = false;
+                int id = replyMgr.addRule(rule, &deduplicated);
                 if (id < 0) { jsonReply(fail("add failed"), std::move(cb)); return; }
                 auto row = st->get<ReplyRuleRow>(id);
-                jsonReply(ok(replyToJson(row)), std::move(cb));
+                auto result = replyToJson(row);
+                result["deduplicated"] = deduplicated;
+                jsonReply(ok(result), std::move(cb));
             } else { jsonReply(fail("Method not allowed"), std::move(cb)); }
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Post});
@@ -3773,9 +3776,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (j.contains("results") && !j.contains("resultWeights")) base.erase("resultWeights");
                 ReplyRule rule = replyRuleFromJson(base);
                 if (auto err = replyRuleValidate(rule); !err.empty()) { jsonReply(fail(err), std::move(cb)); return; }
-                if (!replyMgr.updateRule(rid, rule)) { jsonReply(fail("not found"), std::move(cb)); return; }
+                bool deduplicated = false;
+                if (!replyMgr.updateRule(rid, rule, &deduplicated)) { jsonReply(fail("not found"), std::move(cb)); return; }
                 auto row = st->get<ReplyRuleRow>(rid);
-                jsonReply(ok(replyToJson(row)), std::move(cb));
+                auto result = replyToJson(row);
+                result["deduplicated"] = deduplicated;
+                jsonReply(ok(result), std::move(cb));
             } else if (req->method() == drogon::Delete) {
                 st->remove<ReplyRuleRow>(rid);
                 replyMgr.loadRules();
