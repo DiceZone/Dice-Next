@@ -949,16 +949,17 @@
     "list": "Available personas:\n{list}Use .rpmode set <name> to switch.",
     "set": "Switched to persona \"{name}\".",
     "off": "Persona disabled for this context; using base replies.",
-    "inherit": "Now inheriting the global persona: {name}.",
+    "inherit": "Now inheriting the adapter or global default persona: {name}.",
     "switch_fail": "Failed to save the persona selection.",
     "not_found": "No persona named \"{name}\".",
+    "not_available": "This persona option is not available on the current adapter.",
     "created": "Created persona \"{name}\" from the current setup.\nEdit its entries in the WebUI.",
     "copied": "Copied \"{src}\" to \"{dst}\".",
     "deleted": "Deleted persona \"{name}\".",
     "builtin_no_del": "Built-in personas cannot be deleted.",
     "name_exists": "A persona named \"{name}\" already exists.",
     "name_empty": "Please provide a persona name.",
-    "no_perm_admin": "Group admin permission is required to switch personas.",
+    "no_perm_admin": "A group admin, the bot inviter, or the bot owner is required to switch the group persona.",
     "no_perm_master": "Only the Master can manage personas.",
     "no_entries": "This persona has no entries yet.",
     "entry_count": "Entries: {count}",
@@ -967,7 +968,7 @@
     "copy_fail": "Failed to copy persona.",
     "del_fail": "Failed to delete persona.",
     "copy_usage": ".rpmode copy <source> <target> // copy a persona",
-    "no_personas": "No persona templates yet. Create one in the WebUI."
+    "no_personas": "The current adapter does not expose any selectable personas."
   },
   "npc": {
     "group_only": "NPC cards can only be used in a group chat.",

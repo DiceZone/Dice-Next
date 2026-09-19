@@ -105,6 +105,34 @@ inline bool preservesNumbers(const std::string& orig, const std::string& out) {
     return true;
 }
 
+// Visual action hints are executable copy-paste commands. AI post-processing
+// may translate their labels, but must never rewrite the command itself.
+inline std::vector<std::string> extractActionCommands(const std::string& text) {
+    std::vector<std::string> commands;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        const size_t end = text.find('\n', pos);
+        std::string line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        const size_t label = line.find("  // ");
+        if (label != std::string::npos) {
+            std::string command = line.substr(0, label);
+            const size_t begin = command.find_first_not_of(" \t");
+            const size_t last = command.find_last_not_of(" \t");
+            if (begin != std::string::npos && command[begin] == '.')
+                commands.push_back(command.substr(begin, last - begin + 1));
+        }
+        if (end == std::string::npos) break;
+        pos = end + 1;
+    }
+    return commands;
+}
+
+inline bool preservesActionCommands(const std::string& original, const std::string& output) {
+    for (const auto& command : extractActionCommands(original))
+        if (output.find(command) == std::string::npos) return false;
+    return true;
+}
+
 // 把某模型的用量累加并保存（读-改-写加锁，避免并发调用时互相覆盖）。
 inline std::mutex& usageMutex() { static std::mutex m; return m; }
 inline void addUsage(ConfigManager& cfg, const std::string& modelId, long long tokens, double cost) {

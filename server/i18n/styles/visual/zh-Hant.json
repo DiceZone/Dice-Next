@@ -1,0 +1,84 @@
+{
+  "dice": {
+    "roll": {
+      "result": "🎲 **{nick}** 的擲骰結果\n> `{res}`\n[[action:再次擲骰|.r]]",
+      "result_reason": "🎲 **{nick}** · {reason}\n> `{res}`\n[[action:再次擲骰|.r]]",
+      "multi": "🎲 **{nick}** 連續擲骰 {turn} 次\n{res}\n[[action:再次擲骰|.r]]",
+      "multi_reason": "🎲 **{nick}** · {reason} · {turn} 次\n{res}\n[[action:再次擲骰|.r]]"
+    },
+    "check": {
+      "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**\n[[action:再次檢定|.ra {attr} {rate}]]",
+      "result_reason": "🎯 **{nick}** · {attr} · {reason}\n`{roll}/{rate}`　**{level}**\n[[action:再次檢定|.ra {attr} {rate}]]"
+    },
+    "brp": {
+      "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**",
+      "result_reason": "🎯 **{nick}** · {attr} · {reason}\n`{roll}/{rate}`　**{level}**"
+    },
+    "pool": { "result": "🎲 **{nick}** 的骰池結果\n`{expr}`" },
+    "rav": { "result": "⚔️ **{nick}** 的對抗檢定\n> **{la}**　`1D100={ra}/{va}`　{lva}\n> **{lb}**　`1D100={rb}/{vb}`　{lvb}\n🏁 **{outcome}**" },
+    "sc": { "result": "🧠 **理智檢定**\n{output}\n[[action:再次進行理智檢定|.sc]]" },
+    "st": { "result": "📋 **技能檢定**\n{output}\n[[action:編輯人物卡屬性|.st ]]" },
+    "coc": { "build": "🕵️ **{nick}** 的調查員作成\n{res}" },
+    "dnd": { "build": "🛡️ **{nick}** 的冒險者六維（降序）\n{res}" },
+    "rx": {
+      "receipt": "🕵️ **{nick}** 為「{target}」進行了一次心理學暗骰。",
+      "private": "🕵️ **心理學暗骰 · {target}**\n群組 `{gid}` · `D100={roll}/{rate}` · **{level}**\n{receipt}"
+    }
+  },
+  "card": {
+    "st": { "done": "📋 **{nick}** 的人物卡已更新\n{detail}\n[[action:查看人物卡狀態|.pc status]]" },
+    "show": "📋 **{nick}** 的人物卡\n{detail}\n[[action:查看完整人物卡|.pc show]]",
+    "show_one": "📋 **{nick}** · {attr}\n`{val}`",
+    "sc": {
+      "result": "🧠 **{nick}** 的理智檢定\n`1D100={res}/{san}`　**{grade}**\n理智 `{san} → {final}`　損失 **{loss}**\n[[action:再次進行理智檢定|.sc]]",
+      "result_noloss": "🧠 **{nick}** 的理智檢定\n`1D100={res}/{san}`　**{grade}**\n理智沒有損失\n[[action:再次進行理智檢定|.sc]]"
+    }
+  },
+  "pc": {
+    "list": "📚 **{nick}** 的人物卡 · 共 {count} 張\n{list}\n[[action:查看目前人物卡|.pc show]]",
+    "show": "📋 **{owner}** 的人物卡 · {name}\n{detail}\n[[action:查看狀態面板|.pc status]]",
+    "build_done": "🧩 **{nick}** 的人物卡已生成\n{detail}\n[[action:查看完整人物卡|.pc show]]",
+    "redo_done": "🔄 **{nick}** 的人物卡已重設並重新生成\n{detail}\n[[action:查看完整人物卡|.pc show]]"
+  },
+  "deck": {
+    "result": "🃏 **{nick}** 從「{name}」抽到\n> {res}\n[[action:再次抽取|.draw {name}]]",
+    "list": "🗂️ **可用牌堆 · {count} 個**\n{list}",
+    "default_show": "🃏 本群預設牌堆：**{name}**\n[[action:從預設牌堆抽取|.draw]]"
+  },
+  "log": {
+    "stat": "📊 **「{name}」日誌統計**\n訊息 **{count}** 條 · 參與者 **{players}** 位\n時段 `{from} ~ {to}`\n發言最多：{tops}",
+    "status": "📝 **正在記錄 #{id} · {name}**\n目前 **{count}** 條\n[[action:暫停記錄|.log off]]",
+    "paused_status": "⏸️ **仍有未結束的記錄**\n#{id} · {name} · 最後記錄 {date}\n[[action:繼續記錄|.log on {name}]]",
+    "list": "📚 **本群跑團記錄 · 共 {total} 條**\n目前第 {from}-{to} 條\n{list}{more}",
+    "type_show": "📄 群檔案匯出格式：**{type}**\n[[action:改為 HTML|.log type html]]",
+    "timer": {
+      "started": "⏱️ **跑團計時已開始**",
+      "resumed": "⏱️ **繼續計時** · 累計 {total}",
+      "stopped": "⏱️ **計時已暫停** · 本次 {current} · 累計 {total}",
+      "show": "⏱️ **「{name}」** · 累計 {total}{running}"
+    }
+  },
+  "hiy": {
+    "result": "📊 **{nick} 的擲骰統計 · {total} 次**\n大成功 {crit} · 極難 {extreme} · 困難 {hard}\n成功 {regular} · 失敗 {fail} · 大失敗 {fumble}\n[[bar:成功率|{success}|{total}]]",
+    "skill_result": "📊 **{nick} · {skill} · {total} 次**\n大成功 {crit} · 極難 {extreme} · 困難 {hard}\n成功 {regular} · 失敗 {fail} · 大失敗 {fumble}\n[[bar:成功率|{success}|{total}]]"
+  },
+  "init": { "list": "⚔️ **先攻順序**\n{list}" },
+  "buff": { "show": "✨ **{nick} 目前的 Buff**\n{detail}" },
+  "rule": { "result": "📖 **{book} · {item}**\n{desc}" },
+  "fun": { "name": { "result": "🎭 **{nick}** 的隨機名\n> {res}" } },
+  "dnd": {
+    "rc": { "result": "🎯 **{nick}** · {attr}\n`{roll} {mod} = {total}`\n[[action:再次檢定|.rc {attr}]]" },
+    "rdc": { "result": "🎯 **{nick}** · {attr}{reason}\n{detail}\n[[action:再次檢定|.rdc {attr}]]" },
+    "ss": {
+      "show": "✨ **{nick}** 的法術位\n{detail}\n[[action:恢復全部法術位|.ss rest]]",
+      "set": "✨ **{nick}** 的法術位已設定\n{detail}",
+      "rested": "✨ **{nick}** 的法術位已全部恢復\n[[action:查看法術位|.ss]]",
+      "changed": "✨ **{nick}** 的 {ring} 環法術位\n[[bar:{ring}環|{cur}|{max}]]"
+    },
+    "longrest": { "done": "🌙 **{nick}** 完成長休\nHP 已恢復至 **{hp}**，法術位與死亡豁免已重設。\n[[action:查看人物卡狀態|.pc status]]" },
+    "ds": {
+      "result": "☠️ **{nick}** 的死亡豁免\n`1D20={roll}` → `{total}`　**{outcome}**\n[[action:查看豁免進度|.ds stat]]",
+      "stat": "☠️ **{nick}** 的死亡豁免進度\n[[bar:成功|{s}|3]]\n[[bar:失敗|{f}|3]]"
+    }
+  }
+}

@@ -189,6 +189,43 @@ bool PersonaManager::clearGroupPersona(const std::string& groupId,
     }
 }
 
+std::optional<int> PersonaManager::adapterDefaultPersona(const std::string& adapterId) const {
+    auto* st = db_.getStorage();
+    if (!st || adapterId.empty()) return std::nullopt;
+    try {
+        const int id = std::stoi(adapterId);
+        const auto row = st->get<AdapterRow>(id);
+        const auto cfg = json::parse(row.config, nullptr, false);
+        if (!cfg.is_object() || !cfg.contains("defaultPersonaId")
+            || !cfg["defaultPersonaId"].is_number_integer()) return std::nullopt;
+        const int personaId = cfg["defaultPersonaId"].get<int>();
+        if (personaId <= 0) return std::nullopt;
+        return getTemplateById(personaId).id > 0 ? std::optional<int>(personaId)
+                                                  : std::nullopt;
+    } catch (...) { return std::nullopt; }
+}
+
+bool PersonaManager::userCanSelectPersona(const std::string& adapterId, int personaId) const {
+    auto* st = db_.getStorage();
+    if (!st || adapterId.empty()) return true;
+    try {
+        const int id = std::stoi(adapterId);
+        const auto row = st->get<AdapterRow>(id);
+        const auto cfg = json::parse(row.config, nullptr, false);
+        if (!cfg.is_object()) return true;
+        const std::string policy = cfg.value("personaSelection", std::string("all"));
+        if (policy == "all") return true;
+        if (policy == "none") return false;
+        if (policy != "selected") return true;
+        if (personaId <= 0) return false;
+        if (!cfg.contains("selectablePersonaIds") || !cfg["selectablePersonaIds"].is_array())
+            return false;
+        for (const auto& value : cfg["selectablePersonaIds"])
+            if (value.is_number_integer() && value.get<int>() == personaId) return true;
+        return false;
+    } catch (...) { return true; }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Template CRUD
 // ═══════════════════════════════════════════════════════════════

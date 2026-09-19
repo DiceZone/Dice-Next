@@ -477,6 +477,67 @@ TEST(PersonaActive, UnknownPersonaCannotBecomeGlobalOrGroupSelection) {
     ASSERT_FALSE(mgr.hasGroupPersonaOverride("group-a", "onebot_v11"));
 }
 
+TEST(PersonaAdapterPolicy, DefaultsToAllAndGlobalInheritance) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    PersonaManager mgr(*db, i18n, *cfg);
+    const int pid = mgr.createTemplate("Visible", "");
+
+    AdapterRow adapter;
+    adapter.name = "Legacy";
+    adapter.type = static_cast<int>(AdapterType::kOneBotV11);
+    adapter.config = json{{"defaultPersonaId", 0}}.dump();
+    adapter.id = db->getStorage()->insert(adapter);
+
+    ASSERT_TRUE(mgr.userCanSelectPersona(std::to_string(adapter.id), pid));
+    ASSERT_FALSE(mgr.adapterDefaultPersona(std::to_string(adapter.id)).has_value());
+}
+
+TEST(PersonaAdapterPolicy, SelectedAllowListAndDefaultAreIndependent) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    PersonaManager mgr(*db, i18n, *cfg);
+    const int male = mgr.createTemplate("Male", "");
+    const int female = mgr.createTemplate("Female", "");
+
+    AdapterRow adapter;
+    adapter.name = "Male bot";
+    adapter.type = static_cast<int>(AdapterType::kQQOfficial);
+    adapter.config = json{{"personaSelection", "selected"},
+                          {"selectablePersonaIds", json::array({male})},
+                          {"defaultPersonaId", male}}.dump();
+    adapter.id = db->getStorage()->insert(adapter);
+    const std::string adapterId = std::to_string(adapter.id);
+
+    ASSERT_TRUE(mgr.userCanSelectPersona(adapterId, male));
+    ASSERT_FALSE(mgr.userCanSelectPersona(adapterId, female));
+    ASSERT_FALSE(mgr.userCanSelectPersona(adapterId, 0));
+    ASSERT_TRUE(mgr.adapterDefaultPersona(adapterId).has_value());
+    ASSERT_EQ(*mgr.adapterDefaultPersona(adapterId), male);
+}
+
+TEST(PersonaAdapterPolicy, NoneHidesEveryPersonaButKeepsOwnerDefault) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    PersonaManager mgr(*db, i18n, *cfg);
+    const int fixed = mgr.createTemplate("Fixed", "");
+
+    AdapterRow adapter;
+    adapter.name = "Fixed bot";
+    adapter.type = static_cast<int>(AdapterType::kDiscord);
+    adapter.config = json{{"personaSelection", "none"},
+                          {"defaultPersonaId", fixed}}.dump();
+    adapter.id = db->getStorage()->insert(adapter);
+    const std::string adapterId = std::to_string(adapter.id);
+
+    ASSERT_FALSE(mgr.userCanSelectPersona(adapterId, fixed));
+    ASSERT_FALSE(mgr.userCanSelectPersona(adapterId, 0));
+    ASSERT_EQ(*mgr.adapterDefaultPersona(adapterId), fixed);
+}
+
 TEST(PersonaActive, SameGroupIdIsIsolatedByPlatform) {
     auto db = makeDb();
     auto cfg = makeCfg();

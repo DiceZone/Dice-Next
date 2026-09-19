@@ -1,0 +1,84 @@
+{
+  "dice": {
+    "roll": {
+      "result": "🎲 **{nick}** のロール\n> `{res}`\n[[action:もう一度ロール|.r]]",
+      "result_reason": "🎲 **{nick}** · {reason}\n> `{res}`\n[[action:もう一度ロール|.r]]",
+      "multi": "🎲 **{nick}** の {turn} 回ロール\n{res}\n[[action:もう一度ロール|.r]]",
+      "multi_reason": "🎲 **{nick}** · {reason} · {turn} 回\n{res}\n[[action:もう一度ロール|.r]]"
+    },
+    "check": {
+      "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**\n[[action:もう一度判定|.ra {attr} {rate}]]",
+      "result_reason": "🎯 **{nick}** · {attr} · {reason}\n`{roll}/{rate}`　**{level}**\n[[action:もう一度判定|.ra {attr} {rate}]]"
+    },
+    "brp": {
+      "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**",
+      "result_reason": "🎯 **{nick}** · {attr} · {reason}\n`{roll}/{rate}`　**{level}**"
+    },
+    "pool": { "result": "🎲 **{nick}** · ダイスプール\n`{expr}`" },
+    "rav": { "result": "⚔️ **{nick}** · 対抗判定\n> **{la}**　`1D100={ra}/{va}`　{lva}\n> **{lb}**　`1D100={rb}/{vb}`　{lvb}\n🏁 **{outcome}**" },
+    "sc": { "result": "🧠 **正気度判定**\n{output}\n[[action:もう一度正気度判定|.sc]]" },
+    "st": { "result": "📋 **技能判定**\n{output}\n[[action:キャラクターシートを編集|.st ]]" },
+    "coc": { "build": "🕵️ **{nick}** · 探索者\n{res}" },
+    "dnd": { "build": "🛡️ **{nick}** · 能力値（降順）\n{res}" },
+    "rx": {
+      "receipt": "🕵️ **{nick}** が「{target}」への心理学暗ロールを行いました。",
+      "private": "🕵️ **心理学暗ロール · {target}**\nグループ `{gid}` · `D100={roll}/{rate}` · **{level}**\n{receipt}"
+    }
+  },
+  "card": {
+    "st": { "done": "📋 **{nick}** のキャラクターシートを更新しました\n{detail}\n[[action:状態を見る|.pc status]]" },
+    "show": "📋 **{nick}** のキャラクターシート\n{detail}\n[[action:シート全体を見る|.pc show]]",
+    "show_one": "📋 **{nick}** · {attr}\n`{val}`",
+    "sc": {
+      "result": "🧠 **{nick}** · 正気度判定\n`1D100={res}/{san}`　**{grade}**\nSAN `{san} → {final}`　減少 **{loss}**\n[[action:もう一度正気度判定|.sc]]",
+      "result_noloss": "🧠 **{nick}** · 正気度判定\n`1D100={res}/{san}`　**{grade}**\n正気度の減少なし\n[[action:もう一度正気度判定|.sc]]"
+    }
+  },
+  "pc": {
+    "list": "📚 **{nick}** · キャラクターシート {count} 枚\n{list}\n[[action:現在のシートを見る|.pc show]]",
+    "show": "📋 **{owner}** のキャラクターシート · {name}\n{detail}\n[[action:状態パネルを見る|.pc status]]",
+    "build_done": "🧩 **{nick}** のキャラクターシートを生成しました\n{detail}\n[[action:シート全体を見る|.pc show]]",
+    "redo_done": "🔄 **{nick}** のキャラクターシートを再生成しました\n{detail}\n[[action:シート全体を見る|.pc show]]"
+  },
+  "deck": {
+    "result": "🃏 **{nick}** が「{name}」から引きました\n> {res}\n[[action:もう一度引く|.draw {name}]]",
+    "list": "🗂️ **利用可能なデッキ · {count}**\n{list}",
+    "default_show": "🃏 グループの既定デッキ：**{name}**\n[[action:既定デッキから引く|.draw]]"
+  },
+  "log": {
+    "stat": "📊 **「{name}」ログ統計**\nメッセージ **{count}** 件 · 参加者 **{players}** 人\n期間 `{from} ~ {to}`\n最多発言：{tops}",
+    "status": "📝 **記録中 #{id} · {name}**\n現在 **{count}** 件\n[[action:記録を一時停止|.log off]]",
+    "paused_status": "⏸️ **未終了のログが一時停止中**\n#{id} · {name} · 最終記録 {date}\n[[action:記録を再開|.log on {name}]]",
+    "list": "📚 **グループログ · 全 {total} 件**\n{from}-{to} 件を表示\n{list}{more}",
+    "type_show": "📄 グループファイル出力形式：**{type}**\n[[action:HTML に変更|.log type html]]",
+    "timer": {
+      "started": "⏱️ **セッション計時を開始**",
+      "resumed": "⏱️ **計時を再開** · 合計 {total}",
+      "stopped": "⏱️ **計時を一時停止** · 今回 {current} · 合計 {total}",
+      "show": "⏱️ **「{name}」** · 合計 {total}{running}"
+    }
+  },
+  "hiy": {
+    "result": "📊 **{nick} · ロール統計 · {total} 回**\nクリティカル {crit} · イクストリーム {extreme} · ハード {hard}\n成功 {regular} · 失敗 {fail} · ファンブル {fumble}\n[[bar:成功率|{success}|{total}]]",
+    "skill_result": "📊 **{nick} · {skill} · {total} 回**\nクリティカル {crit} · イクストリーム {extreme} · ハード {hard}\n成功 {regular} · 失敗 {fail} · ファンブル {fumble}\n[[bar:成功率|{success}|{total}]]"
+  },
+  "init": { "list": "⚔️ **イニシアチブ順**\n{list}" },
+  "buff": { "show": "✨ **{nick} の現在の Buff**\n{detail}" },
+  "rule": { "result": "📖 **{book} · {item}**\n{desc}" },
+  "fun": { "name": { "result": "🎭 **{nick}** · ランダム名\n> {res}" } },
+  "dnd": {
+    "rc": { "result": "🎯 **{nick}** · {attr}\n`{roll} {mod} = {total}`\n[[action:もう一度判定|.rc {attr}]]" },
+    "rdc": { "result": "🎯 **{nick}** · {attr}{reason}\n{detail}\n[[action:もう一度判定|.rdc {attr}]]" },
+    "ss": {
+      "show": "✨ **{nick}** · 呪文スロット\n{detail}\n[[action:全スロットを回復|.ss rest]]",
+      "set": "✨ **{nick}** の呪文スロットを設定しました\n{detail}",
+      "rested": "✨ **{nick}** の呪文スロットをすべて回復しました\n[[action:呪文スロットを見る|.ss]]",
+      "changed": "✨ **{nick}** · レベル {ring} 呪文スロット\n[[bar:レベル{ring}|{cur}|{max}]]"
+    },
+    "longrest": { "done": "🌙 **{nick}** が大休憩を完了\nHP を **{hp}** まで回復し、呪文スロットと死亡セーヴをリセットしました。\n[[action:状態を見る|.pc status]]" },
+    "ds": {
+      "result": "☠️ **{nick}** · 死亡セーヴ\n`1D20={roll}` → `{total}`　**{outcome}**\n[[action:進行状況を見る|.ds stat]]",
+      "stat": "☠️ **{nick}** · 死亡セーヴ\n[[bar:成功|{s}|3]]\n[[bar:失敗|{f}|3]]"
+    }
+  }
+}

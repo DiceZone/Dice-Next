@@ -87,7 +87,8 @@ inline std::map<std::string, std::string>& cache() { static std::map<std::string
 // 内置翻译提示词（前端可查看/覆盖）。{lang} 会替换为目标语言名。
 inline std::string defaultPrompt() {
     return "你是 TRPG 跑团骰娘的翻译器。把用户给的骰娘回复翻译成「{lang}」。**原样保留所有数字、"
-        "骰点表达式（如 D100=57）、成功/失败等级、@提及、[图片] 等方括号代码与占位符，不得改动"
+        "骰点表达式（如 D100=57）、成功/失败等级、@提及、[图片] 等方括号代码与占位符，以及"
+        "「.指令  // 提示」行中 // 左侧的完整指令，不得改动"
         "数字、增删内容或解释**。只输出译文。";
 }
 inline std::string fillLang(std::string tpl, const std::string& lang) {
@@ -124,6 +125,7 @@ inline std::string translate(ConfigManager& cfg, const std::string& targetLang, 
     out = out.substr(b, e - b + 1);
     // 译文若丢失/改动了原文数字（骰点结果）→ 判为翻译不可靠，发原文。
     if (!ai::preservesNumbers(text, out)) { DICE_LOG_WARN("[AI translate] numbers changed, falling back to original lang={}", targetLang); return text; }
+    if (!ai::preservesActionCommands(text, out)) { DICE_LOG_WARN("[AI translate] action command changed, falling back to original lang={}", targetLang); return text; }
     {
         std::lock_guard<std::mutex> lk(cacheMutex());
         if (cache().size() > 1000) cache().clear();

@@ -4,6 +4,7 @@
 // Replace the old DD:: namespace (hardcoded QQAPI) with a
 // plugin-based architecture — OneBot v11, Milky, Discord, Kook, etc.
 #include "../common/content_format.h"
+#include "../common/presentation_style.h"
 
 #include <string>
 #include <functional>
@@ -54,6 +55,7 @@ struct Message {
     json extra;               // 平台特定附加数据（CQ码、附件等）
     // Outbound-only structured presentation; never deserialized from gateway data.
     std::shared_ptr<const qq_rich::Card> qqRichReply;
+    std::vector<presentation::Action> presentationActions;
     bool forcePlainText = false; // Outbound conversation preference, captured before async work.
     bool textPreferenceCaptured = false;
 };
@@ -110,24 +112,37 @@ public:
         return plainTextResolver(context);
     }
 
-    /// Global outbound presentation selected by the dice owner.  Adapters that
-    /// have no rich-message equivalent simply keep sending traditional text.
-    static void setCardMessageMode(bool enabled) noexcept { cardMessageMode_.store(enabled); }
-    static bool cardMessageMode() noexcept { return cardMessageMode_.load(); }
-    /// 解析适配器级 message_format：""=跟随全局, "traditional"=传统文本, "card"=卡片。
+    static void setPresentationStyle(PresentationStyle style) noexcept {
+        presentationStyle_.store(static_cast<int>(style));
+    }
+    static PresentationStyle presentationStyle() noexcept {
+        return static_cast<PresentationStyle>(presentationStyle_.load());
+    }
+    // Backward-compatible API for plugins and old tests. "card" now means the
+    // standard Markdown profile; visual is an independent third profile.
+    static void setCardMessageMode(bool enabled) noexcept {
+        setPresentationStyle(enabled ? PresentationStyle::kStandard : PresentationStyle::kTraditional);
+    }
+    static bool cardMessageMode() noexcept { return presentationStyle() != PresentationStyle::kTraditional; }
     static int parseFormatOverride(const std::string& v) {
-        return v == "card" ? 1 : v == "traditional" ? 0 : -1;
+        if (v == "traditional") return static_cast<int>(PresentationStyle::kTraditional);
+        if (v == "standard" || v == "card") return static_cast<int>(PresentationStyle::kStandard);
+        if (v == "visual") return static_cast<int>(PresentationStyle::kVisual);
+        return -1;
     }
+    // Kept for source compatibility with older plugins; new code resolves the
+    // full three-state profile through effectivePresentationStyle().
     static bool resolveCardMessageMode(bool globalEnabled, int scopedMode) noexcept {
-        return globalEnabled && (scopedMode < 0 || scopedMode > 0);
+        return scopedMode < 0 ? globalEnabled : scopedMode > 0;
     }
-    /// 每个适配器可单独覆盖出站消息形式（-1=跟随全局，0=传统文本，1=卡片）。
+    /// 每个适配器可单独覆盖出站消息形式（-1=跟随全局，0/1/2=传统/标准/视觉）。
     void setMessageFormatOverride(int mode) noexcept { messageFormatOverride_.store(mode); }
+    PresentationStyle effectivePresentationStyle() const noexcept {
+        const int scoped = messageFormatOverride_.load();
+        return scoped < 0 ? presentationStyle() : static_cast<PresentationStyle>(scoped);
+    }
     bool effectiveCardMode() const noexcept {
-        // Global mode is the master rich-message switch. Turning it off must
-        // force every adapter and explicitly-Markdown template back to text.
-        // Scoped overrides can still opt out after the master is enabled.
-        return resolveCardMessageMode(cardMessageMode(), messageFormatOverride_.load());
+        return effectivePresentationStyle() != PresentationStyle::kTraditional;
     }
 
     /// Preferred format for a reply generated for this adapter. The core uses
@@ -352,7 +367,7 @@ public:
     }
 
 private:
-    inline static std::atomic_bool cardMessageMode_{false};
+    inline static std::atomic<int> presentationStyle_{static_cast<int>(PresentationStyle::kTraditional)};
     std::atomic<int> messageFormatOverride_{-1};
 };
 

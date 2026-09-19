@@ -194,12 +194,8 @@ public:
         forwardNodes_.clear();    // reset per-message 合并转发节点 (#6)
         s_replyCat.clear();       // 每条消息重置回复类别
         officialCard_.reset();
-        const std::string personaGroupId =
-            (msg.type == MessageType::kGroup || msg.type == MessageType::kChannel)
-                ? msg.targetId : std::string();
         auto personaScope = i18n_.scopedPersona(
-            personaMgr_ ? personaMgr_->getActivePersona(personaGroupId, msg.platform)
-                        : i18n_.getActivePersonaId());
+            personaMgr_ ? activePersonaFor(msg) : i18n_.getActivePersonaId());
         detectDiceBot(msg);       // 被动识别其他骰子的 .bot 横幅回执（须紧跟探测）
         recordBotProbe(msg);      // 记录本群 .bot 探测时间，作为识别的时间窗
         std::string text = trim(msg.content);
@@ -2239,8 +2235,10 @@ private:
 
     // ─── Persona switching: .rpmode ─────────────────────
     // .rpmode is an independent command — no conflict with .rp (COC7 penalty dice).
-    // Permissions: show/list/info = everyone; set/off/default/inherit = group admin;
-    //              create/copy/del = Master only.
+    // Permissions: show/list/info = everyone; set/off/default/inherit = group
+    // admin/inviter in groups and the current user in private; create/copy/del
+    // = Master only. A private selection is personal and must never mutate the
+    // process-wide persona.
 
     std::optional<std::string> tryHandlePersona(Locale loc, const Message& msg,
                                                  const std::string& cmd) {
@@ -2263,7 +2261,7 @@ private:
 
         if (!personaMgr_) return std::nullopt;
 
-        const bool isGroupAdmin = senderIsGroupAdmin(msg);   // 统一群管权限（含群主/管理/邀请人/骰主）
+        const bool isGroupAdmin = msg.type == MessageType::kPrivate || senderIsGroupAdmin(msg);
         const bool isMasterUser = isMaster(msg);
 
         // .rpmode (no args) → show current persona
@@ -2297,11 +2295,35 @@ private:
         return std::nullopt;
     }
 
+    static std::string personalPersonaKey(const Message& msg) {
+        return "persona:" + msg.platform + ":" + msg.adapterId;
+    }
+
+    int activePersonaFor(const Message& msg) const {
+        if (!personaMgr_) return i18n_.getActivePersonaId();
+        if (msg.type == MessageType::kPrivate) {
+            const std::string personal = getUserSetting(msg, personalPersonaKey(msg));
+            if (!personal.empty()) {
+                const int selected = parseIntOr(personal, -1);
+                if (selected == 0) return 0;
+                if (selected > 0 && personaMgr_->getTemplateById(selected).id > 0
+                    && personaMgr_->userCanSelectPersona(msg.adapterId, selected)) return selected;
+            }
+        } else if (!msg.targetId.empty()
+                   && personaMgr_->hasGroupPersonaOverride(msg.targetId, msg.platform)) {
+            return personaMgr_->getActivePersona(msg.targetId, msg.platform);
+        }
+        if (auto adapterPersona = personaMgr_->adapterDefaultPersona(msg.adapterId))
+            return *adapterPersona;
+        return personaMgr_->getActivePersona("", msg.platform);
+    }
+
+    bool personaVisibleTo(const Message& msg, int personaId) const {
+        return isMaster(msg) || personaMgr_->userCanSelectPersona(msg.adapterId, personaId);
+    }
+
     std::optional<std::string> handlePersonaShow(Locale loc, const Message& msg) {
-        std::string groupId =
-            (msg.type == MessageType::kGroup || msg.type == MessageType::kChannel)
-                ? msg.targetId : std::string();
-        int activeId = personaMgr_->getActivePersona(groupId, msg.platform);
+        int activeId = activePersonaFor(msg);
         if (activeId <= 0) {
             return i18n_.tr(loc, "persona.current", {{"name", i18n_.tr(loc, "persona.default_name")}});
         }
@@ -2315,13 +2337,16 @@ private:
         return result;
     }
 
-    std::optional<std::string> handlePersonaList(Locale loc, const Message& /*msg*/) {
+    std::optional<std::string> handlePersonaList(Locale loc, const Message& msg) {
         auto templates = personaMgr_->listTemplates();
-        if (templates.empty()) {
+        bool any = false;
+        for (const auto& t : templates) if (personaVisibleTo(msg, t.id)) { any = true; break; }
+        if (!any) {
             return i18n_.tr(loc, "persona.no_personas");
         }
         std::string list;
         for (const auto& t : templates) {
+            if (!personaVisibleTo(msg, t.id)) continue;
             list += "• " + t.name;
             if (t.isBuiltin) list += "（内置）";
             if (!t.description.empty()) list += " — " + t.description;
@@ -2330,11 +2355,12 @@ private:
         return i18n_.tr(loc, "persona.list", {{"list", list}});
     }
 
-    std::optional<std::string> handlePersonaInfo(Locale loc, const Message& /*msg*/,
+    std::optional<std::string> handlePersonaInfo(Locale loc, const Message& msg,
                                                   const std::string& name) {
         if (name.empty()) return i18n_.tr(loc, "persona.name_empty");
         auto tmpl = personaMgr_->getTemplateByName(name);
-        if (tmpl.id <= 0) return i18n_.tr(loc, "persona.not_found", {{"name", name}});
+        if (tmpl.id <= 0 || !personaVisibleTo(msg, tmpl.id))
+            return i18n_.tr(loc, "persona.not_found", {{"name", name}});
         int entryCount = personaMgr_->getEntryCount(tmpl.id);
         std::string result = i18n_.tr(loc, "persona.info_name", {{"name", tmpl.name}});
         result += "\n" + (tmpl.description.empty() ? "（无描述）" : tmpl.description);
@@ -2347,7 +2373,13 @@ private:
                                                  const std::string& name) {
         if (name.empty()) return i18n_.tr(loc, "persona.name_empty");
         auto tmpl = personaMgr_->getTemplateByName(name);
-        if (tmpl.id <= 0) return i18n_.tr(loc, "persona.not_found", {{"name", name}});
+        if (tmpl.id <= 0 || !personaVisibleTo(msg, tmpl.id))
+            return i18n_.tr(loc, "persona.not_found", {{"name", name}});
+        if (msg.type == MessageType::kPrivate) {
+            setUserSetting(msg, personalPersonaKey(msg), std::to_string(tmpl.id));
+            auto changedPersonaScope = i18n_.scopedPersona(tmpl.id);
+            return i18n_.tr(loc, "persona.set", {{"name", tmpl.name}});
+        }
         std::string groupId =
             (msg.type == MessageType::kGroup || msg.type == MessageType::kChannel)
                 ? msg.targetId : std::string();
@@ -2359,6 +2391,12 @@ private:
     }
 
     std::optional<std::string> handlePersonaOff(Locale loc, const Message& msg) {
+        if (!personaVisibleTo(msg, 0)) return i18n_.tr(loc, "persona.not_available");
+        if (msg.type == MessageType::kPrivate) {
+            setUserSetting(msg, personalPersonaKey(msg), "0");
+            auto changedPersonaScope = i18n_.scopedPersona(0);
+            return i18n_.tr(loc, "persona.off");
+        }
         std::string groupId =
             (msg.type == MessageType::kGroup || msg.type == MessageType::kChannel)
                 ? msg.targetId : std::string();
@@ -2373,17 +2411,13 @@ private:
             (msg.type == MessageType::kGroup || msg.type == MessageType::kChannel)
                 ? msg.targetId : std::string();
         if (groupId.empty()) {
-            // A private command manages the global selection and has no group
-            // override to inherit from. Preserve the historical `default`
-            // behaviour by resetting the global persona.
-            if (!personaMgr_->setActivePersona(0, "", msg.platform))
-                return i18n_.tr(loc, "persona.switch_fail");
+            clearUserSetting(msg, personalPersonaKey(msg));
         } else {
             if (!personaMgr_->clearGroupPersona(groupId, msg.platform))
                 return i18n_.tr(loc, "persona.switch_fail");
         }
 
-        const int activeId = personaMgr_->getActivePersona(groupId, msg.platform);
+        const int activeId = activePersonaFor(msg);
         auto changedPersonaScope = i18n_.scopedPersona(activeId);
         std::string name = i18n_.tr(loc, "persona.default_name");
         if (activeId > 0) {
@@ -2670,12 +2704,16 @@ private:
 
     std::string slotSummary(const std::string& user, const std::string& group) const {
         std::ostringstream s; bool any = false;
+        const bool visual = I18n::outboundPresentationStyle() == PresentationStyle::kVisual;
         for (int i = 1; i <= 9; ++i) {
             auto mx = const_cast<CharacterCardStore&>(cards_).getAttr(user, group, "ssmax" + std::to_string(i));
             if (!mx || *mx <= 0) continue;
             auto cur = const_cast<CharacterCardStore&>(cards_).getAttr(user, group, "ss" + std::to_string(i));
-            if (any) s << ", ";
-            s << i << "\xe7\x8e\xaf:" << (cur ? *cur : 0) << "/" << *mx;   // N环:cur/max
+            if (any) s << (visual ? "\n" : ", ");
+            if (visual)
+                s << "[[bar:" << i << "\xe7\x8e\xaf|" << (cur ? *cur : 0) << "|" << *mx << "]]";
+            else
+                s << i << "\xe7\x8e\xaf:" << (cur ? *cur : 0) << "/" << *mx;   // N环:cur/max
             any = true;
         }
         return any ? s.str() : std::string();
@@ -3888,8 +3926,10 @@ private:
             if (!first) s << " "; first = false;
             if (k == HP) {
                 int eff = v + temp;
-                s << k << ":" << eff;
-                if (hpMax) s << "/" << *hpMax;
+                if (hpMax && I18n::outboundPresentationStyle() == PresentationStyle::kVisual)
+                    s << "[[bar:HP|" << eff << "|" << *hpMax << "]]";
+                else s << k << ":" << eff;
+                if (hpMax && I18n::outboundPresentationStyle() != PresentationStyle::kVisual) s << "/" << *hpMax;
                 else if (temp > 0) s << "(+\xe4\xb8\xb4\xe6\x97\xb6" << temp << ")";   // (+临时N)
             } else s << k << ":" << v;
         }
@@ -4440,9 +4480,13 @@ private:
         return i18n_.tr(loc, "helpdoc.list", {{"list", list}});
     }
 
-    bool senderIsOfficialGroupInviter(const Message& msg) const {
-        if (msg.platform != "qq_official" || msg.type != MessageType::kGroup
-            || msg.adapterId.empty() || msg.targetId.empty() || !msg.extra.is_object()) return false;
+    bool senderIsGroupInviter(const Message& msg) const {
+        if ((msg.type != MessageType::kGroup && msg.type != MessageType::kChannel) || msg.adapterId.empty()
+            || msg.targetId.empty()) return false;
+        if (msg.platform != "qq_official")
+            return groupSettingValue(msg.platform, msg.targetId, "inviter", msg.adapterId)
+                == msg.senderId;
+        if (!msg.extra.is_object()) return false;
         const auto native = msg.extra.value("__identity_native_sender", std::string());
         auto* st = db_.getStorage();
         if (!st || native.empty()) return false;
@@ -4476,8 +4520,7 @@ private:
         if (parsed->feature == "text") {
             if (action == "plain" || action == "rich") {
                 const bool allowed = msg.type == MessageType::kPrivate || msg.fromSelf || isMaster(msg)
-                    || senderIsOfficialGroupInviter(msg)
-                    || (msg.platform != "qq_official" && senderIsGroupAdmin(msg));
+                    || senderIsGroupAdmin(msg);
                 if (!allowed) return i18n_.tr(loc, "gate.no_perm");
                 setGroupSetting(msg, conversationTextKey(msg), action == "plain" ? "1" : "");
             }
@@ -7104,6 +7147,11 @@ private:
                 {"mute", shown(getGroupSetting(msg, "autoMute"))},
                 {"min", mm}});
         }
+        // These settings cause the bot to approve, kick or mute other users.
+        // An inviter may manage ordinary dice settings, but invitation alone is
+        // not proof of a platform moderation role.
+        if (!senderHasGroupModerationPrivilege(msg))
+            return i18n_.tr(loc, "gate.no_perm");
         // 骰子须在群内有管理权限（否则踢人/禁言/审批都无效）。仅当**明确是普通成员**时
         // 拦下并提示；admin/owner 或角色未缓存("")时放行（未缓存也允许配置，避免冷启动
         // 时真管理员被误挡；若实际无权，踢/禁在 NapCat 端会无害失败）。
@@ -7609,15 +7657,11 @@ private:
     }
 
     // ─── .sn 跑团名片（按模板设自己的群名片，青果/海豹）──────
-    /// 群设置变更权限，对齐原版 `DiceEvent::canRoomHost()`（DiceEvent.cpp:4686）：
-    ///   trusted>3 ‖ 私聊 ‖ 群管理/群主（OneBot sender.role）‖ 群邀请人（记录）‖ 骰主。
-    /// 原版用它门控 .bot on/off、.dismiss、.setcoc、.me on/off、.game new 等开关类指令。
+    /// Non-destructive group configuration permission.  An inviter is a room
+    /// host on every adapter because they are normally the person who knows how
+    /// to operate the dice. Platform moderation actions use the stricter
+    /// senderHasGroupModerationPrivilege() check below.
     bool senderIsGroupAdmin(const Message& msg) const {
-        // QQ 官方机器人当前未提供群成员角色字段。为保持基础群内管理指令可用，
-        // 暂时允许官方群内任意用户通过“群管级”门槛（如 .bot on/.bot off）。
-        // 待官方 API 提供可信的群角色/权限信息后，必须改为在此校验 owner/admin。
-        // 骰主按 OpenID 匹配（isMaster 已支持）；信任级仍单独拒绝官方群 OpenID 映射。
-        if (msg.platform == "qq_official" && msg.type == MessageType::kGroup) return true;
         if (msg.fromSelf) return true;                               // 自控：用骰娘账号自身发指令视同群管理（操控者可信）
         if (isMaster(msg) || senderTrust(msg) >= 4) return true;
         if (msg.type == MessageType::kPrivate) return true;          // 原版：私聊恒真
@@ -7634,9 +7678,24 @@ private:
                 a->refreshMemberRole(msg.targetId, msg.senderId);
             }
         }
-        // 群邀请人视同管理（原版 pGrp->inviter == fromChat.uid）
-        if (msg.type == MessageType::kGroup && !msg.targetId.empty() &&
-            groupSettingValue(msg.platform, msg.targetId, "inviter", msg.adapterId) == msg.senderId) return true;
+        // QQ 官方当前没有角色字段时会自然落到这里；未来网关提供可信
+        // owner/admin 角色后，上面的通用 role/cache 路径无需再改权限模型。
+        if (senderIsGroupInviter(msg)) return true;
+        return false;
+    }
+
+    bool senderHasGroupModerationPrivilege(const Message& msg) const {
+        if (msg.fromSelf || isMaster(msg)) return true;
+        if (msg.type != MessageType::kGroup || msg.targetId.empty()) return false;
+        std::string role;
+        try { role = toLower(trim(msg.extra.value("role", std::string()))); } catch (...) {}
+        if (role == "owner" || role == "admin" || role == "creator" || role == "administrator")
+            return true;
+        if (auto a = adapters_.getAdapter(msg.adapterId)) {
+            if (a->isGroupOwner(msg.targetId, msg.senderId)
+                || a->isGroupAdmin(msg.targetId, msg.senderId)) return true;
+            a->refreshMemberRole(msg.targetId, msg.senderId);
+        }
         return false;
     }
 
@@ -10426,7 +10485,7 @@ private:
             auto card = characterStatus(loc, msg);
             if (card.vitals.empty()) return i18n_.tr(loc, "qq_rich.empty");
             card.statusOnly = true;
-            card.original = qq_rich::statusText(card);
+            card.original = qq_rich::statusText(card, I18n::outboundPresentationStyle());
             const auto reply = card.original;
             if (msg.platform == "qq_official" && msg.type != MessageType::kChannel)
                 officialCard_ = std::make_shared<const qq_rich::Card>(std::move(card));

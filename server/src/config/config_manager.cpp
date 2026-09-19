@@ -30,7 +30,7 @@ static json makeDefaultConfig() {
             {"command_prefix", "."},
             {"self_name", ""},                   // strSelfName: 自我介绍场合的名称（空=用登录昵称）
             {"self_call", ""},                   // strSelfCall: 回执自称，{self} 的重定向目标（空=用 self_name）
-            {"message_format", "traditional"},   // 出站消息表现形式：traditional / card
+            {"message_format", "traditional"},   // 出站消息表现形式：traditional / standard / visual
             {"save_log_images", false},
             {"image_send", {{"mode", "base64"}, {"host", ""}}},
             {"image_host", {{"mode", "none"}}},

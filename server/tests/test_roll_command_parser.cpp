@@ -203,13 +203,13 @@ TEST(RollCommandParser, AdapterJsonBoundaryReplacesMalformedUtf8) {
     ASSERT_TRUE(decoded.at("content").get<std::string>().find("reply:") == 0);
     ASSERT_TRUE(encoded.find("\xef\xbf\xbd") != std::string::npos);
 }
-TEST(MessageFormat, GlobalTraditionalOverridesEveryScopedMode) {
+TEST(MessageFormat, ScopedProfileMayOverrideGlobalTraditional) {
     ASSERT_FALSE(IAdapter::resolveCardMessageMode(false, -1));
     ASSERT_FALSE(IAdapter::resolveCardMessageMode(false, 0));
-    ASSERT_FALSE(IAdapter::resolveCardMessageMode(false, 1));
+    ASSERT_TRUE(IAdapter::resolveCardMessageMode(false, 1));
 }
 
-TEST(MessageFormat, GlobalRichModeStillAllowsScopedOptOut) {
+TEST(MessageFormat, ScopedProfileMayOverrideGlobalRich) {
     ASSERT_TRUE(IAdapter::resolveCardMessageMode(true, -1));
     ASSERT_FALSE(IAdapter::resolveCardMessageMode(true, 0));
     ASSERT_TRUE(IAdapter::resolveCardMessageMode(true, 1));

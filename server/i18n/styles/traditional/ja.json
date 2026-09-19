@@ -1,0 +1,23 @@
+{
+  "dice": {
+    "roll": {
+      "result": "{nick} のロール: {res}",
+      "result_reason": "{nick} の{reason}ロール: {res}",
+      "multi": "{nick} の {turn} 回ロール: {res}",
+      "multi_reason": "{nick} の{reason}を {turn} 回ロール: {res}"
+    },
+    "check": {
+      "result": "{nick} の{attr}ロール: {roll}/{rate} {level}",
+      "result_reason": "{reason}のため、{nick} の{attr}ロール: {roll}/{rate} {level}"
+    },
+    "brp": {
+      "result": "{nick} の{attr}ロール: {roll}/{rate} {level}",
+      "result_reason": "{reason}のため、{nick} の{attr}ロール: {roll}/{rate} {level}"
+    },
+    "rav": { "result": "{nick} の対抗判定:\n{la}: 1D100={ra}/{va} {lva}\n{lb}: 1D100={rb}/{vb} {lvb}\n{outcome}" },
+    "sc": { "result": "正気度判定 {output}" },
+    "st": { "result": "技能判定 {output}" },
+    "coc": { "build": "{nick} の探索者:{res}" },
+    "dnd": { "build": "{nick} の冒険者の能力値（降順）:{res}" }
+  }
+}

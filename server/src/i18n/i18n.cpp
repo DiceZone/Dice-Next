@@ -19,6 +19,7 @@ static void flattenNode(const json& node, const std::string& prefix,
 thread_local bool I18n::outboundCaptureActive_ = false;
 thread_local bool I18n::outboundCaptureMarkdown_ = false;
 thread_local ContentFormat I18n::outboundPreferredOutput_ = ContentFormat::kMarkdown;
+thread_local PresentationStyle I18n::outboundPresentationStyle_ = PresentationStyle::kStandard;
 thread_local std::optional<int> I18n::scopedPersonaId_ = std::nullopt;
 
 I18n::PersonaScope::PersonaScope(int personaId)
@@ -59,6 +60,7 @@ bool I18n::load() {
 
     bundles_.clear();
     preparedBundles_.clear();
+    preparedStyleBundles_.clear();
     keywordMap_.clear();
     int loaded = 0;
 
@@ -128,6 +130,32 @@ bool I18n::load() {
         for (const auto& [key, value] : flat) {
             const ContentFormat format = trustedTemplateFormat(value);
             prepared.emplace(key, prepareTemplate(value, format));
+        }
+    }
+
+    // Optional partial overlays contain the historical wording or enhanced
+    // visual templates only. Missing keys deliberately fall back to the
+    // standard bundle, so the three profiles never become three drifting full
+    // copies of every locale.
+    for (const auto& [style, folder] : std::vector<std::pair<PresentationStyle, std::string>>{
+             {PresentationStyle::kTraditional, "traditional"},
+             {PresentationStyle::kVisual, "visual"}}) {
+        for (const auto& [loc, ignored] : bundles_) {
+            (void)ignored;
+            const fs::path file = fs::path(dir) / "styles" / folder /
+                (std::string(localeToString(loc)) + ".json");
+            if (!fs::exists(file)) continue;
+            try {
+                std::ifstream in(file);
+                json overlay; in >> overlay;
+                std::map<std::string, std::string> flat;
+                flattenNode(overlay, "", flat);
+                auto& prepared = preparedStyleBundles_[style][loc];
+                for (const auto& [key, value] : flat)
+                    prepared.emplace(key, prepareTemplate(value, trustedTemplateFormat(value)));
+            } catch (const std::exception& e) {
+                DICE_LOG_ERROR("I18n: failed to parse presentation overlay {}: {}", file.string(), e.what());
+            }
         }
     }
 
@@ -280,6 +308,11 @@ std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const
     if (personaIt != preparedPersonaBundles_.end())
         if (auto rendered = renderFrom(personaIt->second, loc)) return *rendered;
     if (auto rendered = renderFrom(overrides_, loc)) return *rendered;
+    if (outboundCaptureActive_ && outboundPresentationStyle_ != PresentationStyle::kStandard) {
+        auto styleIt = preparedStyleBundles_.find(outboundPresentationStyle_);
+        if (styleIt != preparedStyleBundles_.end())
+            if (auto rendered = renderFrom(styleIt->second, loc)) return *rendered;
+    }
     if (auto rendered = renderFrom(preparedBundles_, loc)) return *rendered;
 
     // default locale uses the same layer order.
@@ -287,6 +320,11 @@ std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const
         if (personaIt != preparedPersonaBundles_.end())
             if (auto rendered = renderFrom(personaIt->second, defaultLocale_)) return *rendered;
         if (auto rendered = renderFrom(overrides_, defaultLocale_)) return *rendered;
+        if (outboundCaptureActive_ && outboundPresentationStyle_ != PresentationStyle::kStandard) {
+            auto styleIt = preparedStyleBundles_.find(outboundPresentationStyle_);
+            if (styleIt != preparedStyleBundles_.end())
+                if (auto rendered = renderFrom(styleIt->second, defaultLocale_)) return *rendered;
+        }
         if (auto rendered = renderFrom(preparedBundles_, defaultLocale_)) return *rendered;
     }
 
@@ -309,10 +347,15 @@ I18n::TemplateValue I18n::prepareTemplate(const std::string& value,
     return prepared;
 }
 
-void I18n::beginOutboundCapture(ContentFormat preferredOutput) {
+void I18n::beginOutboundCapture(ContentFormat preferredOutput, PresentationStyle style) {
     outboundCaptureActive_ = true;
     outboundCaptureMarkdown_ = false;
     outboundPreferredOutput_ = preferredOutput;
+    outboundPresentationStyle_ = style;
+}
+
+PresentationStyle I18n::outboundPresentationStyle() {
+    return outboundCaptureActive_ ? outboundPresentationStyle_ : PresentationStyle::kStandard;
 }
 
 ContentFormat I18n::endOutboundCapture() {
@@ -320,6 +363,7 @@ ContentFormat I18n::endOutboundCapture() {
     outboundCaptureActive_ = false;
     outboundCaptureMarkdown_ = false;
     outboundPreferredOutput_ = ContentFormat::kMarkdown;
+    outboundPresentationStyle_ = PresentationStyle::kStandard;
     return useMarkdown ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
 }
 

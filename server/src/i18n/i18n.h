@@ -19,6 +19,7 @@
 // looks up  { "dice": { "error": { "roll": "Roll error: {error}" } } }.
 
 #include "../common/content_format.h"
+#include "../common/presentation_style.h"
 #include "../common/types.h"
 
 #include <string>
@@ -120,8 +121,10 @@ public:
     /// Capture the richest template format used while one command builds a
     /// reply, without changing the command router's string-returning API.
     static void beginOutboundCapture(
-        ContentFormat preferredOutput = ContentFormat::kMarkdown);
+        ContentFormat preferredOutput = ContentFormat::kMarkdown,
+        PresentationStyle style = PresentationStyle::kStandard);
     static ContentFormat endOutboundCapture();
+    static PresentationStyle outboundPresentationStyle();
 
     /// Flatten the whole bundle for @p loc into {dotted-key → default value} for
     /// every string leaf (powers the "全部文本可自定义" editor). Overrides are NOT
@@ -199,6 +202,7 @@ private:
     Locale defaultLocale_;
     std::map<Locale, json> bundles_;
     std::map<Locale, std::map<std::string, TemplateValue>> preparedBundles_;
+    std::map<PresentationStyle, std::map<Locale, std::map<std::string, TemplateValue>>> preparedStyleBundles_;
     std::map<Locale, std::map<std::string, TemplateValue>> overrides_;
     std::map<int, std::map<Locale, json>> personaBundles_;   // persona → locale → flat key/value
     std::map<int, std::map<Locale, json>> personaFormats_;   // persona → locale → flat key/format
@@ -209,6 +213,7 @@ private:
     static thread_local bool outboundCaptureActive_;
     static thread_local bool outboundCaptureMarkdown_;
     static thread_local ContentFormat outboundPreferredOutput_;
+    static thread_local PresentationStyle outboundPresentationStyle_;
     static thread_local std::optional<int> scopedPersonaId_;
 };
 

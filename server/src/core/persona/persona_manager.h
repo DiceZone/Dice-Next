@@ -14,6 +14,7 @@
 #include "../../i18n/i18n.h"
 
 #include <string>
+#include <optional>
 #include <vector>
 #include <nlohmann/json.hpp>
 
@@ -51,6 +52,17 @@ public:
     /// This operation is idempotent. @p groupId must not be empty.
     bool clearGroupPersona(const std::string& groupId,
                            const std::string& platform = "onebot_v11");
+
+    // ─── Adapter persona policy ──────────────────────────────
+
+    /// Optional persona selected by the dice owner for one adapter. Missing
+    /// means the adapter inherits the process-wide persona.
+    std::optional<int> adapterDefaultPersona(const std::string& adapterId) const;
+
+    /// Whether ordinary users may discover/select @p personaId through this
+    /// adapter.  Legacy adapters default to "all" for compatibility; owners can
+    /// switch an adapter to an explicit allow-list or disable user selection.
+    bool userCanSelectPersona(const std::string& adapterId, int personaId) const;
 
     // ─── Template CRUD ────────────────────────────────────────
 

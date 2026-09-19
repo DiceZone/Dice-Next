@@ -526,8 +526,8 @@ static int realMain(int argc, char* argv[]) {
     }
 
     // ── 4.5. Initialize i18n from the validated/recovered config ──
-    dice::IAdapter::setCardMessageMode(
-        configMgr.get<std::string>("dice/message_format", "traditional") == "card");
+    dice::IAdapter::setPresentationStyle(dice::presentationStyleFromString(
+        configMgr.get<std::string>("dice/message_format", "traditional")));
     std::string i18nDir = configMgr.get<std::string>("i18n/resource_dir", "i18n");
     std::string defaultLocaleCode = configMgr.get<std::string>("i18n/default_locale", "zh-Hans");
     dice::I18n i18n(i18nDir, dice::localeFromString(defaultLocaleCode));
@@ -1334,11 +1334,14 @@ static int realMain(int argc, char* argv[]) {
             receivedHook = jsMod.handleMessageReceived(msg, cmdRouter.jsPrivilegeLevel(msg));
 
         dice::ContentFormat preferredReplyFormat = dice::ContentFormat::kPlainText;
+        dice::PresentationStyle replyStyle = dice::PresentationStyle::kTraditional;
         const bool forcePlainText = cmdRouter.conversationPlainText(msg) || cmdRouter.isTextControl(msg);
-        if (auto sourceAdapter = adapterMgr.getAdapter(msg.adapterId))
+        if (auto sourceAdapter = adapterMgr.getAdapter(msg.adapterId)) {
             preferredReplyFormat = sourceAdapter->preferredReplyFormat(msg);
+            replyStyle = sourceAdapter->effectivePresentationStyle();
+        }
         if (forcePlainText) preferredReplyFormat = dice::ContentFormat::kPlainText;
-        dice::I18n::beginOutboundCapture(preferredReplyFormat);
+        dice::I18n::beginOutboundCapture(preferredReplyFormat, replyStyle);
         auto reply = cmdRouter.handleMessage(msg);
         const auto officialCard = cmdRouter.lastOfficialCard();
         dice::ContentFormat replyFormat = dice::I18n::endOutboundCapture();
@@ -1414,15 +1417,31 @@ static int realMain(int argc, char* argv[]) {
         // AI 网关是同步 curl（最长 30s），此前润色/翻译/对话都直接跑在适配器消息线程
         // 上，一次超时全部指令失效 30 秒。需要 AI 后处理的回复把这一整段投给
         // aiwork::Worker 后台执行；不需要 AI 时原地执行，行为与旧版完全一致。
-        auto finishReply = [&adapterMgr, &cmdRouter, &configMgr, &db, &jsMod, officialCard, forcePlainText](
+        auto finishReply = [&adapterMgr, &cmdRouter, &configMgr, &db, &jsMod, officialCard,
+                            forcePlainText, preferredReplyFormat, replyStyle](
             const dice::Message& msg, std::string reply, std::string broadcast,
             const std::string& aiCat, const std::string& quoteId,
             std::vector<std::string> fwdNodes, bool linkReplyOk,
             dice::ContentFormat replyFormat) {
+            const bool officialCardMatched = officialCard && reply == officialCard->original;
+            std::vector<dice::presentation::Action> replyActions;
             // Resolve self tokens ({self}/{strSelfName}/{strSelfCall}) in the final
             // text — works for both command replies and custom replies.
             if (!reply.empty())     reply = cmdRouter.applySelf(msg, reply, replyFormat);
             if (!broadcast.empty()) broadcast = cmdRouter.applySelf(msg, broadcast);
+            // Resolve semantic presentation components after all ordinary
+            // template variables, but before AI and logging. The same advanced
+            // reply therefore renders appropriately on every adapter.
+            if (!reply.empty()) {
+                auto expanded = dice::presentation::expandComponents(
+                    reply, replyStyle, preferredReplyFormat);
+                reply = std::move(expanded.text);
+                replyActions = std::move(expanded.actions);
+                if (expanded.usedMarkdown) replyFormat = dice::ContentFormat::kMarkdown;
+            }
+            if (!broadcast.empty())
+                broadcast = dice::presentation::expandComponents(
+                    broadcast, replyStyle, dice::ContentFormat::kPlainText).text;
             // 阶段2：AI 润色 —— 类别在覆盖范围内 + 总开关+润色开关开启。失败/超时/
             // 破坏数字一律回退原文，绝不影响掷骰结果。
             if (!reply.empty() && !msg.fromSelf
@@ -1435,6 +1454,22 @@ static int realMain(int argc, char* argv[]) {
                 std::string tgt = cmdRouter.aiLangFor(msg);
                 if (!tgt.empty() && dice::aitrans::covers(configMgr, aiCat))
                     reply = dice::aitrans::translate(configMgr, tgt, reply);
+            }
+            // AI may translate the human-facing action labels. Visual replies
+            // retain the command hint syntax, so rebuild their actions from the
+            // final text while preserving every command verbatim.
+            if (!reply.empty() && replyStyle == dice::PresentationStyle::kVisual) {
+                const auto templateActions = replyActions;
+                replyActions.clear();
+                dice::presentation::discoverUsageActions(reply, replyActions);
+                for (auto& action : replyActions) {
+                    const auto it = std::find_if(templateActions.begin(), templateActions.end(),
+                        [&](const auto& original) {
+                            return dice::presentation::trim(original.text)
+                                == dice::presentation::trim(action.text);
+                        });
+                    if (it != templateActions.end()) action.text = it->text;
+                }
             }
             if (reply.empty() && broadcast.empty()) return;
             // .link：骰娘回复按最终文本转发到链接目标。
@@ -1501,12 +1536,16 @@ static int realMain(int argc, char* argv[]) {
                 dice::Message replyMsg = msg;
                 replyMsg.forcePlainText = forcePlainText;
                 replyMsg.textPreferenceCaptured = true;
+                if (!forcePlainText) replyMsg.presentationActions = replyActions;
                 // Only the unchanged built-in reply may use its structured snapshot.
                 // AI/plugin replacement, forwarding and other adapters keep normal text.
                 replyMsg.qqRichReply.reset();
-                if (!forcePlainText && msg.platform == "qq_official" && officialCard && reply == officialCard->original
-                    && replyFormat == dice::ContentFormat::kPlainText)
-                    replyMsg.qqRichReply = officialCard;
+                if (!forcePlainText && msg.platform == "qq_official" && officialCardMatched
+                    && replyFormat == dice::ContentFormat::kPlainText) {
+                    auto renderedCard = std::make_shared<dice::qq_rich::Card>(*officialCard);
+                    renderedCard->original = reply;
+                    replyMsg.qqRichReply = std::move(renderedCard);
+                }
                 if (!quoteId.empty()) replyMsg.id = quoteId;
                 // 分段发送：超长回复切成多段；首段引用回复，其余作为普通消息（避免 N 次引用）。
                 // 引用开关：骰主关「引用投掷对象发言」后，首段也不引用（但 .log on 等指定引用
@@ -1544,6 +1583,10 @@ static int realMain(int argc, char* argv[]) {
                         if (forcePlainText || a->platform() == "qq_official"
                             || a->platform() == "kook" || a->platform() == "discord") {
                             auto part = replyMsg;
+                            if (k > 0) {
+                                part.presentationActions.clear();
+                                part.qqRichReply.reset();
+                            }
                             if (!(k == 0 && quoteFirst) && a->platform() != "qq_official") part.id.clear();
                             a->sendReplyFormatted(part, segs[k], replyFormat);
                         }
@@ -2227,6 +2270,10 @@ static int realMain(int argc, char* argv[]) {
                 std::to_string(std::hash<std::string>{}(definition.dump())) + "|";
             dice::ReplyCtx ctx{pm.platform, pv ? "" : pm.targetId, pm.senderId};
             const auto pick = replyManager.pickEventReply(rule, ctx, key);
+            const auto style = a->effectivePresentationStyle();
+            dice::ContentFormat preferred = a->preferredReplyFormat(pm);
+            if (cmdRouter.conversationPlainText(pm)) preferred = dice::ContentFormat::kPlainText;
+            dice::I18n::beginOutboundCapture(preferred, style);
             std::string reply;
             if (pick.rule) {
                 const auto command = definition.value("command", std::string());
@@ -2246,10 +2293,14 @@ static int realMain(int argc, char* argv[]) {
             } else if (!pick.notice.empty()) {
                 reply = cmdRouter.renderReply(pm, pick.notice, "", dice::MatchType::kKeyword);
             }
+            auto format = dice::I18n::endOutboundCapture();
             if (reply.empty()) return;
-            reply = cmdRouter.applySelf(pm, reply);
-            if (pv) a->sendPrivateMessage(e.operatorId, reply);
-            else a->sendGroupMessageCQ(e.groupId, reply);
+            reply = cmdRouter.applySelf(pm, reply, format);
+            auto expanded = dice::presentation::expandComponents(reply, style, preferred);
+            reply = std::move(expanded.text);
+            if (expanded.usedMarkdown) format = dice::ContentFormat::kMarkdown;
+            pm.presentationActions = std::move(expanded.actions);
+            a->sendReplyFormatted(pm, reply, format);
             DICE_LOG_INFO("event: poked by {} in group {}", e.operatorId, e.groupId);
         } else if (e.type == ET::kFriendAdd) {
             a->refreshGroupList();   // 同步刷新好友列表缓存（非好友邀请判定依赖它）
@@ -2400,6 +2451,9 @@ static int realMain(int argc, char* argv[]) {
             row.enabled = a.value("enabled", false);
             nlohmann::json extra{
                 {"heartApiKey", a.value("heart_api_key", a.value("heartApiKey", std::string()))},
+                {"personaSelection", a.value("persona_selection", a.value("personaSelection", std::string("all")))},
+                {"selectablePersonaIds", a.value("selectable_persona_ids", a.value("selectablePersonaIds", nlohmann::json::array()))},
+                {"defaultPersonaId", a.value("default_persona_id", a.value("defaultPersonaId", 0))},
             };
             if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
                 row.connectionMode = 0;
@@ -2422,7 +2476,10 @@ static int realMain(int argc, char* argv[]) {
             nlohmann::json a{{"id", row.id}, {"name", row.name}, {"type", dice::adapterTypeToString(static_cast<dice::AdapterType>(row.type))},
                              {"connection_mode", row.type == static_cast<int>(dice::AdapterType::kMilky) ? "forward_ws" : row.connectionMode == 1 ? "reverse_ws" : row.connectionMode == 2 ? "http" : "forward_ws"},
                              {"endpoint", row.endpoint}, {"access_token", row.accessToken}, {"enabled", row.enabled},
-                             {"heart_api_key", extra.value("heartApiKey", std::string())}};
+                             {"heart_api_key", extra.value("heartApiKey", std::string())},
+                             {"persona_selection", extra.value("personaSelection", std::string("all"))},
+                             {"selectable_persona_ids", extra.value("selectablePersonaIds", nlohmann::json::array())},
+                             {"default_persona_id", extra.value("defaultPersonaId", 0)}};
             if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
                 a["app_id"] = extra.value("appId", std::string());
                 a["app_secret"] = extra.value("appSecret", std::string());
@@ -2508,7 +2565,7 @@ static int realMain(int argc, char* argv[]) {
             if (!extra.is_object()) extra = nlohmann::json::object();
             if (extra.contains("message_format")) {
                 const std::string mode = extra.value("message_format", std::string());
-                if (mode == "traditional" || mode == "card") {
+                if (mode == "traditional" || mode == "card" || mode == "standard" || mode == "visual") {
                     dice::scoped_settings::setSection(configMgr, "account",
                         std::to_string(row.id), "dice",
                         nlohmann::json{{"message_format", mode}});

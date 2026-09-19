@@ -956,16 +956,17 @@
     "list": "可用的人格有：\n{list}用 .rpmode set <名称> 切换",
     "set": "已切换到人格「{name}」√",
     "off": "已关闭当前窗口的人格，改用基础回复√",
-    "inherit": "已改为继承全局人格：{name}√",
+    "inherit": "已改为继承当前适配器或全局的默认人格：{name}√",
     "switch_fail": "人格切换保存失败×",
     "not_found": "找不到名为「{name}」的人格×",
+    "not_available": "当前适配器没有开放这个人格选项×",
     "created": "已从当前文案创建人格「{name}」√\n请到 WebUI 后台编辑具体条目",
     "copied": "已将「{src}」复制为「{dst}」√",
     "deleted": "已删除人格「{name}」√",
     "builtin_no_del": "内置人格不可删除×",
     "name_exists": "已存在同名人格「{name}」×",
     "name_empty": "请输入人格名称×",
-    "no_perm_admin": "需要群管理员权限才能切换人格×",
+    "no_perm_admin": "需要群管理员、邀请人或骰主权限才能切换群人格×",
     "no_perm_master": "仅 Master 可管理人格×",
     "no_entries": "该人格暂无覆盖条目",
     "entry_count": "覆盖条目：{count} 条",
@@ -974,7 +975,7 @@
     "copy_fail": "复制人格失败×",
     "del_fail": "删除人格失败×",
     "copy_usage": ".rpmode copy <源名称> <目标名称> // 复制人格",
-    "no_personas": "暂无人格模板，请到 WebUI 后台创建"
+    "no_personas": "当前适配器没有向用户开放可选人格"
   },
   "npc": {
     "group_only": "NPC 角色卡只能在群聊中使用。",

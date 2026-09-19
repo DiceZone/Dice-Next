@@ -955,16 +955,17 @@
     "list": "可用的人格有：\n{list}用 .rpmode set <名稱> 切換",
     "set": "已切換到人格「{name}」。",
     "off": "已關閉目前視窗的人格，改用基礎回覆。",
-    "inherit": "已改為繼承全域人格：{name}。",
+    "inherit": "已改為繼承目前適配器或全域的預設人格：{name}。",
     "switch_fail": "人格切換儲存失敗。",
     "not_found": "找不到名為「{name}」的人格。",
+    "not_available": "目前適配器沒有開放這個人格選項。",
     "created": "已從目前的設定建立人格「{name}」。\n請到 WebUI 後台編輯具體條目",
     "copied": "已將「{src}」複製為「{dst}」。",
     "deleted": "已刪除人格「{name}」。",
     "builtin_no_del": "內建人格不可刪除。",
     "name_exists": "已存在同名人格「{name}」。",
     "name_empty": "請給出人格名稱。",
-    "no_perm_admin": "需要群組管理員權限才能切換人格。",
+    "no_perm_admin": "需要群組管理員、邀請人或骰主權限才能切換群人格。",
     "no_perm_master": "僅 Master 可管理人格。",
     "no_entries": "此人格暫無個性條目",
     "entry_count": "個性條目：{count} 條",
@@ -973,7 +974,7 @@
     "copy_fail": "複製人格失敗。",
     "del_fail": "刪除人格失敗。",
     "copy_usage": ".rpmode copy <來源名稱> <目標名稱> // 複製人格",
-    "no_personas": "暫無人格範本，請到 WebUI 後台建立"
+    "no_personas": "目前適配器沒有向使用者開放可選人格"
   },
   "npc": {
     "group_only": "NPC 角色卡只能在群組中使用。",

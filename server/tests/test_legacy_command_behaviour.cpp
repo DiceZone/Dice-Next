@@ -137,6 +137,50 @@ TEST(IdentityBind, EmailFlowBindsOnlyTheRequestingNativeIdentityOnAllSupportedPl
     }
 }
 
+TEST(PersonaPermission, QQOfficialOrdinaryMemberCannotSwitchButInviterCan) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    PersonaManager personas{f.db, f.i18n, f.cfg};
+    f.router.setPersonaManager(&personas);
+    const int pid = personas.createTemplate("官方群人格", "");
+    ASSERT_TRUE(pid > 0);
+
+    f.msg.platform = "qq_official";
+    f.msg.adapterId = "official-test";
+    f.msg.type = MessageType::kGroup;
+    f.msg.targetId = "group-openid";
+    f.msg.senderId = "normalized-user";
+    f.msg.extra = {{"__identity_native_sender", "member-openid"}};
+
+    ASSERT_EQ(f.run(".rpmode set 官方群人格"), f.i18n.tr(Locale::kZhHans, "persona.no_perm_admin"));
+    ASSERT_FALSE(personas.hasGroupPersonaOverride(f.msg.targetId, f.msg.platform));
+
+    setAccountGroupSetting(*f.db.getStorage(), f.msg.adapterId, f.msg.platform,
+        f.msg.targetId, f.msg.targetId, "inviter", "member-openid");
+    ASSERT_TRUE(f.run(".rpmode set 官方群人格").find("官方群人格") != std::string::npos);
+    ASSERT_EQ(personas.getActivePersona(f.msg.targetId, f.msg.platform), pid);
+}
+
+TEST(PersonaPermission, PrivateSelectionIsPersonalAndNeverChangesGlobalPersona) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    PersonaManager personas{f.db, f.i18n, f.cfg};
+    f.router.setPersonaManager(&personas);
+    const int pid = personas.createTemplate("私聊人格", "");
+    ASSERT_TRUE(pid > 0);
+
+    f.msg.type = MessageType::kPrivate;
+    f.msg.targetId = f.msg.senderId;
+    f.msg.extra = json::object();
+
+    ASSERT_TRUE(f.run(".rpmode set 私聊人格").find("私聊人格") != std::string::npos);
+    ASSERT_EQ(f.cfg.get<int>("persona/global", 0), 0);
+    ASSERT_TRUE(f.run(".rpmode").find("私聊人格") != std::string::npos);
+
+    ASSERT_TRUE(f.run(".rpmode inherit").find("基础") != std::string::npos);
+    ASSERT_EQ(f.cfg.get<int>("persona/global", 0), 0);
+}
+
 TEST(IdentityBind, BareCommandUsesCurrentHelpInEveryLocale) {
     LegacyFixture f;
     f.msg.extra["__identity_transport"] = "onebot_v11";

@@ -1,0 +1,23 @@
+{
+  "dice": {
+    "roll": {
+      "result": "{nick} rolled: {res}",
+      "result_reason": "{nick} rolled for {reason}: {res}",
+      "multi": "{nick} rolled {turn} times: {res}",
+      "multi_reason": "{nick} rolled {turn} times for {reason}: {res}"
+    },
+    "check": {
+      "result": "{nick} rolls {attr}: {roll}/{rate} {level}",
+      "result_reason": "For {reason}, {nick} rolls {attr}: {roll}/{rate} {level}"
+    },
+    "brp": {
+      "result": "{nick} rolls {attr}: {roll}/{rate} {level}",
+      "result_reason": "For {reason}, {nick} rolls {attr}: {roll}/{rate} {level}"
+    },
+    "rav": { "result": "{nick}'s opposed check:\n{la}: 1D100={ra}/{va} {lva}\n{lb}: 1D100={rb}/{vb} {lvb}\n{outcome}" },
+    "sc": { "result": "Sanity check {output}" },
+    "st": { "result": "Skill check {output}" },
+    "coc": { "build": "{nick}'s investigator:{res}" },
+    "dnd": { "build": "{nick}'s adventurer ability scores (descending):{res}" }
+  }
+}

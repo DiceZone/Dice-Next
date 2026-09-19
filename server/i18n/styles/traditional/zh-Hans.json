@@ -1,0 +1,23 @@
+{
+  "dice": {
+    "roll": {
+      "result": "{nick}掷骰: {res}",
+      "result_reason": "{nick}掷骰 {reason}: {res}",
+      "multi": "{nick}掷骰{turn}次: {res}",
+      "multi_reason": "{nick}掷骰{turn}次 {reason}: {res}"
+    },
+    "check": {
+      "result": "{nick}进行{attr}检定：{roll}/{rate} {level}",
+      "result_reason": "由于{reason} {nick}进行{attr}检定：{roll}/{rate} {level}"
+    },
+    "brp": {
+      "result": "{nick}进行{attr}检定：{roll}/{rate} {level}",
+      "result_reason": "由于{reason} {nick}进行{attr}检定：{roll}/{rate} {level}"
+    },
+    "rav": { "result": "{nick} 的对抗检定：\n{la}：1D100={ra}/{va} {lva}\n{lb}：1D100={rb}/{vb} {lvb}\n{outcome}" },
+    "sc": { "result": "理智检定 {output}" },
+    "st": { "result": "技能检定 {output}" },
+    "coc": { "build": "{nick}的调查员作成:{res}" },
+    "dnd": { "build": "为{nick}的冒险者生成随机六维（降序）:{res}" }
+  }
+}

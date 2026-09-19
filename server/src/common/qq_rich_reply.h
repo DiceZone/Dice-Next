@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <nlohmann/json.hpp>
+#include "presentation_style.h"
 
 namespace dice::qq_rich {
 
@@ -92,17 +93,66 @@ inline std::string signedDelta(const Change& change) {
     const int64_t delta = static_cast<int64_t>(change.after) - *change.before;
     return (delta >= 0 ? "+" : "") + std::to_string(delta);
 }
-inline std::string statusText(const Card& card) {
+inline std::string statusText(const Card& card,
+                              PresentationStyle styleMode = PresentationStyle::kStandard) {
     std::string out = card.title;
-    for (const auto& vital : card.vitals)
-        out += "\n" + vital.label + " " + bar(vital, false) + " " + valueText(vital);
+    for (const auto& vital : card.vitals) {
+        if (styleMode == PresentationStyle::kVisual && vital.maximum)
+            out += "\n" + presentation::statusBar(vital.label, vital.current, *vital.maximum,
+                                                    styleMode, ContentFormat::kPlainText);
+        else if (styleMode == PresentationStyle::kTraditional)
+            out += "\n" + vital.label + " " + valueText(vital);
+        else
+            out += "\n" + vital.label + " " + bar(vital, false) + " " + valueText(vital);
+    }
     if (!card.footer.empty()) out += "\n" + card.footer;
     return out;
 }
 inline bool validCommand(const Command& command) {
-    return !command.label.empty() && !command.text.empty() && command.label.size() <= 100
+    // Labels are shortened to QQ's compact control caption at render time;
+    // allow a longer human explanation here so translated usage text is not
+    // silently discarded before that safe shortening step.
+    return !command.label.empty() && !command.text.empty() && command.label.size() <= 512
         && command.text.size() <= 100 && command.text.find_first_of("\r\n") == std::string::npos
         && command.label.find_first_of("\r\n") == std::string::npos;
+}
+inline std::string shortLabel(const std::string& value, size_t maxCharacters = 10) {
+    size_t bytes = 0, characters = 0;
+    while (bytes < value.size() && characters < maxCharacters) {
+        const unsigned char lead = static_cast<unsigned char>(value[bytes]);
+        size_t width = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2
+            : (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
+        if (bytes + width > value.size()) break;
+        bytes += width;
+        ++characters;
+    }
+    return value.substr(0, bytes);
+}
+inline std::vector<Command> mergeCommands(const Card* card,
+                                           const std::vector<presentation::Action>& actions) {
+    std::vector<Command> merged;
+    auto add = [&](const Command& command) {
+        if (!validCommand(command)) return;
+        if (std::any_of(merged.begin(), merged.end(), [&](const Command& existing) {
+                return existing.text == command.text;
+            })) return;
+        merged.push_back(command);
+    };
+    if (card) for (const auto& command : card->commands) add(command);
+    for (const auto& action : actions) add({action.label, action.text});
+    return merged;
+}
+inline std::string commandLinks(const std::vector<Command>& commands) {
+    std::string out;
+    size_t linkCount = 0;
+    for (const auto& command : commands) {
+        if (linkCount == 10) break;
+        if (!validCommand(command)) continue;
+        out += (linkCount++ % 2 == 0 ? "  \n" : " · ");
+        out += "<qqbot-cmd-input text=\"" + urlEncode(command.text)
+            + "\" show=\"" + urlEncode(shortLabel(command.label)) + "\" reference=\"false\" />";
+    }
+    return out;
 }
 inline std::string render(const Card& card, bool math, bool links) {
     std::string out = "**" + literal(card.title) + "**\n\n";
@@ -130,27 +180,20 @@ inline std::string render(const Card& card, bool math, bool links) {
     const auto& detail = card.body ? *card.body : card.original;
     if (!card.statusOnly && !detail.empty()) out += "\n" + literal(detail) + "\n";
     if (!card.footer.empty()) out += "\n" + literal(card.footer) + "\n";
-    size_t linkCount = 0;
-    if (links) for (size_t i = 0; i < std::min<size_t>(card.commands.size(), 5); ++i) {
-        const auto& command = card.commands[i];
-        if (validCommand(command)) {
-            out += (linkCount++ % 2 == 0 ? "  \n" : " · ");
-            out += "<qqbot-cmd-input text=\"" + urlEncode(command.text)
-                + "\" show=\"" + urlEncode(command.label) + "\" reference=\"false\" />";
-        }
-    }
+    if (links) out += commandLinks(card.commands);
     return out;
 }
-inline nlohmann::json keyboard(const Card& card, const std::string& nativeUser) {
+inline nlohmann::json keyboard(const std::vector<Command>& commands, const std::string& nativeUser) {
     using J = nlohmann::json;
     // Never broaden a missing/unknown recipient to permission.type=2 (everyone).
     if (nativeUser.empty()) return J();
     J buttons = J::array();
-    for (const auto& command : card.commands) {
-        if (buttons.size() == 5) break;
+    for (const auto& command : commands) {
+        if (buttons.size() == 10) break;
         if (!validCommand(command)) continue;
+        const auto label = shortLabel(command.label);
         buttons.push_back({{"id", "dice-" + std::to_string(buttons.size())},
-            {"render_data", {{"label", command.label}, {"visited_label", command.label}, {"style", 0}}},
+            {"render_data", {{"label", label}, {"visited_label", label}, {"style", 0}}},
             {"action", {{"type", 2}, {"data", command.text}, {"enter", false}, {"reply", false},
                 {"permission", {{"type", 0}, {"specify_user_ids", J::array({nativeUser})}}},
                 {"unsupport_tips", command.text}}}});
@@ -163,5 +206,8 @@ inline nlohmann::json keyboard(const Card& card, const std::string& nativeUser) 
         rows.push_back({{"buttons", pair}});
     }
     return J{{"content", {{"rows", rows}}}};
+}
+inline nlohmann::json keyboard(const Card& card, const std::string& nativeUser) {
+    return keyboard(card.commands, nativeUser);
 }
 } // namespace dice::qq_rich

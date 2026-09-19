@@ -178,6 +178,9 @@ static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std:
         {"forceVerifyImageResource", official && cfg.is_object() ? cfg.value("forceVerifyImageResource", false) : false},
         {"qqRichReplies", official ? qq_rich::style(cfg.value("qqRichReplies", std::string("off"))) : "off"},
         {"qqInteractions", official ? qq_rich::interaction(cfg.value("qqInteractions", std::string("links"))) : "off"},
+        {"personaSelection", cfg.value("personaSelection", std::string("all"))},
+        {"selectablePersonaIds", cfg.value("selectablePersonaIds", J::array())},
+        {"defaultPersonaId", cfg.value("defaultPersonaId", 0)},
         {"heartApiKeyConfigured", !heartApiKey.empty()},
         {"heartApiKeyTail", heartApiKey.size() > 4 ? heartApiKey.substr(heartApiKey.size() - 4) : std::string()},
         {"enabled", a.enabled},
@@ -193,6 +196,9 @@ static J adapterToConfigJson(const AdapterRow& a) {
           {"connection_mode", a.type == static_cast<int>(AdapterType::kMilky) ? "forward_ws" : a.connectionMode == 1 ? "reverse_ws" : a.connectionMode == 2 ? "http" : "forward_ws"},
           {"endpoint", a.endpoint}, {"access_token", a.accessToken}, {"enabled", a.enabled},
           {"heart_api_key", extra.value("heartApiKey", std::string())}};
+    out["persona_selection"] = extra.value("personaSelection", std::string("all"));
+    out["selectable_persona_ids"] = extra.value("selectablePersonaIds", J::array());
+    out["default_persona_id"] = extra.value("defaultPersonaId", 0);
     if (a.type == static_cast<int>(AdapterType::kQQOfficial)) {
         out["app_id"] = extra.value("appId", std::string());
         out["app_secret"] = extra.value("appSecret", std::string());
@@ -205,6 +211,35 @@ static J adapterToConfigJson(const AdapterRow& a) {
         out["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));
     }
     return out;
+}
+
+static void updateAdapterPersonaPolicy(J& target, const J& source,
+                                       bool useConfigNames = false) {
+    const char* policyKey = useConfigNames ? "persona_selection" : "personaSelection";
+    const char* idsKey = useConfigNames ? "selectable_persona_ids" : "selectablePersonaIds";
+    const char* defaultKey = useConfigNames ? "default_persona_id" : "defaultPersonaId";
+    if (source.contains(policyKey)) {
+        const std::string policy = source.at(policyKey).get<std::string>();
+        if (policy != "all" && policy != "selected" && policy != "none")
+            throw std::runtime_error("Invalid persona selection policy");
+        target["personaSelection"] = policy;
+    }
+    if (source.contains(idsKey)) {
+        if (!source.at(idsKey).is_array()) throw std::runtime_error("Invalid persona allow-list");
+        J ids = J::array();
+        std::set<int> seen;
+        for (const auto& value : source.at(idsKey)) {
+            if (!value.is_number_integer() || value.get<int>() <= 0)
+                throw std::runtime_error("Invalid persona id");
+            if (seen.insert(value.get<int>()).second) ids.push_back(value);
+        }
+        target["selectablePersonaIds"] = std::move(ids);
+    }
+    if (source.contains(defaultKey)) {
+        if (!source.at(defaultKey).is_number_integer() || source.at(defaultKey).get<int>() < 0)
+            throw std::runtime_error("Invalid default persona id");
+        target["defaultPersonaId"] = source.at(defaultKey);
+    }
 }
 
 template <typename Storage>
@@ -1088,7 +1123,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     app.registerHandler("/api/personas/active", [&personaMgr, &cfg](Req req, CB&& cb) {
         std::string groupId = req->getParameter("groupId");
         std::string platform = req->getParameter("platform");
+        std::string adapterId = req->getParameter("adapterId");
+        const bool hasGroupOverride =
+            !groupId.empty() && personaMgr.hasGroupPersonaOverride(groupId, platform);
         int activeId = personaMgr.getActivePersona(groupId, platform);
+        const auto adapterDefault = personaMgr.adapterDefaultPersona(adapterId);
+        if (!hasGroupOverride && adapterDefault) activeId = *adapterDefault;
         J data;
         data["activeId"] = activeId;
         if (activeId > 0) {
@@ -1099,8 +1139,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             }
         }
         data["globalId"] = cfg.get<int>("persona/global", 0);
-        const bool hasGroupOverride =
-            !groupId.empty() && personaMgr.hasGroupPersonaOverride(groupId, platform);
+        data["adapterDefaultId"] = adapterDefault ? J(*adapterDefault) : J(nullptr);
         data["hasGroupOverride"] = hasGroupOverride;
         data["inheritsGlobal"] = !groupId.empty() && !hasGroupOverride;
         jsonReply(ok(data), std::move(cb));
@@ -1112,6 +1151,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     app.registerHandler("/api/personas/active", [&personaMgr, &cfg](Req req, CB&& cb) {
         std::string groupId = req->getParameter("groupId");
         std::string platform = req->getParameter("platform");
+        std::string adapterId = req->getParameter("adapterId");
         if (groupId.empty()) {
             jsonReply(fail("groupId is required"), std::move(cb));
             return;
@@ -1120,9 +1160,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             jsonReply(fail("failed to clear group persona override"), std::move(cb));
             return;
         }
+        const auto adapterDefault = personaMgr.adapterDefaultPersona(adapterId);
         jsonReply(ok(J{
-            {"activeId", personaMgr.getActivePersona(groupId, platform)},
+            {"activeId", adapterDefault ? *adapterDefault : personaMgr.getActivePersona(groupId, platform)},
             {"globalId", cfg.get<int>("persona/global", 0)},
+            {"adapterDefaultId", adapterDefault ? J(*adapterDefault) : J(nullptr)},
             {"hasGroupOverride", false},
             {"inheritsGlobal", true}
         }), std::move(cb));
@@ -1310,8 +1352,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // 出站消息表现形式。传统模式始终发送纯文本；卡片模式由各适配器按其
-    // 官方能力渲染，无法使用富消息的平台会安全回退为传统文本。
+    // 出站消息表现形式。三档方案共享数据与人格，适配器只负责按能力
+    // 渲染 Markdown / 原生富回复，无法使用富消息的平台安全回退为文字。
     // 兼容旧前端接口。实际配置统一写入作用域配置树，避免把运行策略
     // 混入适配器连接凭据。
     app.registerHandler("/api/system/message-format", [&cfg, st, &adapterMgr](Req req, CB&& cb) {
@@ -1319,14 +1361,16 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (req->method() == drogon::Put) {
                 auto j = J::parse(req->body());
                 std::string mode = j.value("mode", std::string("traditional"));
-                if (mode != "card") mode = "traditional";
+                if (mode == "card") mode = "standard";
+                if (mode != "standard" && mode != "visual") mode = "traditional";
                 cfg.set<std::string>("dice/message_format", mode);
                 if (j.contains("adapters") && j["adapters"].is_array()) {
                     for (auto& e : j["adapters"]) {
                         if (!e.is_object()) continue;
                         const std::string id = e.value("id", std::string());
                         std::string am = e.value("mode", std::string());
-                        if (am != "card" && am != "traditional") am = "";
+                        if (am == "card") am = "standard";
+                        if (am != "standard" && am != "visual" && am != "traditional") am = "";
                         int aid = 0; try { aid = std::stoi(id); } catch (...) { continue; }
                         try { (void)st->get<AdapterRow>(aid); } catch (...) { continue; }
                         const J values = am.empty() ? J::object() : J{{"message_format", am}};
@@ -1335,12 +1379,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     }
                 }
                 cfg.save();
-                IAdapter::setCardMessageMode(mode == "card");
+                IAdapter::setPresentationStyle(presentationStyleFromString(mode));
                 for (const auto& row : st->get_all<AdapterRow>())
                     applyScopedAdapterSettings(adapterMgr.getAdapter(std::to_string(row.id)), cfg);
             }
-            const std::string mode = cfg.get<std::string>("dice/message_format", "traditional") == "card"
-                ? "card" : "traditional";
+            const std::string rawMode = cfg.get<std::string>("dice/message_format", "traditional");
+            const std::string mode = presentationStyleName(presentationStyleFromString(rawMode));
             J adapters = J::array();
             for (auto& r : st->get_all<AdapterRow>()) {
                 const J cfg2 = scoped_settings::rawSection(
@@ -1760,7 +1804,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             J body = J::parse(req->body());
             std::string text = body.value("text", "");
             const bool isMarkdown = body.value("format", "plain") == "markdown";
-            jsonReply(ok(J{{"markdown", text}, {"onebot", isMarkdown ? markdown::toPlainText(text) : text}}), std::move(cb));
+            const auto rich = presentation::expandComponents(
+                text, PresentationStyle::kVisual, ContentFormat::kMarkdown).text;
+            const auto plainSource = isMarkdown ? markdown::toPlainText(text) : text;
+            const auto plain = presentation::expandComponents(
+                plainSource, PresentationStyle::kVisual, ContentFormat::kPlainText).text;
+            jsonReply(ok(J{{"markdown", rich}, {"onebot", plain}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
@@ -2371,6 +2420,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     a.connectionMode = (mode == "reverse_ws") ? 1 : (mode == "http") ? 2 : 0;
                     a.config = J{{"heartApiKey", heartApiKey}}.dump();
                 }
+                {
+                    J adapterCfg = J::parse(a.config, nullptr, false);
+                    if (!adapterCfg.is_object()) adapterCfg = J::object();
+                    updateAdapterPersonaPolicy(adapterCfg, j);
+                    a.config = adapterCfg.dump();
+                }
                 a.id = st->insert(a);
                 persistAdaptersToConfig(st, cfg);
 
@@ -2442,6 +2497,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
                 if (j.contains("heartApiKey") && j["heartApiKey"].is_string())
                     adapterCfg["heartApiKey"] = j["heartApiKey"].get<std::string>();
+                updateAdapterPersonaPolicy(adapterCfg, j);
                 a.config = adapterCfg.dump();
                 bool wasEnabled = a.enabled;
                 if (j.contains("enabled")) a.enabled = j["enabled"];
@@ -2618,7 +2674,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         };
         auto validateValue = [](const std::string& key, const J& value) -> bool {
             if (key == "message_format")
-                return value.is_string() && (value == "traditional" || value == "card");
+                return value.is_string() && (value == "traditional" || value == "standard"
+                    || value == "visual" || value == "card");
             if (key == "image_send")
                 return value.is_object() && (value.value("mode", std::string("base64")) == "base64"
                     || value.value("mode", std::string("base64")) == "httpurl");
@@ -2635,7 +2692,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         auto refreshMessageFormats = [&]() {
             const J all = cfg.getAll();
             const std::string globalMode = all.value("dice", J::object()).value("message_format", std::string("traditional"));
-            IAdapter::setCardMessageMode(globalMode == "card");
+            IAdapter::setPresentationStyle(presentationStyleFromString(globalMode));
             for (const auto& adapter : adapterMgr.allAdapters()) {
                 J resolved = scoped_settings::resolveSection(all, "dice", adapter->platform(), adapter->id());
                 adapter->setMessageFormatOverride(IAdapter::parseFormatOverride(

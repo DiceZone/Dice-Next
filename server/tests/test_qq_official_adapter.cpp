@@ -193,6 +193,50 @@ TEST(QQRichReply, ButtonsAreConfirmableAndRestrictedToTransportSender) {
     ASSERT_FALSE(adapter.textPayload(msg, msg.qqRichReply->original, ContentFormat::kPlainText).contains("markdown"));
 }
 
+TEST(QQRichReply, GenericUsageActionsBecomePrefillControlsOnlyOnOfficialRichOutput) {
+    CardModeScope mode;
+    QQOfficialAdapter adapter("test");
+    ASSERT_TRUE(adapter.configure({{"appId", "test"}, {"appSecret", "not-a-real-secret"},
+        {"qqRichReplies", "markdown"}, {"qqInteractions", "buttons"}}));
+    Message msg;
+    msg.platform = "qq_official";
+    msg.type = MessageType::kGroup;
+    msg.extra = {{"__identity_native_sender", "real-openid"}};
+    msg.presentationActions = {{"新建人物卡", ".pc new "}, {"查看人物卡", ".pc show"}};
+    const std::string usage = ".pc new <名字> // 新建人物卡";
+    auto body = adapter.textPayload(msg, usage, ContentFormat::kMarkdown);
+    ASSERT_TRUE(body.contains("keyboard"));
+    ASSERT_EQ(body["keyboard"]["content"]["rows"][0]["buttons"][0]["action"]["data"].get<std::string>(),
+              std::string(".pc new "));
+    ASSERT_FALSE(body["keyboard"]["content"]["rows"][0]["buttons"][0]["action"]["enter"].get<bool>());
+
+    ASSERT_TRUE(adapter.configure({{"appId", "test"}, {"appSecret", "not-a-real-secret"},
+        {"qqRichReplies", "markdown"}, {"qqInteractions", "links"}}));
+    body = adapter.textPayload(msg, usage, ContentFormat::kMarkdown);
+    ASSERT_TRUE(body["markdown"]["content"].get<std::string>().find(
+        "<qqbot-cmd-input text=\".pc%20new%20\"") != std::string::npos);
+
+    msg.forcePlainText = true;
+    ASSERT_FALSE(adapter.textPayload(msg, usage, ContentFormat::kMarkdown).contains("keyboard"));
+    ASSERT_FALSE(adapter.textPayload(msg, usage, ContentFormat::kMarkdown).contains("markdown"));
+    msg.forcePlainText = false;
+    msg.platform = "onebot_v11";
+    body = adapter.textPayload(msg, usage, ContentFormat::kMarkdown);
+    ASSERT_FALSE(body.contains("keyboard"));
+    ASSERT_TRUE(body["markdown"]["content"].get<std::string>().find("qqbot-cmd-input") == std::string::npos);
+}
+
+TEST(QQRichReply, UsageKeyboardFitsTenSafeShortLabels) {
+    std::vector<qq_rich::Command> commands;
+    for (int i = 0; i < 12; ++i)
+        commands.push_back({"这是一个很长的操作按钮" + std::to_string(i), ".pc action " + std::to_string(i)});
+    const auto keys = qq_rich::keyboard(commands, "real-openid");
+    ASSERT_EQ(keys["content"]["rows"].size(), static_cast<size_t>(5));
+    ASSERT_EQ(keys["content"]["rows"][4]["buttons"].size(), static_cast<size_t>(2));
+    ASSERT_EQ(keys["content"]["rows"][0]["buttons"][0]["render_data"]["label"].get<std::string>(),
+              std::string("这是一个很长的操作按"));
+}
+
 TEST(QQRichReply, DynamicTextCannotInjectActionsImagesOrMath) {
     qq_rich::Card card;
     card.title = "<qqbot-cmd-enter text=\"attack\" /> $\\color{red}$ [CQ:image,file=https://example.test/a]";

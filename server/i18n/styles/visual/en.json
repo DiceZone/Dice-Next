@@ -1,0 +1,84 @@
+{
+  "dice": {
+    "roll": {
+      "result": "🎲 **{nick}** rolled\n> `{res}`\n[[action:Roll again|.r]]",
+      "result_reason": "🎲 **{nick}** · {reason}\n> `{res}`\n[[action:Roll again|.r]]",
+      "multi": "🎲 **{nick}** rolled {turn} times\n{res}\n[[action:Roll again|.r]]",
+      "multi_reason": "🎲 **{nick}** · {reason} · {turn} rolls\n{res}\n[[action:Roll again|.r]]"
+    },
+    "check": {
+      "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**\n[[action:Check again|.ra {attr} {rate}]]",
+      "result_reason": "🎯 **{nick}** · {attr} · {reason}\n`{roll}/{rate}`　**{level}**\n[[action:Check again|.ra {attr} {rate}]]"
+    },
+    "brp": {
+      "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**",
+      "result_reason": "🎯 **{nick}** · {attr} · {reason}\n`{roll}/{rate}`　**{level}**"
+    },
+    "pool": { "result": "🎲 **{nick}** · dice pool\n`{expr}`" },
+    "rav": { "result": "⚔️ **{nick}** · opposed check\n> **{la}**　`1D100={ra}/{va}`　{lva}\n> **{lb}**　`1D100={rb}/{vb}`　{lvb}\n🏁 **{outcome}**" },
+    "sc": { "result": "🧠 **Sanity check**\n{output}\n[[action:Check sanity again|.sc]]" },
+    "st": { "result": "📋 **Skill check**\n{output}\n[[action:Edit card attributes|.st ]]" },
+    "coc": { "build": "🕵️ **{nick}** · investigator\n{res}" },
+    "dnd": { "build": "🛡️ **{nick}** · ability scores (descending)\n{res}" },
+    "rx": {
+      "receipt": "🕵️ **{nick}** made a hidden Psychology roll for “{target}”.",
+      "private": "🕵️ **Hidden Psychology · {target}**\nGroup `{gid}` · `D100={roll}/{rate}` · **{level}**\n{receipt}"
+    }
+  },
+  "card": {
+    "st": { "done": "📋 **{nick}**'s character card was updated\n{detail}\n[[action:View card status|.pc status]]" },
+    "show": "📋 **{nick}**'s character card\n{detail}\n[[action:View full card|.pc show]]",
+    "show_one": "📋 **{nick}** · {attr}\n`{val}`",
+    "sc": {
+      "result": "🧠 **{nick}** · Sanity check\n`1D100={res}/{san}`　**{grade}**\nSAN `{san} → {final}`　loss **{loss}**\n[[action:Check sanity again|.sc]]",
+      "result_noloss": "🧠 **{nick}** · Sanity check\n`1D100={res}/{san}`　**{grade}**\nNo Sanity loss\n[[action:Check sanity again|.sc]]"
+    }
+  },
+  "pc": {
+    "list": "📚 **{nick}** · {count} character cards\n{list}\n[[action:View current card|.pc show]]",
+    "show": "📋 **{owner}**'s character card · {name}\n{detail}\n[[action:View status panel|.pc status]]",
+    "build_done": "🧩 **{nick}**'s character card was generated\n{detail}\n[[action:View full card|.pc show]]",
+    "redo_done": "🔄 **{nick}**'s character card was regenerated\n{detail}\n[[action:View full card|.pc show]]"
+  },
+  "deck": {
+    "result": "🃏 **{nick}** drew from “{name}”\n> {res}\n[[action:Draw again|.draw {name}]]",
+    "list": "🗂️ **Available decks · {count}**\n{list}",
+    "default_show": "🃏 Group default deck: **{name}**\n[[action:Draw from default deck|.draw]]"
+  },
+  "log": {
+    "stat": "📊 **“{name}” log statistics**\n**{count}** messages · **{players}** participants\nPeriod `{from} ~ {to}`\nMost active: {tops}",
+    "status": "📝 **Recording #{id} · {name}**\n**{count}** entries\n[[action:Pause logging|.log off]]",
+    "paused_status": "⏸️ **An unfinished log is paused**\n#{id} · {name} · last entry {date}\n[[action:Resume logging|.log on {name}]]",
+    "list": "📚 **Group logs · {total} total**\nShowing {from}-{to}\n{list}{more}",
+    "type_show": "📄 Group-file export format: **{type}**\n[[action:Use HTML|.log type html]]",
+    "timer": {
+      "started": "⏱️ **Session timer started**",
+      "resumed": "⏱️ **Timer resumed** · total {total}",
+      "stopped": "⏱️ **Timer paused** · this session {current} · total {total}",
+      "show": "⏱️ **“{name}”** · total {total}{running}"
+    }
+  },
+  "hiy": {
+    "result": "📊 **{nick} · roll statistics · {total} checks**\nCritical {crit} · Extreme {extreme} · Hard {hard}\nSuccess {regular} · Failure {fail} · Fumble {fumble}\n[[bar:Success rate|{success}|{total}]]",
+    "skill_result": "📊 **{nick} · {skill} · {total} checks**\nCritical {crit} · Extreme {extreme} · Hard {hard}\nSuccess {regular} · Failure {fail} · Fumble {fumble}\n[[bar:Success rate|{success}|{total}]]"
+  },
+  "init": { "list": "⚔️ **Initiative order**\n{list}" },
+  "buff": { "show": "✨ **{nick}'s current buffs**\n{detail}" },
+  "rule": { "result": "📖 **{book} · {item}**\n{desc}" },
+  "fun": { "name": { "result": "🎭 **{nick}** · random name\n> {res}" } },
+  "dnd": {
+    "rc": { "result": "🎯 **{nick}** · {attr}\n`{roll} {mod} = {total}`\n[[action:Check again|.rc {attr}]]" },
+    "rdc": { "result": "🎯 **{nick}** · {attr}{reason}\n{detail}\n[[action:Check again|.rdc {attr}]]" },
+    "ss": {
+      "show": "✨ **{nick}** · spell slots\n{detail}\n[[action:Restore all spell slots|.ss rest]]",
+      "set": "✨ **{nick}**'s spell slots were set\n{detail}",
+      "rested": "✨ **{nick}** restored all spell slots\n[[action:View spell slots|.ss]]",
+      "changed": "✨ **{nick}** · level {ring} spell slots\n[[bar:Level {ring}|{cur}|{max}]]"
+    },
+    "longrest": { "done": "🌙 **{nick}** completed a long rest\nHP restored to **{hp}**; spell slots and death saves were reset.\n[[action:View card status|.pc status]]" },
+    "ds": {
+      "result": "☠️ **{nick}** · death save\n`1D20={roll}` → `{total}`　**{outcome}**\n[[action:View death saves|.ds stat]]",
+      "stat": "☠️ **{nick}** · death saves\n[[bar:Success|{s}|3]]\n[[bar:Failure|{f}|3]]"
+    }
+  }
+}

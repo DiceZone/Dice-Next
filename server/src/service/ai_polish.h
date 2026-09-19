@@ -50,7 +50,8 @@ inline bool pickModel(ConfigManager& cfg, ai::Model& out) {
 inline std::string defaultPromptText() {
     return "你是 TRPG 跑团骰娘。请只调整原回复的语气/措辞让它更自然生动，**保持它的结构与全部信息**。"
         "【硬性要求】必须原样保留原回复里的：角色名/昵称、骰子表达式（如 D100、3d6、b/p）、等号、"
-        "所有数字、大成功/大失败/成功/失败/困难/极难等结果与等级、@提及、[图片] 等方括号代码。"
+        "所有数字、大成功/大失败/成功/失败/困难/极难等结果与等级、@提及、[图片] 等方括号代码、"
+        "以及「.指令  // 提示」行中 // 左侧的完整指令。"
         "这些一个都不能改、不能删、不能编造新数字。示例：原文「<希亚人物卡版> 掷骰: D100=73」润色后"
         "应仍然包含「<希亚人物卡版>」和「D100=73」这样的结构，只在其前后调整语气。只输出润色后的文本，不要解释。";
 }
@@ -95,6 +96,7 @@ inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const 
     if (out.empty()) return replyText;
     // 关键：润色后若丢失/改动了原文的任何数字 → 判为破坏了骰点结果，直接发原文。
     if (!ai::preservesNumbers(replyText, out)) { DICE_LOG_WARN("[AI polish] numbers changed, falling back to original"); return replyText; }
+    if (!ai::preservesActionCommands(replyText, out)) { DICE_LOG_WARN("[AI polish] action command changed, falling back to original"); return replyText; }
     DICE_LOG_INFO("[AI polish] ok model={} tokens={} latency={}ms in_len={} out_len={}", m.id, r.totalTokens, r.latencyMs, replyText.size(), out.size());
     return out;
 }  // polish
