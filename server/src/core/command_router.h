@@ -9806,7 +9806,11 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                                    : (!msg.rawContent.empty() ? msg.rawContent : msg.content);
             if (!logContent.empty()) {
                 GameLogMessageRow m;
-                m.logId = logId; m.messageId = msg.id; m.sender = displayName(msg); m.userId = msg.senderId;
+                // 存的是名字本身，不是回复里那个带包裹的显示形式。displayName 会套上
+                // dice/nick_prefix|suffix（默认 <>），那是给「<希亚> 掷出了 27」这种
+                // 文案用的；日志是存储，套进去之后上传到日志站，染色器按「名字不能以
+                // < 开头」的规则解析，每一个玩家的行都会解析失败。
+                m.logId = logId; m.messageId = msg.id; m.sender = displayNameRaw(msg); m.userId = msg.senderId;
                 m.content = logContent; m.createdAt = nowIso();
                 // 从原始消息提取图片引用；骰主开启「保存图片」则落地到本地。
                 std::string imgs = extractImageRefs(msg.rawContent.empty() ? msg.content : msg.rawContent);
