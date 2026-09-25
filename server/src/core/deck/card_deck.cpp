@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <vector>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -65,9 +66,21 @@ std::vector<std::string> CardDeck::deckNames() const {
     return names;
 }
 
+static bool isBundledDeckDir(const std::string& dir) {
+    const fs::path path = fs::path(std::u8string(dir.begin(), dir.end())).lexically_normal();
+    auto text = [](const fs::path& part) {
+        auto value = part.u8string();
+        std::string result(value.begin(), value.end());
+        std::transform(result.begin(), result.end(), result.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return result;
+    };
+    return text(path.filename()) == "decks" && text(path.parent_path().filename()) != "data";
+}
+
 int CardDeck::loadDir(const std::string& dir) {
     std::lock_guard<std::mutex> lk(mutex_);
-    return loadDirLocked(dir);
+    return loadDirLocked(dir, isBundledDeckDir(dir));
 }
 
 void CardDeck::reload(const std::vector<std::string>& dirs) {
@@ -75,10 +88,10 @@ void CardDeck::reload(const std::vector<std::string>& dirs) {
     decks_.clear();
     sourceFiles_.clear();
     seedBuiltins();                       // 重新铺内置牌堆
-    for (const auto& d : dirs) loadDirLocked(d);   // 重新扫描文件夹（新增/修改/删除都反映）
+    for (const auto& d : dirs) loadDirLocked(d, isBundledDeckDir(d));
 }
 
-int CardDeck::loadDirLocked(const std::string& dir) {   // caller holds mutex_
+int CardDeck::loadDirLocked(const std::string& dir, bool bundled) {   // caller holds mutex_
     std::string d = dir;
     if (!fs::exists(d) && fs::exists("../" + dir)) d = "../" + dir;
     if (!fs::exists(d)) {
@@ -88,8 +101,13 @@ int CardDeck::loadDirLocked(const std::string& dir) {   // caller holds mutex_
     // 文件名转 UTF-8：Windows 上 path::string() 返回系统 ANSI 码页(中文系统=GBK)，
     // 直接进 JSON/日志会变方块问号；u8string() 才是 UTF-8（测试机 Win2016 复现）。
     auto u8name = [](const fs::path& p) { auto u = p.u8string(); return std::string(u.begin(), u.end()); };
+    std::vector<fs::directory_entry> entries;
+    for (const auto& entry : fs::directory_iterator(d)) entries.push_back(entry);
+    std::sort(entries.begin(), entries.end(), [&](const auto& lhs, const auto& rhs) {
+        return lower(u8name(lhs.path().filename())) < lower(u8name(rhs.path().filename()));
+    });
     int count = 0;
-    for (const auto& entry : fs::directory_iterator(d)) {
+    for (const auto& entry : entries) {
         if (!entry.is_regular_file() || entry.path().extension() != ".json") continue;
         try {
             std::ifstream in(entry.path());
@@ -103,7 +121,7 @@ int CardDeck::loadDirLocked(const std::string& dir) {   // caller holds mutex_
                 if (!cards.empty()) {
                     auto key = lower(it.key());
                     decks_[key] = std::move(cards);
-                    sourceFiles_[key] = u8name(entry.path().filename());
+                    sourceFiles_[key] = {u8name(entry.path().filename()), bundled};
                     ++count;
                 }
             }
@@ -118,7 +136,14 @@ int CardDeck::loadDirLocked(const std::string& dir) {   // caller holds mutex_
 std::string CardDeck::getSourceFile(const std::string& name) const {
     std::lock_guard<std::mutex> lk(mutex_);
     auto it = sourceFiles_.find(lower(name));
-    return (it != sourceFiles_.end()) ? it->second : "";
+    return (it != sourceFiles_.end()) ? it->second.filename : "";
+}
+
+std::optional<CardDeck::SourceInfo> CardDeck::getSourceInfo(const std::string& name) const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = sourceFiles_.find(lower(name));
+    if (it == sourceFiles_.end()) return std::nullopt;
+    return it->second;
 }
 
 std::optional<std::string> CardDeck::drawFromDeck(const std::string& name) {

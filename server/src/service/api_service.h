@@ -22,6 +22,7 @@
 #include "../adapter/discord_adapter.h"
 #include "../adapter/kook_adapter.h"
 #include "../core/deck/card_deck.h"
+#include "../core/deck/deck_file_utils.h"
 #include "../core/reply/reply_manager.h"
 #include "../core/mod/js_plugin_manager.h"
 #include "../core/mod/lua_plugin_manager.h"
@@ -2010,7 +2011,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // Upload a deck file (multipart or JSON body). Writes to data/decks/ and reloads.
+    // Upload a user deck file. Filenames are flat and the full deck catalog is
+    // re-scanned so entries removed by an overwrite disappear immediately.
     app.registerHandler("/api/decks/upload", [&cardDeck](Req req, CB&& cb) {
         try {
             auto j = J::parse(req->body());
@@ -2018,6 +2020,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             std::string content = j.value("content", "");
             if (filename.empty() || content.empty()) {
                 jsonReply(fail("filename and content required"), std::move(cb)); return;
+            }
+            if (!deck_files::isSafeJsonFilename(filename)) {
+                jsonReply(fail("牌堆文件名无效；只能使用当前目录下的 .json 文件"), std::move(cb)); return;
             }
             // Validate JSON structure
             std::string validationError = legacyv2::validateDeckJson(content);
@@ -2027,12 +2032,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             namespace fs = std::filesystem;
             fs::path decksDir = "data/decks";
             fs::create_directories(decksDir);
-            fs::path target = decksDir / filename;
+            fs::path target = decksDir / u8p(filename);
             std::ofstream out(target, std::ios::binary);
             out << content;
             out.close();
-            // Reload decks
-            cardDeck.loadDir("data/decks");
+            if (!out) { jsonReply(fail("无法写入牌堆文件"), std::move(cb)); return; }
+            cardDeck.reload({"decks", "data/decks"});
             jsonReply(ok(J{{"filename", filename}, {"total_decks", cardDeck.deckCount()}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
@@ -3856,14 +3861,16 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 for (auto& r : rows) arr.push_back(J{{"id",r.id},{"name",r.name},{"cards",J::parse(r.cards.empty()?"[]":r.cards)}});
                 // Also include file-loaded decks from CardDeck, grouped by FILE
                 int nextId = (int)rows.size() + 1000;
-                std::map<std::string, J> fileGroups; // filename → meta
+                std::map<std::pair<bool, std::string>, J> fileGroups; // (bundled, filename) → meta
                 for (auto& name : cardDeck.deckNames()) {
-                    auto fname = cardDeck.getSourceFile(name);
-                    if (fname.empty()) {
+                    auto source = cardDeck.getSourceInfo(name);
+                    if (!source) {
                         // Built-in deck: show without file
                         J g;
                         g["filename"] = "";
                         g["title"] = name;
+                        g["source"] = "builtin";
+                        g["readonly"] = true;
                         g["author"] = nullptr;
                         g["version"] = nullptr;
                         g["date"] = nullptr;
@@ -3872,28 +3879,29 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         arr.push_back(g);
                         continue;
                     }
-                    if (!fileGroups.count(fname)) {
+                    const auto key = std::make_pair(source->bundled, source->filename);
+                    if (!fileGroups.count(key)) {
                         J g;
-                        g["filename"] = fname;
-                        g["title"] = fname;
+                        g["filename"] = source->filename;
+                        g["title"] = source->filename;
+                        g["source"] = source->bundled ? "builtin" : "user";
+                        g["readonly"] = source->bundled;
                         g["author"] = nullptr;
                         g["version"] = nullptr;
                         g["date"] = nullptr;
                         g["entries"] = J::array();
-                        fileGroups[fname] = g;
+                        fileGroups[key] = g;
                     }
-                    fileGroups[fname]["entries"].push_back(name);
+                    fileGroups[key]["entries"].push_back(name);
                 }
                 // Read each file for metadata
                 for (auto& pair : fileGroups) {
                     auto& g = pair.second;
-                    auto& fname = pair.first;
-                    // 用户牌堆在 data/decks/，内置牌堆在 decks/——都要找（之前只找 decks/，
-                    // 导致 data/decks 里的牌堆元数据 _title/_author 不显示）。
-                    std::ifstream f(u8p("data/decks/" + fname));
-                    if (!f) f.open(u8p("decks/" + fname));
-                    if (!f) f.open(u8p("../data/decks/" + fname));
-                    if (!f) f.open(u8p("../decks/" + fname));
+                    const bool bundled = pair.first.first;
+                    const auto& fname = pair.first.second;
+                    const std::string root = bundled ? "decks/" : "data/decks/";
+                    std::ifstream f(u8p(root + fname));
+                    if (!f) f.open(u8p("../" + root + fname));
                     if (f) {
                         try {
                             auto j = nlohmann::json::parse(f);

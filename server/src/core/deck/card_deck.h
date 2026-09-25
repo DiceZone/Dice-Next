@@ -46,7 +46,16 @@ public:
     std::vector<std::string> deckNames() const;
     size_t deckCount() const;
 
-    /// Get the source filename for a deck (empty if not from file).
+    struct SourceInfo {
+        std::string filename;
+        bool bundled = false;
+    };
+
+    /// Get the source file and whether it belongs to the read-only release.
+    /// nullopt means the emergency in-process fallback rather than a file.
+    std::optional<SourceInfo> getSourceInfo(const std::string& name) const;
+
+    /// Backward-compatible filename-only accessor.
     std::string getSourceFile(const std::string& name) const;
 
     /// Draw one (fully expanded) card from the named deck. nullopt if no such deck.
@@ -66,7 +75,7 @@ private:
     static std::string lower(const std::string& s);
     const Deck* find(const std::string& name) const;
     void seedBuiltins();                       // caller holds mutex_ / construction
-    int  loadDirLocked(const std::string& dir);  // caller holds mutex_
+    int  loadDirLocked(const std::string& dir, bool bundled);  // caller holds mutex_
 
     /// Expand {…} references and [dice] in @p expr (recursive, depleting tempMap).
     std::string expand(std::string expr, TempMap& temp, int depth);
@@ -74,7 +83,7 @@ private:
     std::string drawCard(Deck& deck, bool back, TempMap& temp, int depth);
 
     std::unordered_map<std::string, Deck> decks_;   // keyed by lower(name)
-    std::unordered_map<std::string, std::string> sourceFiles_;  // deck name → filename
+    std::unordered_map<std::string, SourceInfo> sourceFiles_;  // deck name → source
     std::function<long long(const std::string&)> diceEval_;
     std::function<std::optional<std::string>(const std::string&)> helpLookup_;
     std::mt19937_64 rng_;

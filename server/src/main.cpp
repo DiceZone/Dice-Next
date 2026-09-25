@@ -45,6 +45,7 @@
 #include "core/causal/counter_store.h"
 #include "core/mod/js_plugin_manager.h"
 #include "core/mod/lua_plugin_manager.h"
+#include "core/deck/deck_file_utils.h"
 #include "i18n/i18n.h"
 #include "i18n/locale_resolver.h"
 
@@ -3691,41 +3692,6 @@ static int realMain(int argc, char* argv[]) {
                 } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }
             }, {drogon::Post});
     }
-    // ── Deck file upload + hot reload ─────────────────────────
-    app.registerHandler("/api/decks/upload",
-        [&cardDeck](const drogon::HttpRequestPtr& req,
-                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
-            nlohmann::json out;
-            try {
-                auto j = nlohmann::json::parse(req->getBody());
-                std::string name = j.value("filename", "deck.json");
-                std::string content = j.value("content", "");
-                if (content.empty()) {
-                    out["code"] = 1; out["message"] = "文件内容为空";
-                } else if (name.size() < 5 || name.find(".json") == std::string::npos) {
-                    out["code"] = 1; out["message"] = "仅支持 .json 格式的牌堆文件";
-                } else {
-                    auto pos = name.find_last_of("/\\");
-                    if (pos != std::string::npos) name = name.substr(pos + 1);
-                    // User uploads go to data/decks (upgrade-safe), not bundled decks/.
-                    std::filesystem::create_directories("data/decks");
-                    std::ofstream f(u8path("data/decks/" + name), std::ios::binary);
-                    f << content;
-                    f.close();
-                    int loaded = cardDeck.loadDir("data/decks");
-                    out["code"] = 0; out["message"] = "ok";
-                    out["data"] = {{"filename", name}, {"total_decks", (int)cardDeck.deckCount()}, {"loaded", loaded}};
-                    DICE_LOG_INFO("Deck uploaded: '{}', {} decks total", name, cardDeck.deckCount());
-                }
-            } catch (const std::exception& e) {
-                out["code"] = 1; out["message"] = e.what();
-            }
-            auto resp = drogon::HttpResponse::newHttpResponse();
-            resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-            resp->setBody(out.dump());
-            cb(resp);
-        }, {drogon::Post});
-
     // ── Image asset upload + serve (for 发图 in dice text / replies) ──
     // POST /api/assets/upload  {filename, data:"<base64 or dataURL>"} → {url, code, name}
     app.registerHandler("/api/assets/upload",
@@ -3786,33 +3752,60 @@ static int realMain(int argc, char* argv[]) {
     // ── Deck file: read content + edit ────────────────────────
     // GET  /api/decks/file?name=xxx  → {content, meta: {version, author, date}, entries: [...]}
     // PUT  /api/decks/file           → {filename, content} → save + reload
-    auto deckFileHandler = [&cardDeck](const drogon::HttpRequestPtr& req,
+    auto resolveDeckPath = [](bool bundled, const std::string& name) {
+        const std::string root = bundled ? "decks/" : "data/decks/";
+        std::filesystem::path path = u8path(root + name);
+        if (!std::filesystem::exists(path)) {
+            auto alternate = u8path("../" + root + name);
+            if (std::filesystem::exists(alternate)) path = std::move(alternate);
+        }
+        return path;
+    };
+    auto deckFileHandler = [&cardDeck, resolveDeckPath](const drogon::HttpRequestPtr& req,
         std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
         nlohmann::json out;
         try {
             if (req->method() == drogon::Get) {
                 auto n = req->getParameter("name");
                 if (n.empty()) { out["code"] = 1; out["message"] = "缺少 name 参数"; }
+                else if (!dice::deck_files::isSafeJsonFilename(n)) {
+                    out["code"] = 1; out["message"] = "牌堆文件名无效";
+                }
                 else {
-                    // Prefer the user copy in data/decks, fall back to bundled decks/.
-                    std::filesystem::path rp = u8path("data/decks/" + n);
-                    if (!std::filesystem::exists(rp)) rp = u8path("decks/" + n);
-                    std::ifstream f(rp);
-                    if (!f) { out["code"] = 1; out["message"] = "文件不存在"; }
-                    else {
-                        std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-                        nlohmann::json meta;
-                        nlohmann::json entries = nlohmann::json::array();
-                        try {
-                            auto j = nlohmann::json::parse(content);
-                            if (j.is_object()) {
-                                if (j.contains("_meta") && j["_meta"].is_object()) meta = j["_meta"];
-                                for (auto& [k, v] : j.items())
-                                    if (k != "_meta" && v.is_array()) entries.push_back(k);
-                            }
-                        } catch (...) {}
-                        out["code"] = 0; out["message"] = "ok";
-                        out["data"] = {{"content", content}, {"meta", meta}, {"entries", entries}};
+                    const std::string source = req->getParameter("source");
+                    std::filesystem::path rp;
+                    std::string actualSource;
+                    if (source == "builtin") {
+                        rp = resolveDeckPath(true, n); actualSource = "builtin";
+                    } else if (source == "user") {
+                        rp = resolveDeckPath(false, n); actualSource = "user";
+                    } else if (source.empty()) {
+                        rp = resolveDeckPath(false, n); actualSource = "user";
+                        if (!std::filesystem::exists(rp)) {
+                            rp = resolveDeckPath(true, n); actualSource = "builtin";
+                        }
+                    } else {
+                        out["code"] = 1; out["message"] = "无效的牌堆来源";
+                    }
+                    if (out.value("code", 0) == 0) {
+                        std::ifstream f(rp);
+                        if (!f) { out["code"] = 1; out["message"] = "文件不存在"; }
+                        else {
+                            std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                            nlohmann::json meta;
+                            nlohmann::json entries = nlohmann::json::array();
+                            try {
+                                auto j = nlohmann::json::parse(content);
+                                if (j.is_object()) {
+                                    if (j.contains("_meta") && j["_meta"].is_object()) meta = j["_meta"];
+                                    for (auto& [k, v] : j.items())
+                                        if (k != "_meta" && v.is_array()) entries.push_back(k);
+                                }
+                            } catch (...) {}
+                            out["code"] = 0; out["message"] = "ok";
+                            out["data"] = {{"content", content}, {"meta", meta}, {"entries", entries},
+                                           {"source", actualSource}, {"readonly", actualSource == "builtin"}};
+                        }
                     }
                 }
             } else if (req->method() == drogon::Put) {
@@ -3820,17 +3813,29 @@ static int realMain(int argc, char* argv[]) {
                 std::string name = j.value("filename", "");
                 std::string content = j.value("content", "");
                 if (name.empty()) { out["code"] = 1; out["message"] = "缺少 filename"; }
+                else if (!dice::deck_files::isSafeJsonFilename(name)) {
+                    out["code"] = 1; out["message"] = "牌堆文件名无效";
+                }
+                else if (std::filesystem::exists(resolveDeckPath(true, name)) &&
+                         !std::filesystem::exists(resolveDeckPath(false, name))) {
+                    out["code"] = 1; out["message"] = "内置牌堆为只读；请先复制需要修改的条目";
+                }
                 else {
-                    auto pos = name.find_last_of("/\\");
-                    if (pos != std::string::npos) name = name.substr(pos + 1);
-                    // Edits are saved to data/decks (a user override of any bundled deck).
-                    std::filesystem::create_directories("data/decks");
-                    std::ofstream f(u8path("data/decks/" + name), std::ios::binary);
-                    f << content;
-                    f.close();
-                    cardDeck.loadDir("data/decks");
-                    out["code"] = 0; out["message"] = "ok";
-                    out["data"] = {{"filename", name}, {"total_decks", (int)cardDeck.deckCount()}};
+                    const std::string validationError = dice::legacyv2::validateDeckJson(content);
+                    if (!validationError.empty()) {
+                        out["code"] = 1; out["message"] = "牌堆 JSON 无效：" + validationError;
+                    } else {
+                        std::filesystem::create_directories("data/decks");
+                        std::ofstream f(u8path("data/decks/" + name), std::ios::binary);
+                        f << content;
+                        f.close();
+                        if (!f) { out["code"] = 1; out["message"] = "无法写入牌堆文件"; }
+                        else {
+                            cardDeck.reload({"decks", "data/decks"});
+                            out["code"] = 0; out["message"] = "ok";
+                            out["data"] = {{"filename", name}, {"total_decks", (int)cardDeck.deckCount()}};
+                        }
+                    }
                 }
             }
         } catch (const std::exception& e) { out["code"] = 1; out["message"] = e.what(); }
@@ -3841,20 +3846,83 @@ static int realMain(int argc, char* argv[]) {
     };
     app.registerHandler("/api/decks/file", deckFileHandler, {drogon::Get, drogon::Put});
 
-    // ── Deck file: delete from disk ───────────────────────────
-    app.registerHandler("/api/decks/file/{1}", [&cardDeck](const drogon::HttpRequestPtr&,
+    // Copy one entry out of a bundled collection. This avoids freezing every
+    // bundled entry in a full user-side copy when only one deck is customized.
+    app.registerHandler("/api/decks/copy",
+        [&cardDeck, resolveDeckPath](const drogon::HttpRequestPtr& req,
+                                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+        nlohmann::json out;
+        try {
+            const auto body = nlohmann::json::parse(req->getBody());
+            const std::string sourceName = body.value("filename", "");
+            const std::string entry = body.value("entry", "");
+            const std::string targetName = body.value("targetFilename", "");
+            if (!dice::deck_files::isSafeJsonFilename(sourceName) ||
+                !dice::deck_files::isSafeJsonFilename(targetName)) {
+                out = {{"code", 1}, {"message", "牌堆文件名无效"}};
+            } else if (sourceName == targetName) {
+                out = {{"code", 1}, {"message", "用户牌堆不能与内置合集使用同一文件名"}};
+            } else if (entry.empty() || entry.front() == '_') {
+                out = {{"code", 1}, {"message", "请选择可复制的牌堆条目"}};
+            } else {
+                const auto sourcePath = resolveDeckPath(true, sourceName);
+                const auto targetPath = resolveDeckPath(false, targetName);
+                if (!std::filesystem::is_regular_file(sourcePath)) {
+                    out = {{"code", 1}, {"message", "内置牌堆文件不存在"}};
+                } else if (std::filesystem::exists(targetPath)) {
+                    out = {{"code", 1}, {"message", "同名用户牌堆文件已存在"}};
+                } else {
+                    std::ifstream input(sourcePath, std::ios::binary);
+                    nlohmann::json source; input >> source;
+                    if (!source.is_object() || !source.contains(entry) ||
+                        !source[entry].is_array() || source[entry].empty()) {
+                        out = {{"code", 1}, {"message", "内置牌堆中不存在该条目"}};
+                    } else {
+                        nlohmann::json copied = nlohmann::json::object();
+                        copied[entry] = source[entry];
+                        std::filesystem::create_directories("data/decks");
+                        std::ofstream output(u8path("data/decks/" + targetName), std::ios::binary);
+                        output << copied.dump(2) << '\n';
+                        output.close();
+                        if (!output) { out = {{"code", 1}, {"message", "无法写入用户牌堆"}}; }
+                        else {
+                            cardDeck.reload({"decks", "data/decks"});
+                            out = {{"code", 0}, {"message", "ok"},
+                                   {"data", {{"filename", targetName}, {"entry", entry},
+                                             {"total_decks", (int)cardDeck.deckCount()}}}};
+                        }
+                    }
+                }
+            }
+        } catch (const std::exception& e) { out = {{"code", 1}, {"message", e.what()}}; }
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+        resp->setBody(out.dump());
+        cb(resp);
+    }, {drogon::Post});
+
+    // ── Deck file: delete user file only ──────────────────────
+    app.registerHandler("/api/decks/file/{1}", [&cardDeck, resolveDeckPath](const drogon::HttpRequestPtr&,
         std::function<void(const drogon::HttpResponsePtr&)>&& cb, const std::string& name) {
         nlohmann::json out;
         try {
-            // User decks live in data/decks; fall back to bundled decks/ if absent.
-            std::filesystem::path path = u8path("data/decks/" + name);
-            if (!std::filesystem::exists(path)) path = u8path("decks/" + name);
-            std::error_code rmEc;
-            if (std::filesystem::remove(path, rmEc) && !rmEc) {
-                cardDeck.reload({"decks", "data/decks"});   // 全量重扫，删除的牌堆即时消失
-                out["code"] = 0; out["message"] = "ok";
+            if (!dice::deck_files::isSafeJsonFilename(name)) {
+                out["code"] = 1; out["message"] = "牌堆文件名无效";
             } else {
-                out["code"] = 1; out["message"] = "删除失败";
+                const auto userPath = resolveDeckPath(false, name);
+                if (!std::filesystem::is_regular_file(userPath)) {
+                    out["code"] = 1;
+                    out["message"] = std::filesystem::is_regular_file(resolveDeckPath(true, name))
+                        ? "内置牌堆为只读，不能删除" : "用户牌堆文件不存在";
+                } else {
+                    std::error_code rmEc;
+                    if (std::filesystem::remove(userPath, rmEc) && !rmEc) {
+                        cardDeck.reload({"decks", "data/decks"});
+                        out["code"] = 0; out["message"] = "ok";
+                    } else {
+                        out["code"] = 1; out["message"] = "删除失败";
+                    }
+                }
             }
         } catch (const std::exception& e) { out["code"] = 1; out["message"] = e.what(); }
         auto resp = drogon::HttpResponse::newHttpResponse();

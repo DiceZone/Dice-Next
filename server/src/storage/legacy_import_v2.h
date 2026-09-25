@@ -1553,7 +1553,7 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
     auto deckResult = timed("decks", [&] { return importDecks(root, opts); });
     // Inventory the destination actually selected by skip/overwrite, not the
     // source files that might have been rejected or shadowed by existing files.
-    if (deckResult.success > 0 && deck) deck->loadDir("data/decks");
+    if (deckResult.success > 0 && deck) deck->reload({"decks", "data/decks"});
     legacy_reply_references::Catalog references;
     auto addHelp = [&](const std::string& name) {
         const auto normalized = legacy_reply_references::lower(legacy_reply_references::trim(name));
