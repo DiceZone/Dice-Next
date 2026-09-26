@@ -827,8 +827,44 @@ static int realMain(int argc, char* argv[]) {
     dice::LuaPluginManager luaMod;
     dice::LuaPluginManager::setCpathStrict(configMgr.get<bool>("dice/lua_cpath_strict", false));   // 兼容优先默认关
     luaMod.init();
+    luaMod.setHelpLookup([&cmdRouter](const std::string& topic) {
+        return cmdRouter.helpEntryContent(topic);
+    });
     luaMod.setScheduler([](double seconds, std::function<void()> callback) {
         drogon::app().getLoop()->runAfter(seconds, std::move(callback));
+    });
+    luaMod.setRuleGate([&luaMod](const std::string&, const std::string& group,
+                                 const std::string& user, const std::string& required,
+                                 const std::string&) {
+        if (group.empty() || user.empty()) return false;
+        std::string scope = "game:" + group;
+        const std::string session = luaMod.confGet(scope, "__session");
+        if (!session.empty()) scope = "game:session:" + session;
+        if (luaMod.confGet(scope, "__name").empty()) return false;
+        auto containsUser = [&](const char* key) {
+            auto values = nlohmann::json::parse(luaMod.confGet(scope, key), nullptr, false);
+            if (!values.is_array()) return false;
+            for (const auto& value : values) {
+                if (value.is_string() && value.get<std::string>() == user) return true;
+                if ((value.is_number_integer() || value.is_number_unsigned())
+                    && std::to_string(value.get<long long>()) == user) return true;
+            }
+            return false;
+        };
+        std::string autoJoin = luaMod.confGet(scope, "auto_join");
+        for (auto& c : autoJoin) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+        if (!containsUser("__pls") && !containsUser("__gms")
+            && autoJoin != "1" && autoJoin != "true" && autoJoin != "on") return false;
+        if (required.empty()) return true;
+        const std::string active = luaMod.confGet(scope, "rule");
+        auto lower = [](std::string value) {
+            for (char& c : value) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+            return value;
+        };
+        const std::string activeLower = lower(active), requiredLower = lower(required);
+        return activeLower == requiredLower
+            || (activeLower.size() > requiredLower.size()
+                && activeLower.rfind(requiredLower + "-", 0) == 0);
     });
     luaMod.setDeckDraw([&cardDeck](const std::string& name) -> std::string {
         return cardDeck.has(name) ? cardDeck.drawFromDeck(name).value_or("") : std::string();
@@ -1245,6 +1281,34 @@ static int realMain(int argc, char* argv[]) {
         }
         return v;
     });
+    // `.mod` 保持原版 Dice! 的全局模组语义；SeaDice JS 插件仍由 `.plugin`
+    // 和 WebUI 插件页管理，不能混进旧 Mod 命名空间。
+    cmdRouter.setModProvider(
+        [&luaMod]() {
+            std::vector<dice::CommandRouter::ModEntry> out;
+            for (const auto& m : luaMod.mods()) out.push_back({
+                m.name, m.title, m.author, m.version, m.brief, m.enabled,
+                m.singleFile, m.ruleCompat, m.replies, m.scripts, m.events});
+            return out;
+        },
+        [&luaMod](const std::string& action, const std::string& name, std::string& error) {
+            auto reload = [&]() {
+                luaMod.reload();
+                // model/*.xml 与 Lua 回复同属旧 Dice! Mod；启停/删除后同步刷新别名与派生值。
+                dice::CommandRouter::reloadRulePacks({"rules", "data/rules"});
+            };
+            if (action == "reload") { reload(); return true; }
+            if (action == "delete") {
+                if (!luaMod.deleteMod(name)) { error = "mod not found or delete failed"; return false; }
+                reload(); return true;
+            }
+            if (action == "on" || action == "off") {
+                if (!luaMod.setModEnabled(name, action == "on")) { error = "mod not found or rename failed"; return false; }
+                reload(); return true;
+            }
+            error = "unsupported action";
+            return false;
+        });
 
     // 智能化阶段D：AI 工具执行器工厂 —— 给定一条消息，返回一个 ToolExec 回调，能真的
     // 掷骰（骰子引擎）/抽牌（牌堆）/查属性（发送者人物卡）。供 AI 对话 function-calling 用。
@@ -3233,7 +3297,7 @@ static int realMain(int argc, char* argv[]) {
                     cmds.push_back({{"trigger", c.trigger}, {"kind", c.kind}});
                 nlohmann::json item = {{"name", m.name}, {"title", m.title}, {"author", m.author},
                                        {"version", m.version}, {"brief", m.brief}, {"enabled", m.enabled},
-                                       {"replies", m.replies}, {"scripts", m.scripts}, {"helpTopics", help},
+                                       {"replies", m.replies}, {"scripts", m.scripts}, {"events", m.events}, {"helpTopics", help},
                                        {"commands", cmds},
                                        {"singleFile", m.singleFile}, {"ruleCompat", m.ruleCompat}};
                 if (auto owner = dice::CommandRouter::pluginOwnerBundle("lua:" + m.name)) {
@@ -3255,7 +3319,11 @@ static int realMain(int argc, char* argv[]) {
                     auto j = nlohmann::json::parse(req->getBody());
                     std::string name = j.value("name", std::string()); bool en = j.value("enabled", true);
                     if (name.empty()) { cb(jsonResp({{"code", 1}, {"message", "name required"}})); return; }
-                    luaMod.setModEnabled(name, en); luaMod.reload();
+                    if (!luaMod.setModEnabled(name, en)) {
+                        cb(jsonResp({{"code", 1}, {"message", "mod not found or rename failed"}})); return;
+                    }
+                    luaMod.reload();
+                    dice::CommandRouter::reloadRulePacks({"rules", "data/rules"});
                     out = {{"code", 0}, {"message", "ok"}, {"data", luaList()}};
                 } catch (const std::exception& e) { out = {{"code", 1}, {"message", e.what()}}; }
                 cb(jsonResp(out));
@@ -3267,7 +3335,11 @@ static int realMain(int argc, char* argv[]) {
                     auto j = nlohmann::json::parse(req->getBody());
                     std::string name = j.value("name", std::string());
                     if (name.empty()) { cb(jsonResp({{"code", 1}, {"message", "name required"}})); return; }
-                    luaMod.deleteMod(name); luaMod.reload();
+                    if (!luaMod.deleteMod(name)) {
+                        cb(jsonResp({{"code", 1}, {"message", "mod not found or delete failed"}})); return;
+                    }
+                    luaMod.reload();
+                    dice::CommandRouter::reloadRulePacks({"rules", "data/rules"});
                     out = {{"code", 0}, {"message", "ok"}, {"data", luaList()}};
                 } catch (const std::exception& e) { out = {{"code", 1}, {"message", e.what()}}; }
                 cb(jsonResp(out));
@@ -3275,6 +3347,7 @@ static int realMain(int argc, char* argv[]) {
         app.registerHandler("/api/mod/lua/reload",
             [jsonResp, luaList, &luaMod](const drogon::HttpRequestPtr&, std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 luaMod.reload();
+                dice::CommandRouter::reloadRulePacks({"rules", "data/rules"});
                 cb(jsonResp({{"code", 0}, {"message", "ok"}, {"data", luaList()}}));
             }, {drogon::Post});
         // 导入 Lua mod：上传 .lua/.json/.zip（base64）。归位语义见 LuaPluginManager::importUpload
@@ -3309,6 +3382,7 @@ static int realMain(int argc, char* argv[]) {
                         return;
                     }
                     luaMod.reload();
+                    dice::CommandRouter::reloadRulePacks({"rules", "data/rules"});
                     cb(jsonResp({{"code", 0}, {"message", "ok"}, {"data", {{"mods", luaList()}, {"permissions", perms}, {"risks", risks}}}}));
                 } catch (const std::exception& e) { cb(jsonResp({{"code", 1}, {"message", e.what()}})); }
             }, {drogon::Post});

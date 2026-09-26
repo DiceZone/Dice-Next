@@ -927,10 +927,13 @@ inline ImportResult importMods(const fs::path& root, const ImportOptions& opts =
     if (!fs::exists(src, ec) || !fs::is_directory(src, ec)) return result;
     fs::path dst = fs::path("data") / "mod";
     fs::create_directories(dst, ec);
+    std::set<std::string> importedNames;
+    auto fromUtf8 = [](const std::string& value) { return fs::path(std::u8string(value.begin(), value.end())); };
     for (const auto& entry : fs::directory_iterator(src, ec)) {
         const fs::path& p = entry.path();
-        std::string name = p.filename().string();
-        fs::path target = dst / name;
+        const auto name8 = p.filename().u8string();
+        std::string name(name8.begin(), name8.end());
+        fs::path target = dst / fromUtf8(name);
         ImportDetail detail;
         detail.name = name;
 
@@ -953,12 +956,54 @@ inline ImportResult importMods(const fs::path& root, const ImportOptions& opts =
         if (!ec2) {
             detail.status = "success";
             ++result.success;
+            importedNames.insert(name);
         } else {
             detail.status = "failed";
             detail.reason = ec2.message();
             ++result.failed;
         }
         result.details.push_back(detail);
+    }
+
+    // 原版全局启停和覆盖顺序保存在 conf/ModList.json。仅对本次真正复制的
+    // 模组应用状态，避免 overwrite=false 时意外改动用户已有的 Next 模组。
+    try {
+        std::ifstream listIn(root / "conf" / "ModList.json", std::ios::binary);
+        if (listIn) {
+            json list; listIn >> list;
+            if (list.is_array()) {
+                json order = json::array();
+                for (const auto& item : list) {
+                    if (!item.is_object() || !item.contains("name") || !item["name"].is_string()) continue;
+                    const std::string modName = item["name"].get<std::string>();
+                    if (modName.empty()) continue;
+                    order.push_back(modName);
+                    if (item.value("active", true)) continue;
+                    // 只处理本次成功复制的顶层文件名，不允许 ModList 路径越界。
+                    if (!importedNames.count(modName) && !importedNames.count(modName + ".json")) continue;
+                    const fs::path base = dst / fromUtf8(modName);
+                    for (const auto& pair : {std::pair<fs::path, fs::path>{base, dst / fromUtf8(modName + ".disabled")},
+                                             std::pair<fs::path, fs::path>{dst / fromUtf8(modName + ".json"),
+                                                                           dst / fromUtf8(modName + ".json.disabled")}}) {
+                        std::error_code stateEc;
+                        const auto filename8 = pair.first.filename().u8string();
+                        if (!importedNames.count(std::string(filename8.begin(), filename8.end()))) continue;
+                        if (!fs::exists(pair.first, stateEc)) continue;
+                        if (fs::exists(pair.second, stateEc) && opts.overwrite) fs::remove_all(pair.second, stateEc);
+                        stateEc.clear();
+                        if (!fs::exists(pair.second, stateEc)) fs::rename(pair.first, pair.second, stateEc);
+                        if (stateEc) DICE_LOG_WARN("legacy mod '{}' inactive-state migration failed: {}", modName, stateEc.message());
+                    }
+                }
+                const fs::path orderPath = dst.parent_path() / "mod_order.json";
+                if (opts.overwrite || !fs::exists(orderPath)) {
+                    std::ofstream orderOut(orderPath, std::ios::binary | std::ios::trunc);
+                    if (orderOut) orderOut << order.dump(2);
+                }
+            }
+        }
+    } catch (const std::exception& ex) {
+        DICE_LOG_WARN("legacy ModList.json migration skipped: {}", ex.what());
     }
     return result;
 }

@@ -693,6 +693,64 @@ TEST(ImportMods, ValidModImported) {
     cleanupTempDir(root);
 }
 
+TEST(ImportMods, MigratesLegacyGlobalStateAndOrder) {
+    fs::path root = makeTempDir("mods_state_order");
+    fs::create_directories(root / "mod" / "alarm");
+    fs::create_directories(root / "conf");
+    { std::ofstream f(root / "mod" / "alarm" / "descriptor.json"); f << R"({"title":"Alarm"})"; }
+    {
+        std::ofstream f(root / "conf" / "ModList.json");
+        f << R"([{"name":"alarm","active":false},{"name":"later","active":true}])";
+    }
+
+    fs::path origCwd = fs::current_path();
+    fs::current_path(root);
+    ImportOptions opts;
+    auto result = importMods(root, opts);
+    fs::current_path(origCwd);
+
+    ASSERT_EQ(result.success, 1);
+    ASSERT_TRUE(fs::is_directory(root / "data" / "mod" / "alarm.disabled"));
+    ASSERT_TRUE(!fs::exists(root / "data" / "mod" / "alarm"));
+    {
+        std::ifstream orderIn(root / "data" / "mod_order.json");
+        nlohmann::json order; orderIn >> order;
+        ASSERT_EQ(order.size(), static_cast<size_t>(2));
+        ASSERT_EQ(order[0].get<std::string>(), std::string("alarm"));
+        ASSERT_EQ(order[1].get<std::string>(), std::string("later"));
+    }
+
+    cleanupTempDir(root);
+}
+
+TEST(ImportMods, NonOverwritingImportKeepsExistingPairAndOrder) {
+    const auto root = makeTempDir("mods_keep_existing");
+    fs::create_directories(root / "mod" / "alarm");
+    fs::create_directories(root / "conf");
+    fs::create_directories(root / "data" / "mod" / "alarm");
+    { std::ofstream f(root / "mod" / "alarm.json"); f << R"({"title":"Alarm"})"; }
+    { std::ofstream f(root / "data" / "mod" / "alarm" / "keep.txt"); f << "existing"; }
+    { std::ofstream f(root / "data" / "mod_order.json"); f << R"(["existing"])"; }
+    { std::ofstream f(root / "conf" / "ModList.json"); f << R"([{"name":"alarm","active":false}])"; }
+    const auto previous = fs::current_path();
+    fs::current_path(root);
+    ImportOptions options;
+    options.overwrite = false;
+    const auto result = importMods(root, options);
+    fs::current_path(previous);
+    ASSERT_EQ(result.success, 1);
+    ASSERT_EQ(result.skipped, 1);
+    ASSERT_TRUE(fs::exists(root / "data" / "mod" / "alarm" / "keep.txt"));
+    ASSERT_FALSE(fs::exists(root / "data" / "mod" / "alarm.disabled"));
+    ASSERT_TRUE(fs::exists(root / "data" / "mod" / "alarm.json.disabled"));
+    {
+        std::ifstream in(root / "data" / "mod_order.json");
+        json order; in >> order;
+        ASSERT_EQ(order[0].get<std::string>(), std::string("existing"));
+    }
+    cleanupTempDir(root);
+}
+
 TEST(ImportMods, NoModDirReturnsEmpty) {
     fs::path root = makeTempDir("mods_nodir");
 

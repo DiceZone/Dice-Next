@@ -591,9 +591,22 @@
     "temp_tag": "(臨時)"
   },
   "mod": {
-    "info": "外掛 {name}（{kind}，{id}）：{state}",
-    "web_admin": "外掛更新、重載、刪除和重裝請在 WebUI 的外掛管理頁操作。",
-    "usage": "擴充 .mod\n.mod list // 列出擴充\n.mod on|off <外掛> // 啟停擴充\n.mod info <外掛> // 查看擴充資訊"
+    "info": "模組 {name}（{id}）\n狀態：{state}\n版本：{version}\n作者：{author}\n簡介：{brief}",
+    "detail": "回覆檔案：{replies}，Lua 腳本：{scripts}，週期事件：{events}，規則資源：{rules}",
+    "list": "全域模組（{count}）：\n{list}",
+    "empty": "目前沒有已安裝的 Dice! 模組。",
+    "unavailable": "模組管理器尚未初始化。",
+    "name_empty": "請輸入模組名稱。",
+    "not_found": "找不到模組「{name}」。",
+    "already_on": "模組「{name}」已經啟用。",
+    "already_off": "模組「{name}」已經停用。",
+    "enabled": "已全域啟用模組「{name}」。",
+    "disabled": "已全域停用模組「{name}」。",
+    "reloaded": "已重新載入模組「{name}」。",
+    "deleted": "已刪除模組「{name}」。",
+    "failed": "操作模組「{name}」失敗：{error}",
+    "web_admin": "遠端取得、更新和重裝尚未開放聊天指令，請在 WebUI 的模組管理頁操作。",
+    "usage": "模組 .mod\n.mod list // 列出全域模組\n.mod on|off <模組> // 全域啟停\n.mod info|detail <模組> // 查看資訊\n.mod reload|del <模組> // 重載或刪除"
   },
   "authorize": {
     "sent": "許可申請已傳送給 Master。"

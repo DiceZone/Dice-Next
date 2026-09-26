@@ -585,9 +585,22 @@
     "temp_tag": "(temp)"
   },
   "mod": {
-    "info": "Plugin {name} ({kind}, {id}): {state}",
-    "web_admin": "Use the WebUI plugin manager to update, reload, delete, or reinstall plugins.",
-    "usage": "Mods .mod\n.mod list // list mods\n.mod on|off <plugin> // toggle a mod\n.mod info <plugin> // show mod details"
+    "info": "Mod {name} ({id})\nState: {state}\nVersion: {version}\nAuthor: {author}\nDescription: {brief}",
+    "detail": "Reply files: {replies}, Lua scripts: {scripts}, cycle events: {events}, rule resources: {rules}",
+    "list": "Global mods ({count}):\n{list}",
+    "empty": "No Dice! mods are installed.",
+    "unavailable": "The mod manager is not initialized.",
+    "name_empty": "Enter a mod name.",
+    "not_found": "Mod '{name}' was not found.",
+    "already_on": "Mod '{name}' is already enabled.",
+    "already_off": "Mod '{name}' is already disabled.",
+    "enabled": "Globally enabled mod '{name}'.",
+    "disabled": "Globally disabled mod '{name}'.",
+    "reloaded": "Reloaded mod '{name}'.",
+    "deleted": "Deleted mod '{name}'.",
+    "failed": "Failed to operate on mod '{name}': {error}",
+    "web_admin": "Remote install, update, and reinstall are not available as chat commands yet; use the WebUI mod manager.",
+    "usage": "Mods .mod\n.mod list // list global mods\n.mod on|off <mod> // globally toggle\n.mod info|detail <mod> // show information\n.mod reload|del <mod> // reload or delete"
   },
   "authorize": {
     "sent": "Authorization request sent to the Master."

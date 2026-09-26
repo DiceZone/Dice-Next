@@ -217,6 +217,302 @@ end
     ASSERT_EQ(fetchCalls, 3);
 }
 
+TEST(LuaPluginCompat, LegacyTomlReplyLoadsLuaActionAndHonorsRuleScope) {
+    TempWorkspace workspace("dice_next_lua_toml_reply_");
+    const fs::path mod = workspace.root() / "data" / "mod" / "BRP-TRPG";
+    std::error_code ec;
+    fs::create_directories(mod / "reply", ec);
+    fs::create_directories(mod / "script" / "BRP", ec);
+    writeText(mod / "descriptor.json", R"JSON({"title":"BRP","ver":"1.0","helpdoc":{"team":"team help"}})JSON");
+    writeText(mod / "reply" / "sn.toml", R"TOML(
+[reply.BRP_sn]
+type = "Game"
+rule = "BRP"
+keyword.prefix = ".sn"
+limit.grp_id.nor = 0
+echo.lua = "BRP.sn"
+
+[reply.BRP_team]
+type = "Game"
+rule = "BRP"
+keyword.prefix = ".team"
+echo.lua = "BRP.team"
+
+[reply.team_help]
+type = "Order"
+keyword.prefix = ".fallback"
+echo = "{help:team}"
+
+[reply.aaa_generic]
+type = "Order"
+keyword.prefix = ".shared"
+echo = "fallback"
+
+[reply.zzz_specific]
+type = "Game"
+rule = "BRP"
+keyword.prefix = ".shared"
+echo = "specific"
+)TOML");
+    writeText(mod / "script" / "BRP" / "sn.lua", R"LUA(
+return "sn:" .. msg.suffix
+)LUA");
+    writeText(mod / "script" / "BRP" / "team.lua", R"LUA(
+local before = #msg.game.pls
+msg.game.pls:add("p3")
+return "{help:team}:" .. before .. ":" .. #msg.game.pls
+)LUA");
+
+    LuaPluginManager manager;
+    bool brpActive = false;
+    manager.setRuleGate([&](const std::string&, const std::string&, const std::string& user,
+                            const std::string& rule, const std::string&) {
+        return brpActive && user == "u" && rule == "BRP";
+    });
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    ASSERT_EQ(manager.mods().front().replies, 1);
+
+    auto inactive = manager.dispatch(".sn auto", "u", "g", "Tester", "", false, 0, "onebot");
+    ASSERT_TRUE(!inactive.matched);
+    ASSERT_EQ(manager.dispatch(".shared", "u", "g", "Tester", "", false).reply, std::string("fallback"));
+    brpActive = true;
+    ASSERT_EQ(manager.dispatch(".shared", "u", "g", "Tester", "", false).reply, std::string("specific"));
+    // 宿主先提取命令首词再做 ownership probe；参数只在真正 dispatch 时参与。
+    ASSERT_TRUE(manager.hasCommandTrigger(".sn", "u", "g", "Tester", "", false, 0, "onebot"));
+    auto active = manager.dispatch(".sn auto", "u", "g", "Tester", "", false, 0, "onebot");
+    ASSERT_TRUE(active.matched);
+    ASSERT_EQ(active.reply, std::string("sn:auto"));
+
+    manager.confSet("game:g", "__name", "test");
+    manager.confSet("game:g", "__pls", R"JSON(["u","p2"])JSON");
+    auto team = manager.dispatch(".team show", "u", "g", "Tester", "", false, 0, "onebot");
+    ASSERT_TRUE(team.matched);
+    ASSERT_EQ(team.reply, std::string("team help:2:3"));
+    const auto players = nlohmann::json::parse(manager.confGet("game:g", "__pls"), nullptr, false);
+    ASSERT_TRUE(players.is_array());
+    ASSERT_TRUE(std::find(players.begin(), players.end(), "p3") != players.end());
+
+    auto help = manager.dispatch(".fallback", "u", "g", "Tester", "", false, 0, "onebot");
+    ASSERT_TRUE(help.matched);
+    ASSERT_EQ(help.reply, std::string("team help"));
+}
+
+TEST(LuaPluginCompat, LegacyReplySupportsCaseVariantsRegexAndVariableLimits) {
+    TempWorkspace workspace("dice_next_lua_reply_limits_");
+    const fs::path mod = workspace.root() / "data" / "mod" / "compat";
+    std::error_code ec;
+    fs::create_directories(mod / "reply", ec);
+    writeText(mod / "descriptor.json", R"JSON({"title":"compat"})JSON");
+    writeText(mod / "reply" / "rules.lua", R"LUA(
+msg_reply.upper = {
+  keyword = { Prefix = ".upper" },
+  limit = { grp_var = { enabled = true } },
+  echo = "upper:{suffix}"
+}
+msg_reply.regex = {
+  keyword = { Regex = [[^hello\s+(.+)$]] },
+  echo = "regex:{suffix}"
+}
+msg_reply.unblocked = {
+  keyword = { Match = "ask" },
+  limit = { user_var = { blocked = false } },
+  echo = "allowed"
+}
+)LUA");
+
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    ASSERT_FALSE(manager.hasCommandTrigger(".upper", "u", "g", "Tester", "", false));
+
+    std::string error;
+    ASSERT_TRUE(manager.eval("setGroupConf('g', 'enabled', true)", &error));
+    ASSERT_EQ(manager.confGet("g:g", "enabled"), std::string("true"));
+    ASSERT_TRUE(manager.hasCommandTrigger(".upper", "u", "g", "Tester", "", false));
+    auto upper = manager.dispatch(".upper value", "u", "g", "Tester", "", false);
+    ASSERT_TRUE(upper.matched);
+    ASSERT_EQ(upper.reply, std::string("upper:value"));
+
+    auto regex = manager.dispatch("hello world", "u", "g", "Tester", "", false);
+    ASSERT_TRUE(regex.matched);
+    ASSERT_EQ(regex.reply, std::string("regex:world"));
+
+    auto allowed = manager.dispatch("ask", "u", "g", "Tester", "", false);
+    ASSERT_TRUE(allowed.matched);
+    ASSERT_EQ(allowed.reply, std::string("allowed"));
+    ASSERT_TRUE(manager.eval("setUserConf('u', 'blocked', true)", &error));
+    ASSERT_EQ(manager.confGet("u:u", "blocked"), std::string("true"));
+    ASSERT_FALSE(manager.dispatch("ask", "u", "g", "Tester", "", false).matched);
+}
+
+TEST(LuaPluginCompat, LegacyTypedConditionsAndWholeMessageRegex) {
+    TempWorkspace workspace("dice_next_lua_typed_conditions_");
+    const fs::path mod = workspace.root() / "data" / "mod" / "typed";
+    fs::create_directories(mod / "reply");
+    writeText(mod / "reply" / "rules.lua", R"LUA(
+msg_reply.truth = {
+    keyword = { Match = "truth" }, limit = { user_var = { puzzle = true } }, echo = "truthy"
+}
+msg_reply.range = {
+    keyword = { Match = "range" },
+    limit = { user_var = { score = { at_least = 2 }, trust = { at_most = 3 } } }, echo = "in-range"
+}
+msg_reply.private = {
+    keyword = { Match = "private" }, limit = { grp_var = { missing = true } }, echo = "private-ok"
+}
+msg_reply.regex = { keyword = { Regex = [[a{2,4}]] }, echo = "regex-ok" }
+msg_reply.long = { keyword = { Regex = [[z+]] }, echo = "long-ok" }
+msg_reply.game = {
+    keyword = { Match = "gameflag" },
+    echo = function(msg)
+        msg.game.active = false
+        if msg.game.active == false then return "bool-ok" end
+        return "bad"
+    end
+}
+)LUA");
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    auto run = [&](const std::string& text, int trust = 0) {
+        return manager.dispatch(text, "u", "g", "Tester", "", false, trust);
+    };
+    ASSERT_FALSE(run("truth").matched);
+    manager.confSet("u:u", "puzzle", "flower puzzle text");
+    ASSERT_EQ(run("truth").reply, std::string("truthy"));
+    manager.confSet("u:u", "puzzle", "0");
+    ASSERT_TRUE(run("truth").matched);
+    manager.confSet("u:u", "puzzle", "false");
+    ASSERT_FALSE(run("truth").matched);
+    manager.confSet("u:u", "score", "1");
+    ASSERT_FALSE(run("range").matched);
+    manager.confSet("u:u", "score", "2");
+    ASSERT_EQ(run("range", 3).reply, std::string("in-range"));
+    ASSERT_FALSE(run("range", 4).matched);
+    ASSERT_FALSE(manager.hasCommandTrigger("range", "u", "g", "Tester", "", false, 4));
+    ASSERT_FALSE(run("private").matched);
+    ASSERT_EQ(manager.dispatch("private", "u", "", "Tester", "", true).reply, std::string("private-ok"));
+    ASSERT_EQ(run("aaa").reply, std::string("regex-ok"));
+    ASSERT_EQ(run("AAA").reply, std::string("regex-ok"));
+    ASSERT_FALSE(run("xaaa").matched);
+    ASSERT_FALSE(run("aaaaa").matched);
+    ASSERT_TRUE(run(std::string(400, 'z')).matched);
+    ASSERT_FALSE(run(std::string(401, 'z')).matched);
+    manager.confSet("game:g", "__name", "test");
+    ASSERT_EQ(run("gameflag").reply, std::string("bool-ok"));
+}
+
+TEST(LuaPluginCompat, TomlVariableConditionsFailClosedWhenUnsupported) {
+    TempWorkspace workspace("dice_next_lua_toml_limits_");
+    const auto mod = workspace.root() / "data" / "mod" / "limits";
+    fs::create_directories(mod / "reply");
+    writeText(mod / "reply" / "limits.toml", R"TOML(
+[reply.score]
+keyword.Match = "score"
+limit.user_var.score.at_least = 2
+limit.user_var.trust.at_most = 3
+echo = "score-ok"
+[reply.existing]
+keyword.match = "existing"
+limit.user_var.puzzle = true
+echo = "exists"
+[reply.private]
+keyword.match = "group-only"
+limit.grp_id.nor = 0
+echo = "group"
+[reply.restricted]
+keyword.match = "restricted"
+limit.self_var.secret = true
+echo = "must-not-run"
+)TOML");
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    auto run = [&](const std::string& text, int trust = 0) {
+        return manager.dispatch(text, "u", "g", "Tester", "", false, trust);
+    };
+    ASSERT_FALSE(run("score").matched);
+    manager.confSet("u:u", "score", "2");
+    ASSERT_EQ(run("score", 3).reply, std::string("score-ok"));
+    ASSERT_FALSE(run("score", 4).matched);
+    ASSERT_FALSE(run("existing").matched);
+    manager.confSet("u:u", "puzzle", "flower");
+    ASSERT_EQ(run("existing").reply, std::string("exists"));
+    ASSERT_TRUE(run("group-only").matched);
+    ASSERT_FALSE(manager.dispatch("group-only", "u", "", "Tester", "", true).matched);
+    ASSERT_FALSE(run("restricted").matched);
+}
+
+TEST(LuaPluginCompat, MixedDescriptorOrderAndReplyOverrideSurviveReload) {
+    TempWorkspace workspace("dice_next_lua_mod_order_");
+    const fs::path root = workspace.root() / "data" / "mod";
+    for (const auto* name : {"first", "second"}) {
+        fs::create_directories(root / name / "reply");
+        writeText(root / name / "reply" / "rules.lua",
+            "msg_reply.same = { keyword = { Match = 'choose' }, echo = '" + std::string(name) + "' }\n");
+    }
+    writeText(root / "first" / "descriptor.json", R"JSON({"speech":{"choice":"first"}})JSON");
+    writeText(root / "second.json", R"JSON({"speech":{"choice":"second"}})JSON");
+    writeText(root.parent_path() / "mod_order.json", R"JSON(["first","second"])JSON");
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir(root.string()), 2);
+    ASSERT_EQ(manager.mods()[0].name, std::string("first"));
+    ASSERT_EQ(manager.mods()[1].name, std::string("second"));
+    ASSERT_EQ(manager.dispatch("choose", "u", "g", "Tester", "", false).reply, std::string("second"));
+    ASSERT_EQ(manager.formatTemplate("{choice}", {}), std::string("second"));
+    ASSERT_TRUE(manager.setModEnabled("second", false));
+    ASSERT_EQ(manager.reload(), 2);
+    ASSERT_EQ(manager.dispatch("choose", "u", "g", "Tester", "", false).reply, std::string("first"));
+    ASSERT_EQ(manager.formatTemplate("{choice}", {}), std::string("first"));
+}
+
+TEST(LuaPluginCompat, LegacyCycleEventRunsImmediatelyRepeatsAndStopsAfterReload) {
+    TempWorkspace workspace("dice_next_lua_cycle_event_");
+    const fs::path mod = workspace.root() / "data" / "mod" / "alarm";
+    std::error_code ec;
+    fs::create_directories(mod / "event", ec);
+    fs::create_directories(mod / "script", ec);
+    writeText(mod / "descriptor.json", R"JSON({"title":"Alarm"})JSON");
+    writeText(mod / "event" / "cycle.lua", R"LUA(
+event.alarm_main_cycle = {
+  trigger = { cycle = { second = 60 } },
+  action = { lua = "main_cycle" }
+}
+)LUA");
+    writeText(mod / "script" / "main_cycle.lua", R"LUA(
+eventMsg("tick", "g", "u")
+)LUA");
+
+    LuaPluginManager manager;
+    std::vector<std::function<void()>> callbacks;
+    std::vector<double> delays;
+    int ticks = 0;
+    manager.setScheduler([&](double seconds, std::function<void()> callback) {
+        delays.push_back(seconds); callbacks.push_back(std::move(callback));
+    });
+    manager.setEventMsg([&](const std::string& text, const std::string&, const std::string&) {
+        if (text == "tick") ++ticks;
+    });
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    ASSERT_EQ(manager.mods().front().events, 1);
+    ASSERT_EQ(ticks, 1);
+    ASSERT_EQ(delays.front(), 60.0);
+    ASSERT_EQ(callbacks.size(), static_cast<size_t>(1));
+
+    auto firstGeneration = callbacks.front();
+    firstGeneration();
+    ASSERT_EQ(ticks, 2);
+    ASSERT_EQ(callbacks.size(), static_cast<size_t>(2));
+
+    ASSERT_EQ(manager.reload(), 1);
+    ASSERT_EQ(ticks, 3);
+    firstGeneration();
+    ASSERT_EQ(ticks, 3);
+}
+
 TEST(LuaPluginCompat, SleepTimeYieldsAndRepliesWithoutBlockingDispatch) {
     TempWorkspace workspace("dice_next_lua_sleep_");
     const fs::path pluginDir = workspace.root() / "data" / "plugin";

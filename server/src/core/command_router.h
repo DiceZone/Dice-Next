@@ -4091,6 +4091,18 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
     using PluginListFn = std::function<std::vector<PluginEntry>()>;
     void setPluginProvider(PluginListFn f) { pluginProvider_ = std::move(f); }
 
+    // 旧 Dice! `.mod` 管的是全局 Dice 模组，不是当前群的插件选择。
+    struct ModEntry {
+        std::string name, title, author, version, brief;
+        bool enabled = true, singleFile = false, ruleCompat = false;
+        int replies = 0, scripts = 0, events = 0;
+    };
+    using ModListFn = std::function<std::vector<ModEntry>()>;
+    using ModActionFn = std::function<bool(const std::string& action, const std::string& name, std::string& error)>;
+    void setModProvider(ModListFn list, ModActionFn action) {
+        modProvider_ = std::move(list); modAction_ = std::move(action);
+    }
+
     // Enabled plugin command ownership probe. It must be side-effect free: true
     // only tells the router to defer to the existing plugin fallback chain.
     using PluginCommandClaimFn = std::function<bool(const Message&, const std::string& commandBody)>;
@@ -4944,6 +4956,12 @@ public:
             if (!fs::is_directory(base, e2)) return;
             for (fs::recursive_directory_iterator it(base, e2), endit; it != endit; it.increment(e2)) {
                 if (e2) { e2.clear(); continue; }
+                if (it->is_directory()) {
+                    const std::string folder = u8str(it->path().filename());
+                    if (folder.size() > 9 && folder.substr(folder.size() - 9) == ".disabled")
+                        it.disable_recursion_pending();
+                    continue;
+                }
                 std::error_code fe;
                 if (it->is_regular_file(fe) && it->path().extension() == ".xml"
                     && it->path().parent_path().filename() == "model")
@@ -11169,32 +11187,74 @@ private:
     }
 
     std::string handleMod(Locale loc, const std::string& args, const Message& msg) {
+        // 原版 `.mod` 整组命令要求 trusted>=4；它会改变全局运行态，不能下放给普通群管。
+        if (!isMaster(msg) && senderTrust(msg) < 4) return i18n_.tr(loc, "gate.no_perm");
+        if (!modProvider_) return i18n_.tr(loc, "mod.unavailable");
         std::string a = trim(args);
         auto [subRaw, argRaw] = splitCommand(a);
         std::string sub = toLower(trim(subRaw));
         std::string arg = trim(argRaw);
-        if (sub.empty() || sub == "list")
-            return tryHandlePlugin(loc, msg, "plugin list").value_or(i18n_.tr(loc, "plugin.unavailable"));
-        if (sub == "on" || sub == "off")
-            return tryHandlePlugin(loc, msg, "plugin " + sub + " " + arg).value_or(i18n_.tr(loc, "plugin.unavailable"));
-        // Also accept the old ".mod <name> on/off" order.
-        auto [nameRaw, actionRaw] = splitCommand(a);
-        std::string action = toLower(trim(actionRaw));
-        if (action == "on" || action == "off")
-            return tryHandlePlugin(loc, msg, "plugin " + action + " " + trim(nameRaw)).value_or(i18n_.tr(loc, "plugin.unavailable"));
-        if (sub == "get" || sub == "info" || sub == "detail") {
-            if (arg.empty()) return tryHandlePlugin(loc, msg, "plugin list").value_or(i18n_.tr(loc, "plugin.unavailable"));
-            if (msg.type == MessageType::kPrivate || msg.targetId.empty()) return i18n_.tr(loc, "plugin.group_only");
-            if (!pluginProvider_) return i18n_.tr(loc, "plugin.unavailable");
-            auto plugins = pluginProvider_();
-            const PluginEntry* found = matchPlugin(plugins, arg);
-            if (!found) return i18n_.tr(loc, "plugin.not_found", {{"name", arg}});
-            const bool enabled = found->enabledGlobal && isPluginEnabledInGroup(msg.platform, msg.targetId, found->id, msg.adapterId);
-            return i18n_.tr(loc, "mod.info", {{"name", found->name}, {"id", found->id}, {"kind", found->kind},
-                {"state", i18n_.tr(loc, enabled ? "plugin.state.on" : "plugin.state.off")}});
+        auto mods = modProvider_();
+        auto findMod = [&](const std::string& query) -> const ModEntry* {
+            const std::string q = toLower(trim(query));
+            for (const auto& m : mods)
+                if (toLower(m.name) == q || (!m.title.empty() && toLower(m.title) == q)) return &m;
+            return nullptr;
+        };
+        if (sub.empty() || sub == "list") {
+            if (mods.empty()) return i18n_.tr(loc, "mod.empty");
+            std::string list;
+            for (size_t i = 0; i < mods.size(); ++i) {
+                const auto& m = mods[i];
+                if (!list.empty()) list += "\n";
+                list += std::to_string(i + 1) + ". " + (m.title.empty() || m.title == m.name
+                    ? m.name : m.title + "/" + m.name) + (m.enabled ? " √" : " ×");
+            }
+            return i18n_.tr(loc, "mod.list", {{"count", std::to_string(mods.size())}, {"list", list}});
         }
-        if (sub == "update" || sub == "reload" || sub == "del" || sub == "delete" || sub == "reinstall")
-            return i18n_.tr(loc, "mod.web_admin");
+
+        // 同时接受 `.mod on 名称` 与旧版 `.mod 名称 on`。
+        std::string action = sub, name = arg;
+        if (sub != "on" && sub != "off" && sub != "info" && sub != "detail"
+            && sub != "reload" && sub != "del" && sub != "delete"
+            && sub != "get" && sub != "update" && sub != "reinstall") {
+            auto [legacyActionRaw, unused] = splitCommand(arg);
+            (void)unused;
+            const std::string legacyAction = toLower(trim(legacyActionRaw));
+            if (legacyAction == "on" || legacyAction == "off") { action = legacyAction; name = trim(subRaw); }
+        }
+
+        if (action == "on" || action == "off" || action == "reload" || action == "del" || action == "delete") {
+            if (name.empty()) return i18n_.tr(loc, "mod.name_empty");
+            const ModEntry* found = findMod(name);
+            if (!found) return i18n_.tr(loc, "mod.not_found", {{"name", name}});
+            const std::string canonical = found->name;
+            if ((action == "on" && found->enabled) || (action == "off" && !found->enabled))
+                return i18n_.tr(loc, action == "on" ? "mod.already_on" : "mod.already_off", {{"name", found->title.empty() ? found->name : found->title}});
+            std::string error;
+            const std::string op = action == "del" ? "delete" : action;
+            if (!modAction_ || !modAction_(op, canonical, error))
+                return i18n_.tr(loc, "mod.failed", {{"name", canonical}, {"error", error.empty() ? "unknown" : error}});
+            const char* key = op == "on" ? "mod.enabled" : op == "off" ? "mod.disabled"
+                              : op == "reload" ? "mod.reloaded" : "mod.deleted";
+            return i18n_.tr(loc, key, {{"name", found->title.empty() ? found->name : found->title}});
+        }
+        if (action == "info" || action == "detail") {
+            if (name.empty()) return i18n_.tr(loc, "mod.name_empty");
+            const ModEntry* found = findMod(name);
+            if (!found) return i18n_.tr(loc, "mod.not_found", {{"name", name}});
+            std::string base = i18n_.tr(loc, "mod.info", {
+                {"name", found->title.empty() ? found->name : found->title}, {"id", found->name},
+                {"version", found->version.empty() ? "-" : found->version},
+                {"author", found->author.empty() ? "-" : found->author},
+                {"brief", found->brief.empty() ? "-" : found->brief},
+                {"state", i18n_.tr(loc, found->enabled ? "plugin.state.on" : "plugin.state.off")}});
+            if (action == "detail") base += "\n" + i18n_.tr(loc, "mod.detail", {
+                {"replies", std::to_string(found->replies)}, {"scripts", std::to_string(found->scripts)},
+                {"events", std::to_string(found->events)}, {"rules", found->ruleCompat ? "1" : "0"}});
+            return base;
+        }
+        if (action == "get" || action == "update" || action == "reinstall") return i18n_.tr(loc, "mod.web_admin");
         return i18n_.tr(loc, "mod.usage");
     }
 
@@ -11823,6 +11883,8 @@ private:
     HelpProviderFn helpProvider_;
     PluginListFn pluginProvider_;   // 
     PluginCommandClaimFn pluginCommandClaim_;
+    ModListFn modProvider_;
+    ModActionFn modAction_;
 
     // .rules 规则速查的懒加载缓存（rules/*.json）。mutable：在 const 查询里填充。
     mutable bool rulesLoaded_ = false;

@@ -96,6 +96,40 @@ public:
 };
 } // namespace
 
+TEST(LegacyMod, GlobalManagementIsNotTheGroupPluginSwitch) {
+    LegacyFixture f;
+    std::vector<CommandRouter::ModEntry> mods = {
+        {"demo", "Demo", "author", "1.0", "brief", true, false, true, 2, 3, 1}
+    };
+    std::vector<std::string> actions;
+    f.router.setModProvider([&]() { return mods; },
+        [&](const std::string& action, const std::string& name, std::string&) {
+            actions.push_back(action + ":" + name);
+            if (action == "off") mods[0].enabled = false;
+            if (action == "on") mods[0].enabled = true;
+            return true;
+        });
+    f.run(".mod off demo");  // Group admin is not a global mod administrator.
+    ASSERT_TRUE(actions.empty());
+    f.master();
+    f.run(".mod off demo");
+    ASSERT_EQ(actions.size(), static_cast<size_t>(1));
+    ASSERT_EQ(actions.back(), std::string("off:demo"));
+    ASSERT_FALSE(mods[0].enabled);
+    f.run(".mod Demo on");
+    ASSERT_EQ(actions.back(), std::string("on:demo"));
+    ASSERT_TRUE(mods[0].enabled);
+    const auto count = actions.size();
+    f.run(".mod on demo");
+    f.run(".mod off missing");
+    f.run(".mod get demo");
+    ASSERT_EQ(actions.size(), count);
+    f.run(".mod reload demo");
+    ASSERT_EQ(actions.back(), std::string("reload:demo"));
+    f.run(".mod del demo");
+    ASSERT_EQ(actions.back(), std::string("delete:demo"));
+}
+
 TEST(IdentityBind, EmailFlowBindsOnlyTheRequestingNativeIdentityOnAllSupportedPlatforms) {
     for (const auto* platform : {"qq_official", "discord", "kook"}) {
         std::string deliveredCode, recipient;

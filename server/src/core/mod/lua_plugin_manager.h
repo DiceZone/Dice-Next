@@ -2,9 +2,10 @@
 // ─── Dice!Next — Lua 插件子系统 ───────────────────────────────────
 // 嵌入 Lua，并提供模块目录与全局函数接口：
 //   data/mod/<模块名>/descriptor.json   模块元数据（title/ver/author/brief/helpdoc）
-//   data/mod/<模块名>/reply/*.lua        msg_reply 因果回复（阶段二）
+//   data/mod/<模块名>/reply/*.{lua,toml} msg_reply 因果回复
 //   data/mod/<模块名>/script/*.lua       loadLua 调用的函数脚本
 //   data/mod/<模块名>/speech/*.yaml      模板词条（阶段二）
+//   data/mod/<模块名>/event/*.lua        旧 Dice! 周期事件
 //
 // 阶段一（本轮）：引擎嵌入 + 模块发现(descriptor) + 核心 C API
 //   (log/ranint/getUserConf/setUserConf/getGroupConf/setGroupConf/getUserToday/
@@ -18,6 +19,7 @@
 #include <tuple>
 #include <mutex>
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <cstdint>
 #include <atomic>
@@ -72,6 +74,14 @@ public:
         groupGate_ = [f = std::move(f)](const std::string& p, const std::string& g,
                                       const std::string& id, const std::string&) { return f(p, g, id); };
     }
+    // 旧 Dice! TOML reply 的 rule="BRP" 等条件：仅在当前 .game 团务规则匹配时生效。
+    using RuleGateFn = std::function<bool(const std::string& platform, const std::string& group,
+                                          const std::string& user, const std::string& rule,
+                                          const std::string& adapterId)>;
+    void setRuleGate(RuleGateFn f) { ruleGate_ = std::move(f); }
+    // 旧 Dice! 模板的 {help:主题}：先查当前 Mod 的 helpdoc，再交给核心帮助系统。
+    using HelpLookupFn = std::function<std::optional<std::string>(const std::string& topic)>;
+    void setHelpLookup(HelpLookupFn f) { helpLookup_ = std::move(f); }
     // 原版 fmt->format：把 {key} 递归解析为 speech 别名/嵌套模板 / msg 变量 / 全局。
     std::string formatTemplate(const std::string& text,
                                const std::map<std::string, std::string>& vars, int depth = 0) const;
@@ -85,8 +95,9 @@ public:
         bool enabled = true;
         bool singleFile = false;   // 单文件 Lua 插件（msg_order 派发），非目录型 mod
         bool ruleCompat = false;   // 含 model/*.xml 属性模板 → 规则类（同 JS，在规则管理展示）
-        int replies = 0;        // reply/*.lua 数（目录）或 msg_order 条目数（单文件）
+        int replies = 0;        // reply/*.{lua,toml} 数（目录）或 msg_order 条目数（单文件）
         int scripts = 0;        // script/*.lua 数
+        int events = 0;         // 已注册的 event 条目数
         std::map<std::string, std::string> helpdoc;   // descriptor.json helpdoc{主题:文本}
         std::vector<std::string> permissions;   // descriptor 声明的能力（空=未声明）
         std::vector<std::string> risks;         // 静态预检命中的高危标签（仅告警不硬拦）
@@ -244,6 +255,8 @@ public:
     AsyncReplyFn asyncReply_;
     HttpFetchFn httpFetch_;
     GroupGateFn groupGate_;   // 分群启停 gate（地基）
+    RuleGateFn ruleGate_;     // 旧 TOML reply 的 rule 条件
+    HelpLookupFn helpLookup_; // {help:主题} 核心帮助查询桥
     CardLockFn  cardLockFn_;  // 卡片锁定桥接（真人物卡）
     PlayerCardReadFn playerCardRead_;
     PlayerCardWriteFn playerCardWrite_;
@@ -260,26 +273,39 @@ private:
     void registerGlobals();
     void openConfStore();
     int  loadDirLocked(const std::string& dir);
-    void loadModReplies(const LuaMod& mod);   // 载入 speech/*.yaml + reply/*.lua
+    void loadModReplies(LuaMod& mod);   // 载入 speech + reply(.lua/.toml) + event(.lua)
     void loadModFile(const std::filesystem::path& path, bool enabled);   // 单文件 Lua 插件（msg_order）
     std::string valueOf(const std::string& key,
                         const std::map<std::string, std::string>& vars, int depth) const;
 
-    // 一条 msg_reply 因果规则（来自 reply/*.lua）。
+    // 一条 msg_reply 因果规则（来自 reply/*.lua 或 reply/*.toml）。
     struct ReplyRule {
         std::string name, modName, modDir;
         std::vector<std::string> matchPatterns;    // keyword.match（精确等于）
         std::vector<std::string> prefixPatterns;   // keyword.prefix（前缀，余下为 suffix）
         std::vector<std::string> searchPatterns;   // keyword.search（包含即命中）
+        std::vector<std::string> regexPatterns;    // keyword.regex/Regex（正则）
         int cdUser = 0, cdGrp = 0;           // limit.cd（秒）
         int trustAtLeast = 0;                // limit.user_var.trust.at_least
+        std::map<std::string, std::string> userVarEquals;  // JSON-encoded typed conditions
+        std::map<std::string, std::string> groupVarEquals;
         bool groupOnly = false;              // limit.grp_id → 仅群聊
+        bool requiresGame = false;            // type="Game"：需已开团且发送者为参与者
+        std::string requiredRule;             // rule="BRP"：仅匹配该群规则
         int  echoRef = 0;                    // echo 为函数时的 registry 引用
         std::string echoScript;              // echo={lua="name"} 时的脚本名（跑 script/<name>.lua）
+        std::string staticEcho;               // TOML echo="..." 静态回复
         bool maySleep = false;                // 单文件源码使用 sleepTime → 以协程调用
         std::string legacySourceFile;         // data/plugin 单文件：每次调用重新执行源码
         std::string legacyFunctionName;       // msg_order 指向的全局函数名（位于独立 _ENV）
     };
+
+    struct LegacyCycleEvent {
+        std::string id, modName, modDir, actionLua;
+        double intervalSeconds = 0.0;
+    };
+    void scheduleCycleEvent(const std::string& id, bool runNow);
+    void runCycleEvent(const std::string& id, uint64_t generation);
 
     struct LegacyTask {
         std::string name, modName, modDir;
@@ -304,6 +330,7 @@ private:
     std::vector<LuaMod> mods_;
     std::map<std::string, std::string> speech_;   // 全局 speech 词条（各 mod 合并）
     std::vector<ReplyRule> replyRules_;
+    std::map<std::string, LegacyCycleEvent> cycleEvents_;
     std::map<std::string, LegacyTask> taskCalls_;
     std::unordered_map<int, PendingCoroutine> pendingCoroutines_;
     std::atomic<uint64_t> runtimeGeneration_{0};

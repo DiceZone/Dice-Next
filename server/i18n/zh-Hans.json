@@ -592,9 +592,22 @@
     "temp_tag": "(临时)"
   },
   "mod": {
-    "info": "插件 {name}（{kind}，{id}）：{state}",
-    "web_admin": "插件更新、重载、删除和重装请在 WebUI 的插件管理页操作。",
-    "usage": "扩展 .mod\n.mod list // 列出扩展\n.mod on|off <插件> // 启停扩展\n.mod info <插件> // 查看扩展信息"
+    "info": "模组 {name}（{id}）\n状态：{state}\n版本：{version}\n作者：{author}\n简介：{brief}",
+    "detail": "回复文件：{replies}，Lua 脚本：{scripts}，周期事件：{events}，规则资源：{rules}",
+    "list": "全局模组（{count}）：\n{list}",
+    "empty": "当前没有已安装的 Dice! 模组。",
+    "unavailable": "模组管理器尚未初始化。",
+    "name_empty": "请输入模组名。",
+    "not_found": "未找到模组「{name}」。",
+    "already_on": "模组「{name}」已经启用。",
+    "already_off": "模组「{name}」已经停用。",
+    "enabled": "已全局启用模组「{name}」。",
+    "disabled": "已全局停用模组「{name}」。",
+    "reloaded": "已重新加载模组「{name}」。",
+    "deleted": "已删除模组「{name}」。",
+    "failed": "操作模组「{name}」失败：{error}",
+    "web_admin": "远程获取、更新和重装尚未开放聊天指令，请在 WebUI 的模组管理页操作。",
+    "usage": "模组 .mod\n.mod list // 列出全局模组\n.mod on|off <模组> // 全局启停\n.mod info|detail <模组> // 查看信息\n.mod reload|del <模组> // 重载或删除"
   },
   "authorize": {
     "sent": "许可申请已发送给 Master。"
