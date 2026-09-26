@@ -27,6 +27,7 @@
 #include "../core/mod/js_plugin_manager.h"
 #include "../core/mod/lua_plugin_manager.h"
 #include "../core/command_router.h"
+#include "../core/help_entry_filter.h"
 #include "../core/identity/identity_binding.h"
 #include "../platform/system_info.h"
 #include "../i18n/i18n.h"
@@ -3358,13 +3359,15 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try { if (!req->getParameter("page").empty()) { int v = std::stoi(req->getParameter("page")); page = v < 1 ? 1 : v; } } catch (...) {}
         try { if (!req->getParameter("size").empty()) { int v = std::stoi(req->getParameter("size")); size = v < 1 ? 1 : (v > 200 ? 200 : v); } } catch (...) {}
 
-        struct E { std::string key, content, source, i18nKey; bool editable; };
+        const bool management = req->getParameter("management") == "1";
+        struct E { std::string key, content, source, i18nKey; bool editable, shadowed; };
         std::vector<E> all;
-        std::unordered_set<std::string> seenKeys;
+        dice::HelpEntryFilter visibility(management);
         auto add = [&](const std::string& k, const std::string& c, const std::string& src,
                        bool ed, const std::string& i18nKey) {
-            if (k.empty() || c.empty() || !seenKeys.insert(k).second) return;
-            all.push_back({k, c, src, i18nKey, ed});
+            const auto decision = visibility.add(k, c);
+            if (!decision.include) return;
+            all.push_back({k, c, src, i18nKey, ed, decision.shadowed});
         };
         for (const auto& t : CommandRouter::helpTopics())
             add(t, i18n.tr(loc, "help.topic." + t), "builtin", true, "help.topic." + t);
@@ -3398,6 +3401,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         for (int i = start; i < start + size && i < total; ++i) {
             const E& e = *filtered[(size_t)i];
             J o{{"key", e.key}, {"content", e.content}, {"source", e.source}, {"editable", e.editable}};
+            if (management) o["shadowed"] = e.shadowed;
             if (!e.i18nKey.empty()) o["i18nKey"] = e.i18nKey;
             arr.push_back(std::move(o));
         }
@@ -3410,11 +3414,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         Locale loc = localeFromString(lang);
         auto aLow = [](unsigned char c) -> char { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c; };
         std::string q = req->getParameter("q"); for (auto& ch : q) ch = aLow((unsigned char)ch);
+        const bool management = req->getParameter("management") == "1";
         struct E { std::string key, content, source; };
         std::vector<E> all;
-        std::unordered_set<std::string> seenKeys;
+        dice::HelpEntryFilter visibility(management);
         auto add = [&](const std::string& k, const std::string& c, const std::string& src) {
-            if (k.empty() || c.empty() || !seenKeys.insert(k).second) return;
+            if (!visibility.add(k, c).include) return;
             all.push_back({k, c, src});
         };
         for (const auto& t : CommandRouter::helpTopics()) add(t, i18n.tr(loc, "help.topic." + t), "builtin");
@@ -6108,12 +6113,15 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             std::string userId = j.value("userId", "");
             std::string groupId = j.value("groupId", "");
             std::string nick = j.value("nick", std::string("TestUser"));
-            auto result = causalMgr.matchAndExecute(msg, userId, groupId, nick, true);
+            auto result = j.contains("rule")
+                ? causalMgr.testDraft(dice::CausalRule::fromJSON(j.at("rule")), msg, userId, groupId, nick)
+                : causalMgr.matchAndExecute(msg, userId, groupId, nick, true);
             J data;
             data["matched"] = result.matched;
             data["reply"] = result.reply;
             data["ruleId"] = result.ruleId;
             data["ruleName"] = result.ruleName;
+            data["draftTested"] = j.contains("rule");
             auto changes = J::array();
             for (auto& cc : result.counterChanges) {
                 changes.push_back(J{{"name", cc.name}, {"oldValue", cc.oldValue}, {"newValue", cc.newValue}});

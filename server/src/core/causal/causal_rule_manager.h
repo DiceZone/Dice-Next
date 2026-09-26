@@ -128,6 +128,11 @@ public:
                                        const std::string& nick,
                                        bool dryRun = false);
 
+    /// Test only an unsaved draft; never persist it, trigger cooldowns or write counters.
+    CausalMatchResult testDraft(const CausalRule& rule, const std::string& msg,
+                               const std::string& userId, const std::string& groupId,
+                               const std::string& nick);
+
     /// List all rules（返回不可变快照——热重载随时可能换掉整个列表，
     /// 引用/指针会悬空，调用方持有 shared_ptr 即安全）。
     std::shared_ptr<const std::vector<CausalRule>> listRules() const { return snapshot(); }

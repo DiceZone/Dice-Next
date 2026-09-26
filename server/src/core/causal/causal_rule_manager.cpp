@@ -489,6 +489,19 @@ CausalMatchResult CausalRuleManager::matchAndExecute(const std::string& msg,
     return result;
 }
 
+CausalMatchResult CausalRuleManager::testDraft(const CausalRule& rule,
+        const std::string& msg, const std::string& userId,
+        const std::string& groupId, const std::string& nick) {
+    CausalMatchResult result;
+    if (!rule.enabled || !checkScope(rule, userId, groupId)
+        || !evalConditions(rule, msg, userId, groupId, true)) return result;
+    result.matched = true;
+    result.ruleId = rule.id;
+    result.ruleName = rule.name;
+    result.reply = executeActions(rule, msg, userId, groupId, nick, result.counterChanges, true);
+    return result;
+}
+
 bool CausalRuleManager::checkScope(const CausalRule& rule,
                                     const std::string& userId,
                                     const std::string& groupId) const {

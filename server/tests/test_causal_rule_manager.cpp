@@ -45,6 +45,56 @@ static CausalRule makeKeywordRule(const std::string& keyword, const std::string&
 
 // ─── Text Matching Tests ──────────────────────────────────────
 
+TEST(CausalDraft, UsesUnsavedRuleWithoutReplacingStoredRules) {
+    auto db = makeDb(); auto cfg = makeCfg();
+    CooldownManager cd; CounterStore counters(*db);
+    CausalRuleManager mgr(*db, *cfg, cd, counters);
+    auto saved = makeKeywordRule("hello", "saved reply");
+    const int id = mgr.addRule(saved);
+    auto draft = *mgr.getRuleById(id);
+    draft.conditions[0].content = "draft";
+    draft.actions[0].replies = {"unsaved reply"};
+    ASSERT_FALSE(mgr.testDraft(draft, "hello", "u", "g", "Nick").matched);
+    ASSERT_EQ(mgr.testDraft(draft, "draft", "u", "g", "Nick").reply, "unsaved reply");
+    ASSERT_EQ(mgr.matchAndExecute("hello", "u", "g", "Nick", true).reply, "saved reply");
+    ASSERT_FALSE(mgr.matchAndExecute("draft", "u", "g", "Nick", true).matched);
+    ASSERT_EQ((int)mgr.listRules()->size(), 1);
+}
+
+TEST(CausalDraft, ChecksEnabledStateAndUserGroupContext) {
+    auto db = makeDb(); auto cfg = makeCfg();
+    CooldownManager cd; CounterStore counters(*db);
+    CausalRuleManager mgr(*db, *cfg, cd, counters);
+    auto draft = makeKeywordRule("hello", "draft");
+    draft.scope = "group"; draft.scopeIds = {"allowed"};
+    ASSERT_FALSE(mgr.testDraft(draft, "hello", "u", "", "Nick").matched);
+    ASSERT_FALSE(mgr.testDraft(draft, "hello", "u", "other", "Nick").matched);
+    ASSERT_TRUE(mgr.testDraft(draft, "hello", "u", "allowed", "Nick").matched);
+    draft.enabled = false;
+    ASSERT_FALSE(mgr.testDraft(draft, "hello", "u", "allowed", "Nick").matched);
+    ASSERT_TRUE(mgr.listRules()->empty());
+}
+
+TEST(CausalDraft, NeverWritesCountersOrStartsCooldown) {
+    auto db = makeDb(); auto cfg = makeCfg();
+    CooldownManager cd; CounterStore counters(*db);
+    CausalRuleManager mgr(*db, *cfg, cd, counters);
+    auto rule = makeKeywordRule("hello", "count {counter:visits}");
+    rule.cooldownMs = 60000;
+    CausalAction add; add.type = CausalActionType::CounterAdd;
+    add.counterName = "visits"; add.counterScope = "per-user"; add.counterDelta = 1;
+    rule.actions.insert(rule.actions.begin(), add);
+    const int id = mgr.addRule(rule);
+    auto draft = *mgr.getRuleById(id);
+    ASSERT_EQ(mgr.testDraft(draft, "hello", "u", "g", "Nick").reply, "count 1");
+    ASSERT_TRUE(counters.listAll().empty());
+    ASSERT_EQ(mgr.testDraft(draft, "hello", "u", "g", "Nick").reply, "count 1");
+    ASSERT_EQ(mgr.matchAndExecute("hello", "u", "g", "Nick").reply, "count 1");
+    ASSERT_FALSE(mgr.matchAndExecute("hello", "u", "g", "Nick").matched);
+    ASSERT_EQ(mgr.testDraft(draft, "hello", "u", "g", "Nick").reply, "count 2");
+    ASSERT_EQ((int)counters.listAll().size(), 1);
+}
+
 TEST(CausalMatch, KeywordExactMatch) {
     auto db = makeDb();
     auto cfg = makeCfg();
