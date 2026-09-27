@@ -3837,7 +3837,9 @@ static int realMain(int argc, char* argv[]) {
     };
     auto deckFileHandler = [&cardDeck, resolveDeckPath](const drogon::HttpRequestPtr& req,
         std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
-        nlohmann::json out;
+        // The successful GET path checks out.value() before assigning fields.
+        // A default-constructed JSON is null, on which value() throws.
+        nlohmann::json out = nlohmann::json::object();
         try {
             if (req->method() == drogon::Get) {
                 auto n = req->getParameter("name");
