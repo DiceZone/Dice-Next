@@ -18,6 +18,92 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  backend-tests:
+    name: Backend tests (${{ matrix.os }})
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Windows
+            runner: windows-2022
+            triplet: x64-windows
+          - os: Linux
+            runner: ubuntu-24.04
+            triplet: x64-linux-dynamic
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: main
+      - name: Checkout expression engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for repo in onedice-cpp-lib dicescript-c-lib; do
+            for attempt in 1 2 3; do
+              if git clone --depth 1 "https://github.com/DiceZone/${repo}.git" "$repo"; then break; fi
+              if [ "$attempt" = 3 ]; then exit 1; fi
+              sleep 15
+            done
+            [ -d "$repo/.git" ] || exit 1
+          done
+      - name: Test cache snapshot logic
+        shell: bash
+        working-directory: main
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          "$py" -m unittest discover -s .github/scripts -p 'test_*.py' -v
+      - name: Install build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git curl zip unzip tar pkg-config libssl-dev libsqlite3-dev
+      - name: Prepare dependencies
+        uses: ./main/.github/actions/setup-vcpkg
+        with:
+          triplet: ${{ matrix.triplet }}
+          baseline: ${{ env.VCPKG_BASELINE }}
+      - name: Configure tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: main
+        run: |
+          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DDICENEXT_MSVC_COMPILE_PROCESSES=2 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$env:VCPKG_ROOT/installed"
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
+      - name: Configure tests (Linux)
+        if: runner.os == 'Linux'
+        working-directory: main
+        run: |
+          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
+      - name: Compile tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: main
+        run: |
+          cmake --build server/build --config Release --target dice-next-tests --parallel 1
+          if ($LASTEXITCODE -ne 0) { throw 'Test build failed' }
+      - name: Compile tests (Linux)
+        if: runner.os == 'Linux'
+        working-directory: main
+        run: cmake --build server/build --target dice-next-tests --parallel 2
+      - name: Run backend tests
+        shell: bash
+        working-directory: main
+        run: ctest --test-dir server/build -C Release --output-on-failure --no-tests=error --parallel 1 --timeout 900
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-diagnostics-${{ matrix.os }}
+          path: |
+            main/server/build/Testing/Temporary/
+            main/server/build/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+
   webui:
     name: WebUI
     runs-on: ubuntu-latest
@@ -113,39 +199,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake git curl zip unzip tar pkg-config libssl-dev libsqlite3-dev
-      - name: Restore vcpkg cache
-        uses: actions/cache@v4
+      - name: Prepare dependencies
+        uses: ./main/.github/actions/setup-vcpkg
         with:
-          path: |
-            vcpkg
-            vcpkg-cache
-          key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ env.VCPKG_BASELINE }}-${{ hashFiles('main/server/vcpkg.json') }}
-      - name: Build server
+          triplet: ${{ matrix.triplet }}
+          baseline: ${{ env.VCPKG_BASELINE }}
+      - name: Configure release
         working-directory: main
-        env:
-          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
-          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
         run: |
-          set -euo pipefail
-          # 用系统工具从源码构建 vcpkg，避免下载预编译二进制（vcpkg-glibc 偶发网络失败）
-          export VCPKG_FORCE_SYSTEM_BINARIES=1
-          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
-          if [ ! -d "$VCPKG_ROOT/.git" ]; then git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"; fi
-          git -C "$VCPKG_ROOT" fetch --depth=1 origin "$VCPKG_BASELINE"
-          git -C "$VCPKG_ROOT" checkout --detach "$VCPKG_BASELINE"
-          "$VCPKG_ROOT/bootstrap-vcpkg.sh"
-          retry_count=0
-          until "$VCPKG_ROOT/vcpkg" install --x-manifest-root=server --x-install-root="$VCPKG_ROOT/installed" --triplet=${{ matrix.triplet }}; do
-            retry_count=$((retry_count + 1))
-            if [ "$retry_count" -ge 3 ]; then
-              echo "vcpkg install failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "vcpkg install failed (attempt $retry_count), retrying in 15s" >&2
-            sleep 15
-          done
-          cmake -S server -B server/${{ matrix.build_dir }} -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
-          cmake --build server/${{ matrix.build_dir }} --parallel "$(nproc)"
+          cmake -S server -B server/${{ matrix.build_dir }} -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
+      - name: Compile release
+        working-directory: main
+        run: cmake --build server/${{ matrix.build_dir }} --parallel "$(nproc)"
       - name: Package
         working-directory: main
         env:
@@ -237,67 +302,23 @@ jobs:
           done
           [ -d docs/.git ] || { echo "Dice-Next-Doc clone failed after 3 attempts" >&2; exit 1; }
 
-      - name: Restore vcpkg cache
-        uses: actions/cache@v4
+      - name: Prepare dependencies
+        uses: ./main/.github/actions/setup-vcpkg
         with:
-          path: |
-            vcpkg
-            vcpkg-cache
-          key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ env.VCPKG_BASELINE }}-${{ hashFiles('main/server/vcpkg.json') }}
-      - name: Build server
+          triplet: ${{ matrix.triplet }}
+          baseline: ${{ env.VCPKG_BASELINE }}
+      - name: Configure release
         shell: pwsh
         working-directory: main
         run: |
-          $ErrorActionPreference = 'Stop'
-          $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:GITHUB_WORKSPACE 'vcpkg-cache'
-          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
-          $vcpkg = Join-Path $env:GITHUB_WORKSPACE 'vcpkg'
-          if (-not (Test-Path (Join-Path $vcpkg '.git'))) { git clone https://github.com/microsoft/vcpkg.git $vcpkg }
-          git -C $vcpkg fetch --depth 1 origin $env:VCPKG_BASELINE
-          if ($LASTEXITCODE -ne 0) { throw 'vcpkg baseline fetch failed' }
-          git -C $vcpkg checkout --detach $env:VCPKG_BASELINE
-          if ($LASTEXITCODE -ne 0) { throw 'vcpkg baseline checkout failed' }
-          $env:VCPKG_FORCE_SYSTEM_BINARIES = '1'   # 从源码构建，避免下载预编译二进制
-          # Windows bootstrap must download vcpkg.exe; pre-fetch with robust retries (GitHub CDN is flaky).
-          $vcpkgExe = Join-Path $vcpkg 'vcpkg.exe'
-          if (-not (Test-Path $vcpkgExe)) {
-            $vcpkgDownloadUrls = @(
-              'https://github.com/microsoft/vcpkg-tool/releases/download/2026-05-27/vcpkg.exe',
-              'https://github.com/microsoft/vcpkg-tool/releases/latest/download/vcpkg.exe'
-            )
-            $vcpkgDownloaded = $false
-            foreach ($vcpkgUrl in $vcpkgDownloadUrls) {
-              for ($attempt = 1; $attempt -le 8 -and -not $vcpkgDownloaded; $attempt++) {
-                Write-Host "Downloading vcpkg.exe (attempt $attempt): $vcpkgUrl"
-                & curl.exe -L --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 -o $vcpkgExe $vcpkgUrl
-                if ($LASTEXITCODE -eq 0 -and (Test-Path $vcpkgExe) -and ((Get-Item $vcpkgExe).Length -gt 1MB)) {
-                  $vcpkgDownloaded = $true
-                } else {
-                  Remove-Item $vcpkgExe -Force -ErrorAction SilentlyContinue
-                  Start-Sleep -Seconds 10
-                }
-              }
-            }
-            if (-not $vcpkgDownloaded) { Write-Host 'pre-download vcpkg.exe failed, falling back to bootstrap download' }
-          }
-          $bootstrapAttempt = 0
-          do {
-            $bootstrapAttempt++
-            & (Join-Path $vcpkg 'bootstrap-vcpkg.bat')
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($bootstrapAttempt -ge 3) { throw 'vcpkg bootstrap failed' }
-            Write-Host "vcpkg bootstrap failed (attempt $bootstrapAttempt), retrying in 15s"
-            Start-Sleep -Seconds 15
-          } while ($true)
-          for ($vcpkgInstallAttempt = 1; $vcpkgInstallAttempt -le 3; $vcpkgInstallAttempt++) {
-            & (Join-Path $vcpkg 'vcpkg.exe') install --x-manifest-root=server --x-install-root="$vcpkg/installed" --triplet=${{ matrix.triplet }}
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($vcpkgInstallAttempt -lt 3) { Write-Host "vcpkg install failed (attempt $vcpkgInstallAttempt), retrying in 15s"; Start-Sleep -Seconds 15 }
-          }
-          if ($LASTEXITCODE -ne 0) { throw 'vcpkg install failed' }
-          cmake -S server -B server/${{ matrix.build_dir }} -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$vcpkg/installed"
+          cmake -S server -B server/${{ matrix.build_dir }} -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DDICENEXT_MSVC_COMPILE_PROCESSES=2 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$env:VCPKG_ROOT/installed"
           if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
-          cmake --build server/${{ matrix.build_dir }} --config Release --parallel
+      - name: Compile release
+        shell: pwsh
+        working-directory: main
+        run: |
+          # One MSBuild project x two compiler processes bounds peak memory usage.
+          cmake --build server/${{ matrix.build_dir }} --config Release --parallel 1
           if ($LASTEXITCODE -ne 0) { throw 'CMake build failed' }
       - name: Package
         shell: pwsh
@@ -375,39 +396,18 @@ jobs:
             sleep 15
           done
           [ -d docs/.git ] || { echo "Dice-Next-Doc clone failed after 3 attempts" >&2; exit 1; }
-      - name: Restore vcpkg cache
-        uses: actions/cache@v4
+      - name: Prepare dependencies
+        uses: ./main/.github/actions/setup-vcpkg
         with:
-          path: |
-            vcpkg
-            vcpkg-cache
-          key: vcpkg-${{ runner.os }}-arm64-osx-static-${{ env.VCPKG_BASELINE }}-${{ hashFiles('main/server/vcpkg.json') }}
-      - name: Build server
+          triplet: arm64-osx
+          baseline: ${{ env.VCPKG_BASELINE }}
+      - name: Configure release
         working-directory: main
-        env:
-          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
-          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
         run: |
-          set -euo pipefail
-          # 用系统工具从源码构建 vcpkg，避免下载预编译二进制（vcpkg-glibc 偶发网络失败）
-          export VCPKG_FORCE_SYSTEM_BINARIES=1
-          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
-          if [ ! -d "$VCPKG_ROOT/.git" ]; then git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"; fi
-          git -C "$VCPKG_ROOT" fetch --depth=1 origin "$VCPKG_BASELINE"
-          git -C "$VCPKG_ROOT" checkout --detach "$VCPKG_BASELINE"
-          "$VCPKG_ROOT/bootstrap-vcpkg.sh"
-          retry_count=0
-          until "$VCPKG_ROOT/vcpkg" install --x-manifest-root=server --x-install-root="$VCPKG_ROOT/installed" --triplet=arm64-osx; do
-            retry_count=$((retry_count + 1))
-            if [ "$retry_count" -ge 3 ]; then
-              echo "vcpkg install failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "vcpkg install failed (attempt $retry_count), retrying in 15s" >&2
-            sleep 15
-          done
-          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=arm64-osx -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
-          cmake --build server/build --parallel "$(sysctl -n hw.ncpu)"
+          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=arm64-osx -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
+      - name: Compile release
+        working-directory: main
+        run: cmake --build server/build --parallel "$(sysctl -n hw.ncpu)"
       - name: Package
         working-directory: main
         env:
@@ -434,7 +434,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [linux, windows, macos-arm64]
+    needs: [linux, windows, macos-arm64, backend-tests]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

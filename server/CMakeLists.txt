@@ -6,6 +6,18 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Bound compiler concurrency separately from MSBuild project concurrency.
+set(DICENEXT_MSVC_COMPILE_PROCESSES "0" CACHE STRING "MSVC processes per target (0 disables /MP)")
+if(NOT DICENEXT_MSVC_COMPILE_PROCESSES MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "DICENEXT_MSVC_COMPILE_PROCESSES must be a non-negative integer")
+endif()
+function(dicenext_compile_parallelism target)
+    if(MSVC AND DICENEXT_MSVC_COMPILE_PROCESSES GREATER 0)
+        target_compile_options(${target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:C,CXX>:/MP${DICENEXT_MSVC_COMPILE_PROCESSES}>")
+    endif()
+endfunction()
+
 # ─── vcpkg Toolchain ─────────────────────────────────────────
 # Set CMAKE_TOOLCHAIN_FILE to vcpkg.cmake before configuring,
 # or use: cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake
@@ -134,6 +146,7 @@ add_custom_target(prepare_version ALL
 # ─── Executable Target ───────────────────────────────────────
 
 add_executable(dice-next-server ${SOURCES} ${VERSION_BUILD_SOURCE})
+dicenext_compile_parallelism(dice-next-server)
 add_dependencies(dice-next-server prepare_version)
 # Keep the build value in a generated .cpp rather than a generated header.
 # Visual Studio reliably recompiles a source file produced by a dependency
@@ -235,5 +248,7 @@ endif()
 install(TARGETS dice-next-server DESTINATION bin)
 
 # ─── Tests ───────────────────────────────────────────────────
-enable_testing()
-add_subdirectory(tests)
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

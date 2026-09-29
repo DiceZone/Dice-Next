@@ -1,0 +1,97 @@
+name: Prepare cached vcpkg dependencies
+description: Restore ABI-keyed binary packages and save new packages before compiling the application.
+inputs:
+  triplet:
+    description: Target vcpkg triplet
+    required: true
+  baseline:
+    description: Pinned vcpkg repository commit
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Identify dependency cache
+      id: identity
+      shell: bash
+      env:
+        CACHE_FAMILY: vcpkg-bin-v3-${{ runner.os }}-${{ runner.arch }}-${{ inputs.triplet }}-${{ inputs.baseline }}-${{ hashFiles('main/server/vcpkg.json', 'main/.github/actions/setup-vcpkg/action.yml') }}
+      run: |
+        set -euo pipefail
+        : "${ImageVersion:?Hosted runner ImageVersion is required}"
+        image="${ImageOS:-$RUNNER_OS}-${ImageVersion}"
+        echo "family=${CACHE_FAMILY}-" >> "$GITHUB_OUTPUT"
+        echo "prefix=${CACHE_FAMILY}-${image}-" >> "$GITHUB_OUTPUT"
+        echo "key=${CACHE_FAMILY}-${image}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}" >> "$GITHUB_OUTPUT"
+        echo "VCPKG_ROOT=${{ github.workspace }}/vcpkg" >> "$GITHUB_ENV"
+        echo "VCPKG_DEFAULT_BINARY_CACHE=${{ github.workspace }}/vcpkg-cache" >> "$GITHUB_ENV"
+        echo "Dependency cache environment: ${image}; triplet=${{ inputs.triplet }}"
+    - name: Restore binary packages
+      id: cache
+      uses: actions/cache/restore@v4
+      with:
+        path: vcpkg-cache
+        key: ${{ steps.identity.outputs.key }}
+        restore-keys: |
+          ${{ steps.identity.outputs.prefix }}
+          ${{ steps.identity.outputs.family }}
+    - name: Snapshot restored packages
+      id: before
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+        "$py" "$GITHUB_ACTION_PATH/../../scripts/cache-snapshot.py" "$VCPKG_DEFAULT_BINARY_CACHE" >> "$GITHUB_OUTPUT"
+    - name: Checkout pinned vcpkg
+      uses: actions/checkout@v4
+      with:
+        repository: microsoft/vcpkg
+        ref: ${{ inputs.baseline }}
+        path: vcpkg
+        persist-credentials: false
+    - name: Install dependencies (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        export VCPKG_FORCE_SYSTEM_BINARIES=1
+        mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+        "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+        for attempt in 1 2 3; do
+          if "$VCPKG_ROOT/vcpkg" install --x-manifest-root="${{ github.workspace }}/main/server" --x-install-root="$VCPKG_ROOT/installed" --triplet=${{ inputs.triplet }}; then
+            exit 0
+          fi
+          if [ "$attempt" -lt 3 ]; then sleep 15; fi
+        done
+        exit 1
+    - name: Install dependencies (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+        # Bootstrap selects the tool version pinned by this vcpkg checkout.
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+          & "$env:VCPKG_ROOT/bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -eq 0) { break }
+          if ($attempt -eq 3) { throw 'vcpkg bootstrap failed' }
+          Start-Sleep -Seconds 15
+        }
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+          & "$env:VCPKG_ROOT/vcpkg.exe" install --x-manifest-root="${{ github.workspace }}/main/server" --x-install-root="$env:VCPKG_ROOT/installed" --triplet=${{ inputs.triplet }}
+          if ($LASTEXITCODE -eq 0) { break }
+          if ($attempt -eq 3) { throw 'vcpkg install failed' }
+          Start-Sleep -Seconds 15
+        }
+    - name: Snapshot installed packages
+      id: after
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+        "$py" "$GITHUB_ACTION_PATH/../../scripts/cache-snapshot.py" "$VCPKG_DEFAULT_BINARY_CACHE" >> "$GITHUB_OUTPUT"
+    - name: Save refreshed binary packages
+      if: steps.before.outputs.digest != steps.after.outputs.digest || !startsWith(steps.cache.outputs.cache-matched-key, steps.identity.outputs.prefix)
+      uses: actions/cache/save@v4
+      with:
+        path: vcpkg-cache
+        key: ${{ steps.identity.outputs.key }}
