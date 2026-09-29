@@ -46,6 +46,9 @@ runs:
       with:
         repository: microsoft/vcpkg
         ref: ${{ inputs.baseline }}
+        # Version overrides need historical port trees (e.g. Lua 5.4.8),
+        # which are absent from checkout's default shallow clone.
+        fetch-depth: 0
         path: vcpkg
         persist-credentials: false
     - name: Install dependencies (Unix)
