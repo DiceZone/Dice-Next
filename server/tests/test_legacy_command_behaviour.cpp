@@ -211,7 +211,11 @@ TEST(PersonaPermission, PrivateSelectionIsPersonalAndNeverChangesGlobalPersona) 
     ASSERT_EQ(f.cfg.get<int>("persona/global", 0), 0);
     ASSERT_TRUE(f.run(".rpmode").find("私聊人格") != std::string::npos);
 
-    ASSERT_TRUE(f.run(".rpmode inherit").find("基础") != std::string::npos);
+    const auto defaultName = f.i18n.tr(Locale::kZhHans, "persona.default_name");
+    ASSERT_EQ(f.run(".rpmode inherit"),
+        f.i18n.tr(Locale::kZhHans, "persona.inherit", {{"name", defaultName}}));
+    ASSERT_TRUE(f.run(".rpmode").find(defaultName) != std::string::npos);
+    ASSERT_TRUE(f.run(".rpmode").find("私聊人格") == std::string::npos);
     ASSERT_EQ(f.cfg.get<int>("persona/global", 0), 0);
 }
 
