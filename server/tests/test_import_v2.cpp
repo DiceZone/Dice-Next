@@ -304,6 +304,31 @@ TEST(ImportReplies, LegacyDeckAnswerRetainsAndUsesNumericWeight) {
     cleanupTempDir(root);
 }
 
+TEST(ImportReplies, ScopedRulesDoNotSuppressOrGetReplacedByLegacyGlobalImports) {
+    const auto root = makeTempDir("reply_channel_scope");
+    {
+        Database db; ASSERT_TRUE(db.open((root / "test.db").string()));
+        ConfigManager cfg((root / "config").string()); cfg.resetDefault();
+        ReplyManager replies(db, cfg);
+        ReplyRule scoped;
+        scoped.conditions = {{MatchType::kKeyword, "hello"}};
+        scoped.results = {"你好"}; scoped.resultWeights = {1}; scoped.priority = 100;
+        scoped.channelScope = "account"; scoped.channelTarget = "bot:A";
+        const int scopedId = replies.addRule(scoped);
+        ASSERT_TRUE(scopedId > 0);
+        std::ofstream(root / "CustomMsgReply.json") << R"({"旧规则":{"match":["hello"],"answer":["你好"]}})";
+        ASSERT_EQ(importReplies(replies, root), 1);
+        ASSERT_EQ(replies.listRules()->size(), size_t(2));
+        ASSERT_EQ(importReplies(replies, root), 0);
+        ASSERT_EQ(replies.listRules()->size(), size_t(2));
+        const auto row = db.getStorage()->get<ReplyRuleRow>(scopedId);
+        ASSERT_EQ(row.channelScope, std::string("account")); ASSERT_EQ(row.channelTarget, std::string("bot:A"));
+        const auto picked = replies.pickReply("hello", {"onebot_v11", "g", "u", "bot:B"}, false);
+        ASSERT_TRUE(picked.rule.has_value()); ASSERT_EQ(picked.rule->channelScope, std::string("global"));
+    }
+    cleanupTempDir(root);
+}
+
 TEST(ReplyReferenceMigration, ConvertsUniqueReferencesWithoutEvaluatingOrTouchingVariables) {
     using namespace legacy_reply_references;
     Catalog catalog{{"牌堆"}, {"词条"}, {"strHello"}, {}};

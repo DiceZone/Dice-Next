@@ -1088,7 +1088,7 @@ static int realMain(int argc, char* argv[]) {
         }
         // 普通自定义回复（完整触发管线：匹配→范围→冷却→日限→概率）。
         if (reply.empty() && repliesOn) {
-            dice::ReplyCtx rctx{m.platform, pv ? "" : m.targetId, m.senderId};
+            dice::ReplyCtx rctx{m.platform, pv ? "" : m.targetId, m.senderId, m.adapterId};
             auto pk = replyManager.pickReply(m.content, rctx);
             if (pk.rule) {
                 reply = cmdRouter.renderReply(m, replyManager.pickResult(*pk.rule),
@@ -2333,7 +2333,7 @@ static int realMain(int argc, char* argv[]) {
             const auto rule = dice::reply_definition::replyRuleFromJson(definition);
             const auto key = "poke|" + e.adapterId + "|" +
                 std::to_string(std::hash<std::string>{}(definition.dump())) + "|";
-            dice::ReplyCtx ctx{pm.platform, pv ? "" : pm.targetId, pm.senderId};
+            dice::ReplyCtx ctx{pm.platform, pv ? "" : pm.targetId, pm.senderId, pm.adapterId};
             const auto pick = replyManager.pickEventReply(rule, ctx, key);
             const auto style = a->effectivePresentationStyle();
             dice::ContentFormat preferred = a->preferredReplyFormat(pm);
@@ -3074,6 +3074,7 @@ static int realMain(int argc, char* argv[]) {
                 dice::Message msg;
                 msg.id = "reply-test";
                 msg.platform = body.value("platform", std::string("onebot_v11"));
+                msg.adapterId = body.value("adapterId", std::string());
                 msg.content = text; msg.rawContent = text; msg.displayContent = text;
                 msg.senderId = body.value("userId", std::string("10001"));
                 msg.senderName = body.value("nickname", std::string("\xe6\xb5\x8b\xe8\xaf\x95\xe5\x91\x98"));
@@ -3081,14 +3082,21 @@ static int realMain(int argc, char* argv[]) {
                 msg.type = gid.empty() ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
                 msg.targetId = gid.empty() ? msg.senderId : gid;
 
-                auto candidates = replyManager.matchMessage(text);
+                dice::ReplyCtx rctx{msg.platform, gid, msg.senderId, msg.adapterId};
+                // Global editing previews only global definitions; channel
+                // previews include applicable global/platform/account rules.
+                // Keep the renderer's real/default platform intact.
+                const auto previewScope = body.value("scope", std::string());
+                if (previewScope == "global") { rctx.platform.clear(); rctx.adapterId.clear(); }
+                else if (!previewScope.empty() && previewScope != "adapter" && previewScope != "account")
+                    throw std::invalid_argument("invalid reply preview scope");
+                auto candidates = replyManager.matchMessage(text, rctx);
                 nlohmann::json cand = nlohmann::json::array();
                 for (auto& r : candidates)
                     cand.push_back({{"id", r.id}, {"priority", r.priority},
                                     {"matchType", dice::matchTypeToString(r.matchType)},
                                     {"matchContent", r.matchContent},
                                     {"prob", r.prob}, {"cooldownSec", r.cooldownSec}});
-                dice::ReplyCtx rctx{msg.platform, gid, msg.senderId};
                 auto pk = replyManager.pickReply(text, rctx, /*commit=*/false);
                 nlohmann::json skipped = nlohmann::json::array();
                 for (auto& s : pk.skipped) skipped.push_back({{"id", s.id}, {"reason", s.reason}});

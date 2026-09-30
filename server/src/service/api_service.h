@@ -111,6 +111,8 @@ static MatchType matchTypeFromStr(const std::string& mt) {
 // (conditions[]/logic/results[]) and falls back to the legacy single fields.
 static ReplyRule replyRuleFromJson(const J& j) {
     ReplyRule rule;
+    rule.channelScope = j.value("channelScope", std::string("global"));
+    rule.channelTarget = j.value("channelTarget", std::string());
     rule.priority = j.value("priority", 100);
     rule.enabled  = j.value("enabled", true);
     rule.logic    = j.value("logic", std::string("or")) == "and" ? "and" : "or";
@@ -145,6 +147,7 @@ static ReplyRule replyRuleFromJson(const J& j) {
 
 // 保存前校验规则（返回空串=通过）。正则写错以前会静默存库，变成永不命中的死规则。
 static std::string replyRuleValidate(const ReplyRule& rule) {
+    if (auto error = reply_channel_scope::validate(rule.channelScope, rule.channelTarget); !error.empty()) return error;
     if (auto error = reply_definition::validateWeights(rule); !error.empty()) return error;
     for (const auto& c : rule.conditions) {
         if (c.type == MatchType::kRegex) {
@@ -348,6 +351,8 @@ static J replyToJson(const ReplyRuleRow& r) {
         {"dayLimitNotice", r.dayLimitNotice},
         {"scopeUsersMode", r.scopeUsersMode},
         {"scopeUsers", r.scopeUsers},
+        {"channelScope", r.channelScope},
+        {"channelTarget", r.channelTarget},
         {"createdAt", r.createdAt.empty() ? "2026-06-14T00:00:00.000Z" : r.createdAt},
         {"updatedAt", r.updatedAt.empty() ? "2026-06-14T00:00:00.000Z" : r.updatedAt}
     };
@@ -3808,8 +3813,22 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (req->method() == drogon::Get) {
                 auto rows = st->get_all<ReplyRuleRow>(orm::order_by(&ReplyRuleRow::priority));
                 J arr = J::array();
-                for (auto& r : rows) arr.push_back(replyToJson(r));
-                jsonReply(ok(arr), std::move(cb));
+                const auto scope = req->getParameter("scope");
+                const auto target = req->getParameter("target");
+                // Unfiltered calls retain the old all-rules API contract. The
+                // WebUI requests an editable collection, not inherited rows.
+                if (!scope.empty()) {
+                    if (auto err = reply_channel_scope::validate(scope, target); !err.empty()) {
+                        jsonReply(fail(err), std::move(cb)); return;
+                    }
+                }
+                for (auto& r : rows) {
+                    if (!scope.empty() && (r.channelScope != scope || r.channelTarget != target)) continue;
+                    arr.push_back(replyToJson(r));
+                }
+                auto result = ok(arr);
+                if (!scope.empty()) result["replyScope"] = {{"scope", scope}, {"target", target}};
+                jsonReply(result, std::move(cb));
             } else if (req->method() == drogon::Post) {
                 auto j = J::parse(req->body());
                 ReplyRule rule = replyRuleFromJson(j);

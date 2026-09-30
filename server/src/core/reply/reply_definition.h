@@ -1,6 +1,7 @@
 #pragma once
 
 #include "reply_manager.h"
+#include "reply_channel_scope.h"
 #include "../../common/weighted_reply.h"
 #include <algorithm>
 #include <stdexcept>
@@ -72,6 +73,8 @@ inline MatchType matchTypeFromStr(const std::string& type) {
 
 inline ReplyRule replyRuleFromJson(const json& body) {
     ReplyRule rule;
+    rule.channelScope = body.value("channelScope", std::string("global"));
+    rule.channelTarget = body.value("channelTarget", std::string());
     rule.priority = body.value("priority", 100);
     rule.enabled = body.value("enabled", true);
     rule.logic = body.value("logic", std::string("or")) == "and" ? "and" : "or";
@@ -100,6 +103,7 @@ inline ReplyRule replyRuleFromJson(const json& body) {
 }
 
 inline std::string replyRuleValidate(const ReplyRule& rule, bool eventTrigger = false) {
+    if (auto error = reply_channel_scope::validate(rule.channelScope, rule.channelTarget); !error.empty()) return error;
     if (auto error = validateWeights(rule); !error.empty()) return error;
     if (!eventTrigger && (rule.conditions.empty() || rule.conditions.front().content.empty())) return "match content required";
     for (const auto& condition : rule.conditions) if (condition.type == MatchType::kRegex) {

@@ -53,6 +53,8 @@ struct ReplyRule {
     std::string dayLimitNotice;  // 达到日限回这句（空=沉默跳过）
     std::string scopeUsersMode;  // ""=不限 | "allow"=仅列表内用户 | "deny"=排除列表内用户
     std::string scopeUsers;      // 逗号分隔用户ID
+    std::string channelScope = "global";
+    std::string channelTarget;
 
     json toJSON() const {
         json j;
@@ -80,6 +82,8 @@ struct ReplyRule {
         j["day_limit_notice"] = dayLimitNotice;
         j["scope_users_mode"] = scopeUsersMode;
         j["scope_users"]      = scopeUsers;
+        j["channel_scope"]    = channelScope;
+        j["channel_target"]   = channelTarget;
         return j;
     }
 };
@@ -89,6 +93,7 @@ struct ReplyCtx {
     std::string platform;
     std::string groupId;
     std::string userId;
+    std::string adapterId;
 };
 
 /// pickReply 的结果：选中的规则（拷贝，matchContent/matchType 已换成实际命中的
@@ -162,6 +167,7 @@ public:
      * @brief Find all reply rules that match the given message.
      *
      * Rules are sorted by priority (descending), ties broken by
+     * channel specificity (account > adapter > global), then
      * match-mode specificity (keyword > prefix > search > regex,
      * 对齐原版 Match→Prefix→Search→Regex 的隐式次序), then id.
      * Only enabled rules are considered. 纯文本匹配——不看
@@ -171,6 +177,9 @@ public:
      * @return Vector of matching ReplyRule (may be empty).
      */
     std::vector<ReplyRule> matchMessage(const std::string& msg) const;
+    /// Candidates applicable to this channel; group/user limits are still
+    /// reported separately by pickReply. Used by the live engine preview.
+    std::vector<ReplyRule> matchMessage(const std::string& msg, const ReplyCtx& ctx) const;
 
     /**
      * @brief 完整触发管线：文本匹配 → 生效范围(scope) → 冷却 → 概率，

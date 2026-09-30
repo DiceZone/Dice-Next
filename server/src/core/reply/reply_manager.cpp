@@ -3,6 +3,7 @@
 #include "../../common/utils.h"
 #include "../../common/weighted_reply.h"
 #include "reply_definition.h"
+#include "reply_channel_scope.h"
 
 #include <algorithm>
 #include <ctime>
@@ -74,6 +75,8 @@ static ReplyRule ruleFromRow(const ReplyRuleRow& row) {
     rule.dayLimitNotice = row.dayLimitNotice;
     rule.scopeUsersMode = row.scopeUsersMode;
     rule.scopeUsers     = row.scopeUsers;
+    rule.channelScope   = row.channelScope;
+    rule.channelTarget  = row.channelTarget;
     normalizeRule(rule, row.conditions, row.logic, row.results);
     return rule;
 }
@@ -134,12 +137,16 @@ static std::string semanticFingerprint(const ReplyRule& source) {
         {"dayLimitNotice", rule.dayLimitNotice},
         {"scopeUsersMode", rule.scopeUsersMode},
         {"scopeUsers", rule.scopeUsers},
+        {"channelScope", rule.channelScope},
+        {"channelTarget", rule.channelTarget},
     }.dump();
 }
 
 // Serialize a rule's conditions/results into the row's JSON columns, keeping the
 // legacy scalar columns pointed at the first condition/result.
 static void serializeRule(const ReplyRule& rule, ReplyRuleRow& row) {
+    row.channelScope = rule.channelScope;
+    row.channelTarget = rule.channelTarget;
     if (rule.conditions.size() > 1) {
         json arr = json::array();
         for (const auto& c : rule.conditions)
@@ -256,6 +263,8 @@ void ReplyManager::loadRules() {
         std::sort(next->begin(), next->end(),
             [&specRank](const ReplyRule& a, const ReplyRule& b) {
                 if (a.priority != b.priority) return a.priority > b.priority;
+                const int ca = reply_channel_scope::rank(a.channelScope), cb = reply_channel_scope::rank(b.channelScope);
+                if (ca != cb) return ca < cb;
                 int sa = specRank(a), sb = specRank(b);
                 if (sa != sb) return sa < sb;
                 return a.id < b.id;
@@ -271,6 +280,7 @@ void ReplyManager::loadRules() {
 
 int ReplyManager::addRule(const ReplyRule& rule, bool* deduplicated) {
     if (deduplicated) *deduplicated = false;
+    if (!reply_channel_scope::validate(rule.channelScope, rule.channelTarget).empty()) return -1;
     auto* storage = db_.getStorage();
     if (!storage) {
         DICE_LOG_ERROR("ReplyManager: database not open");
@@ -320,6 +330,7 @@ int ReplyManager::addRule(const ReplyRule& rule, bool* deduplicated) {
 
 bool ReplyManager::updateRule(int id, const ReplyRule& rule, bool* deduplicated) {
     if (deduplicated) *deduplicated = false;
+    if (!reply_channel_scope::validate(rule.channelScope, rule.channelTarget).empty()) return false;
     auto* storage = db_.getStorage();
     if (!storage) {
         DICE_LOG_ERROR("ReplyManager: database not open");
@@ -430,6 +441,7 @@ bool ReplyManager::csvHas(const std::string& csv, const std::string& id) {
 }
 
 bool ReplyManager::scopeAllows(const ReplyRule& rule, const ReplyCtx& ctx) {
+    if (!reply_channel_scope::allows(rule.channelScope, rule.channelTarget, ctx.platform, ctx.adapterId)) return false;
     if (rule.scopeMode.empty() || rule.scopeIds.empty()) return true;
     // 私聊不在任何群名单里：allow 名单 → 不触发；deny 名单 → 放行。
     const bool inList = !ctx.groupId.empty() && csvHas(rule.scopeIds, ctx.groupId);
@@ -447,7 +459,15 @@ bool ReplyManager::userAllows(const ReplyRule& rule, const ReplyCtx& ctx) {
 }
 
 ReplyPick ReplyManager::pickReply(const std::string& msg, const ReplyCtx& ctx, bool commit) {
-    return pickCandidates(matchMessage(msg), ctx, commit);
+    return pickCandidates(matchMessage(msg, ctx), ctx, commit);
+}
+
+std::vector<ReplyRule> ReplyManager::matchMessage(const std::string& msg, const ReplyCtx& ctx) const {
+    auto candidates = matchMessage(msg);
+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](const ReplyRule& rule) {
+        return !reply_channel_scope::allows(rule.channelScope, rule.channelTarget, ctx.platform, ctx.adapterId);
+    }), candidates.end());
+    return candidates;
 }
 
 ReplyPick ReplyManager::pickEventReply(const ReplyRule& rule, const ReplyCtx& ctx,
@@ -470,6 +490,7 @@ ReplyPick ReplyManager::pickCandidates(std::vector<ReplyRule> matches, const Rep
         if (!scopeAllows(r, ctx)) { pick.skipped.push_back({r.id, "scope"}); continue; }
         if (!userAllows(r, ctx))  { pick.skipped.push_back({r.id, "scope"}); continue; }
         const std::string key = eventKey + std::to_string(r.id) + "|" + ctx.platform + "|"
+            + ctx.adapterId + "|"
             + (ctx.groupId.empty() ? ("u" + ctx.userId) : ("g" + ctx.groupId));
         // 冷却：冷却中 → 有提示语则回提示语（原版 cd@echo），否则沉默让下条接话。
         if (r.cooldownSec > 0) {

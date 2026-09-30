@@ -63,7 +63,9 @@ bool Database::open(const std::string& path) {
                     orm::make_column("day_limit", &ReplyRuleRow::dayLimit, orm::default_value(0)),
                     orm::make_column("day_limit_notice", &ReplyRuleRow::dayLimitNotice, orm::default_value("")),
                     orm::make_column("scope_users_mode", &ReplyRuleRow::scopeUsersMode, orm::default_value("")),
-                    orm::make_column("scope_users", &ReplyRuleRow::scopeUsers, orm::default_value(""))
+                    orm::make_column("scope_users", &ReplyRuleRow::scopeUsers, orm::default_value("")),
+                    orm::make_column("channel_scope", &ReplyRuleRow::channelScope, orm::default_value("global")),
+                    orm::make_column("channel_target", &ReplyRuleRow::channelTarget, orm::default_value(""))
                 ),
                 // ── dice_config ──
                 orm::make_table("dice_config",

@@ -42,6 +42,8 @@ struct ReplyRuleRow {
     std::string dayLimitNotice;   // 达到日限回这句（原版 daylimit_notice；空=沉默）
     std::string scopeUsersMode;   // ""=不限 | "allow"=仅列表内用户 | "deny"=排除列表内用户
     std::string scopeUsers;       // 逗号分隔用户ID（原版 user_id 白/黑名单）
+    std::string channelScope = "global"; // global | adapter（平台类型）| account（适配器账号ID）
+    std::string channelTarget;
 };
 
 /// Key-value dice configuration (extensible rule storage).
@@ -495,7 +497,9 @@ private:
             orm::make_column("day_limit", &ReplyRuleRow::dayLimit, orm::default_value(0)),
             orm::make_column("day_limit_notice", &ReplyRuleRow::dayLimitNotice, orm::default_value("")),
             orm::make_column("scope_users_mode", &ReplyRuleRow::scopeUsersMode, orm::default_value("")),
-            orm::make_column("scope_users", &ReplyRuleRow::scopeUsers, orm::default_value(""))
+            orm::make_column("scope_users", &ReplyRuleRow::scopeUsers, orm::default_value("")),
+            orm::make_column("channel_scope", &ReplyRuleRow::channelScope, orm::default_value("global")),
+            orm::make_column("channel_target", &ReplyRuleRow::channelTarget, orm::default_value(""))
         ),
         orm::make_table("dice_config",
             orm::make_column("id", &DiceConfigRow::id,

@@ -451,6 +451,7 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir,
             std::sort(rs.begin(), rs.end());
             // Structured encoding avoids collisions with delimiters in authored text.
             return json{{"conditions", conds}, {"results", rs}, {"prob", r.prob},
+                {"channelScope", r.channelScope}, {"channelTarget", r.channelTarget},
                 {"cooldownSec", r.cooldownSec}, {"dayLimit", r.dayLimit}, {"scopeMode", r.scopeMode},
                 {"scopeIds", r.scopeIds}, {"scopeUsersMode", r.scopeUsersMode}, {"scopeUsers", r.scopeUsers},
                 {"cooldownNotice", r.cooldownNotice}, {"dayLimitNotice", r.dayLimitNotice}, {"logic", r.logic}}.dump();
