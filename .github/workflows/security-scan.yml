@@ -8,9 +8,9 @@ on:
 jobs:
   secrets:
     name: Secret scan (Gitleaks)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       # gitleaks-action 现在强制要求 license；改用开源 CLI 直接扫描（无需 license）。
@@ -24,18 +24,18 @@ jobs:
 
   sast:
     name: SAST (Semgrep)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: returntocorp/semgrep-action@v1
         with:
           config: p/cwe-top-25 p/owasp-top-ten
 
   deps:
     name: Dependency scan (Trivy)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
