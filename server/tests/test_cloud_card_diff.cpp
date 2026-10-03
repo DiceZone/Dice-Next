@@ -2,6 +2,27 @@
 #include "src/common/cloud_card_diff.h"
 using namespace dice::cloud_cards;
 
+TEST(CloudCardDiff, RootNullRemainsPresentAndDoesNotBecomeMissing) {
+    const DiffJson base = nullptr, local = "replacement", remote = nullptr;
+    const auto differences = compareDocuments(base, local, remote);
+    ASSERT_EQ(differences.size(), size_t(1));
+    EXPECT_EQ(differences[0].path, "");
+    ASSERT_TRUE(differences[0].base.has_value());
+    ASSERT_TRUE(differences[0].remote.has_value());
+    EXPECT_TRUE(differences[0].base->is_null());
+    EXPECT_TRUE(differences[0].remote->is_null());
+    EXPECT_TRUE(differences[0].kind == Difference::Kind::Local);
+    EXPECT_TRUE(compareDocuments(base, base, base).empty());
+}
+TEST(CloudCardDiff, JsonDisplayUsesValuesWithoutImplicitOptionalConversion) {
+    const DiffJson nullValue = nullptr, number = 0, boolean = false;
+    EXPECT_EQ(diffValue(nullValue), "null");
+    EXPECT_EQ(diffValue(number), "0");
+    EXPECT_EQ(diffValue(boolean), "false");
+    EXPECT_EQ(diffValue(std::nullopt), "(missing)");
+    EXPECT_EQ(diffValue(std::optional<DiffJson>(std::in_place, nullValue)), "null");
+    EXPECT_EQ(diffValue(DiffJson::array({1, 2})), "［1,2］");
+}
 TEST(CloudCardDiff, ClassifiesIndependentEditsConflictsAndEqualChangesWithoutWrites) {
     DiffJson base = {{"attrs", {{"HP", 10}, {"SAN", 60}, {"MP", 10}, {"力", 50}}}, {"rev", 1}};
     auto local = base, remote = base;

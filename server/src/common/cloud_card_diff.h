@@ -24,7 +24,8 @@ inline void compareDocumentValues(const std::optional<DiffJson>& base, const std
         for (const auto* object : {&*base, &*local, &*remote})
             for (auto it = object->begin(); it != object->end(); ++it) keys.insert(it.key());
         const auto get = [](const DiffJson& object, const std::string& key) -> std::optional<DiffJson> {
-            const auto it = object.find(key); return it == object.end() ? std::nullopt : std::optional<DiffJson>(*it);
+            const auto it = object.find(key);
+            return it == object.end() ? std::nullopt : std::optional<DiffJson>(std::in_place, *it);
         };
         for (const auto& key : keys) {
             if (path.empty() && (key == "schema_version" || key == "card_id" || key == "rev")) continue;
@@ -40,7 +41,12 @@ inline void compareDocumentValues(const std::optional<DiffJson>& base, const std
 }
 inline std::vector<Difference> compareDocuments(const DiffJson& base, const DiffJson& local, const DiffJson& remote) {
     std::vector<Difference> out;
-    compareDocumentValues(base, local, remote, "", out);
+    // JSON's optional conversion and optional's value constructor can both
+    // participate in overload resolution. Construct the contained JSON directly;
+    // an existing JSON null is still a value, not a missing document.
+    compareDocumentValues(std::optional<DiffJson>(std::in_place, base),
+                          std::optional<DiffJson>(std::in_place, local),
+                          std::optional<DiffJson>(std::in_place, remote), "", out);
     return out;
 }
 inline std::string diffValue(const std::optional<DiffJson>& value) {
@@ -51,6 +57,9 @@ inline std::string diffValue(const std::optional<DiffJson>& value) {
     std::string safe;
     for (char ch : text) safe += ch == '[' ? "［" : ch == ']' ? "］" : std::string(1, ch);
     return safe;
+}
+inline std::string diffValue(const DiffJson& value) {
+    return diffValue(std::optional<DiffJson>(std::in_place, value));
 }
 inline std::string differenceText(const std::vector<Difference>& differences) {
     std::string text;
