@@ -44,6 +44,8 @@ workspace/
 
 从源码构建、生成本地测试包和自动发布的说明均维护在文档站的[开发构建文档](https://github.com/DiceZone/Dice-Next-Doc/blob/main/src/develop/build.md)。Windows 本地打包也可直接运行仓库根目录的 `package.ps1`。
 
+构建默认标记为 Beta，WebUI 显示 `beta-3.0.0(123)`。维护者发布正式版时，在 CMake 配置参数中使用 `-DDICENEXT_PRERELEASE=OFF`，界面会显示 `v3.0.0(123)`；它不改变语义版本或构建号规则。当前自动发布工作流仍发布 Beta。
+
 ## 运行
 
 启动程序后，默认管理后台地址为 [http://localhost:18088](http://localhost:18088)。**首次访问必须设置管理口令**（未设置口令时其它管理接口一律拒绝），之后使用该口令登录。
@@ -81,4 +83,3 @@ Dice!Next 是对 [Dice!](https://github.com/Dice-Developer-Team/Dice) 的致敬�
 Dice!Next 以 **GNU Affero General Public License v3.0 or later（AGPL-3.0-or-later）** 发布。你可以在遵守该许可证的前提下使用、复制、修改和再发布本项目。
 
 如果你修改本项目并通过网络向他人提供服务，AGPL 要求向相应用户提供对应的完整源代码；分发修改版本时也必须保留许可证、版权与致谢信息。完整条款见 [LICENSE](LICENSE)。
- 

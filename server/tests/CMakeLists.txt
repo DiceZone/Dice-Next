@@ -74,6 +74,10 @@ set(TEST_SOURCES
 )
 
 add_executable(dice-next-tests ${TEST_SOURCES})
+target_compile_definitions(dice-next-tests PRIVATE
+    DICE_VERSION_STRING="${PROJECT_VERSION}"
+    DICE_PRERELEASE=$<BOOL:${DICENEXT_PRERELEASE}>
+)
 dicenext_compile_parallelism(dice-next-tests)
 add_dependencies(dice-next-tests prepare_version)
 

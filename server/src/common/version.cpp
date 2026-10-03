@@ -4,9 +4,18 @@
 #define DICE_VERSION_STRING "3.0.0"   // fallback; normally set by CMake
 #endif
 
+#ifndef DICE_PRERELEASE
+#define DICE_PRERELEASE 1
+#endif
+
 namespace dice {
 
 std::string versionString() { return DICE_VERSION_STRING; }
+bool isPrerelease() { return DICE_PRERELEASE != 0; }
+std::string releaseTag() {
+    return "v" + versionString() +
+        (isPrerelease() ? "-beta." + std::to_string(buildNumber()) : "");
+}
 
 std::string compilerString() {
 #if defined(_MSC_VER)

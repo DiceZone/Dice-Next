@@ -3,6 +3,7 @@
 #include "../config/config_manager.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -71,6 +72,12 @@ struct ContainerEnvironment {
 ContainerEnvironment detectContainerEnvironment(const ContainerDetectionInput& input);
 ContainerEnvironment detectContainerEnvironment();
 
+struct DownloadPolicy {
+    std::chrono::milliseconds idleTimeout{60000};
+    std::chrono::milliseconds attemptTimeout{20 * 60 * 1000};
+    std::chrono::milliseconds pollInterval{250};
+};
+
 class UpdateService {
 public:
     using Json = nlohmann::json;
@@ -84,7 +91,7 @@ public:
     UpdateService(ConfigManager& config, std::function<void()> restart,
                   NotifyCallback notify = {},
                   ContainerEnvironment container = detectContainerEnvironment(),
-                  FetchCallback fetch = {});
+                  FetchCallback fetch = {}, DownloadPolicy downloadPolicy = {});
     ~UpdateService();
 
     UpdateService(const UpdateService&) = delete;
@@ -95,6 +102,7 @@ public:
     bool requestCheck(bool force, std::string& error);
     bool requestDownload(std::string& error);
     bool requestInstall(std::string& error);
+    bool requestCancelDownload(std::string& error);
     void tick();
 
 private:
@@ -157,6 +165,7 @@ private:
     NotifyCallback notify_;
     ContainerEnvironment container_;
     FetchCallback fetch_;
+    DownloadPolicy downloadPolicy_;
 
     mutable std::mutex mutex_;
     std::condition_variable wake_;
@@ -164,6 +173,8 @@ private:
     Job job_ = Job::none;
     bool forceCheck_ = false;
     std::atomic<bool> stopping_{false};
+    std::atomic<bool> downloadCancelled_{false};
+    bool downloadActive_ = false;
 
     std::string phase_ = "idle";
     std::string error_;

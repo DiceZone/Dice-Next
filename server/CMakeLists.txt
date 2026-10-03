@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(dice-next-server VERSION 3.0.0 LANGUAGES C CXX)
+option(DICENEXT_PRERELEASE "Mark this binary as a beta release (OFF for stable releases)" ON)
 
 # ─── C++ Standard ─────────────────────────────────────────────
 set(CMAKE_CXX_STANDARD 20)
@@ -167,6 +168,7 @@ target_include_directories(dice-next-server PRIVATE
 
 target_compile_definitions(dice-next-server PRIVATE
     DICE_VERSION_STRING="${PROJECT_VERSION}"
+    DICE_PRERELEASE=$<BOOL:${DICENEXT_PRERELEASE}>
 )
 
 target_link_libraries(dice-next-server PRIVATE

@@ -1,5 +1,6 @@
 #include "test_framework.h"
 #include "../src/common/subprocess.h"
+#include "../src/common/version.h"
 #include "../src/service/update_service.h"
 
 #include <atomic>
@@ -78,7 +79,326 @@ bool waitUntil(const std::function<bool()>& predicate,
     return predicate();
 }
 
+class DownloadFixture {
+public:
+    DownloadFixture() : root(std::filesystem::temp_directory_path() /
+        ("dice_next_download_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))) {
+        std::filesystem::create_directories(root);
+        current_ = std::make_unique<ScopedCurrentPath>(root);
+    }
+    ~DownloadFixture() {
+        current_.reset();
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    }
+    std::filesystem::path root;
+private:
+    std::unique_ptr<ScopedCurrentPath> current_;
+};
+
+std::string downloadManifest() {
+    auto manifest = nlohmann::json::parse(validManifestForCurrentPlatform());
+    manifest["version"] = "99.0.0";
+    manifest["tag"] = "v99.0.0-beta.900";
+    auto& asset = manifest["assets"][0];
+    asset["name"] = "test-update.zip";
+    asset["size"] = 3;
+    asset["sha256"] = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"; // abc
+    return manifest.dump();
+}
+
+void writeResponse(const std::filesystem::path& output, const std::string& text) {
+    std::filesystem::create_directories(output.parent_path());
+    std::ofstream(output, std::ios::binary) << text;
+}
+
+DownloadPolicy quickDownloadPolicy() {
+    return {std::chrono::milliseconds(80), std::chrono::milliseconds(500), std::chrono::milliseconds(5)};
+}
+
+bool downloadFinished(UpdateService& service) {
+    const auto phase = service.status().value("phase", std::string());
+    return phase == "error" || phase == "cancelled" || phase == "downloaded" || phase == "staged";
+}
+
 }  // namespace
+
+TEST(UpdateService, CurrentVersionReportsItsActualReleaseChannel) {
+    DownloadFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{});
+    const auto status = service.status();
+    ASSERT_EQ(status["current"]["prerelease"].get<bool>(), dice::isPrerelease());
+    ASSERT_EQ(status["current"]["tag"].get<std::string>(), "v" + dice::versionString() +
+        (dice::isPrerelease() ? "-beta." + std::to_string(dice::buildNumber()) : ""));
+    ASSERT_TRUE(status["cancelSupported"].get<bool>());
+    ASSERT_FALSE(status["canCancel"].get<bool>());
+    std::string error;
+    ASSERT_FALSE(service.requestCancelDownload(error));
+}
+
+TEST(UpdateService, CancelDownloadStopsTransferAndAllowsRetryWithoutRestart) {
+    DownloadFixture fixture;
+    writeResponse(fixture.root / "updates" / "downloads" / "previous-verified.zip", "abc");
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<std::string>("update/source", "direct");
+    std::atomic<int> attempts{0};
+    std::atomic<bool> cancelled{false};
+    std::atomic<bool> releaseTransfer{false};
+    auto fetch = [&](const std::string& url, const std::filesystem::path& output, std::uint64_t,
+                     int, std::string&, const UpdateService::CancellationCheck& shouldCancel) {
+        if (url.find("update-manifest.json") != std::string::npos) {
+            writeResponse(output, downloadManifest());
+            return true;
+        }
+        const int attempt = ++attempts;
+        writeResponse(output, "a");
+        if (attempt > 1) return false;
+        while (!shouldCancel()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        cancelled.store(true);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!releaseTransfer.load() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        return false;
+    };
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, fetch);
+    std::string error;
+    ASSERT_TRUE(service.requestCheck(true, error));
+    ASSERT_TRUE(waitUntil([&] { return service.status()["updateAvailable"].get<bool>(); }));
+    ASSERT_TRUE(service.requestDownload(error));
+    ASSERT_TRUE(waitUntil([&] { return service.status()["downloadedBytes"].get<int>() == 1; }));
+    ASSERT_FALSE(service.requestDownload(error));
+    ASSERT_EQ(service.status()["downloadedBytes"].get<int>(), 1);
+    ASSERT_TRUE(service.requestCancelDownload(error));
+    ASSERT_TRUE(waitUntil([&] { return cancelled.load(); }));
+    EXPECT_EQ(service.status()["phase"].get<std::string>(), std::string("cancelling"));
+    EXPECT_FALSE(service.requestCheck(true, error));
+    EXPECT_FALSE(service.requestDownload(error));
+    releaseTransfer.store(true);
+    ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }));
+    ASSERT_EQ(service.status()["phase"].get<std::string>(), std::string("cancelled"));
+    ASSERT_EQ(service.status()["error"].get<std::string>(), std::string());
+    ASSERT_FALSE(service.status()["canCancel"].get<bool>());
+    ASSERT_EQ(std::distance(std::filesystem::directory_iterator(fixture.root / "updates" / "downloads"),
+        std::filesystem::directory_iterator()), 1);
+    ASSERT_TRUE(std::filesystem::is_regular_file(fixture.root / "updates" / "downloads" / "previous-verified.zip"));
+    ASSERT_TRUE(service.requestDownload(error));
+    ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }));
+    ASSERT_EQ(attempts.load(), 2);
+}
+
+TEST(UpdateService, StalledSourceIsCancelledBeforeTryingTheNextMirror) {
+    DownloadFixture fixture;
+    writeResponse(fixture.root / "update-mirrors.json", R"({"mirrors":["https://backup.example"]})");
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<std::string>("update/source", "auto");
+    std::atomic<bool> stalledCancelled{false};
+    std::atomic<bool> fallbackStarted{false};
+    auto fetch = [&](const std::string& url, const std::filesystem::path& output, std::uint64_t,
+                     int, std::string&, const UpdateService::CancellationCheck& shouldCancel) {
+        const bool mirror = url.rfind("https://backup.example", 0) == 0;
+        if (url.find("update-manifest.json") != std::string::npos) {
+            if (mirror) return false; // Include failed probe sources as download fallbacks.
+            writeResponse(output, downloadManifest());
+            return true;
+        }
+        if (!mirror) {
+            writeResponse(output, "a");
+            while (!shouldCancel()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            stalledCancelled.store(true);
+            return false;
+        }
+        fallbackStarted.store(stalledCancelled.load());
+        writeResponse(output, "bad"); // A reachable mirror must still pass the checksum.
+        return true;
+    };
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, fetch, quickDownloadPolicy());
+    std::string error;
+    ASSERT_TRUE(service.requestCheck(true, error));
+    ASSERT_TRUE(waitUntil([&] { return service.status()["updateAvailable"].get<bool>(); }));
+    ASSERT_TRUE(service.requestDownload(error));
+    ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }));
+    ASSERT_TRUE(stalledCancelled.load());
+    ASSERT_TRUE(fallbackStarted.load());
+    const auto status = service.status();
+    ASSERT_EQ(status["phase"].get<std::string>(), std::string("error"));
+    ASSERT_TRUE(status["error"].get<std::string>().find("download stalled") != std::string::npos);
+    ASSERT_TRUE(status["error"].get<std::string>().find("SHA-256 mismatch") != std::string::npos);
+    ASSERT_TRUE(std::filesystem::is_empty(fixture.root / "updates" / "downloads"));
+    ASSERT_TRUE(service.requestCheck(true, error));
+}
+
+TEST(UpdateService, DownloadUsesChangedSourceAndRecoversAfterAllSourcesTimeout) {
+    DownloadFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<std::string>("update/source", "direct");
+    std::atomic<int> customAttempts{0};
+    std::atomic<int> directAttempts{0};
+    auto fetch = [&](const std::string& url, const std::filesystem::path& output, std::uint64_t,
+                     int, std::string&, const UpdateService::CancellationCheck& shouldCancel) {
+        if (url.find("update-manifest.json") != std::string::npos) {
+            writeResponse(output, downloadManifest());
+            return true;
+        }
+        if (url.rfind("https://custom.example", 0) == 0) ++customAttempts;
+        else ++directAttempts;
+        while (!shouldCancel()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        return false;
+    };
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, fetch, quickDownloadPolicy());
+    std::string error;
+    ASSERT_TRUE(service.requestCheck(true, error));
+    ASSERT_TRUE(waitUntil([&] { return service.status()["updateAvailable"].get<bool>(); }));
+    ASSERT_TRUE(service.updateSettings({{"source", "custom"}, {"customMirror", "https://custom.example"}}, error));
+    ASSERT_TRUE(service.requestDownload(error));
+    ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }));
+    ASSERT_EQ(service.status()["phase"].get<std::string>(), std::string("error"));
+    ASSERT_EQ(customAttempts.load(), 1);
+    ASSERT_EQ(directAttempts.load(), 0);
+    ASSERT_TRUE(service.updateSettings({{"source", "direct"}}, error));
+    ASSERT_TRUE(service.requestDownload(error));
+    ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }));
+    ASSERT_EQ(directAttempts.load(), 1);
+}
+
+TEST(UpdateService, ContinuingProgressDoesNotTriggerIdleTimeout) {
+    DownloadFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<std::string>("update/source", "direct");
+    std::atomic<bool> unexpectedlyCancelled{false};
+    auto fetch = [&](const std::string& url, const std::filesystem::path& output, std::uint64_t,
+                     int, std::string&, const UpdateService::CancellationCheck& shouldCancel) {
+        if (url.find("update-manifest.json") != std::string::npos) {
+            writeResponse(output, downloadManifest());
+            return true;
+        }
+        for (int i = 1; i <= 6; ++i) {
+            writeResponse(output, std::string(i, 'a'));
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            if (shouldCancel()) { unexpectedlyCancelled.store(true); return false; }
+        }
+        return true;
+    };
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, fetch, quickDownloadPolicy());
+    std::string error;
+    ASSERT_TRUE(service.requestCheck(true, error));
+    ASSERT_TRUE(waitUntil([&] { return service.status()["updateAvailable"].get<bool>(); }));
+    ASSERT_TRUE(service.requestDownload(error));
+    ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }));
+    ASSERT_FALSE(unexpectedlyCancelled.load());
+    ASSERT_TRUE(service.status()["error"].get<std::string>().find("SHA-256 mismatch") != std::string::npos);
+}
+
+TEST(UpdateService, AttemptDeadlineStopsEvenAContinuouslyProgressingTransfer) {
+    DownloadFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<std::string>("update/source", "direct");
+    auto policy = quickDownloadPolicy();
+    policy.idleTimeout = std::chrono::seconds(1);
+    policy.attemptTimeout = std::chrono::milliseconds(100);
+    auto fetch = [&](const std::string& url, const std::filesystem::path& output, std::uint64_t,
+                     int, std::string&, const UpdateService::CancellationCheck& shouldCancel) {
+        if (url.find("update-manifest.json") != std::string::npos) {
+            writeResponse(output, downloadManifest());
+            return true;
+        }
+        int bytes = 0;
+        while (!shouldCancel()) {
+            writeResponse(output, std::string(++bytes, 'a'));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    };
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, fetch, policy);
+    std::string error;
+    ASSERT_TRUE(service.requestCheck(true, error));
+    ASSERT_TRUE(waitUntil([&] { return service.status()["updateAvailable"].get<bool>(); }));
+    ASSERT_TRUE(service.requestDownload(error));
+    ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }));
+    ASSERT_TRUE(service.status()["error"].get<std::string>().find("attempt timed out") != std::string::npos);
+    ASSERT_TRUE(std::filesystem::is_empty(fixture.root / "updates" / "downloads"));
+}
+
+TEST(UpdateService, TransferExceptionRemovesPartialAndAllowsRetry) {
+    DownloadFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<std::string>("update/source", "direct");
+    auto fetch = [&](const std::string& url, const std::filesystem::path& output, std::uint64_t,
+                     int, std::string&, const UpdateService::CancellationCheck&) -> bool {
+        if (url.find("update-manifest.json") != std::string::npos) {
+            writeResponse(output, downloadManifest());
+            return true;
+        }
+        writeResponse(output, "a");
+        throw std::runtime_error("simulated transport exception");
+    };
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, fetch, quickDownloadPolicy());
+    std::string error;
+    ASSERT_TRUE(service.requestCheck(true, error));
+    ASSERT_TRUE(waitUntil([&] { return service.status()["updateAvailable"].get<bool>(); }));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        ASSERT_TRUE(service.requestDownload(error));
+        ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }));
+        ASSERT_TRUE(service.status()["error"].get<std::string>().find("transport exception") != std::string::npos);
+        ASSERT_TRUE(std::filesystem::is_empty(fixture.root / "updates" / "downloads"));
+    }
+}
+
+TEST(UpdateService, ChangedSettingsDuringCheckCannotRestoreAnExcludedSource) {
+    DownloadFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<std::string>("update/source", "direct");
+    std::atomic<bool> probeStarted{false}, releaseProbe{false}, usedCustom{false};
+    auto fetch = [&](const std::string& url, const std::filesystem::path& output, std::uint64_t,
+                     int, std::string&, const UpdateService::CancellationCheck& shouldCancel) {
+        if (url.find("update-manifest.json") != std::string::npos) {
+            probeStarted.store(true);
+            while (!releaseProbe.load() && !shouldCancel()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            writeResponse(output, downloadManifest());
+            return true;
+        }
+        usedCustom.store(url.rfind("https://custom.example", 0) == 0);
+        return false;
+    };
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, fetch, quickDownloadPolicy());
+    std::string error;
+    ASSERT_TRUE(service.requestCheck(true, error));
+    ASSERT_TRUE(waitUntil([&] { return probeStarted.load(); }));
+    ASSERT_TRUE(service.updateSettings({{"source", "custom"}, {"customMirror", "https://custom.example"}}, error));
+    releaseProbe.store(true);
+    ASSERT_TRUE(waitUntil([&] { return service.status()["updateAvailable"].get<bool>(); }));
+    ASSERT_TRUE(service.requestDownload(error));
+    ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }));
+    ASSERT_TRUE(usedCustom.load());
+}
+
+#if !defined(_WIN32)
+TEST(UpdateService, VerifiedDownloadAndCacheReuseStillWork) {
+    DownloadFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<std::string>("update/source", "direct");
+    std::atomic<int> transfers{0};
+    auto fetch = [&](const std::string& url, const std::filesystem::path& output, std::uint64_t,
+                     int, std::string&, const UpdateService::CancellationCheck&) {
+        if (url.find("update-manifest.json") != std::string::npos) writeResponse(output, downloadManifest());
+        else { ++transfers; writeResponse(output, "abc"); }
+        return true;
+    };
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, fetch, quickDownloadPolicy());
+    std::string error;
+    ASSERT_TRUE(service.requestCheck(true, error));
+    ASSERT_TRUE(waitUntil([&] { return service.status()["updateAvailable"].get<bool>(); }));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        ASSERT_TRUE(service.requestDownload(error));
+        ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }));
+        ASSERT_EQ(service.status()["phase"].get<std::string>(), std::string("downloaded"));
+        ASSERT_FALSE(service.status()["canCancel"].get<bool>());
+    }
+    ASSERT_EQ(transfers.load(), 1);
+    ASSERT_EQ(service.status()["source"].get<std::string>(), std::string("local cache"));
+    ASSERT_TRUE(std::filesystem::is_regular_file(fixture.root / "updates" / "downloads" / "test-update.zip"));
+}
+#endif
 
 TEST(UpdateManifest, ParsesAndSelectsExactPlatformAsset) {
     ReleaseManifest manifest;

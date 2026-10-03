@@ -502,9 +502,14 @@ ContainerEnvironment detectContainerEnvironment() {
 
 UpdateService::UpdateService(ConfigManager& config, std::function<void()> restart,
                              NotifyCallback notify, ContainerEnvironment container,
-                             FetchCallback fetch)
+                             FetchCallback fetch, DownloadPolicy downloadPolicy)
     : config_(config), restart_(std::move(restart)), notify_(std::move(notify)),
-      container_(std::move(container)), fetch_(std::move(fetch)) {
+      container_(std::move(container)), fetch_(std::move(fetch)),
+      downloadPolicy_(downloadPolicy) {
+    const DownloadPolicy defaults;
+    if (downloadPolicy_.idleTimeout.count() <= 0) downloadPolicy_.idleTimeout = defaults.idleTimeout;
+    if (downloadPolicy_.attemptTimeout.count() <= 0) downloadPolicy_.attemptTimeout = defaults.attemptTimeout;
+    if (downloadPolicy_.pollInterval.count() <= 0) downloadPolicy_.pollInterval = defaults.pollInterval;
     if (container_.detected) {
         DICE_LOG_INFO("Container runtime detected ({} via {}); self-update download and "
                       "installation are disabled",
@@ -558,8 +563,7 @@ void UpdateService::processInstallResult() {
 
         if (success && runningExpectedBuild) {
             emitNotification("update_result",
-                "Dice!Next 更新安装成功：" + tag + "\n当前运行版本：v" +
-                versionString() + "-beta." + std::to_string(buildNumber()));
+                "Dice!Next 更新安装成功：" + tag + "\n当前运行版本：" + releaseTag());
         } else {
             std::string detail = result.value("message", std::string());
             if (success && !runningExpectedBuild) {
@@ -653,12 +657,15 @@ UpdateService::Json UpdateService::status() const {
         {"current", Json{
             {"version", versionString()},
             {"build", buildNumber()},
-            {"tag", "v" + versionString() + "-beta." + std::to_string(buildNumber())}
+            {"prerelease", isPrerelease()},
+            {"tag", releaseTag()}
         }},
         {"platform", Json{{"os", currentOs()}, {"arch", currentArch()}}},
         {"latest", latest},
         {"updateAvailable", updateAvailable_},
         {"phase", phase_},
+        {"cancelSupported", true},
+        {"canCancel", downloadActive_ && !downloadCancelled_.load(std::memory_order_acquire)},
         {"error", error_},
         {"source", activeSource_},
         {"downloadedBytes", downloadedBytes_},
@@ -773,6 +780,11 @@ bool UpdateService::updateSettings(const Json& values, std::string& error) {
             error = "cannot save update settings";
             return false;
         }
+        if (next.source != previous.source || next.customMirror != previous.customMirror) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sourceOrder_.clear();
+            sourceCacheUntil_ = 0;
+        }
         return true;
     } catch (const std::exception& ex) {
         error = ex.what();
@@ -780,7 +792,7 @@ bool UpdateService::updateSettings(const Json& values, std::string& error) {
     }
 }
 bool UpdateService::isBusyLocked() const {
-    return phase_ == "checking" || phase_ == "downloading" || phase_ == "installing" ||
+    return downloadActive_ || phase_ == "checking" || phase_ == "installing" ||
         job_ != Job::none;
 }
 
@@ -817,10 +829,23 @@ bool UpdateService::requestDownload(std::string& error) {
         error = "no newer release is available";
         return false;
     }
+    if (!queueJobLocked(Job::download, "connecting", error)) return false;
     downloadedBytes_ = 0;
     totalBytes_ = 0;
-    if (!queueJobLocked(Job::download, "downloading", error)) return false;
+    downloadCancelled_.store(false, std::memory_order_release);
+    downloadActive_ = true;
     automaticDownload_ = false;
+    return true;
+}
+
+bool UpdateService::requestCancelDownload(std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!downloadActive_) {
+        error = "no cancellable download is running";
+        return false;
+    }
+    downloadCancelled_.store(true, std::memory_order_release);
+    phase_ = "cancelling";
     return true;
 }
 
@@ -882,8 +907,11 @@ void UpdateService::workerLoop() {
         } catch (const std::exception& ex) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (stopping_.load(std::memory_order_acquire)) break;
-            phase_ = "error";
-            error_ = ex.what();
+            const bool cancelled = downloadActive_ && downloadCancelled_.load(std::memory_order_acquire);
+            downloadActive_ = false;
+            automaticDownload_ = false;
+            phase_ = cancelled ? "cancelled" : "error";
+            error_ = cancelled ? "" : ex.what();
             DICE_LOG_ERROR("Update service failed: {}", ex.what());
         }
     }
@@ -1216,14 +1244,16 @@ void UpdateService::doCheck(bool force) {
         checkedAt_ = epochSeconds();
         error_.clear();
         phase_ = available ? "available" : "up_to_date";
-        DICE_LOG_INFO("Update check via {}: latest {} (current v{}-beta.{})",
-            activeSource_, latest_.tag, versionString(), buildNumber());
+        DICE_LOG_INFO("Update check via {}: latest {} (current {})",
+            activeSource_, latest_.tag, releaseTag());
 
         if (available && current.action != "notify" && downloadSupported()) {
             downloadedBytes_ = 0;
             totalBytes_ = 0;
             automaticDownload_ = true;
-            phase_ = "downloading";
+            phase_ = "connecting";
+            downloadCancelled_.store(false, std::memory_order_release);
+            downloadActive_ = true;
             job_ = Job::download;
             wake_.notify_all();
         }
@@ -1237,7 +1267,7 @@ void UpdateService::doCheck(bool force) {
                 ? "自动下载" : current.action == "install" ? "自动下载并安装" : "仅通知";
         emitNotification("update_available",
             "检测到 Dice!Next 新版本：" + checkedTag +
-            "\n当前版本：v" + versionString() + "-beta." + std::to_string(buildNumber()) +
+            "\n当前版本：" + releaseTag() +
             "\n更新策略：" + action +
             "\n发布页：" + checkedReleaseUrl);
         config_.set<std::string>("update/last_notified_tag", checkedTag);
@@ -1312,9 +1342,14 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
 
     archive = downloads / asset.name;
     const auto shouldCancel = [this] {
-        return stopping_.load(std::memory_order_acquire);
+        return stopping_.load(std::memory_order_acquire) ||
+            downloadCancelled_.load(std::memory_order_acquire);
     };
     if (fs::is_regular_file(archive, ec) && fs::file_size(archive, ec) == asset.size) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!shouldCancel()) phase_ = "verifying";
+        }
         std::string existingDigest;
         std::string digestError;
         if (sha256File(archive, existingDigest, digestError, shouldCancel) &&
@@ -1344,38 +1379,80 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
                 activeSource_ = source.label;
                 totalBytes_ = asset.size;
                 downloadedBytes_ = 0;
+                if (!shouldCancel()) phase_ = "connecting";
             }
 
             std::string fetchError;
+            std::atomic<bool> timedOut{false};
+            const auto attemptCancelled = [&] {
+                return shouldCancel() || timedOut.load(std::memory_order_acquire);
+            };
+            const auto started = std::chrono::steady_clock::now();
+            auto lastProgress = started;
+            std::uint64_t previousSize = 0;
+            std::string timeoutError;
+            const auto timeoutSeconds = static_cast<int>(std::clamp<long long>(
+                (downloadPolicy_.attemptTimeout.count() + 999) / 1000, 1, 20 * 60));
             auto transfer = std::async(std::launch::async, [&] {
                 return fetch_
-                    ? fetch_(url, partial, asset.size + 1, 20 * 60, fetchError,
-                             shouldCancel)
-                    : fetchToFile(url, partial, asset.size + 1, 20 * 60, fetchError,
-                                  shouldCancel);
+                    ? fetch_(url, partial, asset.size + 1, timeoutSeconds, fetchError,
+                             attemptCancelled)
+                    : fetchToFile(url, partial, asset.size + 1, timeoutSeconds, fetchError,
+                                  attemptCancelled);
             });
-            while (transfer.wait_for(std::chrono::milliseconds(250)) != std::future_status::ready) {
+            while (transfer.wait_for(downloadPolicy_.pollInterval) != std::future_status::ready) {
                 std::error_code progressError;
                 const auto currentSize = fs::file_size(partial, progressError);
                 if (!progressError) {
+                    if (currentSize > previousSize) {
+                        lastProgress = std::chrono::steady_clock::now();
+                        previousSize = currentSize;
+                    }
                     std::lock_guard<std::mutex> lock(mutex_);
                     downloadedBytes_ = (std::min)(
                         static_cast<std::uint64_t>(currentSize), asset.size);
+                    if (currentSize > 0 && !shouldCancel()) phase_ = "downloading";
+                }
+                const auto now = std::chrono::steady_clock::now();
+                if (!attemptCancelled() &&
+                    (now - lastProgress >= downloadPolicy_.idleTimeout ||
+                     now - started >= downloadPolicy_.attemptTimeout)) {
+                    timeoutError = now - lastProgress >= downloadPolicy_.idleTimeout
+                        ? "download stalled: no new data received"
+                        : "download attempt timed out";
+                    timedOut.store(true, std::memory_order_release);
                 }
             }
-            if (!transfer.get()) {
-                if (stopping_.load(std::memory_order_acquire)) {
-                    fs::remove(partial, ec);
+            bool fetched = false;
+            try {
+                fetched = transfer.get();
+            } catch (const std::exception& ex) {
+                fetchError = ex.what();
+            } catch (...) {
+                fetchError = "download transfer failed";
+            }
+            if (!fetched || attemptCancelled()) {
+                // Remove only this attempt's partial file, never a verified cache.
+                fs::remove(partial, ec);
+                if (shouldCancel()) {
                     error = "update operation cancelled";
                     return false;
                 }
                 if (!failures.empty()) failures += "; ";
                 failures += source.label;
                 if (downloadName != asset.name) failures += " (" + downloadName + ")";
-                failures += ": " + fetchError;
+                failures += ": " + (!timeoutError.empty() ? timeoutError :
+                    fetchError.empty() ? "download failed" : fetchError);
+                // Changing an asset filename cannot fix a stalled connection.
+                if (timedOut.load(std::memory_order_acquire)) break;
                 continue;
             }
 
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                downloadedBytes_ = asset.size;
+                if (!shouldCancel()) phase_ = "verifying";
+            }
             const auto size = fs::file_size(partial, ec);
             std::string actualDigest;
             std::string digestError;
@@ -1384,6 +1461,10 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
                 lower(actualDigest) == asset.sha256;
             if (!verified) {
                 fs::remove(partial, ec);
+                if (shouldCancel()) {
+                    error = "update operation cancelled";
+                    return false;
+                }
                 if (!failures.empty()) failures += "; ";
                 failures += source.label;
                 if (downloadName != asset.name) failures += " (" + downloadName + ")";
@@ -1466,7 +1547,8 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
     const std::string tar = dice::proc::systemTool("tar.exe");
     const fs::path archivePath = fs::absolute(archive);
     const auto shouldCancel = [this] {
-        return stopping_.load(std::memory_order_acquire);
+        return stopping_.load(std::memory_order_acquire) ||
+            downloadCancelled_.load(std::memory_order_acquire);
     };
     const dice::proc::Result listed =
         dice::proc::runPathsCancellable(
@@ -1567,6 +1649,11 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
     }
     fs::remove_all(extractRoot, ec);
 
+    if (shouldCancel()) {
+        fs::remove_all(pendingNew, ec);
+        error = "update operation cancelled";
+        return false;
+    }
     bool hadPending = fs::exists(pending, ec);
     if (hadPending) {
         fs::rename(pending, pendingOld, ec);
@@ -1592,6 +1679,7 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
 
 void UpdateService::doDownload() {
     ReleaseManifest manifest;
+    const auto configured = configuredSources(settings());
     std::vector<Source> sources;
     bool automatic = false;
     std::string initialError;
@@ -1604,19 +1692,34 @@ void UpdateService::doDownload() {
             initialError = "no newer release is available";
         } else {
             manifest = latest_;
-            sources = sourceOrder_;
+            // A settings save can race an in-flight check. Reuse probe ordering,
+            // but never reuse a source excluded by the current configuration.
+            for (const auto& cached : sourceOrder_) {
+                const auto found = std::find_if(configured.begin(), configured.end(),
+                    [&](const Source& source) { return source.prefix == cached.prefix; });
+                if (found != configured.end()) sources.push_back(*found);
+            }
+            for (const auto& source : configured) {
+                if (std::none_of(sources.begin(), sources.end(), [&](const Source& existing) {
+                        return existing.prefix == source.prefix;
+                    })) sources.push_back(source);
+            }
         }
     }
 
     auto fail = [&](std::string message) {
         if (stopping_.load(std::memory_order_acquire)) return;
+        bool cancelled = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (stopping_.load(std::memory_order_acquire)) return;
-            phase_ = "error";
-            error_ = message;
+            cancelled = downloadCancelled_.load(std::memory_order_acquire);
+            phase_ = cancelled ? "cancelled" : "error";
+            error_ = cancelled ? "" : message;
+            downloadActive_ = false;
             automaticDownload_ = false;
         }
+        if (cancelled) return;
         DICE_LOG_WARN("Update download failed: {}", message);
         if (automatic) {
             emitNotification("update_error",
@@ -1630,13 +1733,16 @@ void UpdateService::doDownload() {
         fail(std::move(initialError));
         return;
     }
+    if (downloadCancelled_.load(std::memory_order_acquire)) {
+        fail("update operation cancelled");
+        return;
+    }
 
     const ReleaseAsset* asset = selectAsset(manifest, currentOs(), currentArch());
     if (!asset) {
         fail("latest release has no matching platform asset");
         return;
     }
-    if (sources.empty()) sources = configuredSources(settings());
 
     fs::path archive;
     std::string usedSource;
@@ -1646,8 +1752,12 @@ void UpdateService::doDownload() {
         return;
     }
 
-    std::string stageError;
 #if defined(_WIN32)
+    std::string stageError;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!downloadCancelled_.load(std::memory_order_acquire)) phase_ = "preparing";
+    }
     if (!prepareWindowsStage(archive, manifest, stageError)) {
         fail(std::move(stageError));
         return;
@@ -1659,9 +1769,14 @@ void UpdateService::doDownload() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_.load(std::memory_order_acquire)) return;
+        downloadActive_ = false;
         automaticDownload_ = false;
         activeSource_ = usedSource;
         error_.clear();
+        if (downloadCancelled_.load(std::memory_order_acquire)) {
+            phase_ = "cancelled";
+            return;
+        }
 #if defined(_WIN32)
         phase_ = "staged";
 #else

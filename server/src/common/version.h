@@ -10,6 +10,8 @@ namespace dice {
 
 /// Semantic version, e.g. "3.0.0" (only changes when the maintainer decides).
 std::string versionString();
+bool isPrerelease();
+std::string releaseTag();
 
 /// Auto-incrementing build number (the (NNN) part). Resets on minor/major bump.
 int buildNumber();

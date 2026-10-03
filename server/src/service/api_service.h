@@ -400,6 +400,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         jsonReply(ok(J{
             {"status","running"},
             {"version",versionString()},
+            {"prerelease",isPrerelease()},
             {"buildNumber",bn},
             {"buildTime",buildTime()},
             {"uptime", static_cast<int>(std::time(nullptr) - utils::getStartupEpoch())}
@@ -447,6 +448,15 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     app.registerHandler("/api/system/update/install", [&updateService](Req, CB&& cb) {
         std::string error;
         if (!updateService.requestInstall(error)) {
+            jsonReply(fail(error), std::move(cb));
+            return;
+        }
+        jsonReply(ok(updateService.status()), std::move(cb));
+    }, {drogon::Post});
+
+    app.registerHandler("/api/system/update/cancel", [&updateService](Req, CB&& cb) {
+        std::string error;
+        if (!updateService.requestCancelDownload(error)) {
             jsonReply(fail(error), std::move(cb));
             return;
         }
