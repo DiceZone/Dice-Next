@@ -2,6 +2,7 @@
 #include "common/types.h"
 #include "common/errors.h"
 #include "common/utils.h"
+#include "common/reply_content.h"
 #include "common/hot_reload.h"
 #include "config/config_manager.h"
 #include "config/scoped_settings.h"
@@ -1434,13 +1435,19 @@ static int realMain(int argc, char* argv[]) {
             if (reply.empty()) {
                 reply = receivedHook.reply; replySrc = "plugin";
                 replyFormat = dice::ContentFormat::kPlainText;
-            } else reply = receivedHook.reply + "\n" + reply;
+            } else {
+                auto joined = dice::joinReplyContent({{receivedHook.reply, dice::ContentFormat::kPlainText}, {reply, replyFormat}});
+                reply = std::move(joined.text); replyFormat = joined.format;
+            }
         }
         if (!commandHook.reply.empty()) {
             if (reply.empty()) {
                 reply = commandHook.reply; replySrc = "plugin";
                 replyFormat = dice::ContentFormat::kPlainText;
-            } else reply += "\n" + commandHook.reply;
+            } else {
+                auto joined = dice::joinReplyContent({{reply, replyFormat}, {commandHook.reply, dice::ContentFormat::kPlainText}});
+                reply = std::move(joined.text); replyFormat = joined.format;
+            }
         }
         if (!reply.empty() && replySrc == "plugin_command") didCommand = true;
         // ── 先在消息线程消费本条消息的一次性路由状态 ─────────────
@@ -1511,14 +1518,14 @@ static int realMain(int argc, char* argv[]) {
             // 破坏数字一律回退原文，绝不影响掷骰结果。
             if (!reply.empty() && !msg.fromSelf
                 && dice::aipolish::enabled(configMgr) && dice::aipolish::covers(configMgr, aiCat)) {
-                reply = dice::aipolish::polish(configMgr, msg.content, reply);
+                reply = dice::aipolish::polish(configMgr, msg.content, reply, replyFormat);
             }
             // 阶段3：AI 翻译 —— 本群/本用户 .lang 切到骰主自定义语言时，回复先按正常
             // 语言生成，发送前大模型翻译成目标语言（带缓存）。按覆盖范围过滤。
             if (!reply.empty() && !msg.fromSelf && dice::aitrans::enabled(configMgr)) {
                 std::string tgt = cmdRouter.aiLangFor(msg);
                 if (!tgt.empty() && dice::aitrans::covers(configMgr, aiCat))
-                    reply = dice::aitrans::translate(configMgr, tgt, reply);
+                    reply = dice::aitrans::translate(configMgr, tgt, reply, replyFormat);
             }
             // AI may translate the human-facing action labels. Visual replies
             // retain the command hint syntax, so rebuild their actions from the
@@ -3307,6 +3314,7 @@ static int realMain(int argc, char* argv[]) {
                                        {"version", m.version}, {"brief", m.brief}, {"enabled", m.enabled},
                                        {"replies", m.replies}, {"scripts", m.scripts}, {"events", m.events}, {"helpTopics", help},
                                        {"commands", cmds},
+                                       {"compatibilityWarnings", m.compatibilityWarnings},
                                        {"singleFile", m.singleFile}, {"ruleCompat", m.ruleCompat}};
                 if (auto owner = dice::CommandRouter::pluginOwnerBundle("lua:" + m.name)) {
                     item["ownerBundle"] = owner->first;

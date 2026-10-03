@@ -1,4 +1,5 @@
 #pragma once
+#include "../common/outbound_payload.h"
 
 // KOOK (开黑啦) Bot adapter — Gateway WebSocket + REST v3。
 // 流程：GET /api/v3/user/me 校验 Token 并取机器人身份 → GET /api/v3/gateway/index
@@ -129,21 +130,7 @@ private:
     /// KOOK CardMessage is a documented rich-message type.  Keep oversized
     /// messages in the existing KMarkdown/text path so no reply is truncated.
     json outboundPayload(const std::string& target, const std::string& content, ContentFormat format, bool forcePlain = false) {
-        const bool isMarkdown = format == ContentFormat::kMarkdown;
-        if (content.size() > 5000)
-            return json{{"type", 1}, {"target_id", target}, {"content", isMarkdown ? markdown::toPlainText(content) : content}};
-        if (forcePlain || !effectiveCardMode())
-            return json{{"type", 1}, {"target_id", target},
-                        {"content", isMarkdown ? markdown::toPlainText(content) : content}};
-        const std::string wire = isMarkdown ? content : markdown::escapeLiteral(content);
-        const json card = json::array({{
-            {"type", "card"}, {"theme", "primary"}, {"size", "sm"},
-            {"modules", json::array({{
-                {"type", "section"},
-                {"text", {{"type", "kmarkdown"}, {"content", wire}}}
-            }})}
-        }});
-        return json{{"type", 10}, {"target_id", target}, {"content", card.dump()}};
+        return outbound::kookText(target, content, format, !forcePlain && effectiveCardMode());
     }
 
     static std::string resolveIpv4(const std::string& host) {

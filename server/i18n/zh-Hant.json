@@ -42,8 +42,9 @@
     "status_usage": ".pc status // 查看自己的目前狀態"
   },
   "cloud_card": {
+    "diff": "「{name}」的同步差異（雲卡 {id}，rev {rev}）\n每項：基礎 | 本機 | 雲端；local=僅本機變更，remote=僅雲端變更，same=兩邊一致，conflict=兩邊不同變更。\n{diff}\n最多顯示 30 項；長值可用 .cloud pull {id} 新卡名 保留對照副本。未修改卡或同步基準，不會強制覆蓋。",
     "queued": "正在背景處理雲人物卡請求，結果會私發給你，不影響普通擲骰。",
-    "usage": "雲端服務 .cloud（需私聊）\n.cloud auth [write] // 申請帳號中心授權，預設唯讀，加 write 同時申請寫入\n.cloud confirm // 在網頁輸入驗證碼同意後，回到私聊確認\n.cloud status // 查看目前授權狀態\n.cloud logout // 清除本機授權\n.cloud list // 查看雲端人物卡\n.cloud pull <雲卡ID> [本機卡名] // 拉取雲卡到本機\n.cloud push <本機卡名> // 首次上傳本機卡\n.cloud sync <本機卡名> // 依上次同步的版本提交\n授權一次即可：雲人物卡讀寫與真實 QQ 核驗共用同一份權杖，不會自動同步。",
+    "usage": "雲端服務 .cloud（需私聊）\n.cloud auth [write] // 申請帳號中心授權，預設唯讀，加 write 同時申請寫入\n.cloud confirm // 在網頁輸入驗證碼同意後，回到私聊確認\n.cloud status // 查看目前授權狀態\n.cloud logout // 清除本機授權\n.cloud list // 查看雲端人物卡\n.cloud pull <雲卡ID> [本機卡名] // 拉取雲卡到本機\n.cloud push <本機卡名> // 首次上傳本機卡\n.cloud sync <本機卡名> // 依上次同步的版本提交\n.cloud diff <本機卡名> // 唯讀對照基礎、本機與雲端欄位，不會覆蓋\n授權一次即可：雲人物卡讀寫與真實 QQ 核驗共用同一份權杖，不會自動同步。",
     "private_only": "雲人物卡僅供玩家本人私聊操作，請私聊本骰使用 .cloud；不能代他人授權或同步。",
     "no_adapter": "目前不是可用的真實私聊連線，請在平台上私聊本骰操作。",
     "no_key": "目前骰娘未設定有效的 BDC 骰娘 API Key。請骰主在帳號中心驗證綁定後，在此適配器填寫 heart_api_key；未驗證心跳 Key 不能用於雲卡。",
@@ -61,7 +62,7 @@
     "network": "雲卡請求未能確認成功，請稍後重試；本地卡保持不變。若剛執行首次上傳，請先 list 檢查是否已建立，避免重複。",
     "bad_response": "雲卡格式／版本不支援、回應異常或本地同步狀態無法儲存。本地既有卡不會被強制覆蓋，請檢查後再試。",
     "not_found": "雲卡不存在，或不屬於本次授權帳號。",
-    "conflict": "雲端同一欄位也被修改，或基礎修訂已過期；已停止同步，未覆蓋任一方。可用 pull 雲卡ID 新卡名 保留雲端副本對照；不會自動強制覆蓋。",
+    "conflict": "雲端同一欄位也被修改，或基礎修訂已過期；已停止同步，未覆蓋任一方。可用 pull 雲卡ID 新卡名 保留雲端副本對照；不會自動強制覆蓋。 .cloud diff <本機卡名> // 唯讀對照基礎、本機與雲端欄位，不會覆蓋",
     "list": "你的雲人物卡（ID | 名稱 | 修訂）：\n{list}",
     "pulled": "已拉取雲卡 {id} 到本地「{name}」。在跑團群使用 .pc tag {name} 即可；尚未自動綁定。",
     "synced": "本地「{name}」已同步到雲卡 {id}，修訂 {rev}。",

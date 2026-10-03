@@ -28,8 +28,10 @@ set(TEST_SOURCES
     test_update_service.cpp
     test_check_roll_override.cpp
     test_markdown.cpp
+    test_outbound_payload.cpp
     test_heart_debounce.cpp
     test_cloud_cards.cpp
+    test_cloud_card_diff.cpp
     test_command_prefix_policy.cpp
     test_me_command.cpp
     test_log_bot_off.cpp

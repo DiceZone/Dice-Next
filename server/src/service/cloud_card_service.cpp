@@ -1,4 +1,5 @@
 #include "cloud_card_service.h"
+#include "../common/cloud_card_diff.h"
 #include "../adapter/adapter_interface.h"
 #include "../config/config_manager.h"
 #include "../core/character/card_store.h"
@@ -289,7 +290,7 @@ struct Service::Impl {
         std::transform(action.begin(), action.end(), action.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (action.empty() || action == "help") return result("usage");
         if (action != "auth" && action != "confirm" && action != "status" && action != "logout" &&
-            action != "list" && action != "pull" && action != "push" && action != "sync") return result("usage");
+            action != "list" && action != "pull" && action != "push" && action != "sync" && action != "diff") return result("usage");
         auto ctx = (expectedQQ.empty() ? std::string() : std::string("bind:")) + context(msg);
         if (action == "logout") { sessions.erase(ctx); return result("logout"); }
         for (auto it = sessions.begin(); it != sessions.end();) {
@@ -425,6 +426,23 @@ struct Service::Impl {
             if (l.at("local_id").get<int>() == local->id) { old = std::move(l); break; }
         }
         if (action == "sync" && !old.is_object()) return result("not_linked");
+        if (action == "diff") {
+            if (!old.is_object()) return result("not_linked");
+            const auto id = old["base"].at("card_id").get<std::string>();
+            if (!validId(id)) return result("bad_response");
+            auto r = call("/api/v1/cards/" + id);
+            if (r.status != 200) { if (r.status == 401) sessions.erase(ctx); return failure(r); }
+            if (!validRemote(r.body, id)) return result("bad_response");
+            local = cards.snapshotById(msg.senderId, local->id);
+            if (!local) return result("local_missing");
+            if (cards.cardLockedByName(msg.senderId, local->name, "r") || cards.cardLockedByName(msg.senderId, local->name, "w"))
+                return result("locked");
+            const auto name = local->name == old.at("local_name").get<std::string>()
+                ? old["base"].at("name").get<std::string>() : local->name;
+            const auto doc = toDocument(local->data, name, old["base"].value("system", ""));
+            return {"cloud_card.diff", {{"name", diffValue(DiffJson(local->name))}, {"id", id}, {"rev", r.body["rev"].dump()},
+                {"diff", differenceText(compareDocuments(old["base"], doc, r.body))}}, true};
+        }
         if (!hasScope("cards.write")) return result("readonly");
         std::string id, name = local->name, system;
         int64_t rev = 0;

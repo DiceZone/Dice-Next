@@ -9,6 +9,8 @@
 
 #include "../config/config_manager.h"
 #include "ai_gateway.h"
+#include "../common/content_format.h"
+#include "../common/markdown.h"
 #include <nlohmann/json.hpp>
 #include <string>
 
@@ -64,7 +66,8 @@ inline std::string defaultPromptRp() {
 
 // 主入口：润色一条掷骰回复。@p userMsg = 玩家原始消息（含掷骰指令/事件），
 // @p replyText = 骰子生成的回复。返回润色后的文本；任何失败都返回 replyText 原文。
-inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const std::string& replyText) {
+inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const std::string& replyText,
+                          ContentFormat format = ContentFormat::kPlainText) {
     if (replyText.empty()) return replyText;
     ai::Model m;
     if (!pickModel(cfg, m)) return replyText;
@@ -78,6 +81,8 @@ inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const 
     std::string sys = c.value("prompt", std::string());
     if (sys.empty()) sys = (mode == "rp") ? defaultPromptRp() : defaultPromptText();
     if (!persona.empty()) sys += "\n人设/风格：" + persona;
+    if (format == ContentFormat::kMarkdown)
+        sys += "\n回复采用 Markdown。必须保留标题、列表、表格、引用、粗体等排版结构，代码、数学公式、链接目标和媒体代码必须原样保留，只改普通文字。";
 
     std::string user = "玩家消息：" + userMsg + "\n骰子回复：" + replyText;
 
@@ -97,6 +102,9 @@ inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const 
     // 关键：润色后若丢失/改动了原文的任何数字 → 判为破坏了骰点结果，直接发原文。
     if (!ai::preservesNumbers(replyText, out)) { DICE_LOG_WARN("[AI polish] numbers changed, falling back to original"); return replyText; }
     if (!ai::preservesActionCommands(replyText, out)) { DICE_LOG_WARN("[AI polish] action command changed, falling back to original"); return replyText; }
+    if (format == ContentFormat::kMarkdown && !markdown::preservesStructure(replyText, out)) {
+        DICE_LOG_WARN("[AI polish] Markdown structure changed, falling back to original"); return replyText;
+    }
     DICE_LOG_INFO("[AI polish] ok model={} tokens={} latency={}ms in_len={} out_len={}", m.id, r.totalTokens, r.latencyMs, replyText.size(), out.size());
     return out;
 }  // polish

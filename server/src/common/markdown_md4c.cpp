@@ -479,6 +479,97 @@ bool renderPlainText(const std::string& source,
 
 } // namespace
 
+namespace {
+struct StructureState {
+    std::vector<std::string> events;
+    std::string literal;
+    int literalDepth = 0;
+    void flush() {
+        if (!literal.empty()) { events.push_back("literal:" + literal); literal.clear(); }
+    }
+};
+
+int structureBlock(MD_BLOCKTYPE type, void* detail, void* data) {
+    auto& state = *static_cast<StructureState*>(data);
+    state.flush();
+    // Allow RP prose before/after the reply without removing its rich layout.
+    if (type == MD_BLOCK_DOC || type == MD_BLOCK_P) return 0;
+    std::string event = "block:" + std::to_string(type);
+    if (type == MD_BLOCK_H) event += ":" + std::to_string(static_cast<MD_BLOCK_H_DETAIL*>(detail)->level);
+    if (type == MD_BLOCK_OL) event += ":" + std::to_string(static_cast<MD_BLOCK_OL_DETAIL*>(detail)->start);
+    if (type == MD_BLOCK_LI) {
+        const auto& item = *static_cast<MD_BLOCK_LI_DETAIL*>(detail);
+        event += item.is_task ? std::string(":task:") + item.task_mark : ":item";
+    }
+    if (type == MD_BLOCK_TH || type == MD_BLOCK_TD)
+        event += ":" + std::to_string(static_cast<MD_BLOCK_TD_DETAIL*>(detail)->align);
+    if (type == MD_BLOCK_CODE) {
+        event += ":" + attributeText(static_cast<MD_BLOCK_CODE_DETAIL*>(detail)->info);
+        ++state.literalDepth;
+    }
+    state.events.push_back(std::move(event));
+    return 0;
+}
+int structureBlockEnd(MD_BLOCKTYPE type, void*, void* data) {
+    auto& state = *static_cast<StructureState*>(data);
+    state.flush();
+    if (type == MD_BLOCK_CODE) --state.literalDepth;
+    if (type != MD_BLOCK_DOC && type != MD_BLOCK_P)
+        state.events.push_back("/block:" + std::to_string(type));
+    return 0;
+}
+int structureSpan(MD_SPANTYPE type, void* detail, void* data) {
+    auto& state = *static_cast<StructureState*>(data);
+    state.flush();
+    std::string event = "span:" + std::to_string(type);
+    if (type == MD_SPAN_A) event += ":" + attributeText(static_cast<MD_SPAN_A_DETAIL*>(detail)->href);
+    if (type == MD_SPAN_IMG) event += ":" + attributeText(static_cast<MD_SPAN_IMG_DETAIL*>(detail)->src);
+    if (type == MD_SPAN_CODE || type == MD_SPAN_LATEXMATH || type == MD_SPAN_LATEXMATH_DISPLAY)
+        ++state.literalDepth;
+    state.events.push_back(std::move(event));
+    return 0;
+}
+int structureSpanEnd(MD_SPANTYPE type, void*, void* data) {
+    auto& state = *static_cast<StructureState*>(data);
+    state.flush();
+    if (type == MD_SPAN_CODE || type == MD_SPAN_LATEXMATH || type == MD_SPAN_LATEXMATH_DISPLAY)
+        --state.literalDepth;
+    state.events.push_back("/span:" + std::to_string(type));
+    return 0;
+}
+int structureText(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* data) {
+    auto& state = *static_cast<StructureState*>(data);
+    if (state.literalDepth || type == MD_TEXT_HTML) state.literal.append(text, size);
+    if (type == MD_TEXT_BR) state.events.push_back("break");
+    return 0;
+}
+bool structureOf(const std::string& text, std::vector<std::string>& events) {
+    StructureState state;
+    MD_PARSER parser{};
+    parser.flags = MD_DIALECT_GITHUB | MD_FLAG_LATEXMATHSPANS;
+    parser.enter_block = structureBlock; parser.leave_block = structureBlockEnd;
+    parser.enter_span = structureSpan; parser.leave_span = structureSpanEnd;
+    parser.text = structureText;
+    if (md_parse(text.data(), static_cast<MD_SIZE>(text.size()), &parser, &state) != 0) return false;
+    state.flush();
+    // Media protocol codes are opaque even when Markdown treats them as text.
+    for (size_t pos = 0; pos < text.size(); ++pos) {
+        if (!parserProtocolCodeAt(text, pos)) continue;
+        const auto end = text.find(']', pos);
+        if (end == std::string::npos) return false;
+        state.events.push_back("media:" + text.substr(pos, end - pos + 1));
+        pos = end;
+    }
+    events = std::move(state.events);
+    return true;
+}
+} // namespace
+
+bool preservesStructure(const std::string& original, const std::string& candidate) {
+    std::vector<std::string> before, after;
+    return structureOf(original, before) && structureOf(candidate, after) && before == after;
+}
+
 std::string toPlainText(const std::string& markdownText) {
     if (markdownText.empty()) return {};
     if (markdownText.find_first_of("*_~\x60[#><") == std::string::npos) {
@@ -502,4 +593,3 @@ std::string toPlainText(const std::string& markdownText) {
 }
 
 } // namespace dice::markdown
-

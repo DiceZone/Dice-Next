@@ -2026,12 +2026,15 @@ static std::string dnx_trimToml(std::string value) {
 }
 
 static std::string dnx_stripTomlComment(const std::string& line) {
-    bool quoted = false, escaped = false;
+    char quote = 0; bool escaped = false;
     for (size_t i = 0; i < line.size(); ++i) {
         const char c = line[i];
-        if (quoted && c == '\\' && !escaped) { escaped = true; continue; }
-        if (c == '"' && !escaped) quoted = !quoted;
-        if (c == '#' && !quoted) return line.substr(0, i);
+        if (quote == '"' && c == '\\' && !escaped) { escaped = true; continue; }
+        if (!escaped && (c == '"' || c == '\'')) {
+            if (!quote) quote = c;
+            else if (quote == c) quote = 0;
+        }
+        if (c == '#' && !quote) return line.substr(0, i);
         escaped = false;
     }
     return line;
@@ -2039,6 +2042,12 @@ static std::string dnx_stripTomlComment(const std::string& line) {
 
 static std::string dnx_tomlString(std::string value) {
     value = dnx_trimToml(value);
+    if (value.rfind("\"\"\"", 0) == 0 || value.rfind("'''", 0) == 0)
+        throw std::runtime_error("multiline TOML strings are not supported");
+    if (!value.empty() && (value.front() == '"' || value.front() == '\'')) {
+        if (value.size() < 2 || value.back() != value.front()) throw std::runtime_error("unterminated TOML string");
+        if (value.front() == '\'') return value.substr(1, value.size() - 2);
+    }
     if (value.size() < 2 || value.front() != '"' || value.back() != '"') return value;
     std::string out;
     out.reserve(value.size() - 2);
@@ -2049,7 +2058,10 @@ static std::string dnx_tomlString(std::string value) {
         if (n == 'n') out.push_back('\n');
         else if (n == 'r') out.push_back('\r');
         else if (n == 't') out.push_back('\t');
-        else out.push_back(n);
+        else if (n == 'b') out.push_back('\b');
+        else if (n == 'f') out.push_back('\f');
+        else if (n == '\\' || n == '"') out.push_back(n);
+        else throw std::runtime_error("unsupported TOML escape; use a literal string for regex or paths");
     }
     return out;
 }
@@ -2057,27 +2069,36 @@ static std::string dnx_tomlString(std::string value) {
 static std::vector<std::string> dnx_tomlStrings(std::string value) {
     value = dnx_trimToml(value);
     if (value.empty()) return {};
-    if (value.front() != '[' || value.back() != ']') return {dnx_tomlString(value)};
+    if (value.front() != '[') return {dnx_tomlString(value)};
+    if (value.back() != ']') throw std::runtime_error("multiline/unterminated TOML arrays are not supported");
     value = value.substr(1, value.size() - 2);
     std::vector<std::string> out;
-    bool quoted = false, escaped = false;
+    char quote = 0; bool escaped = false;
     size_t start = 0;
     for (size_t i = 0; i <= value.size(); ++i) {
         const char c = i < value.size() ? value[i] : ',';
-        if (quoted && c == '\\' && !escaped) { escaped = true; continue; }
-        if (c == '"' && !escaped) quoted = !quoted;
-        if (c == ',' && !quoted) {
+        if (quote == '"' && c == '\\' && !escaped) { escaped = true; continue; }
+        if (!escaped && (c == '"' || c == '\'')) {
+            if (!quote) quote = c;
+            else if (quote == c) quote = 0;
+        }
+        if (c == ',' && !quote) {
             std::string item = dnx_trimToml(value.substr(start, i - start));
             if (!item.empty()) out.push_back(dnx_tomlString(item));
             start = i + 1;
         }
         escaped = false;
     }
+    if (quote) throw std::runtime_error("unterminated TOML array string");
     return out;
 }
 
 static int dnx_tomlInt(const std::string& value) {
-    try { return std::stoi(dnx_trimToml(value)); } catch (...) { return 0; }
+    const auto text = dnx_trimToml(value);
+    size_t used = 0;
+    const auto number = std::stoi(text, &used);
+    if (used != text.size() || number < 0) throw std::runtime_error("invalid non-negative TOML cooldown");
+    return number;
 }
 
 // 兼容常见 reply TOML 子集；未实现的限制必须跳过回复并诊断，不能放宽权限。
@@ -2146,6 +2167,9 @@ static std::vector<DnxLegacyTomlReply> dnx_parseLegacyReplyToml(const fs::path& 
 
 // 载入一个旧 Dice! mod 的 speech + reply(.lua/.toml) + event(.lua)。
 void LuaPluginManager::loadModReplies(LuaMod& mod) {
+    auto compatibilityWarning = [&](std::string text) {
+        if (mod.compatibilityWarnings.size() < 100) mod.compatibilityWarnings.push_back(std::move(text));
+    };
     std::error_code ec;
     // 1) speech 词条：平铺 key:value 标量。
     fs::path sp = fs::path(mod.dir) / "speech";
@@ -2290,6 +2314,12 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
             if (lua_istable(state_, -1)) {
                 lua_getfield(state_, -1, "trigger");
                 if (lua_istable(state_, -1)) {
+                    bool unsupportedTrigger = false;
+                    for (const char* field : {"clock", "hook"}) {
+                        lua_getfield(state_, -1, field);
+                        unsupportedTrigger = unsupportedTrigger || !lua_isnil(state_, -1);
+                        lua_pop(state_, 1);
+                    }
                     lua_getfield(state_, -1, "cycle");
                     if (lua_isnumber(state_, -1)) event.intervalSeconds = lua_tonumber(state_, -1);
                     else if (lua_istable(state_, -1)) {
@@ -2301,6 +2331,7 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
                         unit("second", 1.0); unit("minute", 60.0); unit("hour", 3600.0); unit("day", 86400.0);
                     }
                     lua_pop(state_, 1);
+                    if (unsupportedTrigger) event.intervalSeconds = 0;
                 }
                 lua_pop(state_, 1);
                 lua_getfield(state_, -1, "action");
@@ -2316,6 +2347,7 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
                 ++mod.events;
             } else {
                 DICE_LOG_WARN("[lua] mod '{}' event '{}': requires a positive trigger.cycle and action.lua; clock/hook actions are not supported", mod.name, event.id);
+                compatibilityWarning("事件 " + event.id + " 已跳过：仅支持有效的 trigger.cycle 与 action.lua，clock/hook 尚不支持。");
             }
             lua_pop(state_, 1);
         }
@@ -2327,6 +2359,7 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
         lua_newtable(state_); lua_setglobal(state_, "event");
         if (dnx_dofile(state_, file) != LUA_OK) {
             DICE_LOG_ERROR("[lua] mod definition '{}' load error: {}", dnx_u8str(file.filename()), argStr(state_, -1));
+            compatibilityWarning(dnx_u8str(file.filename()) + " 加载失败，请查看运行日志。");
             lua_pop(state_, 1); return;
         }
         collectReplies();
@@ -2345,6 +2378,7 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
                     if (!legacy.unsupportedLimit.empty()) {
                         DICE_LOG_WARN("[lua] TOML reply '{}:{}' skipped: unsupported condition '{}'",
                                       mod.name, legacy.name, legacy.unsupportedLimit);
+                        compatibilityWarning(dnx_u8str(f.path().filename()) + " / " + legacy.name + " 已跳过：不支持的条件 " + legacy.unsupportedLimit + "，不会忽略条件后执行。");
                         continue;
                     }
                     ReplyRule rule;
@@ -2358,9 +2392,12 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
                     std::string legacyType = legacy.type;
                     for (auto& c : legacyType) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
                     rule.requiresGame = legacyType == "game";
-                    if (!legacy.echoJs.empty())
-                        DICE_LOG_WARN("[lua] TOML reply '{}:{}' uses legacy Dice! JS action '{}'; skipped (not a SeaDice plugin)",
+                    if (!legacy.echoJs.empty()) {
+                        DICE_LOG_WARN("[lua] TOML reply '{}:{}' uses legacy Dice! JS action '{}'; skipped (not a SealDice plugin)",
                                       mod.name, legacy.name, legacy.echoJs);
+                        compatibilityWarning(dnx_u8str(f.path().filename()) + " / " + legacy.name + " 已跳过：旧 Dice! JS 不属于海豹 JS 插件体系，不提供兼容执行。");
+                        continue;
+                    }
                     if ((!rule.echoScript.empty() || !rule.staticEcho.empty())
                         && (!rule.matchPatterns.empty() || !rule.prefixPatterns.empty()
                             || !rule.searchPatterns.empty() || !rule.regexPatterns.empty()))
@@ -2368,6 +2405,7 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
                 }
             } catch (const std::exception& ex) {
                 DICE_LOG_ERROR("[lua] reply TOML '{}' parse error: {}", dnx_u8str(f.path().filename()), ex.what());
+                compatibilityWarning(dnx_u8str(f.path().filename()) + " 解析失败，请检查 TOML 语法并查看运行日志。");
             }
         }
     }

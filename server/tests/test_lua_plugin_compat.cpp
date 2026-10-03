@@ -70,6 +70,63 @@ private:
 
 }  // namespace
 
+TEST(LuaPluginCompat, UnsupportedLegacyActionsAreVisibleAndNeverRunPartialFallbacks) {
+    TempWorkspace workspace("dice_next_lua_diagnostics_");
+    const auto mod = workspace.root() / "data" / "mod" / "unsupported";
+    fs::create_directories(mod / "reply"); fs::create_directories(mod / "event");
+    writeText(mod / "descriptor.json", R"({"title":"兼容诊断"})");
+    writeText(mod / "reply" / "unsupported.toml", R"TOML(
+[reply.javascript]
+keyword.match = "legacyjs"
+echo.js = "old.js"
+echo = "must not run a partial fallback"
+[reply.unsupported_condition]
+keyword.match = "unsafe"
+limit.unknown = true
+echo = "must not run without its condition"
+)TOML");
+    writeText(mod / "event" / "mixed.lua", R"LUA(
+event = { mixed = { trigger = { cycle = 10, hook = "message" }, action = { lua = "never" } } }
+)LUA");
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    const auto mods = manager.mods();
+    ASSERT_EQ(mods.size(), size_t(1));
+    ASSERT_EQ(mods[0].events, 0);
+    ASSERT_EQ(mods[0].compatibilityWarnings.size(), size_t(3));
+    ASSERT_FALSE(manager.dispatch("legacyjs", "u", "g", "n", "", false).matched);
+    ASSERT_FALSE(manager.dispatch("unsafe", "u", "g", "n", "", false).matched);
+}
+
+TEST(LuaPluginCompat, TomlLiteralStringsKeepHashesCommasAndRegexBackslashes) {
+    TempWorkspace workspace("dice_next_lua_literal_toml_");
+    const auto mod = workspace.root() / "data" / "mod" / "literal";
+    fs::create_directories(mod / "reply");
+    writeText(mod / "descriptor.json", R"({"title":"literal"})");
+    writeText(mod / "reply" / "literal.toml", R"TOML(
+[reply.literal]
+keyword.match = ['hash#word', 'comma,word'] # real comment
+echo = 'literal#content, with \backslash'
+[reply.regex]
+keyword.regex = '^num\d+$'
+echo = 'regex'
+)TOML");
+    writeText(mod / "reply" / "invalid.toml", R"TOML(
+[reply.unsafe]
+keyword.match = "invalid"
+limit.cd = invalid
+echo = "must not silently disable cooldown"
+)TOML");
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    ASSERT_EQ(manager.dispatch("hash#word", "u", "g", "n", "", false).reply, "literal#content, with \\backslash");
+    ASSERT_EQ(manager.dispatch("comma,word", "u", "g", "n", "", false).reply, "literal#content, with \\backslash");
+    ASSERT_EQ(manager.dispatch("num123", "u", "g", "n", "", false).reply, "regex");
+    ASSERT_FALSE(manager.dispatch("invalid", "u", "g", "n", "", false).matched);
+    ASSERT_EQ(manager.mods()[0].compatibilityWarnings.size(), size_t(1));
+}
+
 TEST(LuaPluginCompat, LegacySiblingLoadLuaAndTopLevelHttpRefreshPerInvocation) {
     TempWorkspace workspace("dice_next_lua_compat_");
     const fs::path pluginDir = workspace.root() / "data" / "plugin";

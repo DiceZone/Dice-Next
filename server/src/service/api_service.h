@@ -13,6 +13,7 @@
 #include "../core/dice/dice_rules.h"
 #include "../common/utils.h"
 #include "../common/markdown.h"
+#include "../common/reply_preview.h"
 #include "../common/version.h"
 #include "../adapter/adapter_interface.h"
 #include "../adapter/adapter_manager.h"
@@ -1814,19 +1815,25 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // Exact platform previews used by the reply editor. Plain text never runs
-    // through a Markdown heuristic; only explicitly-marked Markdown is reduced.
+    // Text/card serialization preview only; no real messages or credentials.
     app.registerHandler("/api/templates/preview", [](Req req, CB&& cb) {
         try {
             J body = J::parse(req->body());
             std::string text = body.value("text", "");
-            const bool isMarkdown = body.value("format", "plain") == "markdown";
-            const auto rich = presentation::expandComponents(
-                text, PresentationStyle::kVisual, ContentFormat::kMarkdown).text;
-            const auto plainSource = isMarkdown ? markdown::toPlainText(text) : text;
-            const auto plain = presentation::expandComponents(
-                plainSource, PresentationStyle::kVisual, ContentFormat::kPlainText).text;
-            jsonReply(ok(J{{"markdown", rich}, {"onebot", plain}}), std::move(cb));
+            if (text.size() > 65536) throw std::invalid_argument("preview text too long");
+            const auto formatName = body.value("format", "plain");
+            if (formatName != "markdown" && formatName != "plain") throw std::invalid_argument("invalid format");
+            const auto format = formatName == "markdown" ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
+            const auto styleName = body.value("style", std::string("visual"));
+            if (styleName != "traditional" && styleName != "standard" && styleName != "visual")
+                throw std::invalid_argument("invalid presentation style");
+            const auto style = presentationStyleFromString(styleName);
+            const auto preview = outbound::replyPreview(text, format,
+                body.value("platform", std::string("qq_group")), style, body.value("forcePlain", false));
+            // Retain the old editor response fields during independent frontend upgrades.
+            jsonReply(ok(J{{"preview", preview},
+                {"markdown", outbound::replyPreview(text, format, "qq_group", style)["text"]},
+                {"onebot", outbound::replyPreview(text, format, "plain", style)["text"]}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 

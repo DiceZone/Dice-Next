@@ -42,8 +42,9 @@
     "status_usage": ".pc status // view your current status"
   },
   "cloud_card": {
+    "diff": "Sync differences for {name} (cloud {id}, rev {rev})\nEach row: base | local | cloud. local=local edit, remote=cloud edit, same=identical edits, conflict=different edits on both sides.\n{diff}\nUp to 30 fields; for long values use .cloud pull {id} NEW_NAME to compare a separate copy. No card or merge base was changed; no forced overwrite.",
     "queued": "Processing your cloud card request in the background. Results will be sent privately; ordinary rolls are unaffected.",
-    "usage": "Cloud services .cloud (private chat only)\n.cloud auth [write] // request account authorization; read-only unless write is given\n.cloud confirm // confirm here after approving with the code on the web page\n.cloud status // show the current authorization state\n.cloud logout // clear the authorization stored on this machine\n.cloud list // list your cloud cards\n.cloud pull <cloud card ID> [local name] // pull a cloud card to this machine\n.cloud push <local card> // upload a local card for the first time\n.cloud sync <local card> // submit against the revision last synchronized\nOne authorization covers both: cloud cards and the real-QQ check share the same token. Nothing synchronizes on its own.",
+    "usage": "Cloud services .cloud (private chat only)\n.cloud auth [write] // request account authorization; read-only unless write is given\n.cloud confirm // confirm here after approving with the code on the web page\n.cloud status // show the current authorization state\n.cloud logout // clear the authorization stored on this machine\n.cloud list // list your cloud cards\n.cloud pull <cloud card ID> [local name] // pull a cloud card to this machine\n.cloud push <local card> // upload a local card for the first time\n.cloud sync <local card> // submit against the revision last synchronized\n.cloud diff <local card> // read-only base/local/cloud comparison\nOne authorization covers both: cloud cards and the real-QQ check share the same token. Nothing synchronizes on its own.",
     "private_only": "Use .cloud in your own private chat with this bot. Proxy authorization/synchronization is not allowed.",
     "no_adapter": "Use a real, connected platform private chat for cloud cards.",
     "no_key": "This adapter needs its verified BDC dice API key (heart_api_key). An unverified heartbeat key is not sufficient.",
@@ -61,7 +62,7 @@
     "network": "The cloud request could not be confirmed. Local cards are unchanged. After a first-upload error, check list before retrying to avoid duplicates.",
     "bad_response": "Unsupported/malformed cloud data or local sync-state storage failure. Existing local cards are not forcibly overwritten.",
     "not_found": "Cloud card not found or not owned by the authorized account.",
-    "conflict": "Concurrent edits or expired merge base: sync stopped without overwriting either side. Pull CLOUD_ID NEW_LOCAL_NAME to inspect a separate cloud copy. No forced overwrite is attempted.",
+    "conflict": "Concurrent edits or expired merge base: sync stopped without overwriting either side. Pull CLOUD_ID NEW_LOCAL_NAME to inspect a separate cloud copy. No forced overwrite is attempted. .cloud diff <local card> // read-only base/local/cloud comparison",
     "list": "Your cloud cards (ID | name | revision):\n{list}",
     "pulled": "Cloud card {id} imported as '{name}'. Use .pc tag {name} in your game group; no automatic binding was changed.",
     "synced": "'{name}' synchronized with cloud card {id}, revision {rev}.",

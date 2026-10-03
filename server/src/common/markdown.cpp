@@ -49,7 +49,7 @@ bool expressionMarkerAt(const std::string& text, size_t pos, std::string_view ma
 // Protect content that must survive the Markdown downgrade byte-for-byte:
 // OneBot protocol codes, escaped punctuation and inline-code contents.
 std::string protectInline(const std::string& input, std::vector<std::string>& protectedText) {
-    static constexpr std::string_view kEscapable = R"(\`*_{}[]()#+-.!>|~)";
+    static constexpr std::string_view kEscapable = R"(\`*_{}[]()#+-.!>|~$)";
     std::string out;
     out.reserve(input.size());
     for (size_t i = 0; i < input.size();) {
@@ -248,7 +248,7 @@ bool hasFormatting(const std::string& text) {
 }
 
 std::string escapeLiteral(const std::string& text) {
-    static constexpr std::string_view kEscapable = R"(\`*_{}[]()#+-.!>|~)";
+    static constexpr std::string_view kEscapable = R"(\`*_{}[]()#+-.!>|~$)";
     std::string out;
     out.reserve(text.size() + text.size() / 8);
     for (size_t i = 0; i < text.size();) {

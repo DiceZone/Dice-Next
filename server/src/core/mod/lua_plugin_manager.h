@@ -101,6 +101,7 @@ public:
         std::map<std::string, std::string> helpdoc;   // descriptor.json helpdoc{主题:文本}
         std::vector<std::string> permissions;   // descriptor 声明的能力（空=未声明）
         std::vector<std::string> risks;         // 静态预检命中的高危标签（仅告警不硬拦）
+        std::vector<std::string> compatibilityWarnings; // Skipped legacy features, not permission warnings.
         bool permissionDeclared = false;
     };
     std::vector<LuaMod> mods() const;

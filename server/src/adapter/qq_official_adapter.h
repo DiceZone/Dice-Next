@@ -9,6 +9,7 @@
 #include "../common/logger.h"
 #include "../common/markdown.h"
 #include "../common/qq_rich_reply.h"
+#include "../common/outbound_payload.h"
 
 #include <drogon/HttpAppFramework.h>   // drogon::app()：此前靠其他头间接带入，独立编译会缺
 #include <drogon/HttpClient.h>
@@ -1276,34 +1277,12 @@ public:
     json textPayload(const Message& m, const std::string& text, ContentFormat format, int fallbackLevel = 0) const {
         const bool useMarkdown = !forcePlainTextFor(m) && fallbackLevel < 2 && effectiveCardMode()
             && m.type != MessageType::kChannel && markdownCardReady();
-        const bool rich = useMarkdown && m.platform == "qq_official" && format == ContentFormat::kPlainText
-            && richStyle_ != "off" && m.qqRichReply
-            && m.qqRichReply->original == text;
-        const bool interactive = useMarkdown && m.platform == "qq_official" && fallbackLevel == 0
-            && richStyle_ != "off" && !m.presentationActions.empty();
-        const auto commands = qq_rich::mergeCommands(rich ? m.qqRichReply.get() : nullptr,
-                                                       m.presentationActions);
-        std::string wireText = useMarkdown
-            ? (format == ContentFormat::kMarkdown ? text : markdown::escapeQQMarkdownLiteral(text))
-            : (format == ContentFormat::kMarkdown ? markdown::toPlainText(text) : text);
-        if (rich) wireText = qq_rich::render(*m.qqRichReply,
-            fallbackLevel == 0 && richStyle_ == "math", false);
-        if ((rich || interactive) && fallbackLevel == 0 && interactions_ == "links")
-            wireText += qq_rich::commandLinks(commands);
-        // Large cards use the existing plain reply/segmentation path, never send a truncated formula.
-        if (rich && wireText.size() > 3500) return textPayload(m, text, format, 2);
-        json body = useMarkdown
-            ? json{{"content", " "}, {"msg_type", 2}, {"markdown", {{"content", wireText}, {"force_verify_image_resource", forceVerifyImageResource_}}}}
-            : json{{"content", wireText.empty() && !text.empty() ? text : wireText}};
-        if (!useMarkdown && m.type != MessageType::kChannel) body["msg_type"] = 0;
-        if ((rich || interactive) && fallbackLevel == 0 && interactions_ == "buttons") {
-            // Use the source transport OpenID, never its bound/canonical QQ identity.
-            const auto nativeUser = m.extra.is_object()
-                ? m.extra.value("__identity_native_sender", std::string()) : std::string();
-            auto keys = qq_rich::keyboard(commands, nativeUser);
-            if (!keys.is_null()) body["keyboard"] = std::move(keys);
-        }
-        return body;
+        const auto nativeUser = m.extra.is_object()
+            ? m.extra.value("__identity_native_sender", std::string()) : std::string();
+        return outbound::qqText(text, format, useMarkdown, m.type == MessageType::kChannel,
+            m.platform == "qq_official" ? m.qqRichReply.get() : nullptr, m.presentationActions,
+            m.platform == "qq_official" ? richStyle_ : "off", interactions_, nativeUser,
+            forceVerifyImageResource_, fallbackLevel);
     }
 private:
     /// QQ 官方机器人支持 Markdown，但它仍受机器人后台能力开关约束。卡片模式

@@ -1,6 +1,60 @@
 # Dice!Next command and plugin compatibility report
 
-Date: 2026-09-03
+Historical baseline date: 2026-09-03. Later entries below record their own scope;
+targeted checks must not be presented as a fresh full-suite or live-platform run.
+
+## 2026-10-04: Reply previews, Lua diagnostics and cloud comparison
+
+Local implementation, not committed or published. Scope is deliberately split:
+
+- Markdown/production text serializers: 21 cases / 76 assertions passed.
+  Covers AI structure guards, literal plugin fragments, platform downgrade,
+  QQ group/private/channel boundaries, KOOK cards and Discord literal output.
+  No live AI request or actual platform delivery was made.
+- Lua compatibility: 17 registered cases / 156 assertions passed. Literal TOML
+  strings retain hashes, commas and regex backslashes; invalid cooldowns fail
+  closed. Unsupported actions/conditions are visible and never partially run.
+  Optional external corpus fixtures were not supplied. Legacy Dice! JS is
+  intentionally excluded; JS uses the SealDice runtime and Python is not planned.
+- Read-only cloud diff: 4 cases / 23 assertions passed. Includes missing versus
+  null, arrays, escaped paths, parent deletion/type conflicts and bounded safe
+  receipts. The new cloud-service integration test was added but not executed.
+  Automatic sync and editable conflict handling remain design-only; no auto
+  uploads, token persistence/refresh or force overwrite have been enabled.
+- i18n/persona regression: 29 cases / 138 assertions passed.
+- WebUI: 107 tests, TypeScript checks and production build passed; 3 PWA build
+  artifact checks passed. Documentation-site production build passed. Existing
+  bundle-size warnings remain. Local preview uses the production serializer CLI;
+  manual UI checking confirmed QQ Markdown `msg_type: 2` becomes plain
+  `msg_type: 0` when simulation is enabled, without saving or sending anything.
+- The independent read-only frontend workflow is added, but has not run on
+  GitHub because these changes have not been pushed.
+- Existing native updater regression: 22 cases / 169 assertions passed again.
+  This is not Windows package acceptance. The Windows checklist remains pending:
+  [windows-update-acceptance.md](../../docs/windows-update-acceptance.md).
+- The local machine lacks the full Drogon/CMake dependency environment. The
+  complete backend executable and cloud-service integration suite were not built
+  in this round; targeted standalone suites do not substitute for that check.
+
+## 2026-10-03: Update recovery, version UI and default help
+
+- Core `22904bb`: native update-service regression, 22 cases / 169 assertions
+  passed. Covers cancellation, idle/attempt deadlines, source fallback and cache
+  invalidation, partial cleanup, checksum rejection and retry. Stable-channel
+  version smoke checks passed with `DICE_PRERELEASE=0`.
+- WebUI `fe9060d`: 102 tests, TypeScript checks and production build passed.
+  Includes version formatting, status reconciliation, request timeout, safe New
+  icon, cancellation controls and the removal of redundant playground dividers.
+- Core `75ec20d`: i18n/help regression, 29 cases / 138 assertions passed. Default
+  help includes the two-line feedback group hint in all four locales and all
+  three profiles; topic help and owner overrides retain their behavior.
+- Release workflow [37108609089](https://github.com/DiceZone/Dice-Next/actions/runs/37108609089)
+  completed successfully and beta.925 was published. The help-only `75ec20d`
+  came later and is not part of that package; its security checks do not imply
+  a new full release/test run.
+- No new real-account delivery or Windows cancellation/install end-to-end test
+  was performed by these local checks. Prior full Windows test records are in
+  [CI build notes](../../docs/ci-release-build.md); retain their original dates.
 
 ## 2026-09-16: Legacy Dice sample reply templates
 

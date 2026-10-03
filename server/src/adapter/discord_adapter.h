@@ -1,4 +1,5 @@
 #pragma once
+#include "../common/outbound_payload.h"
 
 // Discord Bot adapter — Gateway WebSocket (v10) + REST。
 // 结构与 QQOfficialAdapter 一致：REST 取网关地址 → WSS 连接 → hello/identify/
@@ -164,10 +165,7 @@ private:
         return forcePlainTextFor(m);
     }
     std::string outboundText(const std::string& text, ContentFormat format, bool forcePlain = false) const {
-        if (format == ContentFormat::kMarkdown)
-            return forcePlain ? markdown::escapeLiteral(markdown::toPlainText(text))
-                : (effectiveCardMode() ? text : markdown::toPlainText(text));
-        return markdown::escapeLiteral(text);
+        return outbound::discordText(text, format, !forcePlain && effectiveCardMode());
     }
 
     /// REST 调用（discord.com），走 curl 子进程 + 独立线程。回调只在 2xx 且 JSON
@@ -386,12 +384,7 @@ private:
         // Discord embeds are universally available to bot messages.  Keep long
         // replies as plain text because an embed description is limited to 4096
         // characters and silently truncating dice/log output would be worse.
-        json body;
-        if (effectiveCardMode() && native.size() <= 4096) {
-            body = {{"embeds", json::array({{{"description", native}, {"color", 0x5865F2}}})}};
-        } else {
-            body = {{"content", native}};
-        }
+        json body = outbound::discordPayload(native, effectiveCardMode());
         restRequest("POST", "/api/v10/channels/" + channelId + "/messages", body, nullptr);
     }
 

@@ -178,6 +178,24 @@ TEST(CloudCards, ConflictsDoNotRetryOverwriteOrAdvanceBase) {
     ASSERT_EQ(Json::parse(f.calls.back().body)["base_rev"], 1);
 }
 
+TEST(CloudCards, DifferenceIsPrivateReadOnlyAndKeepsTheOriginalMergeBase) {
+    Fixture f; f.scope = "cards.read"; ASSERT_TRUE(f.auth(false));
+    ASSERT_EQ(f.run("pull card-1").key, "cloud_card.pulled");
+    f.cards.setAttrByName("1000", "云卡", "力量", 70);
+    f.custom = [](const Request& r) {
+        return r.path == "/api/v1/cards/card-1" ? Response{200, remote({{"力量", 80}}, 2)} : Response{};
+    };
+    const auto result = f.run("diff 云卡");
+    ASSERT_EQ(result.key, "cloud_card.diff"); ASSERT_TRUE(result.secret);
+    ASSERT_TRUE(result.args.at("diff").find("conflict") != std::string::npos);
+    ASSERT_EQ(f.cards.getAttrByName("1000", "云卡", "力量").value(), 70);
+    for (const auto& row : f.db.getStorage()->get_all<UserSettingRow>())
+        ASSERT_EQ(Json::parse(row.value)["base"]["rev"], 1);
+    f.msg.type = MessageType::kGroup;
+    const auto count = f.calls.size();
+    ASSERT_EQ(f.run("diff 云卡").key, "cloud_card.private_only"); ASSERT_EQ(f.calls.size(), count);
+}
+
 TEST(CloudCards, LocalRenameKeepsCloudIdAndBindingsWorkOffline) {
     Fixture f; ASSERT_TRUE(f.auth()); ASSERT_EQ(f.run("pull card-1").key, "cloud_card.pulled");
     f.cards.bindCard("1000", "group", "云卡");

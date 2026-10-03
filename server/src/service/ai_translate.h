@@ -12,6 +12,8 @@
 
 #include "../config/config_manager.h"
 #include "ai_gateway.h"
+#include "../common/content_format.h"
+#include "../common/markdown.h"
 #include <nlohmann/json.hpp>
 #include "../common/logger.h"
 #include <string>
@@ -97,9 +99,10 @@ inline std::string fillLang(std::string tpl, const std::string& lang) {
 }
 
 /// 把 @p text 翻译成 @p targetLang（显示名，如「德语」）。失败返回原文。
-inline std::string translate(ConfigManager& cfg, const std::string& targetLang, const std::string& text) {
+inline std::string translate(ConfigManager& cfg, const std::string& targetLang, const std::string& text,
+                             ContentFormat format = ContentFormat::kPlainText) {
     if (text.empty() || targetLang.empty()) return text;
-    std::string key = targetLang + "\x1f" + text;
+    std::string key = targetLang + "\x1f" + (format == ContentFormat::kMarkdown ? "markdown" : "plain") + "\x1f" + text;
     {
         std::lock_guard<std::mutex> lk(cacheMutex());
         auto it = cache().find(key);
@@ -113,6 +116,8 @@ inline std::string translate(ConfigManager& cfg, const std::string& targetLang, 
     std::string tpl = conf(cfg).value("prompt", std::string());
     if (tpl.empty()) tpl = defaultPrompt();
     std::string sys = fillLang(tpl, targetLang);
+    if (format == ContentFormat::kMarkdown)
+        sys += "\n回复采用 Markdown。必须保留标题、列表、表格、引用、粗体等排版结构，代码、数学公式、链接目标和媒体代码必须原样保留，只翻译普通文字。";
     int maxTok = (int)(text.size()) + 256;
     if (maxTok > 2048) maxTok = 2048;
     ai::Result r = ai::chat(cfg, m, sys, text, maxTok, 20, /*tempOverride=*/0.3);
@@ -126,6 +131,9 @@ inline std::string translate(ConfigManager& cfg, const std::string& targetLang, 
     // 译文若丢失/改动了原文数字（骰点结果）→ 判为翻译不可靠，发原文。
     if (!ai::preservesNumbers(text, out)) { DICE_LOG_WARN("[AI translate] numbers changed, falling back to original lang={}", targetLang); return text; }
     if (!ai::preservesActionCommands(text, out)) { DICE_LOG_WARN("[AI translate] action command changed, falling back to original lang={}", targetLang); return text; }
+    if (format == ContentFormat::kMarkdown && !markdown::preservesStructure(text, out)) {
+        DICE_LOG_WARN("[AI translate] Markdown structure changed, falling back to original lang={}", targetLang); return text;
+    }
     {
         std::lock_guard<std::mutex> lk(cacheMutex());
         if (cache().size() > 1000) cache().clear();
