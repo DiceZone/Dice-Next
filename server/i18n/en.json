@@ -272,7 +272,7 @@
     "summon_empty": "You summoned {self}, {nick} — what can I do for you?"
   },
   "help": {
-    "main": "Dice!Next Help\n- Roll: .r .rh .rb/.rp .ww .dx\n- Checks: .ra .rc .rav .sc(san) .en(grow)\n- Cards: .st .pc (multi-card)\n- Generate: .coc .dnd .name\n- Decks: .deck .draw .gacha\n- Fun: .jrrp .nn .set\n- Admin: .bot .group .log .ob .dismiss .send\n- Account: .bind (identity) .info (endpoints) .cloud (cloud services)\nType .help <cmd> for details (e.g. .help ra); .helpdoc lists all topics.",
+    "main": "Dice!Next Help\n- Roll: .r .rh .rb/.rp .ww .dx\n- Checks: .ra .rc .rav .sc(san) .en(grow)\n- Cards: .st .pc (multi-card)\n- Generate: .coc .dnd .name\n- Decks: .deck .draw .gacha\n- Fun: .jrrp .nn .set\n- Admin: .bot .group .log .ob .dismiss .send\n- Account: .bind (identity) .info (endpoints) .cloud (cloud services)\nType .help <cmd> for details (e.g. .help ra); .helpdoc lists all topics.\nDice!Next test group: 933145116\nJoin the group to report bugs or share suggestions.",
     "entry_missing": "Help entry \"{entry}\" is not available yet; please check the docs.",
     "unknown": "No help found for \"{topic}\". Try .helpdoc for available topics.",
     "ambiguous": "\"{topic}\" matches several help topics: {list}. Please be more specific.",

@@ -278,7 +278,7 @@
     "summon_empty": "召喚{self}，{nick}有何事？"
   },
   "help": {
-    "main": "Dice!Next 指令幫助\n· 擲骰：.r .rh .rb/.rp .ww .dx\n· 檢定：.ra .rc .rav對抗 .sc理智 .en成長\n· 人物卡：.st 錄卡 .pc 多卡管理\n· 生成：.coc .dnd .name\n· 牌堆：.deck .draw .gacha\n· 娛樂：.jrrp .nn .set\n· 管理：.bot .group .log .ob .dismiss .send\n· 帳號：.bind 綁定身份 .info 查看識別 .cloud 雲服務與授權\n輸入 .help <指令> 看詳情（如 .help ra）；.helpdoc 看全部條目。",
+    "main": "Dice!Next 指令幫助\n· 擲骰：.r .rh .rb/.rp .ww .dx\n· 檢定：.ra .rc .rav對抗 .sc理智 .en成長\n· 人物卡：.st 錄卡 .pc 多卡管理\n· 生成：.coc .dnd .name\n· 牌堆：.deck .draw .gacha\n· 娛樂：.jrrp .nn .set\n· 管理：.bot .group .log .ob .dismiss .send\n· 帳號：.bind 綁定身份 .info 查看識別 .cloud 雲服務與授權\n輸入 .help <指令> 看詳情（如 .help ra）；.helpdoc 看全部條目。\nDice!Next 測試群：933145116\n如有故障或建議歡迎加群回饋",
     "entry_missing": "說明詞條「{entry}」暫未收錄，請查閱文件。",
     "unknown": "沒有找到「{topic}」的幫助。試試 .helpdoc 查看可用條目。",
     "ambiguous": "「{topic}」對應到多個幫助條目：{list}，請輸入更精確的名稱。",

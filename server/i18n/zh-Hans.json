@@ -279,7 +279,7 @@
     "summon_empty": "召唤{self}，{nick}有何事？"
   },
   "help": {
-    "main": "Dice!Next 指令帮助\n· 投骰：.r .rh .rb/.rp .ww .dx/.rdx\n· 检定：.ra .rc .rav对抗 .sc理智 .en成长\n· 人物卡：.st 录卡 .pc 多卡管理\n· 生成：.coc .dnd .name\n· 牌堆：.deck .draw .gacha\n· 娱乐：.jrrp .nn .set\n· 管理：.bot .group .log .ob .dismiss .send\n· 账号：.bind 绑定身份 .info 查看标识 .cloud 云服务与授权\n输入 .help <指令> 看详情（如 .help ra）；.helpdoc 看全部条目。",
+    "main": "Dice!Next 指令帮助\n· 投骰：.r .rh .rb/.rp .ww .dx/.rdx\n· 检定：.ra .rc .rav对抗 .sc理智 .en成长\n· 人物卡：.st 录卡 .pc 多卡管理\n· 生成：.coc .dnd .name\n· 牌堆：.deck .draw .gacha\n· 娱乐：.jrrp .nn .set\n· 管理：.bot .group .log .ob .dismiss .send\n· 账号：.bind 绑定身份 .info 查看标识 .cloud 云服务与授权\n输入 .help <指令> 看详情（如 .help ra）；.helpdoc 看全部条目。\nDice!Next 测试群：933145116\n如有故障或建议欢迎加群反馈",
     "entry_missing": "帮助词条「{entry}」暂未收录，请查阅文档。",
     "unknown": "没有找到「{topic}」的帮助。试试 .helpdoc 查看可用条目。",
     "ambiguous": "「{topic}」匹配到多个帮助条目：{list}，请输入更精确的名称。",

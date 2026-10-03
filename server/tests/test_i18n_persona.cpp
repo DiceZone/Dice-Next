@@ -58,6 +58,28 @@ TEST(I18nBundles, LocaleLeafKeysStayInSyncAndLegacyKeysAreTopLevel) {
     ASSERT_TRUE(baseline.at("dice").at("error").contains("non_numeric"));
 }
 
+TEST(I18nBundles, DefaultHelpIncludesFeedbackGroupWithoutChangingTopicHelpOrOverrides) {
+    const auto dir = std::filesystem::path(__FILE__).parent_path().parent_path() / "i18n";
+    I18n i18n(dir.string(), Locale::kZhHans);
+    ASSERT_TRUE(i18n.load());
+    for (const auto locale : {Locale::kZhHans, Locale::kZhHant, Locale::kEn, Locale::kJa}) {
+        for (const auto style : {PresentationStyle::kTraditional, PresentationStyle::kStandard,
+                                 PresentationStyle::kVisual}) {
+            I18n::beginOutboundCapture(ContentFormat::kMarkdown, style);
+            const auto main = i18n.tr(locale, "help.main");
+            const auto topic = i18n.tr(locale, "help.topic.r");
+            I18n::endOutboundCapture();
+            ASSERT_TRUE(main.find("933145116") != std::string::npos);
+            ASSERT_EQ(main.find("933145116"), main.rfind("933145116"));
+            ASSERT_TRUE(topic.find("933145116") == std::string::npos);
+        }
+    }
+    ASSERT_TRUE(i18n.tr(Locale::kZhHans, "help.main").ends_with(
+        "\nDice!Next 测试群：933145116\n如有故障或建议欢迎加群反馈"));
+    i18n.setOverride(Locale::kZhHans, "help.main", "自定义帮助");
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "help.main"), std::string("自定义帮助"));
+}
+
 // Helper: create an I18n with a minimal bundle for testing
 // We can't easily load from disk in tests, so we test the lookup chain
 // using overrides and persona bundles directly.

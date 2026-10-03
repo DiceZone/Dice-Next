@@ -273,7 +273,7 @@
     "summon_empty": "{self} を呼びましたね、{nick} — ご用件は何でしょう？"
   },
   "help": {
-    "main": "Dice!Next ヘルプ\n- ロール: .r .rh .rb/.rp .ww .dx\n- 判定: .ra .rc .rav .sc(SAN) .en(成長)\n- シート: .st .pc（複数枚）\n- 生成: .coc .dnd .name\n- デッキ: .deck .draw .gacha\n- 娯楽: .jrrp .nn .set\n- 管理: .bot .group .log .ob .dismiss .send\n- アカウント: .bind（身分紐付け）.info（識別子）.cloud（クラウド）\n詳細は .help <コマンド>（例 .help ra）；.helpdoc で全項目一覧。",
+    "main": "Dice!Next ヘルプ\n- ロール: .r .rh .rb/.rp .ww .dx\n- 判定: .ra .rc .rav .sc(SAN) .en(成長)\n- シート: .st .pc（複数枚）\n- 生成: .coc .dnd .name\n- デッキ: .deck .draw .gacha\n- 娯楽: .jrrp .nn .set\n- 管理: .bot .group .log .ob .dismiss .send\n- アカウント: .bind（身分紐付け）.info（識別子）.cloud（クラウド）\n詳細は .help <コマンド>（例 .help ra）；.helpdoc で全項目一覧。\nDice!Next テストグループ：933145116\n不具合やご提案がありましたら、グループに参加してお知らせください。",
     "entry_missing": "ヘルプ項目「{entry}」はまだ利用できません。ドキュメントをご確認ください。",
     "unknown": "「{topic}」のヘルプが見つかりません。.helpdoc で項目一覧をご確認ください。",
     "ambiguous": "「{topic}」は複数の項目に一致します: {list}。もう少し具体的に指定してください。",
