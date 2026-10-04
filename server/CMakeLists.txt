@@ -200,7 +200,7 @@ if(WIN32)
     # The manager must run before lib/ is added to PATH, so do not make it
     # depend on the package's MSVC runtime DLLs.
     set_property(TARGET dice-next-launcher PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    target_link_libraries(dice-next-launcher PRIVATE shell32)
+    target_link_libraries(dice-next-launcher PRIVATE shell32 user32)
     target_compile_options(dice-next-launcher PRIVATE /W4 /utf-8)
     # Icon plus VERSIONINFO. Without version metadata Windows shows the manager
     # as an unnamed publisher-less binary, which reputation-based scanners treat

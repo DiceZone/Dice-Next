@@ -30,6 +30,7 @@
 #include "service/cloudban_service.h"  // 云黑名单同步（cloudban.dice.zone）
 #include "service/backup_service.h"
 #include "platform/instance_guard.h"   // 必须在 tray_win.h(<windows.h>) 之前：先引 winsock2.h
+#include "platform/startup_guard.h"
 #include "platform/autostart_win.h"    // Windows 注册表开机自启；其他平台提供 no-op 接口。
 #include "platform/tray_win.h"
 #include "platform/crash_diag_win.h"
@@ -62,6 +63,8 @@
 #include <atomic>
 #include <clocale>
 #include <thread>
+#include <memory>
+#include <mutex>
 #include <chrono>
 #include <vector>
 #include <filesystem>
@@ -336,23 +339,8 @@ static int realMain(int argc, char* argv[]) {
         if (a == "--crash-test=av")    { dice::crashdiag::setPhase("crash-test"); volatile int* p = nullptr; *p = 1; }
     }
     dice::crashdiag::setPhase("main:chdir");
-    // ── 0a. chdir 到 exe 所在目录 ────────────────────────────
-    // 让相对路径(data/ config/ web/dist 等)始终基于程序目录，无论从哪启动——
-    // 这样「开机自启(Run 键，cwd=system32)」「双击/从别处运行」都能找到数据。
-#ifdef _WIN32
-    {
-        wchar_t b[MAX_PATH]; DWORD n = GetModuleFileNameW(nullptr, b, MAX_PATH);
-        if (n > 0) { std::wstring p(b, n); auto s = p.find_last_of(L"\\/");
-            if (s != std::wstring::npos) {
-                std::wstring dir = p.substr(0, s);
-                // 仅当 exe 目录含 web/（发行包才有 web/dist）才切——避免开发时 exe 在
-                // build/Release（可能因旧运行残留 config/）被误切走。
-                if (GetFileAttributesW((dir + L"\\web").c_str()) != INVALID_FILE_ATTRIBUTES)
-                    SetCurrentDirectoryW(dir.c_str());
-            }
-        }
-    }
-#endif
+    // Windows working-directory preparation and temp checks already ran in main,
+    // before installing crash diagnostics or opening any persistent files.
 
     // ── 0. Setup console for UTF-8 output ───────────────────
     setupConsole();
@@ -4053,6 +4041,41 @@ static int realMain(int argc, char* argv[]) {
         cb(resp);
     }, {drogon::Get, drogon::Put});
 
+    // Installation-wide tray label: never scoped to an adapter/account. Use the actual bound port.
+    auto traySettingsMutex = std::make_shared<std::mutex>();
+    app.registerHandler("/api/system/tray", [&configMgr, port, traySettingsMutex](const drogon::HttpRequestPtr& req,
+        std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+        nlohmann::json out{{"code", 0}, {"message", "ok"}};
+        try {
+            // Concurrent settings windows must not persist one name but apply another.
+            std::lock_guard<std::mutex> lock(*traySettingsMutex);
+            if (req->method() == drogon::Put) {
+                if (!dice::tray_settings::supported) throw std::runtime_error("托盘文字设置仅支持 Windows / Windows only");
+                const auto body = nlohmann::json::parse(req->body());
+                if (!body.is_object() || !body.contains("text") || !body["text"].is_string())
+                    throw std::runtime_error("text 必须是字符串 / text must be a string");
+                std::string text, error;
+                if (!dice::tray_settings::normalize(body["text"].get<std::string>(), text, error))
+                    throw std::runtime_error(error);
+                const auto previous = configMgr.get<std::string>("dice/tray_text", "");
+                configMgr.set("dice/tray_text", text);
+                if (!configMgr.save()) {
+                    configMgr.set("dice/tray_text", previous);
+                    throw std::runtime_error("无法保存托盘文字 / Could not save tray text");
+                }
+                dice::updateSystemTrayText(text);
+            }
+            std::string text, error;
+            dice::tray_settings::normalize(configMgr.get<std::string>("dice/tray_text", ""), text, error);
+            out["data"] = {{"text", text}, {"port", port}, {"supported", dice::tray_settings::supported},
+                {"tooltip", dice::tray_settings::tooltip(text, static_cast<uint16_t>(port))}};
+        } catch (const std::exception& e) { out["code"] = 1; out["message"] = e.what(); }
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+        resp->setBody(out.dump());
+        cb(resp);
+    }, {drogon::Get, drogon::Put});
+
     DICE_LOG_INFO("Test API ready → web admin \344\276\247\350\276\271\346\240\217\343\200\214\346\265\213\350\257\225\345\217\260\343\200\215");
 
     // Start adapters after the event loop is running (WebSocket needs an active
@@ -4427,7 +4450,10 @@ static int realMain(int argc, char* argv[]) {
     dice::startSystemTray(static_cast<uint16_t>(port), [] {
         g_running.store(false);
         drogon::app().quit();   // unblock app.run() so we shut down cleanly
-    }, startHidden);
+    }, startHidden, configMgr.get<std::string>("dice/tray_text", ""));
+    configMgr.onConfigChanged([&configMgr] {
+        dice::updateSystemTrayText(configMgr.get<std::string>("dice/tray_text", ""));
+    });
 
     DICE_LOG_INFO("Server starting — press Ctrl+C to stop");
     dice::crashdiag::setPhase("running");
@@ -4454,6 +4480,8 @@ static int realMain(int argc, char* argv[]) {
 // ── 崩溃诊断：main 整体包裹——未捕获 C++ 异常在此直接拿到 what() 落盘
 // （SEH 兜底只有异常码 0xE06D7363，这里可读性最好）。
 int main(int argc, char* argv[]) {
+    // Must precede crash diagnostics, logging, backups and config/database initialization.
+    if (!dice::startup::prepareCoreLaunch()) return 2;
     try {
         return realMain(argc, argv);
     } catch (const std::exception& e) {
