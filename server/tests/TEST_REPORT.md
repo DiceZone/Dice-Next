@@ -5,8 +5,14 @@ targeted checks must not be presented as a fresh full-suite or live-platform run
 
 ## 2026-10-05: Weighted command replies and global persona pool
 
-Pre-release implementation. Backend, WebUI and docs were fast-forwarded before
+Release scope: build 926. Backend, WebUI and docs were fast-forwarded before
 this work, then merged with startup-limits; no live bot account was connected.
+
+- The failed release on 2026-10-04 (UTC+8), run 37156422056 at 56a1466,
+  hit the same JSON-to-optional conversion ambiguity in cloud_card_diff.h on
+  all five platform builds and both backend-test jobs. Commit 1a7fe1f already
+  fixes that conversion. The targeted rerun passed 6 cases / 37 assertions.
+  This is local verification, not a claim that the replacement CI run passed.
 
 - Backend Windows Release executable and credential-free preview driver build
   successfully. After merging startup-limits, the full core suite passed all
