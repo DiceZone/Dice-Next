@@ -67,6 +67,31 @@ TEST(ConfigManager, ObsoleteDefaultConfigIsDiscardedWithoutCreatingDefaults) {
     fs::remove_all(root, ec);
 }
 
+TEST(ConfigManager, TrayTextPersistsAndRejectsInvalidSnapshots) {
+    const fs::path root = temporaryConfigRoot("tray_text");
+    ConfigManager cfg((root / "config").string());
+    ASSERT_TRUE(cfg.load());
+    ASSERT_EQ(cfg.get<std::string>("dice/tray_text", ""), "");
+    cfg.set<std::string>("dice/tray_text", "希亚骰🎲");
+    ASSERT_TRUE(cfg.save());
+    ConfigManager reloaded((root / "config").string());
+    ASSERT_TRUE(reloaded.load());
+    ASSERT_EQ(reloaded.get<std::string>("dice/tray_text", ""), "希亚骰🎲");
+    const auto good = cfg.getAll();
+    for (const auto& invalid : {json(42), json("12345678901"), json("骰\n骰")}) {
+        auto snapshot = good;
+        snapshot["dice"]["tray_text"] = invalid;
+        ASSERT_FALSE(reloaded.restoreSnapshot(snapshot));
+        ASSERT_EQ(reloaded.get<std::string>("dice/tray_text", ""), "希亚骰🎲");
+    }
+    cfg.set<std::string>("dice/tray_text", "");
+    ASSERT_TRUE(cfg.save());
+    ASSERT_TRUE(reloaded.load());
+    ASSERT_EQ(reloaded.get<std::string>("dice/tray_text", ""), "");
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
 TEST(WebAuth, NewPasswordPolicyRequiresAllCharacterClasses) {
     ASSERT_TRUE(WebAuth::isValidNewPassword("Dice@2026!"));
     ASSERT_TRUE(WebAuth::isValidNewPassword("", true));

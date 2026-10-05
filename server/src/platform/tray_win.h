@@ -8,12 +8,14 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
+#include "tray_settings.h"
 
 #if defined(_WIN32)
 #include <windows.h>
 #include <shellapi.h>
 #include <thread>
-#include <string>
+#include <mutex>
 #include "autostart_win.h"
 
 #pragma comment(lib, "user32.lib")
@@ -28,6 +30,10 @@ namespace tray_detail {
     inline bool g_consoleVisible = true;
 
     constexpr UINT WM_TRAY = WM_USER + 1;
+    constexpr UINT WM_TRAY_TEXT = WM_USER + 2;
+    inline std::mutex g_textMutex;
+    inline std::string g_text;
+    inline HWND g_window = nullptr; // protected by g_textMutex; nid belongs only to the tray thread
     enum { ID_DIR = 1, ID_CONSOLE, ID_WEB, ID_AUTOSTART, ID_EXIT };
 
     // Explorer drops every tray icon when it restarts — after a shell crash, an
@@ -39,7 +45,24 @@ namespace tray_detail {
     inline UINT g_taskbarCreated = 0;
     inline NOTIFYICONDATAW g_nid{};
 
+    inline std::wstring wideTooltip() { // caller holds g_textMutex
+        const auto utf8 = tray_settings::tooltip(g_text, g_port);
+        const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+        std::wstring result(static_cast<size_t>(size), L'\0');
+        if (size) MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), result.data(), size);
+        return result;
+    }
+
     inline LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (msg == WM_TRAY_TEXT) {
+            std::lock_guard<std::mutex> lock(g_textMutex);
+            const auto tip = wideTooltip();
+            wcsncpy_s(g_nid.szTip, tip.c_str(), _TRUNCATE);
+            NOTIFYICONDATAW update = g_nid;
+            update.uFlags = NIF_TIP;
+            Shell_NotifyIconW(NIM_MODIFY, &update);
+            return 0;
+        }
         if (g_taskbarCreated != 0 && msg == g_taskbarCreated) {
             Shell_NotifyIconW(NIM_ADD, &g_nid);   // already present: returns FALSE, harmless
             return 0;
@@ -93,12 +116,21 @@ namespace tray_detail {
     }
 } // namespace tray_detail
 
+inline void updateSystemTrayText(const std::string& text) {
+    std::string normalized, error;
+    if (!tray_settings::normalize(text, normalized, error)) return;
+    std::lock_guard<std::mutex> lock(tray_detail::g_textMutex);
+    tray_detail::g_text = std::move(normalized);
+    if (tray_detail::g_window) PostMessageW(tray_detail::g_window, tray_detail::WM_TRAY_TEXT, 0, 0);
+}
+
 /// Start the tray icon on a background thread. @p onExit is invoked when the
 /// user picks "退出" (wire it to stop the server cleanly). @p startHidden:
 /// 启动后把控制台窗口隐藏到托盘并禁用其关闭按钮，弹气泡告知「未退出，已最小化到托盘」。
-inline void startSystemTray(uint16_t port, std::function<void()> onExit, bool startHidden = false) {
+inline void startSystemTray(uint16_t port, std::function<void()> onExit, bool startHidden = false, const std::string& text = "") {
     tray_detail::g_onExit = std::move(onExit);
     tray_detail::g_port = port;
+    updateSystemTrayText(text);
     std::thread([startHidden] {
         HINSTANCE inst = GetModuleHandleW(nullptr);
         WNDCLASSW wc = {};
@@ -128,10 +160,14 @@ inline void startSystemTray(uint16_t port, std::function<void()> onExit, bool st
         nid.uCallbackMessage = tray_detail::WM_TRAY;
         nid.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));            // exe's own icon if present…
         if (!nid.hIcon) nid.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));  // …else IDI_APPLICATION
-        // 悬停提示带端口，区分多开：Dice!Next(18088)
-        { std::wstring tip = L"Dice!Next(" + std::to_wstring(tray_detail::g_port) + L")";
-          wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE); }
-        Shell_NotifyIconW(NIM_ADD, &nid);
+        // Publish the window and initial tip atomically so an early settings save cannot be lost.
+        {
+            std::lock_guard<std::mutex> lock(tray_detail::g_textMutex);
+            const auto tip = tray_detail::wideTooltip();
+            wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+            Shell_NotifyIconW(NIM_ADD, &nid);
+            tray_detail::g_window = hWnd;
+        }
 
         // 启动即最小化到托盘——隐藏控制台窗口 + 禁用其关闭按钮（避免误点 X 杀进程，
         // 退出统一走托盘「退出」），并弹一次气泡告知程序仍在后台运行。
@@ -145,7 +181,7 @@ inline void startSystemTray(uint16_t port, std::function<void()> onExit, bool st
             NOTIFYICONDATAW info = nid;
             info.uFlags = NIF_INFO;
             info.dwInfoFlags = NIIF_INFO;
-            wcsncpy_s(info.szInfoTitle, L"Dice!Next", _TRUNCATE);
+            wcsncpy_s(info.szInfoTitle, nid.szTip, _TRUNCATE);
             wcsncpy_s(info.szInfo,
                 L"Dice!Next 并未退出，而是最小化到此处。如需退出，请右键此图标选择“退出”。",
                 _TRUNCATE);
@@ -153,8 +189,10 @@ inline void startSystemTray(uint16_t port, std::function<void()> onExit, bool st
         }
 
         MSG msg;
-        while (GetMessageW(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
+        while (GetMessageW(&msg, nullptr, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessage(&msg); }
+        { std::lock_guard<std::mutex> lock(tray_detail::g_textMutex); tray_detail::g_window = nullptr; }
         Shell_NotifyIconW(NIM_DELETE, &nid);
+        DestroyWindow(hWnd);
     }).detach();
 }
 
@@ -162,6 +200,7 @@ inline void startSystemTray(uint16_t port, std::function<void()> onExit, bool st
 
 #else   // non-Windows: no-op
 namespace dice {
-inline void startSystemTray(uint16_t, std::function<void()>, bool = false) {}
+inline void startSystemTray(uint16_t, std::function<void()>, bool = false, const std::string& = "") {}
+inline void updateSystemTrayText(const std::string&) {}
 }
 #endif

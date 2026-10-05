@@ -2,6 +2,7 @@
 // Win32 libraries, so it can prepare PATH before dice-next-core.exe loads DLLs.
 #include <windows.h>
 #include <shellapi.h>
+#include "startup_guard.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -373,6 +374,8 @@ int wmain() {
 
     const fs::path root = executableDirectory();
     if (root.empty()) return 1;
+    // Before restoring/updating or loading the core (an archive preview may contain only this EXE).
+    if (!dice::startup::allowLaunch(root.wstring(), root.wstring())) return 2;
 
     // "--after <pid>": the core is shutting down for a restart, or to let a
     // staged update be applied.  Anything else is forwarded to the core.

@@ -1,6 +1,7 @@
 #include "config_manager.h"
 #include "../common/logger.h"
 #include "../common/utils.h"
+#include "../platform/tray_settings.h"
 
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -49,6 +50,7 @@ static json makeDefaultConfig() {
             {"expression_mode", "enhanced"},    // enhanced / compatible / original / custom
             {"expression_order", json::array({"dicenext", "onedice", "dicescript"})},
             {"console_start_hidden", true},      // 启动即最小化到托盘（隐藏控制台，退出走托盘）
+            {"tray_text", ""},                   // Windows 托盘提示：留空用 Dice!Next，自动追加端口
             {"scoped_overrides", json::object()}, // #17: adapter/account overrides; account > adapter > global
             {"rules", {
                 {"coc_enabled", true},
@@ -158,6 +160,11 @@ static bool validateConfig(const json& value, std::string& error) {
     }
     if (value.contains("dice") && value["dice"].is_object()) {
         const auto& dice = value["dice"];
+        if (dice.contains("tray_text")) {
+            if (!dice["tray_text"].is_string()) { error = "dice.tray_text 必须是字符串"; return false; }
+            std::string normalized;
+            if (!tray_settings::normalize(dice["tray_text"].get<std::string>(), normalized, error)) return false;
+        }
         if (dice.contains("expression_mode")) {
             if (!dice["expression_mode"].is_string()) { error = "dice.expression_mode 必须是字符串"; return false; }
             const std::string mode = dice["expression_mode"].get<std::string>();
