@@ -1,4 +1,6 @@
 #pragma once
+#include "../common/weighted_templates.h"
+#include "../common/template_preview.h"
 // ─── Dice!Next v3.0.0 — Real API Service ─────────────────────
 // Direct Drogon handler implementations backed by Database + ConfigManager.
 // Provides full CRUD for adapters, replies, dice rules, and system status.
@@ -1137,6 +1139,19 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
+    // Weighted global activation (specific routes must precede {1}).
+    app.registerHandler("/api/personas/pool", [&personaMgr](Req, CB&& cb) {
+        jsonReply(ok(personaMgr.getPersonaPool()), std::move(cb));
+    }, {drogon::Get});
+    app.registerHandler("/api/personas/pool", [&personaMgr](Req req, CB&& cb) {
+        try {
+            const auto body = J::parse(req->body());
+            if (!personaMgr.setPersonaPool(body.at("pool")))
+                throw std::invalid_argument("Invalid persona pool or failed to save");
+            jsonReply(ok(personaMgr.getPersonaPool()), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Put});
+
     // Get active persona info (specific route — before {1})
     app.registerHandler("/api/personas/active", [&personaMgr, &cfg](Req req, CB&& cb) {
         std::string groupId = req->getParameter("groupId");
@@ -1157,6 +1172,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             }
         }
         data["globalId"] = cfg.get<int>("persona/global", 0);
+        data["pool"] = personaMgr.getPersonaPool();
         data["adapterDefaultId"] = adapterDefault ? J(*adapterDefault) : J(nullptr);
         data["hasGroupOverride"] = hasGroupOverride;
         data["inheritsGlobal"] = !groupId.empty() && !hasGroupOverride;
@@ -1277,7 +1293,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             auto j = J::parse(req->body());
             std::string locale = j.value("locale", "zh-Hans");
             std::string key = j.value("key", "");
-            std::string value = j.value("value", "");
+            std::string value = weighted_templates::apiValue(j);
             std::string format = j.value("format", "plain");
             if (key.empty()) { jsonReply(fail("key is required"), std::move(cb)); return; }
             if (!personaMgr.setEntry(id, locale, key, value, format)) {
@@ -1754,7 +1770,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             auto j = J::parse(req->body());
             std::string lang = j.value("locale", "");
             std::string key = j.value("key", "");
-            std::string value = j.value("value", "");
+            std::string value = weighted_templates::apiValue(j);
             std::string format = j.value("format", "plain") == "markdown" ? "markdown" : "plain";
             if (lang.empty() || key.empty()) { jsonReply(fail("locale & key required"), std::move(cb)); return; }
             // upsert DB
@@ -1781,7 +1797,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             J out = J::object();
             if (st) for (auto& r : st->get_all<I18nOverrideRow>())
-                out[r.locale][r.key] = J{{"value", r.value}, {"format", r.format}};
+                out[r.locale][r.key] = weighted_templates::apiRecord(r.value, r.format);
             jsonReply(ok(out), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
@@ -1793,6 +1809,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             J body = J::parse(req->body());
             J data = body.contains("data") ? body["data"] : body;
             if (!data.is_object()) { jsonReply(fail("invalid json"), std::move(cb)); return; }
+            // Validate the entire document before applying any entry.
+            for (auto& [lang, keys] : data.items()) {
+                if (!keys.is_object()) continue;
+                for (auto& [key, val] : keys.items()) {
+                    if (val.is_string()) weighted_templates::decode(val.get<std::string>());
+                    else if (val.is_object()) weighted_templates::apiValue(val);
+                }
+            }
             int n = 0;
             for (auto& [lang, keys] : data.items()) {
                 if (!keys.is_object()) continue;
@@ -1800,7 +1824,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     std::string value, format = "plain";
                     if (val.is_string()) value = val.get<std::string>();
                     else if (val.is_object()) {
-                        value = val.value("value", "");
+                        value = weighted_templates::apiValue(val);
                         format = val.value("format", "plain") == "markdown" ? "markdown" : "plain";
                     } else continue;
                     auto rows = st->get_all<I18nOverrideRow>(
@@ -1818,22 +1842,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // Text/card serialization preview only; no real messages or credentials.
     app.registerHandler("/api/templates/preview", [](Req req, CB&& cb) {
         try {
-            J body = J::parse(req->body());
-            std::string text = body.value("text", "");
-            if (text.size() > 65536) throw std::invalid_argument("preview text too long");
-            const auto formatName = body.value("format", "plain");
-            if (formatName != "markdown" && formatName != "plain") throw std::invalid_argument("invalid format");
-            const auto format = formatName == "markdown" ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
-            const auto styleName = body.value("style", std::string("visual"));
-            if (styleName != "traditional" && styleName != "standard" && styleName != "visual")
-                throw std::invalid_argument("invalid presentation style");
-            const auto style = presentationStyleFromString(styleName);
-            const auto preview = outbound::replyPreview(text, format,
-                body.value("platform", std::string("qq_group")), style, body.value("forcePlain", false));
-            // Retain the old editor response fields during independent frontend upgrades.
-            jsonReply(ok(J{{"preview", preview},
-                {"markdown", outbound::replyPreview(text, format, "qq_group", style)["text"]},
-                {"onebot", outbound::replyPreview(text, format, "plain", style)["text"]}}), std::move(cb));
+            jsonReply(ok(outbound::templatePreview(J::parse(req->body()))), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 

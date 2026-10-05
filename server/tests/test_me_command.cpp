@@ -1,6 +1,7 @@
 #include "test_framework.h"
 #include "core/command_router.h"
 #include "storage/group_account_settings.h"
+#include "common/weighted_templates.h"
 
 #include <chrono>
 #include <filesystem>
@@ -113,6 +114,39 @@ struct MeFixture {
 };
 
 } // namespace
+
+TEST(PersonaRoll, RealRouterPoolNestedRepliesAndConversationOverrides) {
+    MeFixture f;
+    ConfigManager cfg((f.dir.path / "config").string());
+    ASSERT_TRUE(cfg.load());
+    PersonaManager personas(f.db, f.i18n, cfg);
+    f.router.setPersonaManager(&personas);
+    const int a = personas.createTemplate("A", "");
+    const int b = personas.createTemplate("B", "");
+    const auto value = weighted_templates::encode(json::array({
+        {{"text", "never"}, {"weight", 0}},
+        {{"text", "B:{sample:{sample:正常|正常}|正常}"}, {"weight", 3}}
+    }));
+    ASSERT_TRUE(personas.setEntry(a, "zh-Hans", "dice.roll.result", "A"));
+    ASSERT_TRUE(personas.setEntry(b, "zh-Hans", "dice.roll.result", value));
+    f.i18n.setOverride(Locale::kZhHans, "dice.roll.result", "base");
+    ASSERT_TRUE(personas.setPersonaPool(json::array({{{"id", a}, {"weight", 0}}, {{"id", b}, {"weight", 3}}})));
+    ASSERT_EQ(f.run(".r d1"), "B:正常");
+    ASSERT_TRUE(personas.setActivePersona(a, f.msg.targetId, f.msg.platform));
+    ASSERT_EQ(f.run(".r d1"), "A");
+    ASSERT_TRUE(personas.setActivePersona(0, f.msg.targetId, f.msg.platform));
+    ASSERT_EQ(f.run(".r d1"), "base");
+    ASSERT_TRUE(personas.clearGroupPersona(f.msg.targetId, f.msg.platform));
+    ASSERT_EQ(f.run(".r d1"), "B:正常");
+    f.makePrivate();
+    ASSERT_EQ(f.run(".r d1"), "B:正常");
+    ASSERT_EQ(f.run(".rpmode set A"), "persona.set");
+    ASSERT_EQ(f.run(".r d1"), "A");
+    ASSERT_EQ(f.run(".rpmode off"), "persona.off");
+    ASSERT_EQ(f.run(".r d1"), "base");
+    ASSERT_EQ(f.run(".rpmode inherit"), "persona.inherit");
+    ASSERT_EQ(f.run(".r d1"), "B:正常");
+}
 
 // Legacy reference: Dice-dev/Dice/DiceEvent.cpp, pref2 == "me".
 // Group uses (trust > 4 ? "" : idx_pc); remote uses (trust > 4 ? getName : "").

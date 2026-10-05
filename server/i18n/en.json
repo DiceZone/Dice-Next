@@ -959,6 +959,7 @@
   },
   "persona": {
     "default_name": "Default",
+    "random_name": "Random personas (weighted)",
     "current": "Current persona: {name}",
     "list": "Available personas:\n{list}Use .rpmode set <name> to switch.",
     "set": "Switched to persona \"{name}\".",

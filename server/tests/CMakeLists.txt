@@ -150,6 +150,21 @@ else()
 endif()
 
 # ─── CTest Integration ───────────────────────────────────────
+# Build only on request; this preview has no bot, credentials or database.
+add_executable(dice-next-reply-preview EXCLUDE_FROM_ALL
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/reply-preview.cpp
+    ../src/i18n/i18n.cpp
+    ../src/common/logger.cpp
+    ../src/common/markdown.cpp
+    ../src/common/markdown_md4c.cpp
+)
+target_include_directories(dice-next-reply-preview PRIVATE ../src)
+target_link_libraries(dice-next-reply-preview PRIVATE
+    nlohmann_json::nlohmann_json spdlog::spdlog dice-md4c)
+if(MSVC)
+    target_compile_options(dice-next-reply-preview PRIVATE /utf-8 /bigobj)
+endif()
+
 enable_testing()
 add_test(NAME dice_next_tests COMMAND dice-next-tests)
 add_test(NAME dice_next_lua_tests COMMAND dice-next-lua-tests)

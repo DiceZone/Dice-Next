@@ -1,4 +1,5 @@
 #include "i18n.h"
+#include "../common/weighted_templates.h"
 #include "../common/logger.h"
 #include "../common/markdown.h"
 #include "../common/sample_template.h"
@@ -341,6 +342,13 @@ I18n::TemplateValue I18n::prepareTemplate(const std::string& value,
                                            ContentFormat format) {
     TemplateValue prepared;
     prepared.value = value;
+    const auto variants = weighted_templates::decode(value);
+    for (const auto& variant : variants) {
+        auto candidate = prepareTemplate(variant["text"].get<std::string>(), format);
+        candidate.weight = variant["weight"].get<size_t>();
+        prepared.choices.push_back(std::move(candidate));
+    }
+    if (!prepared.choices.empty()) { prepared.format = format; return prepared; }
     prepared.plainValue = format == ContentFormat::kMarkdown
         ? markdown::toPlainText(value) : value;
     prepared.format = format;
@@ -372,7 +380,20 @@ void I18n::noteOutboundFormat(ContentFormat format) {
         outboundCaptureMarkdown_ = true;
 }
 
+std::string I18n::previewTemplate(const std::string& value, const Args& args, ContentFormat format) {
+    return renderTemplate(prepareTemplate(value, format), args);
+}
+
 std::string I18n::renderTemplate(const TemplateValue& value, const Args& args) {
+    if (!value.choices.empty()) {
+        size_t total = 0;
+        for (const auto& choice : value.choices) total += choice.weight;
+        size_t ticket = sample_template::choose(total);
+        for (const auto& choice : value.choices) {
+            if (ticket < choice.weight) return renderTemplate(choice, args);
+            ticket -= choice.weight;
+        }
+    }
     const bool usePreparedPlain = value.format == ContentFormat::kMarkdown &&
         outboundCaptureActive_ && outboundPreferredOutput_ == ContentFormat::kPlainText;
     const ContentFormat outputFormat = usePreparedPlain

@@ -1,8 +1,74 @@
 #include "test_framework.h"
 #include "common/sample_template.h"
+#include "common/weighted_templates.h"
+#include "common/template_preview.h"
 #include "i18n/i18n.h"
 
 using namespace dice;
+
+TEST(WeightedTemplate, TicketsRespectWeightsAndZeroIsDisabled) {
+    const auto items = weighted_templates::validate(json::array({
+        {{"text", "停用"}, {"weight", 0}}, {{"text", "甲"}, {"weight", 1}},
+        {{"text", "乙"}, {"weight", 3}}
+    }));
+    for (size_t ticket = 0; ticket < 4; ++ticket) {
+        size_t seen = 0;
+        auto choose = [ticket, &seen](size_t total) { seen = total; return ticket; };
+        ASSERT_EQ(weighted_templates::pick(items, choose), ticket == 0 ? size_t(1) : size_t(2));
+        ASSERT_EQ(seen, size_t(4));
+    }
+    ASSERT_EQ(weighted_templates::decode(weighted_templates::encode(items)), items);
+    const auto exported = weighted_templates::apiRecord(weighted_templates::encode(items), "plain");
+    ASSERT_EQ(exported["value"].get<std::string>(), "甲");
+    ASSERT_EQ(weighted_templates::decode(weighted_templates::apiValue(exported)), items);
+    ASSERT_TRUE(weighted_templates::decode("[ordinary JSON]").empty());
+    for (const auto& invalid : std::vector<json>{
+        json::array(), json::array({{{"text", "x"}, {"weight", 0}}}),
+        json::array({{{"text", "x"}, {"weight", -1}}}),
+        json::array({{{"text", "x"}, {"weight", 0.5}}}),
+        json::array({{{"text", "x"}, {"weight", 1000000}}})
+    }) {
+        bool rejected = false;
+        try { weighted_templates::encode(invalid); } catch (...) { rejected = true; }
+        ASSERT_TRUE(rejected);
+    }
+}
+
+TEST(WeightedTemplate, NativeChoiceNestedSamplePreviewAndCachedPlain) {
+    const auto value = weighted_templates::encode(json::array({
+        {{"text", "NEVER"}, {"weight", 0}},
+        {{"text", "**{nick}**：{sample:{sample:好|好}|好} `{expr}`"}, {"weight", 2}}
+    }));
+    I18n i18n("nonexistent_dir");
+    i18n.setOverride(Locale::kZhHans, "weighted.test", value, ContentFormat::kMarkdown);
+    const I18n::Args args{{"nick", "A*B"}, {"expr", "D100"}};
+    ASSERT_EQ(I18n::previewTemplate(value, args, ContentFormat::kMarkdown), "**A\\*B**：好 `D100`");
+    I18n::beginOutboundCapture(ContentFormat::kPlainText);
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "weighted.test", args), "A*B：好 D100");
+    ASSERT_TRUE(I18n::endOutboundCapture() == ContentFormat::kPlainText);
+    ASSERT_EQ(I18n::previewTemplate("{sample:{nick}|{nick}}", {{"nick", "{sample:literal|name}"}}),
+              "{sample:literal|name}");
+}
+
+TEST(WeightedTemplate, PreviewAllPlatformsShareASingleSampleAndArgumentsAreLiteral) {
+    const json variants = json::array({
+        {{"text", "wrong"}, {"weight", 0}},
+        {{"text", "**{nick}** {sample:甲|乙} `{expr}`"}, {"weight", 1}}
+    });
+    for (const char* platform : {"qq_group", "qq_channel", "discord", "kook", "plain"}) {
+        const auto result = outbound::templatePreview({{"variants", variants}, {"format", "markdown"},
+            {"platform", platform}, {"args", {{"nick", "玩家"}, {"expr", "D100"}}}});
+        const auto md = result["markdown"].get<std::string>();
+        ASSERT_EQ(result["templateVersion"].get<int>(), 1);
+        const auto plain = result["onebot"].get<std::string>();
+        ASSERT_TRUE(md == "**玩家** 甲 `D100`" || md == "**玩家** 乙 `D100`");
+        ASSERT_EQ(markdown::toPlainText(md), plain);
+        ASSERT_EQ(result["preview"]["plain"].get<std::string>(), plain);
+    }
+    const auto literal = outbound::templatePreview({{"text", "{sample:{nick}|{nick}}"},
+        {"args", {{"nick", "{sample:这是|用户数据}"}}}});
+    ASSERT_EQ(literal["onebot"].get<std::string>(), "{sample:这是|用户数据}");
+}
 
 TEST(SampleTemplate, EveryTopLevelOptionIncludingEmptyIsReachable) {
     const std::vector<std::string> expected{"甲", "", "乙", ""};

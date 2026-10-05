@@ -3,6 +3,37 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-05: Weighted command replies and global persona pool
+
+Pre-release implementation. Backend, WebUI and docs were fast-forwarded before
+this work, then merged with startup-limits; no live bot account was connected.
+
+- Backend Windows Release executable and credential-free preview driver build
+  successfully. After merging startup-limits, the full core suite passed all
+  510 registered cases / 3414 assertions; the Windows launcher also builds.
+  Lua suite: 17 registered cases / 165 assertions passed (optional external
+  plugin corpora were not supplied).
+- New coverage includes deterministic weighted tickets and zero weights,
+  validation and readable import/export round trips, native variants containing
+  nested legacy sample macros, Markdown/cached plain text, shared preview draws,
+  literal user arguments, persona persistence/deletion/single-mode restoration,
+  and actual router precedence for group/private selections.
+- WebUI type check and production build passed. Full suite: 135 of 136 tests
+  passed. The unchanged update-page test at system-update.test.mjs:158 expects
+  LF bytes in about-page.tsx; this Windows checkout uses CRLF. The assertion
+  passes after newline normalization; that unrelated source/test was not edited.
+  All new weighted-template tests and the related 78-test subset passed,
+  including tray settings and settings search after merging startup-limits.
+- Docs: four-locale catalog check (810 linked texts) and production build passed.
+- HTTP isolated preview exercised all nested sample branches; probability zero
+  candidates were excluded. It uses the same template/transport rendering as
+  the production preview endpoint and does not send platform messages.
+- Browser automation failed twice with a host sandbox ACL initialization error.
+  No visual/client or real-account delivery acceptance is claimed. The actual
+  React pages remain available at the credential-free local preview for manual
+  review. Backend and WebUI must be upgraded together; old-backend detection
+  prevents saving the new native representation as literal reply text.
+
 ## 2026-10-04: Reply previews, Lua diagnostics and cloud comparison
 
 Local implementation, not committed or published. Scope is deliberately split:

@@ -2,9 +2,12 @@
 #include "persona_manager.h"
 #include "../../common/logger.h"
 #include "../../common/utils.h"
+#include "../../common/weighted_templates.h"
 
 #include <sqlite_orm/sqlite_orm.h>
 #include <algorithm>
+#include <set>
+#include <climits>
 
 namespace dice {
 
@@ -26,6 +29,10 @@ void PersonaManager::loadStartupPersona() {
     // cache every template once and refresh individual entries after edits.
     for (const auto& tmpl : listTemplates()) {
         if (tmpl.id > 0) loadIntoI18n(tmpl.id);
+    }
+    {
+        std::lock_guard<std::mutex> lock(poolMutex_);
+        personaPool_ = readPersonaPool();
     }
 
     int globalId = cfg_.get<int>("persona/global", 0);
@@ -79,6 +86,67 @@ int PersonaManager::getActivePersona(const std::string& groupId,
     return cfg_.get<int>("persona/global", 0);
 }
 
+json PersonaManager::getPersonaPool() const {
+    std::lock_guard<std::mutex> lock(poolMutex_);
+    return personaPool_;
+}
+
+json PersonaManager::readPersonaPool() const {
+    const auto configured = cfg_.get<json>("persona/pool", json::array());
+    json pool = json::array();
+    if (!configured.is_array() || configured.size() > 256) return pool;
+    size_t total = 0;
+    std::set<int> seen;
+    for (const auto& item : configured) {
+        if (!item.is_object() || !item.contains("id") || !item["id"].is_number_integer()
+            || !item.contains("weight") || !item["weight"].is_number_integer()) continue;
+        const auto id = item["id"].get<int64_t>();
+        const auto weight = item["weight"].get<int64_t>();
+        if (id < 0 || id > INT_MAX || weight < 0 || weight > 999999) continue;
+        if (!seen.insert(static_cast<int>(id)).second) continue;
+        if (id > 0 && getTemplateById(static_cast<int>(id)).id <= 0) continue;
+        pool.push_back({{"id", id}, {"weight", weight}});
+        total += static_cast<size_t>(weight);
+    }
+    return total ? pool : json::array();
+}
+
+bool PersonaManager::setPersonaPool(const json& pool) {
+    std::lock_guard<std::mutex> lock(poolMutex_);
+    if (!pool.is_array() || pool.size() > 256) return false;
+    size_t total = 0;
+    std::set<int> ids;
+    for (const auto& item : pool) {
+        if (!item.is_object() || !item.contains("id") || !item["id"].is_number_integer()
+            || !item.contains("weight") || !item["weight"].is_number_integer()) return false;
+        const auto id = item["id"].get<int64_t>();
+        const auto weight = item["weight"].get<int64_t>();
+        if (id < 0 || id > INT_MAX || weight < 0 || weight > 999999
+            || !ids.insert(static_cast<int>(id)).second
+            || (id > 0 && getTemplateById(static_cast<int>(id)).id <= 0)) return false;
+        total += static_cast<size_t>(weight);
+    }
+    if (!pool.empty() && !total) return false;
+    const auto previous = cfg_.get<json>("persona/pool", json::array());
+    cfg_.set<json>("persona/pool", pool);
+    if (!cfg_.save()) {
+        cfg_.set<json>("persona/pool", previous);
+        return false;
+    }
+    for (const auto& item : pool) loadIntoI18n(item["id"].get<int>());
+    personaPool_ = pool;
+    return true;
+}
+
+int PersonaManager::chooseGlobalPersona() const {
+    const auto pool = getPersonaPool();
+    size_t total = 0;
+    for (const auto& item : pool) total += item["weight"].get<size_t>();
+    if (!total) return getActivePersona();
+    auto choose = [](size_t count) { return sample_template::choose(count); };
+    return pool[weighted_templates::pick(pool, choose)]["id"].get<int>();
+}
+
 bool PersonaManager::setActivePersona(int personaId, const std::string& groupId,
                                       const std::string& platform) {
     if (personaId < 0 || (personaId > 0 && getTemplateById(personaId).id <= 0)) {
@@ -87,14 +155,19 @@ bool PersonaManager::setActivePersona(int personaId, const std::string& groupId,
     }
 
     if (groupId.empty()) {
+        std::lock_guard<std::mutex> lock(poolMutex_);
         // Global persona
         const int previousId = cfg_.get<int>("persona/global", 0);
+        const auto previousPool = cfg_.get<json>("persona/pool", json::array());
         cfg_.set<int>("persona/global", personaId);
+        cfg_.set<json>("persona/pool", json::array());
         if (!cfg_.save()) {
             cfg_.set<int>("persona/global", previousId);
+            cfg_.set<json>("persona/pool", previousPool);
             return false;
         }
         DICE_LOG_INFO("PersonaManager: global persona set to {}", personaId);
+        personaPool_ = json::array();
     } else {
         // Per-group persona — store in group_settings
         auto* st = db_.getStorage();
@@ -331,6 +404,7 @@ int PersonaManager::copyTemplate(int srcId, const std::string& newName) {
 }
 
 bool PersonaManager::deleteTemplate(int id) {
+    std::lock_guard<std::mutex> poolLock(poolMutex_);
     auto* st = db_.getStorage();
     if (!st) return false;
 
@@ -355,11 +429,14 @@ bool PersonaManager::deleteTemplate(int id) {
         });
         if (!committed) return false;
 
+        // Filter after deletion so missing entries never participate in a draw.
+        personaPool_ = readPersonaPool();
+        cfg_.set<json>("persona/pool", personaPool_);
         if (wasGlobal) {
             cfg_.set<int>("persona/global", 0);
-            cfg_.save();
             i18n_.setPersona(0);
         }
+        cfg_.save();
         i18n_.clearPersonaBundles(id);
         DICE_LOG_INFO("PersonaManager: deleted persona '{}' (id={})", tmpl.name, id);
         return true;
@@ -417,6 +494,8 @@ bool PersonaManager::setEntry(int personaId, const std::string& locale,
     if (!st) return false;
 
     try {
+        weighted_templates::decode(value);
+        if (getTemplateById(personaId).id <= 0) return false;
         // Check if entry exists (upsert)
         auto rows = st->get_all<PersonaEntryRow>(
             orm::where(orm::c(&PersonaEntryRow::personaId) == personaId
@@ -525,12 +604,10 @@ json PersonaManager::exportTemplate(int id) const {
     auto entries = listEntries(id);
     json entriesArr = json::array();
     for (const auto& e : entries) {
-        entriesArr.push_back(json{
-            {"locale", e.locale},
-            {"key", e.key},
-            {"value", e.value},
-            {"format", e.format}
-        });
+        auto entry = weighted_templates::apiRecord(e.value, e.format);
+        entry["locale"] = e.locale;
+        entry["key"] = e.key;
+        entriesArr.push_back(std::move(entry));
     }
     j["entries"] = entriesArr;
     return j;
@@ -543,6 +620,12 @@ int PersonaManager::importTemplate(const json& data) {
 
     std::string description = data.value("description", "");
 
+    if (data.contains("entries")) {
+        if (!data["entries"].is_array()) return -1;
+        try {
+            for (const auto& e : data["entries"]) weighted_templates::apiValue(e);
+        } catch (...) { return -1; }
+    }
     int newId = createTemplate(name, description);
     if (newId < 0) return -1;
 
@@ -551,10 +634,13 @@ int PersonaManager::importTemplate(const json& data) {
         for (const auto& e : data["entries"]) {
             std::string locale = e.value("locale", "zh-Hans");
             std::string key = e.value("key", "");
-            std::string value = e.value("value", "");
+            std::string value = weighted_templates::apiValue(e);
             std::string format = e.value("format", "plain");
             if (!key.empty()) {
-                setEntry(newId, locale, key, value, format);
+                if (!setEntry(newId, locale, key, value, format)) {
+                    deleteTemplate(newId);
+                    return -1;
+                }
             }
         }
     }

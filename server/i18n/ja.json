@@ -960,6 +960,7 @@
   },
   "persona": {
     "default_name": "既定",
+    "random_name": "ランダムな複数人格（重み付き）",
     "current": "現在のペルソナ: {name}",
     "list": "利用可能なペルソナ:\n{list}.rpmode set <名前> で切替。",
     "set": "ペルソナ「{name}」に切り替えました。",

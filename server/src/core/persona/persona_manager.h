@@ -43,6 +43,11 @@ public:
     bool setActivePersona(int personaId, const std::string& groupId = "",
                           const std::string& platform = "onebot_v11");
 
+    /// Weighted global pool. Explicit conversation/adapter selections still win.
+    json getPersonaPool() const;
+    bool setPersonaPool(const json& pool);
+    int chooseGlobalPersona() const;
+
     /// Whether a group/channel has an explicit persona selection (including 0/off).
     /// @p groupId empty has no group override and therefore always returns false.
     bool hasGroupPersonaOverride(const std::string& groupId,
@@ -123,6 +128,9 @@ public:
     int importTemplate(const json& data);
 
 private:
+    json readPersonaPool() const;
+    mutable std::mutex poolMutex_;
+    json personaPool_ = json::array();
     Database& db_;
     I18n& i18n_;
     ConfigManager& cfg_;

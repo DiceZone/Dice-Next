@@ -97,6 +97,9 @@ public:
     /// Replace every {name} in @p tmpl with args.at("name"). Public so callers
     /// can interpolate text that isn't itself a translation key (e.g. data tables).
     static std::string interpolate(const std::string& tmpl, const Args& args);
+    /// Preview uses the same native weighted selection and nested sample renderer.
+    static std::string previewTemplate(const std::string& value, const Args& args = {},
+                                      ContentFormat format = ContentFormat::kPlainText);
 
     // ─── User overrides (editable reply templates) ───────────
     // An override replaces the bundle value for one (locale, key). The bundle
@@ -189,6 +192,8 @@ private:
         std::string value;
         std::string plainValue;
         ContentFormat format = ContentFormat::kPlainText;
+        size_t weight = 1;
+        std::vector<TemplateValue> choices;
     };
     static TemplateValue prepareTemplate(const std::string& value,
                                          ContentFormat format);

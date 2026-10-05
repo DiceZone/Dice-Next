@@ -7,6 +7,7 @@
 #include "../src/i18n/i18n.h"
 #include "../src/storage/database.h"
 #include "../src/config/config_manager.h"
+#include "../src/common/weighted_templates.h"
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -54,6 +55,65 @@ static std::unique_ptr<PersonaTestConfig> makeCfg() {
     auto cfg = std::make_unique<PersonaTestConfig>();
     cfg->load();
     return cfg;
+}
+
+TEST(PersonaPool, ValidationPersistenceSingleSelectionAndDeletion) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("nonexistent_dir");
+    PersonaManager mgr(*db, i18n, *cfg);
+    const int a = mgr.createTemplate("a", "");
+    const int b = mgr.createTemplate("b", "");
+    const json pool = json::array({{{"id", a}, {"weight", 0}}, {{"id", b}, {"weight", 3}}});
+    ASSERT_TRUE(mgr.setPersonaPool(pool));
+    for (int n = 0; n < 20; ++n) ASSERT_EQ(mgr.chooseGlobalPersona(), b);
+    ASSERT_FALSE(mgr.setPersonaPool(json::array({{{"id", a}, {"weight", 0}}})));
+    ASSERT_FALSE(mgr.setPersonaPool(json::array({{{"id", 999}, {"weight", 1}}})));
+    ASSERT_FALSE(mgr.setPersonaPool(json::array({{{"id", a}, {"weight", 1}}, {{"id", a}, {"weight", 2}}})));
+    ASSERT_EQ(mgr.getPersonaPool(), pool);
+    ASSERT_TRUE(mgr.setActivePersona(a, "g"));
+    ASSERT_EQ(mgr.getActivePersona("g"), a);
+    ASSERT_EQ(mgr.getPersonaPool(), pool);
+    ASSERT_TRUE(cfg->reload());
+    PersonaManager restored(*db, i18n, *cfg);
+    restored.loadStartupPersona();
+    ASSERT_EQ(restored.getPersonaPool(), pool);
+    ASSERT_EQ(restored.chooseGlobalPersona(), b);
+    ASSERT_TRUE(restored.deleteTemplate(b));
+    ASSERT_TRUE(restored.getPersonaPool().empty());
+    ASSERT_EQ(restored.chooseGlobalPersona(), 0);
+    ASSERT_TRUE(restored.setActivePersona(a));
+    ASSERT_TRUE(restored.getPersonaPool().empty());
+    ASSERT_EQ(restored.chooseGlobalPersona(), a);
+    ASSERT_TRUE(restored.setPersonaPool(json::array({{{"id", 0}, {"weight", 1}}})));
+    ASSERT_EQ(restored.chooseGlobalPersona(), 0);
+}
+
+TEST(PersonaPool, NativeVariantsSurviveExportCopyImport) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    I18n i18n("nonexistent_dir");
+    PersonaManager mgr(*db, i18n, *cfg);
+    const int id = mgr.createTemplate("source", "");
+    const auto value = weighted_templates::encode(json::array({
+        {{"text", "wrong"}, {"weight", 0}}, {{"text", "{sample:{nick}|{nick}}=42"}, {"weight", 1}}
+    }));
+    ASSERT_TRUE(mgr.setEntry(id, "zh-Hans", "dice.roll.result", value));
+    auto exported = mgr.exportTemplate(id);
+    exported["name"] = "imported";
+    const int imported = mgr.importTemplate(exported);
+    ASSERT_TRUE(imported > 0);
+    const int copied = mgr.copyTemplate(imported, "copy");
+    ASSERT_TRUE(copied > 0);
+    mgr.loadStartupPersona();
+    auto scope = i18n.scopedPersona(copied);
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.roll.result", {{"nick", "玩家"}}), "玩家=42");
+    ASSERT_EQ(mgr.listEntries(copied).front().value, value);
+    auto invalid = exported;
+    invalid["name"] = "invalid";
+    invalid["entries"][0]["variants"] = json::array({{{"text", "x"}, {"weight", 0}}});
+    ASSERT_EQ(mgr.importTemplate(invalid), -1);
+    ASSERT_TRUE(mgr.getTemplateByName("invalid").id <= 0);
 }
 
 // ─── Template CRUD Tests ──────────────────────────────────────

@@ -965,6 +965,7 @@
   },
   "persona": {
     "default_name": "預設",
+    "random_name": "隨機多人格（按權重）",
     "current": "目前人格：{name}",
     "list": "可用的人格有：\n{list}用 .rpmode set <名稱> 切換",
     "set": "已切換到人格「{name}」。",

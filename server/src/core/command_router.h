@@ -195,7 +195,7 @@ public:
         s_replyCat.clear();       // 每条消息重置回复类别
         officialCard_.reset();
         auto personaScope = i18n_.scopedPersona(
-            personaMgr_ ? activePersonaFor(msg) : i18n_.getActivePersonaId());
+            personaMgr_ ? activePersonaFor(msg, true) : i18n_.getActivePersonaId());
         detectDiceBot(msg);       // 被动识别其他骰子的 .bot 横幅回执（须紧跟探测）
         recordBotProbe(msg);      // 记录本群 .bot 探测时间，作为识别的时间窗
         std::string text = trim(msg.content);
@@ -2299,8 +2299,8 @@ private:
         return "persona:" + msg.platform + ":" + msg.adapterId;
     }
 
-    int activePersonaFor(const Message& msg) const {
-        if (!personaMgr_) return i18n_.getActivePersonaId();
+    std::optional<int> explicitPersonaFor(const Message& msg) const {
+        if (!personaMgr_) return std::nullopt;
         if (msg.type == MessageType::kPrivate) {
             const std::string personal = getUserSetting(msg, personalPersonaKey(msg));
             if (!personal.empty()) {
@@ -2315,7 +2315,13 @@ private:
         }
         if (auto adapterPersona = personaMgr_->adapterDefaultPersona(msg.adapterId))
             return *adapterPersona;
-        return personaMgr_->getActivePersona("", msg.platform);
+        return std::nullopt;
+    }
+
+    int activePersonaFor(const Message& msg, bool draw = false) const {
+        if (!personaMgr_) return i18n_.getActivePersonaId();
+        if (auto fixed = explicitPersonaFor(msg)) return *fixed;
+        return draw ? personaMgr_->chooseGlobalPersona() : personaMgr_->getActivePersona("", msg.platform);
     }
 
     bool personaVisibleTo(const Message& msg, int personaId) const {
@@ -2323,6 +2329,8 @@ private:
     }
 
     std::optional<std::string> handlePersonaShow(Locale loc, const Message& msg) {
+        if (!explicitPersonaFor(msg) && !personaMgr_->getPersonaPool().empty())
+            return i18n_.tr(loc, "persona.current", {{"name", i18n_.tr(loc, "persona.random_name")}});
         int activeId = activePersonaFor(msg);
         if (activeId <= 0) {
             return i18n_.tr(loc, "persona.current", {{"name", i18n_.tr(loc, "persona.default_name")}});
@@ -2417,10 +2425,12 @@ private:
                 return i18n_.tr(loc, "persona.switch_fail");
         }
 
-        const int activeId = activePersonaFor(msg);
+        const int activeId = activePersonaFor(msg, true);
         auto changedPersonaScope = i18n_.scopedPersona(activeId);
         std::string name = i18n_.tr(loc, "persona.default_name");
-        if (activeId > 0) {
+        if (!explicitPersonaFor(msg) && !personaMgr_->getPersonaPool().empty())
+            name = i18n_.tr(loc, "persona.random_name");
+        else if (activeId > 0) {
             auto tmpl = personaMgr_->getTemplateById(activeId);
             if (tmpl.id > 0) name = tmpl.name;
         }
