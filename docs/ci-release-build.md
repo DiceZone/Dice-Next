@@ -1,5 +1,34 @@
 # Release 构建提速与测试门禁
 
+## 自动发布说明
+
+Release 工作流使用 `.github/scripts/release-notes.py` 生成中文说明，通过
+`body_path: release-notes.md` 写入 Release，不再只依赖 GitHub 的 PR 摘要。
+
+- 比较起点是比本次 tag 更早、源码属于本次构建历史且五个平台安装包及更新清单完整的已发布版本，包含 Beta；草稿、当前 tag、未来版本及未上传完整的发布不作基准。
+- 主程序范围截止于本次 `github.sha`，WebUI 范围截止于实际构建任务检出的 SHA，不采纳构建期间后来进入 main 的提交。生成器同样读取本次构建 SHA 中已测试的脚本，说明在构建号提交 / rebase 之前生成。
+- 每次发布额外附带 `release-sources.json`，记录主程序和 WebUI 的仓库、完整 SHA 与比较基准；不改变更新清单 schema、安装包或客户端更新协议。
+- 首次接入旧 Release 时，尝试从同一主程序 SHA 的成功 Release 运行中恢复 WebUI 检出 SHA；晚于该 Release 发布的重跑不作依据。日志过期或无读取权限时明确提示无法比较前端，不按提交日期猜测，也不把整个前端历史当作本次新增。
+- `feat` / `fix` / `perf` 自动分类为新增功能、问题修复、性能优化，破坏性变更单列；重复摘要合并并保留对应提交链接。构建号、普通 CI / 文档等提交保留在折叠记录中。摘要和折叠记录有长度限制，超出部分明确指向完整 Git 比较链接。
+- 元数据读取失败不会悄悄选一个更旧的比较起点；确认不了主程序发布范围，或已发布源码记录的格式 / 仓库 / SHA 校验失败时，在发布前报错。已有有效源码记录时无需依赖旧日志。脚本只进行 GitHub GET 和本地 Git 读取，不创建 tag、提交、发布或执行 commit 文本。
+
+大提交可以在正文中附带可选发布摘要；未填写时使用标题，不自动抄入测试过程或其他正文：
+
+```text
+feat(core): 支持定时安装更新
+
+Release-Notes:
+- feat: 支持先下载更新包，再按服务器时区定时安装，默认凌晨 04:00。
+- fix: 开启自动安装后，手动重启也会安装已下载更新。
+End-Release-Notes
+
+验证：这里记录测试范围，不会进入上述摘要。
+```
+
+本地验证可运行 `python -m unittest discover -s .github/scripts -p 'test_*.py' -v`。
+使用脚本 CLI 做只读预览时，传入两个仓库的完整构建 SHA、目标 tag，以及
+独立的 `--output` / `--sources-output` 路径；该操作仅生成文件，不触发 Release。
+
 ## 独立前端检查（本轮本地新增）
 
 WebUI 仓的 `.github/workflows/checks.yml` 在 push / pull_request / 手动运行时执行 `npm ci`、`npm test`、类型检查、生产构建和 PWA 产物检查。固定 Ubuntu 24.04 / Node 24，缓存 npm 下载，旧任务可被新提交取消。只读权限、不保留检出凭据、不使用发布密钥、不部署，不修改主仓后端发布工作流或 vcpkg 缓存。首次 GH 执行须等提交后验证。

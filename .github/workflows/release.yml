@@ -51,7 +51,7 @@ jobs:
             done
             [ -d "$repo/.git" ] || exit 1
           done
-      - name: Test cache snapshot logic
+      - name: Test Release automation
         shell: bash
         working-directory: main
         run: |
@@ -107,12 +107,18 @@ jobs:
   webui:
     name: WebUI
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           repository: DiceZone/Dice-Next-WebUI
           path: web
           token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+      - name: Record WebUI build source
+        id: source
+        working-directory: web
+        run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -434,8 +440,11 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [linux, windows, macos-arm64, backend-tests]
+    needs: [webui, linux, windows, macos-arm64, backend-tests]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -533,6 +542,33 @@ jobs:
               assets:$assets}' > update-manifest.json
           jq -e '.schema == 1 and (.assets | length) == 5' update-manifest.json >/dev/null
           cat update-manifest.json
+      - name: Checkout the actual WebUI build source for release notes
+        uses: actions/checkout@v4
+        with:
+          repository: DiceZone/Dice-Next-WebUI
+          ref: ${{ needs.webui.outputs.source_sha }}
+          path: release-webui
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+      - name: Generate categorized release notes and source record
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CORE_SHA: ${{ github.sha }}
+          WEBUI_SHA: ${{ needs.webui.outputs.source_sha }}
+          RELEASE_TAG: ${{ steps.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # The counter checkout tracks main, which can move during a build.
+          # Execute the generator actually covered by this run's source/tests.
+          git show "$CORE_SHA":.github/scripts/release-notes.py > release-notes-generator.py
+          python3 release-notes-generator.py \
+            --core-path . --core-sha "$CORE_SHA" \
+            --webui-path release-webui --webui-sha "$WEBUI_SHA" \
+            --tag "$RELEASE_TAG" \
+            --output release-notes.md --sources-output release-sources.json
+          cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
       - name: Record successful build number
         shell: bash
         env:
@@ -602,7 +638,8 @@ jobs:
         with:
           tag_name: ${{ steps.build.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          generate_release_notes: true
+          body_path: release-notes.md
+          generate_release_notes: false
           files: |
             artifacts/DiceNext-linux-amd64/*.tar.gz
             artifacts/DiceNext-linux-arm64/*.tar.gz
@@ -610,3 +647,4 @@ jobs:
             artifacts/DiceNext-windows-arm64/*.zip
             artifacts/DiceNext-macos-arm64/*.tar.gz
             update-manifest.json
+            release-sources.json
