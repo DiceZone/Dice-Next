@@ -102,6 +102,8 @@ static json makeDefaultConfig() {
             {"auto_check", true},
             {"check_interval_hours", 6},
             {"auto_action", "notify"},
+            {"scheduled_install", false},
+            {"install_time", "04:00"},
             {"source", "auto"},
             {"custom_mirror", ""}
         }},

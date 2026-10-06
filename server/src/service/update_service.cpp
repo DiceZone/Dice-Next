@@ -3,6 +3,8 @@
 #include "../common/logger.h"
 #include "../common/subprocess.h"
 #include "../common/version.h"
+#include "../common/utils.h"
+#include "../common/update_schedule.h"
 
 #include <openssl/evp.h>
 
@@ -66,6 +68,35 @@ std::string updaterTemporarySuffix() {
 
 std::int64_t epochSeconds() {
     return static_cast<std::int64_t>(std::time(nullptr));
+}
+
+bool writePendingMetadata(const fs::path& path, const nlohmann::json& metadata,
+                          std::string& error) {
+    const fs::path temporary = path.string() + ".tmp-" + updaterTemporarySuffix();
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        output << metadata.dump(2) << '\n';
+        output.close();
+        if (!output) {
+            error = "cannot persist scheduled update metadata";
+            std::error_code ignored;
+            fs::remove(temporary, ignored);
+            return false;
+        }
+    }
+    std::error_code ec;
+#if defined(_WIN32)
+    if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        ec = std::error_code(GetLastError(), std::system_category());
+#else
+    fs::rename(temporary, path, ec);
+#endif
+    if (ec) {
+        error = "cannot persist scheduled update metadata: " + ec.message();
+        fs::remove(temporary, ec);
+        return false;
+    }
+    return true;
 }
 
 std::string lower(std::string value) {
@@ -502,10 +533,10 @@ ContainerEnvironment detectContainerEnvironment() {
 
 UpdateService::UpdateService(ConfigManager& config, std::function<void()> restart,
                              NotifyCallback notify, ContainerEnvironment container,
-                             FetchCallback fetch, DownloadPolicy downloadPolicy)
+                             FetchCallback fetch, DownloadPolicy downloadPolicy, Clock clock)
     : config_(config), restart_(std::move(restart)), notify_(std::move(notify)),
       container_(std::move(container)), fetch_(std::move(fetch)),
-      downloadPolicy_(downloadPolicy) {
+      downloadPolicy_(downloadPolicy), clock_(std::move(clock)) {
     const DownloadPolicy defaults;
     if (downloadPolicy_.idleTimeout.count() <= 0) downloadPolicy_.idleTimeout = defaults.idleTimeout;
     if (downloadPolicy_.attemptTimeout.count() <= 0) downloadPolicy_.attemptTimeout = defaults.attemptTimeout;
@@ -514,6 +545,11 @@ UpdateService::UpdateService(ConfigManager& config, std::function<void()> restar
         DICE_LOG_INFO("Container runtime detected ({} via {}); self-update download and "
                       "installation are disabled",
             container_.type, container_.evidence);
+    }
+    std::string pendingError;
+    if (!reconcilePendingLocked(settings(), pendingError)) {
+        phase_ = "error";
+        error_ = pendingError;
     }
     worker_ = std::thread([this] { workerLoop(); });
 }
@@ -585,6 +621,10 @@ UpdateService::Settings UpdateService::settings() const {
     result.autoCheck = config_.get<bool>("update/auto_check", true);
     result.intervalHours = std::clamp(config_.get<int>("update/check_interval_hours", 6), 1, 168);
     result.action = config_.get<std::string>("update/auto_action", "notify");
+    result.scheduledInstall = config_.get<bool>("update/scheduled_install", false);
+    if (!installSupported()) result.scheduledInstall = false;
+    result.installTime = config_.get<std::string>("update/install_time", "04:00");
+    if (!validInstallTime(result.installTime)) result.installTime = "04:00";
     result.source = config_.get<std::string>("update/source", "auto");
     result.customMirror = config_.get<std::string>("update/custom_mirror", "");
     if (result.action != "notify" && result.action != "download" && result.action != "install")
@@ -594,6 +634,76 @@ UpdateService::Settings UpdateService::settings() const {
         result.source != "mirror" && result.source != "custom")
         result.source = "auto";
     return result;
+}
+
+std::int64_t UpdateService::now() const { return clock_ ? clock_() : epochSeconds(); }
+
+bool UpdateService::reconcilePendingLocked(const Settings& current, std::string& error, bool arm) {
+    const fs::path stage = fs::path("updates") / "pending";
+    scheduledInstallAt_ = 0;
+    pendingTag_.clear();
+    if (!fs::is_directory(stage)) return true;
+    if (!pendingUpdateHeld(stage)) {
+        if (!arm || current.action != "install" || !current.scheduledInstall || !installSupported()) return true;
+        // Explicitly enabling scheduling also holds a package staged by an older core.
+        std::ofstream hold(stage / kUpdateHoldFile, std::ios::binary | std::ios::trunc);
+        hold << "Scheduled installation requires core authorization.\n";
+        hold.close();
+        if (!hold) { error = "cannot hold staged update for scheduled installation"; return false; }
+    }
+    try {
+        std::string readError;
+        auto metadata = Json::parse(readFileLimited(stage / "update.json", 64 * 1024, readError));
+        pendingTag_ = metadata.at("tag").get<std::string>();
+        if (compareRelease(versionString(), buildNumber(), metadata.at("version").get<std::string>(),
+                           metadata.at("build").get<int>()) >= 0) {
+            // A rolled-back/stale package must not restart the current build forever.
+            std::error_code ec;
+            fs::remove(stage / kUpdateInstallOnRestartFile, ec);
+            if (ec) { error = "cannot revoke stale installation permission: " + ec.message(); return false; }
+            phase_ = "staged";
+            return true;
+        }
+        const int timezone = utils::effectiveTimezoneOffsetMinutes();
+        const bool previouslyArmed = metadata.value("install_plan_enabled", false);
+        const bool previouslyAutoArmed = metadata.value("auto_install_authorized", previouslyArmed);
+        const bool autoArmed = current.action == "install" && installSupported() && (arm || previouslyAutoArmed);
+        const bool enabled = current.action == "install" && current.scheduledInstall && installSupported() &&
+            (arm || previouslyArmed);
+        const fs::path restartPermission = stage / kUpdateInstallOnRestartFile;
+        if (!autoArmed) {
+            std::error_code ec;
+            fs::remove(restartPermission, ec);
+            if (ec) { error = "cannot revoke automatic installation on restart: " + ec.message(); return false; }
+        }
+        const auto previous = metadata.value("install_at", std::int64_t(0));
+        auto due = enabled ? previous : 0;
+        if (enabled && (due <= 0 || metadata.value("install_time", std::string()) != current.installTime ||
+                       metadata.value("install_timezone", 9999) != timezone)) {
+            due = nextInstallTime(now(), timezone, current.installTime);
+        }
+        if (autoArmed != previouslyAutoArmed || enabled != previouslyArmed || due != previous ||
+            (enabled && metadata.value("install_time", std::string()) != current.installTime)) {
+            metadata["auto_install_authorized"] = autoArmed;
+            metadata["install_plan_enabled"] = enabled;
+            metadata["install_at"] = due;
+            metadata["install_time"] = current.installTime;
+            metadata["install_timezone"] = timezone;
+            if (!writePendingMetadata(stage / "update.json", metadata, error)) return false;
+        }
+        if (autoArmed && !fs::is_regular_file(restartPermission)) {
+            std::ofstream permission(restartPermission, std::ios::binary | std::ios::trunc);
+            permission << "Automatic installation enabled; apply this verified package on the next start.\n";
+            permission.close();
+            if (!permission) { error = "cannot authorize automatic installation on restart"; return false; }
+        }
+        scheduledInstallAt_ = due;
+        phase_ = due > 0 ? "scheduled" : "staged";
+        return true;
+    } catch (const std::exception& ex) {
+        error = "cannot restore staged update: " + std::string(ex.what());
+        return false;
+    }
 }
 
 bool UpdateService::downloadSupported() const {
@@ -673,6 +783,10 @@ UpdateService::Json UpdateService::status() const {
         {"checkedAt", checkedAt_},
         {"downloadSupported", downloadSupported()},
         {"installSupported", installSupported()},
+        {"scheduledInstallSupported", installSupported()},
+        {"scheduledInstallAt", scheduledInstallAt_},
+        {"pendingTag", pendingTag_},
+        {"timezoneMinutes", utils::effectiveTimezoneOffsetMinutes()},
         {"selfUpdateBlockedReason", container_.detected ? "container" : ""},
         {"runtime", Json{
             {"container", container_.detected},
@@ -684,6 +798,8 @@ UpdateService::Json UpdateService::status() const {
             {"autoCheck", current.autoCheck},
             {"intervalHours", current.intervalHours},
             {"autoAction", current.action},
+            {"scheduledInstall", current.scheduledInstall},
+            {"installTime", current.installTime},
             {"source", current.source},
             {"customMirror", current.customMirror}
         }}
@@ -699,6 +815,25 @@ bool UpdateService::updateSettings(const Json& values, std::string& error) {
 
         const Settings previous = settings();
         Settings next = previous;
+        if (values.contains("scheduledInstall")) {
+            if (!values["scheduledInstall"].is_boolean()) {
+                error = "scheduledInstall must be a boolean";
+                return false;
+            }
+            next.scheduledInstall = values["scheduledInstall"].get<bool>();
+            if (next.scheduledInstall && !installSupported()) {
+                error = "scheduled installation requires the Windows dice-next.exe manager";
+                return false;
+            }
+        }
+        if (values.contains("installTime")) {
+            if (!values["installTime"].is_string() ||
+                !validInstallTime(values["installTime"].get<std::string>())) {
+                error = "installTime must use HH:MM (00:00-23:59)";
+                return false;
+            }
+            next.installTime = values["installTime"].get<std::string>();
+        }
         if (values.contains("autoCheck")) {
             if (!values["autoCheck"].is_boolean()) {
                 error = "autoCheck must be a boolean";
@@ -771,9 +906,16 @@ bool UpdateService::updateSettings(const Json& values, std::string& error) {
             config_.set<bool>("update/auto_check", value.autoCheck);
             config_.set<int>("update/check_interval_hours", value.intervalHours);
             config_.set<std::string>("update/auto_action", value.action);
+            config_.set<bool>("update/scheduled_install", value.scheduledInstall);
+            config_.set<std::string>("update/install_time", value.installTime);
             config_.set<std::string>("update/source", value.source);
             config_.set<std::string>("update/custom_mirror", value.customMirror);
         };
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (phase_ == "installing") {
+            error = "cannot change update settings while installation is starting";
+            return false;
+        }
         store(next);
         if (!config_.save()) {
             store(previous);
@@ -781,9 +923,15 @@ bool UpdateService::updateSettings(const Json& values, std::string& error) {
             return false;
         }
         if (next.source != previous.source || next.customMirror != previous.customMirror) {
-            std::lock_guard<std::mutex> lock(mutex_);
             sourceOrder_.clear();
             sourceCacheUntil_ = 0;
+        }
+        const bool arm = next.scheduledInstall != previous.scheduledInstall ||
+            next.installTime != previous.installTime || next.action != previous.action;
+        if (!isBusyLocked() && !reconcilePendingLocked(next, error, arm)) {
+            phase_ = "error";
+            error_ = error;
+            return false;
         }
         return true;
     } catch (const std::exception& ex) {
@@ -863,18 +1011,53 @@ bool UpdateService::requestInstall(std::string& error) {
         error = "no staged update is ready";
         return false;
     }
-    return queueJobLocked(Job::install, "installing", error);
+    if (!queueJobLocked(Job::install, "installing", error)) return false;
+    scheduledInstallJob_ = false;
+    return true;
+}
+
+bool UpdateService::requestManualRestart(std::string& error) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (phase_ == "installing") {
+            error = "installation and restart are already starting";
+            return false;
+        }
+        // The explicit endpoint coordinates a ready package with the worker.
+        // Other starts use the persisted launcher permission for the same policy.
+        if (!isBusyLocked() && settings().action == "install" && installSupported() &&
+            fs::is_directory(fs::path("updates") / "pending")) {
+            if (!queueJobLocked(Job::install, "installing", error)) return false;
+            scheduledInstallJob_ = false;
+            return true;
+        }
+    }
+    if (!restart_) { error = "restart callback is not available"; return false; }
+    try { restart_(); return true; }
+    catch (const std::exception& ex) { error = ex.what(); return false; }
+    catch (...) { error = "restart callback failed"; return false; }
 }
 
 void UpdateService::tick() {
     processInstallResult();
-    const Settings current = settings();
-    if (!current.autoCheck) return;
 
     bool due = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (isBusyLocked()) return;
+        const Settings current = settings();
+        std::string pendingError;
+        if (!reconcilePendingLocked(current, pendingError)) {
+            phase_ = "error";
+            error_ = pendingError;
+            return;
+        }
+        if (scheduledInstallAt_ > 0 && now() >= scheduledInstallAt_) {
+            std::string ignored;
+            if (queueJobLocked(Job::install, "installing", ignored)) scheduledInstallJob_ = true;
+            return;
+        }
+        if (!current.autoCheck) return;
         const auto interval = static_cast<std::int64_t>(current.intervalHours) * 60 * 60;
         due = checkedAt_ == 0 || epochSeconds() - checkedAt_ >= interval;
     }
@@ -1243,11 +1426,12 @@ void UpdateService::doCheck(bool force) {
         sourceCacheUntil_ = epochSeconds() + kMirrorCacheSeconds;
         checkedAt_ = epochSeconds();
         error_.clear();
-        phase_ = available ? "available" : "up_to_date";
+        phase_ = scheduledInstallAt_ > 0 ? "scheduled" : available ? "available" : "up_to_date";
         DICE_LOG_INFO("Update check via {}: latest {} (current {})",
             activeSource_, latest_.tag, releaseTag());
 
-        if (available && current.action != "notify" && downloadSupported()) {
+        const Settings activeSettings = settings();
+        if (available && latest_.tag != pendingTag_ && activeSettings.action != "notify" && downloadSupported()) {
             downloadedBytes_ = 0;
             totalBytes_ = 0;
             automaticDownload_ = true;
@@ -1264,7 +1448,9 @@ void UpdateService::doCheck(bool force) {
         const std::string action = container_.detected
             ? "仅通知（容器内禁止程序自更新，请更新镜像后重建容器）"
             : current.action == "download"
-                ? "自动下载" : current.action == "install" ? "自动下载并安装" : "仅通知";
+                ? "自动下载" : current.action == "install"
+                    ? (current.scheduledInstall ? "自动下载，定时安装（" + current.installTime + "，服务器时区）" : "自动下载并安装")
+                    : "仅通知";
         emitNotification("update_available",
             "检测到 Dice!Next 新版本：" + checkedTag +
             "\n当前版本：" + releaseTag() +
@@ -1629,12 +1815,31 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
             {"tag", manifest.tag},
             {"version", manifest.version},
             {"build", manifest.build},
-            {"staged_at", epochSeconds()}
+            {"staged_at", epochSeconds()},
+            {"install_plan_enabled", false},
+            {"auto_install_authorized", false}
         };
         std::ofstream output(packageRoot / "update.json", std::ios::binary | std::ios::trunc);
         output << metadata.dump(2) << '\n';
         if (!output) {
             error = "cannot write staged update metadata";
+            fs::remove_all(extractRoot, ec);
+            return false;
+        }
+        // Never accept a restart permission carried inside the downloaded archive.
+        fs::remove(packageRoot / kUpdateInstallOnRestartFile, ec);
+        if (ec) {
+            error = "cannot discard archived installation permission: " + ec.message();
+            fs::remove_all(extractRoot, ec);
+            return false;
+        }
+        // Create the gate before publishing the stage. Only a completed download
+        // or an explicit policy change may authorize installation on restart.
+        std::ofstream hold(packageRoot / kUpdateHoldFile, std::ios::binary | std::ios::trunc);
+        hold << "Installation requires explicit authorization from the core.\n";
+        hold.close();
+        if (!hold) {
+            error = "cannot hold staged update for installation";
             fs::remove_all(extractRoot, ec);
             return false;
         }
@@ -1764,10 +1969,12 @@ void UpdateService::doDownload() {
     }
 #endif
 
-    const Settings current = settings();
+    Settings current;
     bool installQueued = false;
+    std::string pendingError;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        current = settings();
         if (stopping_.load(std::memory_order_acquire)) return;
         downloadActive_ = false;
         automaticDownload_ = false;
@@ -1785,19 +1992,30 @@ void UpdateService::doDownload() {
         DICE_LOG_INFO("Verified update {} downloaded from {} to {}",
             manifest.tag, usedSource, archive.string());
 
-        if (current.action == "install" && installSupported()) {
+        if (!reconcilePendingLocked(current, pendingError, true)) {
+            phase_ = "error";
+            error_ = pendingError;
+        } else if (current.action == "install" && !current.scheduledInstall && installSupported()) {
             phase_ = "installing";
             job_ = Job::install;
+            scheduledInstallJob_ = false;
             installQueued = true;
             wake_.notify_all();
         }
+    }
+
+    if (!pendingError.empty()) {
+        if (automatic) emitNotification("update_error", "Dice!Next 更新包已下载，但无法保存安装计划：" + pendingError);
+        return;
     }
 
     if (automatic && !stopping_.load(std::memory_order_acquire)) {
         emitNotification("update_result",
             "Dice!Next 自动更新包已下载并通过 SHA-256 校验：" + manifest.tag +
             "\n下载源：" + usedSource +
-            (installQueued ? "\n即将重启并安装更新。" : "\n更新包已准备完成。"));
+            (installQueued ? "\n即将重启并安装更新。" : current.scheduledInstall && current.action == "install"
+                ? "\n将在服务器时区的 " + current.installTime + " 安装更新。"
+                : "\n更新包已准备完成，等待手动安装。"));
     }
 }
 void UpdateService::doInstall() {
@@ -1806,6 +2024,21 @@ void UpdateService::doInstall() {
             std::lock_guard<std::mutex> lock(mutex_);
             phase_ = "error";
             error_ = message;
+            // Do not retry a failed restart every minute (or after a restart).
+            if (scheduledInstallJob_) {
+                scheduledInstallAt_ = 0;
+                const fs::path path = fs::path("updates") / "pending" / "update.json";
+                try {
+                    std::string ignored;
+                    auto metadata = Json::parse(readFileLimited(path, 64 * 1024, ignored));
+                    metadata["install_plan_enabled"] = false;
+                    metadata["install_at"] = 0;
+                    if (!writePendingMetadata(path, metadata, ignored)) DICE_LOG_WARN("{}", ignored);
+                } catch (const std::exception& ex) {
+                    DICE_LOG_WARN("Could not cancel failed installation plan: {}", ex.what());
+                }
+                scheduledInstallJob_ = false;
+            }
         }
         DICE_LOG_WARN("Update installation failed: {}", message);
         emitNotification("update_error",
@@ -1831,7 +2064,33 @@ void UpdateService::doInstall() {
         }
     }
     if (restart_) {
-        restart_();
+        const fs::path stage = fs::path("updates") / "pending";
+        std::string authorizationError;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (scheduledInstallJob_) {
+                const Settings current = settings();
+                std::string pendingError;
+                if (!reconcilePendingLocked(current, pendingError) || scheduledInstallAt_ <= 0 || now() < scheduledInstallAt_) {
+                    if (!pendingError.empty()) { phase_ = "error"; error_ = pendingError; }
+                    return;
+                }
+                phase_ = "installing";
+            }
+            std::error_code ec;
+            fs::remove(stage / kUpdateHoldFile, ec);
+            if (ec) {
+                authorizationError = "cannot authorize staged installation: " + ec.message();
+            } else {
+                scheduledInstallAt_ = 0;
+            }
+        }
+        if (!authorizationError.empty()) { fail(authorizationError); return; }
+        try { restart_(); }
+        catch (...) {
+            std::ofstream(stage / kUpdateHoldFile) << "Installation interrupted.\n";
+            fail("restart callback failed; staged update remains held");
+        }
     } else {
         fail("restart callback is not available");
     }

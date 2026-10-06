@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include "startup_guard.h"
+#include "../common/update_schedule.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -338,6 +339,7 @@ bool applyPendingUpdate(const fs::path& root) {
     const fs::path stage = root / L"updates" / L"pending";
     std::error_code ec;
     if (!fs::is_directory(stage, ec)) return false;
+    if (!dice::update::pendingUpdateMayApply(stage)) return false;
     if (runningInContainer()) {
         std::wcerr << L"Dice!Next: a container environment was detected; the staged "
                       L"program update was not applied. Pull a new image and recreate "

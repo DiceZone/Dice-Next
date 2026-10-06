@@ -2922,13 +2922,6 @@ static int realMain(int argc, char* argv[]) {
                         {"restart_required", changed}}}}));
                 } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }
             }, {drogon::Get, drogon::Put});
-        // 重启程序：派生一个分离的小批处理(等本进程退出→重启 exe)，然后优雅退出。
-        app.registerHandler("/api/system/restart",
-            [jResp](const drogon::HttpRequestPtr&,
-                    std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
-                cb(jResp({{"code", 0}, {"message", "restarting"}}));
-                relaunchSelf();
-            }, {drogon::Post});
     }
 
     // Static file serving — serve web/dist/ as document root
@@ -3016,6 +3009,19 @@ static int realMain(int argc, char* argv[]) {
         });
 
     // ── Register real REST API endpoints ─────────────────────
+    // 主动重启通过更新器协调：自动安装已开启且包已就绪时，不必等定时窗口。
+    app.registerHandler("/api/system/restart",
+        [&updateService](const drogon::HttpRequestPtr&,
+                        std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+            std::string error;
+            const bool accepted = updateService.requestManualRestart(error);
+            auto response = drogon::HttpResponse::newHttpResponse();
+            response->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+            response->setBody(nlohmann::json{
+                {"code", accepted ? 0 : 1}, {"message", accepted ? "restarting" : error}
+            }.dump());
+            cb(response);
+        }, {drogon::Post});
     dice::utils::setStartupEpoch();
     dice::api::registerApiRoutes(db, configMgr, adapterMgr, engine, cardDeck, replyManager, i18n, jsMod, luaMod,
                                  causalMgr, cooldownMgr, counterStore, personaMgr, updateService, cmdRouter);

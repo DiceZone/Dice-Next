@@ -3,6 +3,29 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-05: Scheduled update installation and installation on any restart
+
+- Windows Release builds of the backend, tests and launcher succeeded. The full
+  core suite passed 527 cases / 3565 assertions; the new UpdateSchedule scope
+  passed 17 cases / 151 assertions. No live bot account or real process restart
+  was used: restart callbacks recorded intent in isolated package fixtures.
+- Coverage includes opt-in defaults (04:00), strict HH:MM validation, next-day
+  and fractional timezone calculations, persisted deadlines, changed settings,
+  cancellation, interrupted preparation, stale metadata, same-tag download
+  deduplication, overdue plans and failure without a repeated restart loop.
+- Real fixture ZIPs went through download, size/SHA-256 verification and Windows
+  staging for scheduled, immediate and download-only policies. Incoming restart
+  authorization was discarded; only the core generated a valid permission.
+  The launcher's shared gate permits any startup to apply an authorized package
+  before the proactive deadline, and revokes that permission for notify/download.
+- WebUI: 137 tests and production build passed; styled time controls, four
+  locales, server-time display, capability guards and setting search are covered.
+  The isolated preview API also passed defaults, scheduled download, cancellation
+  and explicit restart checks, without network downloads or restarting a bot.
+- Documentation catalog validation (810 backend text keys per locale) and the
+  documentation production build passed. These are local results, not a new
+  Release/CI run or live-platform upgrade validation.
+
 ## 2026-10-05: Weighted command replies and global persona pool
 
 Release scope: build 926. Backend, WebUI and docs were fast-forwarded before

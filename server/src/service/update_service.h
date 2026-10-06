@@ -83,6 +83,7 @@ public:
     using Json = nlohmann::json;
     using NotifyCallback = std::function<void(const std::string& event, const std::string& message)>;
     using CancellationCheck = std::function<bool()>;
+    using Clock = std::function<std::int64_t()>;
     using FetchCallback = std::function<bool(
         const std::string& url, const std::filesystem::path& output,
         std::uint64_t maxBytes, int timeoutSeconds, std::string& error,
@@ -91,7 +92,7 @@ public:
     UpdateService(ConfigManager& config, std::function<void()> restart,
                   NotifyCallback notify = {},
                   ContainerEnvironment container = detectContainerEnvironment(),
-                  FetchCallback fetch = {}, DownloadPolicy downloadPolicy = {});
+                  FetchCallback fetch = {}, DownloadPolicy downloadPolicy = {}, Clock clock = {});
     ~UpdateService();
 
     UpdateService(const UpdateService&) = delete;
@@ -102,6 +103,7 @@ public:
     bool requestCheck(bool force, std::string& error);
     bool requestDownload(std::string& error);
     bool requestInstall(std::string& error);
+    bool requestManualRestart(std::string& error);
     bool requestCancelDownload(std::string& error);
     void tick();
 
@@ -112,6 +114,8 @@ private:
         bool autoCheck = true;
         int intervalHours = 6;
         std::string action = "notify";
+        bool scheduledInstall = false;
+        std::string installTime = "04:00";
         std::string source = "auto";
         std::string customMirror;
     };
@@ -140,6 +144,8 @@ private:
     void doDownload();
     void doInstall();
     void processInstallResult();
+    bool reconcilePendingLocked(const Settings& current, std::string& error, bool arm = false);
+    std::int64_t now() const;
     void emitNotification(const std::string& event, const std::string& message) const;
 
     std::vector<Source> configuredSources(const Settings& settings) const;
@@ -166,6 +172,7 @@ private:
     ContainerEnvironment container_;
     FetchCallback fetch_;
     DownloadPolicy downloadPolicy_;
+    Clock clock_;
 
     mutable std::mutex mutex_;
     std::condition_variable wake_;
@@ -186,6 +193,9 @@ private:
     bool updateAvailable_ = false;
     bool automaticDownload_ = false;
     bool installResultProcessed_ = false;
+    bool scheduledInstallJob_ = false;
+    std::int64_t scheduledInstallAt_ = 0;
+    std::string pendingTag_;
     ReleaseManifest latest_;
     std::vector<Source> sourceOrder_;
     std::int64_t sourceCacheUntil_ = 0;

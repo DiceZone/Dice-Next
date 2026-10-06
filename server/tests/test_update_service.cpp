@@ -1,6 +1,8 @@
 #include "test_framework.h"
 #include "../src/common/subprocess.h"
 #include "../src/common/version.h"
+#include "../src/common/update_schedule.h"
+#include "../src/common/utils.h"
 #include "../src/service/update_service.h"
 
 #include <atomic>
@@ -8,9 +10,16 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <iomanip>
+#include <sstream>
 #include <mutex>
 #include <regex>
 #include <thread>
+#include <openssl/evp.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 using namespace dice::update;
 
@@ -121,7 +130,394 @@ bool downloadFinished(UpdateService& service) {
     return phase == "error" || phase == "cancelled" || phase == "downloaded" || phase == "staged";
 }
 
+#if defined(_WIN32)
+class ScheduledUpdateFixture : public DownloadFixture {
+public:
+    ScheduledUpdateFixture() : timezone_(dice::utils::timezoneOffsetMinutes()) {
+        wchar_t value[32768]{};
+        if (GetEnvironmentVariableW(L"DICENEXT_MANAGED", value, 32768) > 0) previous_ = value;
+        SetEnvironmentVariableW(L"DICENEXT_MANAGED", L"1");
+        dice::utils::setTimezoneOffset(480);
+        writeResponse(root / "dice-next.exe", "test fixture, never executed");
+        writeResponse(root / "app" / "dice-next-core.exe", "test fixture, never executed");
+        writeResponse(root / "updates" / "pending" / kUpdateHoldFile, "held");
+        writeResponse(root / "updates" / "pending" / "update.json", nlohmann::json{
+            {"schema", 1}, {"tag", "v99.0.0-beta.900"}, {"version", "99.0.0"}, {"build", 900},
+            {"install_plan_enabled", true}
+        }.dump());
+    }
+    ~ScheduledUpdateFixture() {
+        SetEnvironmentVariableW(L"DICENEXT_MANAGED", previous_.empty() ? nullptr : previous_.c_str());
+        dice::utils::setTimezoneOffset(timezone_);
+    }
+    void configure(dice::ConfigManager& config) {
+        config.set<bool>("update/auto_check", false);
+        config.set<std::string>("update/source", "direct");
+        config.set<std::string>("update/auto_action", "install");
+        config.set<bool>("update/scheduled_install", true);
+        config.set<std::string>("update/install_time", "04:00");
+    }
+private:
+    int timezone_;
+    std::wstring previous_;
+};
+#endif
+
 }  // namespace
+
+TEST(UpdateSchedule, ValidatesTimeAndUsesNextServerLocalOccurrence) {
+    for (const auto* time : {"00:00", "04:00", "23:59"}) ASSERT_TRUE(validInstallTime(time));
+    for (const auto* time : {"4:00", "24:00", "04:60", "-1:00", "04:00:00", "０４:００", ""})
+        ASSERT_FALSE(validInstallTime(time));
+    ASSERT_EQ(nextInstallTime(86400 + 19 * 3600, 480, "04:00"), 86400 + 20 * 3600);
+    ASSERT_EQ(nextInstallTime(86400 + 20 * 3600, 480, "04:00"), 2 * 86400 + 20 * 3600);
+    ASSERT_EQ(nextInstallTime(86400 + 21 * 3600, 480, "04:00"), 2 * 86400 + 20 * 3600);
+    ASSERT_EQ(nextInstallTime(86400 + 7 * 3600, -210, "04:00"), 86400 + 7 * 3600 + 1800);
+    ASSERT_EQ(nextInstallTime(86400, 345, "00:00"), 2 * 86400 - 345 * 60);
+    ASSERT_EQ(nextInstallTime(-60, 0, "00:00"), 0);
+    ASSERT_EQ(nextInstallTime(100, 0, "24:00"), 0);
+}
+
+TEST(UpdateSchedule, LauncherGateHoldsNewPackagesButPreservesLegacyBehavior) {
+    DownloadFixture fixture;
+    const auto stage = fixture.root / "updates" / "pending";
+    std::filesystem::create_directories(stage);
+    ASSERT_FALSE(pendingUpdateHeld(stage));
+    writeResponse(stage / kUpdateHoldFile, "held");
+    ASSERT_TRUE(pendingUpdateHeld(stage));
+    ASSERT_FALSE(pendingUpdateMayApply(stage));
+    writeResponse(stage / kUpdateInstallOnRestartFile, "automatic installation enabled");
+    ASSERT_TRUE(pendingUpdateMayApply(stage));
+    std::filesystem::remove(stage / kUpdateInstallOnRestartFile);
+    ASSERT_FALSE(pendingUpdateMayApply(stage));
+    std::filesystem::remove(stage / kUpdateHoldFile);
+    ASSERT_FALSE(pendingUpdateHeld(stage));
+    ASSERT_TRUE(pendingUpdateMayApply(stage));
+}
+
+TEST(UpdateSchedule, DefaultsAreOptInAndInvalidSettingsAreRejected) {
+    DownloadFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{true, "docker", "test"});
+    ASSERT_FALSE(service.status()["settings"]["scheduledInstall"].get<bool>());
+    ASSERT_EQ(service.status()["settings"]["installTime"].get<std::string>(), "04:00");
+    ASSERT_FALSE(service.status()["scheduledInstallSupported"].get<bool>());
+    std::string error;
+    for (const auto& values : {nlohmann::json{{"installTime", "24:00"}},
+                              nlohmann::json{{"installTime", 400}},
+                              nlohmann::json{{"scheduledInstall", "true"}},
+                              nlohmann::json{{"scheduledInstall", true}}}) {
+        ASSERT_FALSE(service.updateSettings(values, error));
+        ASSERT_FALSE(error.empty());
+    }
+    ASSERT_EQ(service.status()["settings"]["installTime"].get<std::string>(), "04:00");
+}
+
+#if defined(_WIN32)
+TEST(UpdateSchedule, PersistsAcrossRestartAndInstallsOnceAtDeadlineEvenWithoutAutoCheck) {
+    ScheduledUpdateFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    fixture.configure(config);
+    ASSERT_TRUE(config.save());
+    std::atomic<std::int64_t> clock{86400 + 19 * 3600};
+    std::atomic<int> restarts{0};
+    std::int64_t due = 0;
+    {
+        UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{}, {}, {}, [&] { return clock.load(); });
+        due = service.status()["scheduledInstallAt"].get<std::int64_t>();
+        ASSERT_EQ(due, 86400 + 20 * 3600);
+        ASSERT_EQ(service.status()["phase"].get<std::string>(), "scheduled");
+        service.tick();
+        ASSERT_EQ(restarts.load(), 0);
+        ASSERT_TRUE(pendingUpdateHeld(fixture.root / "updates" / "pending"));
+    }
+    clock += 120;
+    dice::ConfigManager restored((fixture.root / "config").string());
+    ASSERT_TRUE(restored.load());
+    UpdateService service(restored, [&] { ++restarts; }, {}, ContainerEnvironment{}, {}, {}, [&] { return clock.load(); });
+    ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), due);
+    clock = due - 1;
+    service.tick();
+    ASSERT_EQ(restarts.load(), 0);
+    clock = due;
+    service.tick();
+    ASSERT_TRUE(waitUntil([&] { return restarts.load() == 1; }));
+    ASSERT_FALSE(pendingUpdateHeld(fixture.root / "updates" / "pending"));
+    service.tick();
+    ASSERT_EQ(restarts.load(), 1);
+}
+
+TEST(UpdateSchedule, CancellingOrChangingStrategyHoldsPackageAndReschedulingUsesNewTime) {
+    ScheduledUpdateFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    fixture.configure(config);
+    std::atomic<std::int64_t> clock{86400 + 19 * 3600};
+    std::atomic<int> restarts{0};
+    UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{}, {}, {}, [&] { return clock.load(); });
+    std::string error;
+    ASSERT_TRUE(service.updateSettings({{"installTime", "05:15"}}, error));
+    ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), 86400 + 21 * 3600 + 15 * 60);
+    ASSERT_TRUE(service.updateSettings({{"scheduledInstall", false}}, error));
+    ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), 0);
+    clock = 3 * 86400;
+    service.tick();
+    ASSERT_EQ(restarts.load(), 0);
+    ASSERT_TRUE(pendingUpdateHeld(fixture.root / "updates" / "pending"));
+    ASSERT_EQ(service.status()["phase"].get<std::string>(), "staged");
+    ASSERT_TRUE(pendingUpdateMayApply(fixture.root / "updates" / "pending"));
+    ASSERT_TRUE(service.updateSettings({{"scheduledInstall", true}}, error));
+    ASSERT_TRUE(service.status()["scheduledInstallAt"].get<std::int64_t>() > clock.load());
+    ASSERT_TRUE(service.updateSettings({{"autoAction", "notify"}}, error));
+    ASSERT_FALSE(pendingUpdateMayApply(fixture.root / "updates" / "pending"));
+    ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), 0);
+    service.tick();
+    ASSERT_EQ(restarts.load(), 0);
+}
+
+TEST(UpdateSchedule, TimezoneChangeReschedulesAndManualInstallCanBypassDeadline) {
+    ScheduledUpdateFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    fixture.configure(config);
+    std::atomic<int> restarts{0};
+    UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{}, {}, {}, [] { return 86400 + 19 * 3600; });
+    dice::utils::setTimezoneOffset(0);
+    service.tick();
+    ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), 2 * 86400 + 4 * 3600);
+    std::string error;
+    ASSERT_TRUE(service.requestInstall(error));
+    ASSERT_FALSE(service.requestInstall(error));
+    ASSERT_TRUE(waitUntil([&] { return restarts.load() == 1; }));
+    ASSERT_FALSE(pendingUpdateHeld(fixture.root / "updates" / "pending"));
+}
+
+TEST(UpdateSchedule, ChecksDoNotRedownloadAnAlreadyScheduledRelease) {
+    ScheduledUpdateFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    fixture.configure(config);
+    std::atomic<int> downloads{0};
+    auto fetch = [&](const std::string& url, const std::filesystem::path& output, std::uint64_t,
+                     int, std::string&, const UpdateService::CancellationCheck&) {
+        if (url.find("update-manifest.json") != std::string::npos) {
+            writeResponse(output, downloadManifest());
+            return true;
+        }
+        ++downloads;
+        return false;
+    };
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, fetch, {}, [] { return 86400 + 19 * 3600; });
+    const auto due = service.status()["scheduledInstallAt"].get<std::int64_t>();
+    std::string error;
+    ASSERT_TRUE(service.requestCheck(true, error));
+    ASSERT_TRUE(waitUntil([&] { return service.status()["checkedAt"].get<std::int64_t>() > 0; }));
+    ASSERT_EQ(downloads.load(), 0);
+    ASSERT_EQ(service.status()["phase"].get<std::string>(), "scheduled");
+    ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), due);
+}
+
+TEST(UpdateSchedule, CorruptMetadataAndStalePackagesNeverAutoInstall) {
+    ScheduledUpdateFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    fixture.configure(config);
+    std::atomic<int> restarts{0};
+    writeResponse(fixture.root / "updates" / "pending" / "update.json", "not json");
+    {
+        UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{});
+        service.tick();
+        ASSERT_EQ(service.status()["phase"].get<std::string>(), "error");
+        ASSERT_EQ(restarts.load(), 0);
+        ASSERT_TRUE(pendingUpdateHeld(fixture.root / "updates" / "pending"));
+    }
+    writeResponse(fixture.root / "updates" / "pending" / "update.json", nlohmann::json{
+        {"tag", dice::releaseTag()}, {"version", dice::versionString()}, {"build", dice::buildNumber()}
+    }.dump());
+    UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{});
+    service.tick();
+    ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), 0);
+    ASSERT_EQ(restarts.load(), 0);
+}
+
+TEST(UpdateSchedule, InterruptedOrCancelledPreparationIsNotAutomaticallyArmedOnRestart) {
+    ScheduledUpdateFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    fixture.configure(config);
+    writeResponse(fixture.root / "updates" / "pending" / "update.json", nlohmann::json{
+        {"tag", "v99.0.0-beta.900"}, {"version", "99.0.0"}, {"build", 900},
+        {"install_plan_enabled", false}
+    }.dump());
+    std::atomic<int> restarts{0};
+    UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{});
+    service.tick();
+    ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), 0);
+    ASSERT_EQ(service.status()["phase"].get<std::string>(), "staged");
+    ASSERT_EQ(restarts.load(), 0);
+    ASSERT_TRUE(pendingUpdateHeld(fixture.root / "updates" / "pending"));
+}
+
+TEST(UpdateSchedule, EveryStartupCanApplyScheduledPackageAndChangingStrategyRevokesPermission) {
+    ScheduledUpdateFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    fixture.configure(config);
+    const auto pending = fixture.root / "updates" / "pending";
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, {}, {}, [] { return 86400 + 19 * 3600; });
+    ASSERT_TRUE(service.status()["scheduledInstallAt"].get<std::int64_t>() > 86400 + 19 * 3600);
+    ASSERT_TRUE(pendingUpdateHeld(pending));
+    ASSERT_TRUE(pendingUpdateMayApply(pending)); // Launcher applies even before the proactive restart time.
+    std::string error;
+    ASSERT_TRUE(service.updateSettings({{"autoAction", "download"}}, error));
+    ASSERT_FALSE(pendingUpdateMayApply(pending));
+    ASSERT_TRUE(service.updateSettings({{"autoAction", "install"}}, error));
+    ASSERT_TRUE(pendingUpdateMayApply(pending));
+    ASSERT_TRUE(service.updateSettings({{"autoAction", "notify"}}, error));
+    ASSERT_FALSE(pendingUpdateMayApply(pending));
+}
+
+TEST(UpdateSchedule, ExplicitScheduleAlsoHoldsLegacyStagedPackage) {
+    ScheduledUpdateFixture fixture;
+    std::filesystem::remove(fixture.root / "updates" / "pending" / kUpdateHoldFile);
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<bool>("update/auto_check", false);
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{});
+    std::string error;
+    ASSERT_TRUE(service.updateSettings({{"autoAction", "install"}, {"scheduledInstall", true}}, error));
+    ASSERT_TRUE(pendingUpdateHeld(fixture.root / "updates" / "pending"));
+    ASSERT_TRUE(service.status()["scheduledInstallAt"].get<std::int64_t>() > 0);
+}
+
+TEST(UpdateSchedule, VerifiedWindowsDownloadHonorsScheduledImmediateAndDownloadOnlyModes) {
+    for (const auto* mode : {"scheduled", "immediate", "download"}) {
+        ScheduledUpdateFixture fixture;
+        const auto pending = fixture.root / "updates" / "pending";
+        std::filesystem::remove(pending / kUpdateHoldFile);
+        std::filesystem::remove(pending / "update.json");
+        std::filesystem::remove(pending);
+        const auto package = fixture.root / "package";
+        for (const auto* file : {"dice-next.exe", "app/dice-next-core.exe", "app/msvcp140.dll",
+                                 "app/vcruntime140.dll", "app/vcruntime140_1.dll", "i18n/zh-Hans.json",
+                                 "web/dist/index.html", "docs/roadmap.md", "install-on-restart"}) {
+            writeResponse(package / file, "test package, never executed");
+        }
+        const auto archive = fixture.root / "fixture.zip";
+        const auto packed = dice::proc::run(dice::proc::systemTool("tar.exe"),
+            {"-a", "-cf", archive.string(), "package"}, 4096, true, fixture.root);
+        ASSERT_TRUE(packed.ok());
+        std::ifstream input(archive, std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        unsigned char digest[EVP_MAX_MD_SIZE]{};
+        unsigned int length = 0;
+        ASSERT_EQ(EVP_Digest(bytes.data(), bytes.size(), digest, &length, EVP_sha256(), nullptr), 1);
+        std::ostringstream hex;
+        for (unsigned int i = 0; i < length; ++i) hex << std::hex << std::setw(2) << std::setfill('0') << unsigned(digest[i]);
+        auto manifest = nlohmann::json::parse(downloadManifest());
+        manifest["assets"][0]["size"] = bytes.size();
+        manifest["assets"][0]["sha256"] = hex.str();
+        dice::ConfigManager config((fixture.root / "config").string());
+        fixture.configure(config);
+        const bool scheduled = std::string(mode) == "scheduled";
+        const bool immediate = std::string(mode) == "immediate";
+        config.set<bool>("update/scheduled_install", scheduled);
+        if (!scheduled && !immediate) config.set<std::string>("update/auto_action", "download");
+        std::atomic<int> restarts{0};
+        auto fetch = [&](const std::string& url, const std::filesystem::path& output, std::uint64_t,
+                         int, std::string&, const UpdateService::CancellationCheck&) {
+            writeResponse(output, url.find("update-manifest.json") != std::string::npos ? manifest.dump() : bytes);
+            return true;
+        };
+        UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{}, fetch, {}, [] { return 86400 + 19 * 3600; });
+        std::string error;
+        ASSERT_TRUE(service.requestCheck(true, error));
+        ASSERT_TRUE(waitUntil([&] {
+            const auto phase = service.status()["phase"].get<std::string>();
+            return phase == "scheduled" || phase == "staged" || phase == "error" || restarts.load() > 0;
+        }, std::chrono::seconds(5)));
+        ASSERT_TRUE(service.status()["error"].get<std::string>().empty());
+        ASSERT_TRUE(service.status()["pending"].get<bool>());
+        ASSERT_EQ(restarts.load(), immediate ? 1 : 0);
+        ASSERT_EQ(pendingUpdateHeld(pending), !immediate);
+        ASSERT_EQ(pendingUpdateMayApply(pending), scheduled || immediate);
+        ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), scheduled ? 86400 + 20 * 3600 : 0);
+        if (!immediate) ASSERT_EQ(service.status()["phase"].get<std::string>(), scheduled ? "scheduled" : "staged");
+    }
+}
+
+TEST(UpdateSchedule, OverduePlanSurvivesRestartWithoutMovingToTomorrow) {
+    ScheduledUpdateFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    fixture.configure(config);
+    std::atomic<std::int64_t> clock{86400 + 19 * 3600};
+    std::atomic<int> restarts{0};
+    std::int64_t due = 0;
+    {
+        UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{}, {}, {}, [&] { return clock.load(); });
+        due = service.status()["scheduledInstallAt"].get<std::int64_t>();
+    }
+    clock = due + 120;
+    UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{}, {}, {}, [&] { return clock.load(); });
+    ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), due);
+    service.tick();
+    ASSERT_TRUE(waitUntil([&] { return restarts.load() == 1; }));
+}
+
+TEST(UpdateSchedule, FailedRestartKeepsPackageHeldAndDoesNotRepeatAutomatically) {
+    ScheduledUpdateFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    fixture.configure(config);
+    std::atomic<std::int64_t> clock{86400 + 19 * 3600};
+    std::atomic<int> restarts{0};
+    UpdateService service(config, [&] { ++restarts; throw std::runtime_error("test restart failure"); }, {},
+                          ContainerEnvironment{}, {}, {}, [&] { return clock.load(); });
+    clock = service.status()["scheduledInstallAt"].get<std::int64_t>();
+    service.tick();
+    ASSERT_TRUE(waitUntil([&] { return service.status()["phase"].get<std::string>() == "error"; }));
+    ASSERT_EQ(restarts.load(), 1);
+    ASSERT_TRUE(pendingUpdateHeld(fixture.root / "updates" / "pending"));
+    service.tick();
+    ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), 0);
+    ASSERT_EQ(restarts.load(), 1);
+}
+
+TEST(UpdateSchedule, ExplicitRestartInstallsEarlyOnlyWhenAutomaticInstallationIsEnabled) {
+    for (const auto* action : {"install", "download", "notify"}) {
+        ScheduledUpdateFixture fixture;
+        dice::ConfigManager config((fixture.root / "config").string());
+        fixture.configure(config);
+        config.set<std::string>("update/auto_action", action);
+        std::atomic<int> restarts{0};
+        UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{}, {}, {}, [] { return 86400 + 19 * 3600; });
+        const bool install = std::string(action) == "install";
+        if (install) ASSERT_TRUE(service.status()["scheduledInstallAt"].get<std::int64_t>() > 86400 + 19 * 3600);
+        std::string error;
+        ASSERT_TRUE(service.requestManualRestart(error));
+        ASSERT_TRUE(waitUntil([&] { return restarts.load() == 1; }));
+        ASSERT_EQ(pendingUpdateHeld(fixture.root / "updates" / "pending"), !install);
+        ASSERT_EQ(restarts.load(), 1);
+        if (install) ASSERT_EQ(service.status()["scheduledInstallAt"].get<std::int64_t>(), 0);
+    }
+}
+
+TEST(UpdateSchedule, ExplicitRestartInsideContainerIsStillAnOrdinaryRestart) {
+    ScheduledUpdateFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    fixture.configure(config);
+    std::atomic<int> restarts{0};
+    UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{true, "docker", "test"});
+    std::string error;
+    ASSERT_TRUE(service.requestManualRestart(error));
+    ASSERT_EQ(restarts.load(), 1);
+    ASSERT_TRUE(pendingUpdateHeld(fixture.root / "updates" / "pending"));
+}
+
+TEST(UpdateSchedule, ExplicitRestartWithoutAReadyPackageIsStillAnOrdinaryRestart) {
+    DownloadFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<std::string>("update/auto_action", "install");
+    std::atomic<int> restarts{0};
+    UpdateService service(config, [&] { ++restarts; }, {}, ContainerEnvironment{});
+    std::string error;
+    ASSERT_TRUE(service.requestManualRestart(error));
+    ASSERT_EQ(restarts.load(), 1);
+    ASSERT_FALSE(service.status()["pending"].get<bool>());
+}
+#endif
 
 TEST(UpdateService, CurrentVersionReportsItsActualReleaseChannel) {
     DownloadFixture fixture;
