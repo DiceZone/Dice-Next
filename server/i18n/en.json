@@ -83,6 +83,103 @@
     ]
   },
   "dice": {
+    "compat": {
+      "check": {
+        "prefix": "{nick} checks {attr}: ",
+        "prefix_reason": "For {reason}, {nick} checks {attr}: ",
+        "single": {
+          "critical": "Critical success!",
+          "extreme": "Extreme success",
+          "hard": "Hard success",
+          "regular": "Success",
+          "failure": "Failure",
+          "fumble": "Fumble!"
+        }
+      },
+      "sanity": {
+        "result": "{nick}'s SAN check:\n{res} {grade:rank?2={strSuccess}&1={strFailure}&0={strFumble}}\n{case:loss?0=No SAN loss.&else=SAN lost: {change}; remaining: {final}}"
+      },
+      "growth": {
+        "base": "{nick}'s {attr} growth check:\n{res}",
+        "unchanged": "{strEnRoll}\n{nick}'s {attr} is unchanged.",
+        "failure": "{strEnRoll}\n{nick}'s {attr} changes by {change}; now {final}.",
+        "success": "{strEnRoll}\n{nick}'s {attr} increases by {change}; now {final}."
+      }
+    },
+    "outcome": {
+      "standard": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": "",
+        "special": "",
+        "tie": ""
+      },
+      "bonus": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "penalty": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "brp": {
+        "critical": "",
+        "special": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "sanity": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "growth": {
+        "regular": "",
+        "failure": ""
+      },
+      "psychology": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "opposed": {
+        "regular": "",
+        "failure": "",
+        "tie": ""
+      },
+      "resist": {
+        "regular": "",
+        "failure": ""
+      },
+      "dnd_check": {
+        "regular": "",
+        "failure": ""
+      },
+      "death_save": {
+        "critical": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      }
+    },
     "error": {
       "roll": "Roll error: {error}",
       "non_numeric": "The roll expression must return a number.",
@@ -774,6 +871,25 @@
     "list_empty": "(none)"
   },
   "tplvar": {
+    "rank": "Legacy success rank: 0 fumble, 1 failure, 2 success, 3 hard, 4 extreme, 5 critical",
+    "result": "Check value (number)",
+    "outcome": "Rule-specific outcome",
+    "total": "Total",
+    "mod": "Modifier",
+    "threshold": "Difficulty class",
+    "target": "Target",
+    "receipt": "Psychology result phrase",
+    "gid": "Group ID",
+    "s": "Successful death saves",
+    "f": "Failed death saves",
+    "la": "Active attribute",
+    "lb": "Passive attribute",
+    "ra": "Active roll",
+    "rb": "Passive roll",
+    "va": "Active value",
+    "vb": "Passive value",
+    "lva": "Active success level",
+    "lvb": "Passive success level",
     "nick": "nickname",
     "res": "roll/result",
     "reason": "reason",

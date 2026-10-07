@@ -5,7 +5,7 @@
 
 namespace dice::outbound {
 // Credential-free rendering shared by the HTTP endpoint and the local UI driver.
-inline json templatePreview(const json& body) {
+inline json templatePreview(const json& body, const I18n* i18n = nullptr) {
     std::string text = body.contains("variants") ? weighted_templates::encode(body["variants"])
                                                : body.value("text", "");
     if (weighted_templates::decode(text).empty() && text.size() > 65536)
@@ -28,7 +28,11 @@ inline json templatePreview(const json& body) {
         }
     }
     // One draw shared by all views. Substituted user data never becomes code.
-    text = I18n::previewTemplate(text, args, format);
+    if (i18n) {
+        const auto locale = localeFromString(body.value("locale", std::string("zh-Hans")));
+        const auto scope = i18n->scopedPersona(body.value("personaId", 0));
+        text = i18n->previewWithReferences(locale, text, args, format);
+    } else text = I18n::previewTemplate(text, args, format);
     return json{{"templateVersion", 1}, {"preview", replyPreview(text, format,
             body.value("platform", std::string("qq_group")), style, body.value("forcePlain", false))},
         {"markdown", replyPreview(text, format, "qq_group", style)["text"]},

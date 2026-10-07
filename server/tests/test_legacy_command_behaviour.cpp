@@ -424,7 +424,7 @@ TEST(LegacyReply, ExplicitHelpAndGlobalTextUseTheirOwnNamespaces) {
     f.deck.loadDir(u8str(f.dir.path));
     f.i18n.setOverride(Locale::kZhHans, "help.topic.同名", "帮助内容");
     f.i18n.setOverride(Locale::kZhHans, "legacy.同名", "全局内容");
-    f.i18n.setOverride(Locale::kZhHans, "dice.crit", "优秀");
+    f.i18n.setOverride(Locale::kZhHans, "dice.compat.check.single.critical", "优秀");
     ASSERT_EQ(f.router.renderReply(f.msg, "{text:strRollCriticalSuccess}", "", MatchType::kKeyword), "优秀");
     ASSERT_EQ(f.router.renderReply(f.msg, "{deck:同名}/{help:同名}/{text:同名}", "", MatchType::kKeyword), "牌面/帮助内容/全局内容");
     ASSERT_EQ(f.router.renderReply(f.msg, "{help:缺失}/{text:缺失}/{deck:缺失}", "", MatchType::kKeyword), "{help:缺失}/{text:缺失}/{deck:缺失}");

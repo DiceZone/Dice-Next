@@ -17,6 +17,7 @@
 #include "database.h"
 #include "legacy_dice2.h"
 #include "legacy_message_keys.h"
+#include "legacy_check_text_upgrade.h"
 #include "../config/config_manager.h"
 #include "../i18n/i18n.h"
 #include "../core/reply/reply_manager.h"
@@ -726,7 +727,7 @@ inline std::string v2KeyFor(const std::string& ourKey) {
 // Mapped keys → their DiceNext i18n key (zh-Hans+zh-Hant). UNmapped keys are
 // preserved under "legacy.<strXXX>" so the web 「无效文本」 tab can show them for
 // manual porting. The file is UTF-8 (NOT GBK) but has raw CR/LF inside strings.
-inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, int& orphans) {
+inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, int& orphans, json* details = nullptr) {
     auto* st = db.getStorage();
     if (!st) return 0;
     std::string raw = readFile(confDir / "CustomMsg.json");
@@ -761,13 +762,33 @@ inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, in
             if (text.empty()) continue;
             auto it = M.find(origKey);
             if (it != M.end()) {                                  // mapped → real i18n key
-                writeOv("zh-Hans", it->second, normalizeLegacyTemplate(origKey, text));
+                const auto normalized = normalizeLegacyTemplate(origKey, text);
+                if (legacy_check_replies::isKey(it->second)) {
+                    // Keep the untouched original, even for a successful mapping.
+                    writeOv("zh-Hans", "legacy." + origKey, text);
+                    auto detail = checkTextDetail(origKey, it->second, normalized);
+                    const auto existing = st->get_all<I18nOverrideRow>(orm::where(
+                        orm::c(&I18nOverrideRow::locale) == std::string("zh-Hans") and orm::c(&I18nOverrideRow::key) == it->second));
+                    if (!existing.empty() && existing.front().value != normalized) detail["status"] = "conflict";
+                    if (detail["status"] == "active" || detail["status"] == "partial") {
+                        writeOv("zh-Hans", it->second, normalized); ++imported;
+                    } else ++orphans;
+                    if (details) details->push_back(detail);
+                    continue;
+                }
+                writeOv("zh-Hans", it->second, normalized);
                                                                     // 仅导入简体中文，其他语言保留自带 i18n
                 clearOtherLocales(it->second);
                 ++imported;
+                if (details) {
+                    const auto program = safe_template::compile(normalized);
+                    details->push_back({{"source", origKey}, {"target", it->second},
+                        {"status", program.issues.empty() ? "active" : "partial"}, {"issues", program.issues}});
+                }
             } else {                                              // unmapped → 无效文本
                 writeOv("zh-Hans", "legacy." + origKey, text);
                 ++orphans;
+                if (details) details->push_back({{"source", origKey}, {"target", ""}, {"status", "preserved"}, {"issues", {"no audited mapping"}}});
             }
         }
     } catch (...) {}
@@ -1588,7 +1609,8 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
     int black = timed("blacklist", [&] { return importBlacklist(db, confDir); });
     int help = timed("help", [&] { return importHelp(db, i18n, confDir); });
     int orphans = 0;
-    int msgs = timed("custom messages", [&] { return importCustomMsg(db, i18n, confDir, orphans); });
+    json customTextDetails = json::array();
+    int msgs = timed("custom messages", [&] { return importCustomMsg(db, i18n, confDir, orphans, &customTextDetails); });
     int masters = timed("masters", [&] { return importMasters(cfg, confDir); });
     int links = timed("links", [&] { return importLinks(cfg, confDir); });
     int notices = timed("notices", [&] { return importNotices(cfg, confDir); });
@@ -1665,7 +1687,7 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
         {"cards", cards}, {"cardUsers", users}, {"profiles", profiles},
         {"blacklist", black}, {"replies", replies}, {"help", help}, {"msgs", msgs},
         {"replyReferences", referenceReport.toJSON()},
-        {"orphans", orphans}, {"masters", masters}, {"links", links}, {"notices", notices}, {"censorWords", censorWords},
+        {"orphans", orphans}, {"customTextDetails", customTextDetails}, {"masters", masters}, {"links", links}, {"notices", notices}, {"censorWords", censorWords},
         {"decks", deckResult.toJSON()}, {"mods", modResult.toJSON()}, {"plugins", pluginResult.toJSON()},
         {"sessions", sessions}, {"logs", logs}, {"logMessages", logMessages},
         {"chatGroups", chatGroups}, {"chatSettings", chatSettings},

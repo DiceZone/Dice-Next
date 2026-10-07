@@ -11,6 +11,8 @@
 #include "../adapter/adapter_interface.h"
 #include "../common/qq_rich_reply.h"
 #include "../common/sample_template.h"
+#include "../common/check_reply.h"
+#include "../common/legacy_check_replies.h"
 #include "../common/subprocess.h"
 #include "../adapter/adapter_manager.h"
 #include "../core/dice/dice_engine.h"
@@ -1160,6 +1162,32 @@ private:
         return "dice.level.failure";
     }
 
+    static std::string replyGrade(SuccessLevel lv) {
+        switch (lv) {
+            case SuccessLevel::kCritical: return "critical";
+            case SuccessLevel::kExtreme: return "extreme";
+            case SuccessLevel::kHard: return "hard";
+            case SuccessLevel::kRegular: return "regular";
+            case SuccessLevel::kFailure: return "failure";
+            case SuccessLevel::kFumble: return "fumble";
+        }
+        return "failure";
+    }
+
+    static I18n::Args outcomeArgs(const std::string& nick, const std::string& attr,
+                                 const std::string& reason, const std::string& roll,
+                                 int result, int rate, const std::string& level) {
+        return {{"nick", nick}, {"attr", attr}, {"reason", reason}, {"roll", roll},
+                {"res", roll}, {"result", std::to_string(result)}, {"rate", std::to_string(rate)},
+                {"level", level}, {"outcome", level}};
+    }
+
+    std::string outcomeReply(Locale loc, const std::string& family, const std::string& grade,
+                             const std::string& legacyKey, const I18n::Args& args) {
+        if (auto reply = i18n_.trCandidates(loc, check_reply::candidates(family, grade), args)) return *reply;
+        return i18n_.tr(loc, legacyKey, args);
+    }
+
     // .rx 心理学暗骰：每个成功等级对应一句自定义回执（参考原版 rx.lua）。
     const char* rxReceiptKey(SuccessLevel lv) const {
         switch (lv) {
@@ -1440,14 +1468,16 @@ private:
         else outcomeKey = "dice.rav.tie";
 
         const std::string nick = displayName(msg);
-        return i18n_.tr(loc, "dice.rav.result", {
-            {"nick", nick},
-            {"la", la}, {"ra", std::to_string(rA.modifiedTotal)},
+        const std::string grade = outcomeKey == "dice.rav.a_wins" ? "regular" :
+            outcomeKey == "dice.rav.b_wins" ? "failure" : "tie";
+        const std::string outcome = i18n_.tr(loc, outcomeKey, {{"a", la}, {"b", lb}});
+        auto args = outcomeArgs(nick, la, "", rA.formattedOutput + " vs " + rB.formattedOutput,
+            rA.modifiedTotal, rateA, outcome);
+        args.insert({{"la", la}, {"ra", std::to_string(rA.modifiedTotal)},
             {"va", std::to_string(rateA)}, {"lva", i18n_.tr(loc, levelKey(lvA))},
             {"lb", lb}, {"rb", std::to_string(rB.modifiedTotal)},
-            {"vb", std::to_string(rateB)}, {"lvb", i18n_.tr(loc, levelKey(lvB))},
-            {"outcome", i18n_.tr(loc, outcomeKey, {{"a", la}, {"b", lb}})}
-        });
+            {"vb", std::to_string(rateB)}, {"lvb", i18n_.tr(loc, levelKey(lvB))}});
+        return outcomeReply(loc, "opposed", grade, "dice.rav.result", args);
     }
 
     // ─── BRP（基础角色扮演）规则 .ba / .bav ──────────────────────
@@ -1515,10 +1545,10 @@ private:
             SuccessLevel lv = brpSuccessLevel(r.modifiedTotal, rate);
             recordRollStat(msg, attr, lv);
             if (i) out += "\n";
-            out += i18n_.tr(loc, reason.empty() ? "dice.brp.result" : "dice.brp.result_reason",
-                {{"nick", nick}, {"attr", label}, {"reason", reason},
-                 {"roll", r.formattedOutput}, {"rate", std::to_string(rate)},
-                 {"level", i18n_.tr(loc, brpLevelKey(lv))}});
+            out += outcomeReply(loc, "brp", lv == SuccessLevel::kExtreme ? "special" : replyGrade(lv),
+                reason.empty() ? "dice.brp.result" : "dice.brp.result_reason",
+                outcomeArgs(nick, label, reason, r.formattedOutput, r.modifiedTotal,
+                    rate, i18n_.tr(loc, brpLevelKey(lv))));
         }
         return out;
     }
@@ -1539,12 +1569,12 @@ private:
         if (!r.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", r.error}});
         bool win = r.modifiedTotal <= targetPct;       // 实际判定用未钳目标
         const std::string nick = displayName(msg);
-        return i18n_.tr(loc, "dice.brp.resist", {
-            {"nick", nick}, {"la", la}, {"lb", lb},
+        const auto outcome = i18n_.tr(loc, win ? "dice.brp.resist_win" : "dice.brp.resist_lose", {{"a", la}, {"b", lb}});
+        auto args = outcomeArgs(nick, la, "", r.formattedOutput, r.modifiedTotal, shown, outcome);
+        args.insert({{"la", la}, {"lb", lb},
             {"va", std::to_string(actV)}, {"vb", std::to_string(pasV)},
-            {"target", std::to_string(shown)}, {"roll", r.formattedOutput},
-            {"outcome", i18n_.tr(loc, win ? "dice.brp.resist_win" : "dice.brp.resist_lose", {{"a", la}, {"b", lb}})}
-        });
+            {"target", std::to_string(shown)}});
+        return outcomeReply(loc, "resist", win ? "regular" : "failure", "dice.brp.resist", args);
     }
 
     std::optional<std::string> tryHandleCheck(Locale loc, const Message& msg,
@@ -1652,17 +1682,31 @@ private:
     std::string formatCheck(Locale loc, const Message& msg, const std::string& attr,
                             int rate, const std::string& reason,
                             const std::string& rollDetail, int rollValue,
-                            bool recordStats = true) {
+                            bool recordStats = true, const std::string& family = "standard",
+                            int rounds = 1, bool* compatibilityPrefix = nullptr) {
         SuccessLevel lv = rollSuccessLevel(rollValue, rate, getCocRule(msg));
         if (recordStats) {
             recordRollStat(msg, attr, lv);   // accumulate per-skill for .hiy 统计
             recordDiceSamples(msg, 100, {rollValue});
         }
         const std::string nick = displayName(msg);
-        return i18n_.tr(loc, reason.empty() ? "dice.check.result" : "dice.check.result_reason",
-            {{"nick", nick}, {"attr", attr}, {"reason", reason},
-             {"roll", rollDetail}, {"rate", std::to_string(rate)},
-             {"level", i18n_.tr(loc, levelKey(lv))}});
+        const auto grade = replyGrade(lv);
+        auto args = outcomeArgs(nick, attr, reason, rollDetail, rollValue, rate, i18n_.tr(loc, levelKey(lv)));
+        if (rounds == 1)
+            if (auto oldLevel = i18n_.trConfigured(loc, legacy_check_replies::single(grade), args)) args["level"] = args["outcome"] = *oldLevel;
+        if (auto result = i18n_.trCandidates(loc, check_reply::candidates(family, grade), args)) return *result;
+        const std::string nativeKey = reason.empty() ? "dice.check.result" : "dice.check.result_reason";
+        // An explicit Next template wins over an imported partial prefix.
+        if (!i18n_.hasConfigured(loc, nativeKey) &&
+            (i18n_.hasConfigured(loc, "dice.compat.check.prefix") || i18n_.hasConfigured(loc, "dice.compat.check.prefix_reason"))) {
+            std::string prefix;
+            if (!compatibilityPrefix || !*compatibilityPrefix) {
+                prefix = i18n_.tr(loc, reason.empty() ? "dice.compat.check.prefix" : "dice.compat.check.prefix_reason", args);
+                if (compatibilityPrefix) *compatibilityPrefix = true;
+            }
+            return prefix + rollDetail + "/" + std::to_string(rate) + " " + args["level"];
+        }
+        return i18n_.tr(loc, nativeKey, args);
     }
 
     // ─── 好感度系统 (DiceFavor) ──────────────────────────────
@@ -2092,7 +2136,7 @@ private:
                     std::string out2 = i18n_.tr(loc, "dice.roll.result",
                         {{"nick", displayName(msg)}, {"res", rr.formattedOutput}});
                     out2 += "\n" + formatCheck(loc, msg, lbl, eff2, reason2, rr.formattedOutput, rr.modifiedTotal);
-                    if (hidden) { sendPrivate(msg, out2); return i18n_.tr(loc, "dice.check.hidden", {{"nick", displayName(msg)}}); }
+                    if (hidden) { sendPrivate(msg, out2); return i18n_.tr(loc, "dice.check.hidden", {{"nick", displayName(msg)}, {"attr", lbl}}); }
                     return out2;
                 }
             }
@@ -2109,6 +2153,7 @@ private:
            : bpType == 'p' ? i18n_.tr(loc, "dice.bp.penalty_label") : "");  // (奖)/(惩)，随语言切换
 
         std::string out;
+        bool compatibilityPrefix = false;
         for (int i = 0; i < multi; ++i) {
             std::string detail; int val;
             if (bpType) {
@@ -2120,9 +2165,10 @@ private:
                    if (!r.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", r.error}});
                    val = r.modifiedTotal; detail = r.formattedOutput; }
             if (i) out += "\n";
-            out += formatCheck(loc, msg, label, effRate, reason, detail, val, !fixedRoll.has_value());
+            out += formatCheck(loc, msg, label, effRate, reason, detail, val, !fixedRoll.has_value(),
+                bpType == 'b' ? "bonus" : bpType == 'p' ? "penalty" : "standard", multi, &compatibilityPrefix);
         }
-        if (hidden) { sendPrivate(msg, out); return i18n_.tr(loc, "dice.check.hidden", {{"nick", displayName(msg)}}); }
+        if (hidden) { sendPrivate(msg, out); return i18n_.tr(loc, "dice.check.hidden", {{"nick", displayName(msg)}, {"attr", label}}); }
         return out;
     }
 
@@ -2159,11 +2205,10 @@ private:
         std::string kpName = personName(msg);
 
         // 私聊给 KP 的详细结果（含成功等级 + 自定义回执）。
-        sendPrivate(msg, i18n_.tr(loc, "dice.rx.private", {
-            {"target", targetName}, {"gid", msg.targetId},
-            {"roll", std::to_string(result)}, {"rate", std::to_string(rate)},
-            {"level", i18n_.tr(loc, levelKey(lv))},
-            {"receipt", i18n_.tr(loc, rxReceiptKey(lv))}}));
+        auto args = outcomeArgs(kpName, PSY, "", std::to_string(result), result, rate,
+            i18n_.tr(loc, levelKey(lv)));
+        args.insert({{"target", targetName}, {"gid", msg.targetId}, {"receipt", i18n_.tr(loc, rxReceiptKey(lv))}});
+        sendPrivate(msg, outcomeReply(loc, "psychology", replyGrade(lv), "dice.rx.private", args));
 
         // 群里只出一句不剧透的回执。
         return i18n_.tr(loc, "dice.rx.receipt", {{"nick", kpName}, {"target", targetName}});
@@ -2230,7 +2275,7 @@ private:
         if (!resolveRate(loc, msg, rest, attr, rate, reason, err)) return err;
         std::string detail;
         int result = rollBonusPenalty(n, bonus, loc, detail);
-        return formatCheck(loc, msg, attr, rate, reason, detail, result);
+        return formatCheck(loc, msg, attr, rate, reason, detail, result, true, bonus ? "bonus" : "penalty");
     }
 
     // ─── Persona switching: .rpmode ─────────────────────
@@ -2898,8 +2943,11 @@ private:
             cards_.setAttr(user, group, "hp", 1);
             cards_.eraseAttr(user, group, "dssuccess"); cards_.eraseAttr(user, group, "dsfail");
             outcome = i18n_.tr(loc, "dnd.ds.miracle");
-            return i18n_.tr(loc, "dnd.ds.result",
-                {{"nick", nick}, {"roll", std::to_string(d20)}, {"total", std::to_string(total)}, {"outcome", outcome}});
+            auto replyArgs = outcomeArgs(nick, "DS", "", std::to_string(d20), total, 10,
+                i18n_.tr(loc, "dice.level.critical"));
+            replyArgs["outcome"] = outcome;
+            replyArgs.insert({{"total", std::to_string(total)}, {"s", "0"}, {"f", "0"}});
+            return outcomeReply(loc, "death_save", "critical", "dnd.ds.result", replyArgs);
         }
         if (d20 == 1) { f += 2; outcome = i18n_.tr(loc, "dnd.ds.critfail"); }
         else if (total >= 10) { s += 1; outcome = i18n_.tr(loc, "dnd.ds.success"); }
@@ -2913,8 +2961,13 @@ private:
         else if (s >= 3) { status = "\n" + i18n_.tr(loc, "dnd.ds.stabilized", {{"nick", nick}});
             cards_.eraseAttr(user, group, "dssuccess"); cards_.eraseAttr(user, group, "dsfail"); }
 
-        return i18n_.tr(loc, "dnd.ds.result",
-            {{"nick", nick}, {"roll", std::to_string(d20)}, {"total", std::to_string(total)}, {"outcome", outcome}}) + status;
+        const std::string grade = d20 == 1 ? "fumble" : total >= 10 ? "regular" : "failure";
+        auto replyArgs = outcomeArgs(nick, "DS", "", std::to_string(d20), total, 10,
+            i18n_.tr(loc, "dice.level." + grade));
+        replyArgs["outcome"] = outcome;
+        replyArgs.insert({{"total", std::to_string(total)}, {"s", std::to_string(s)}, {"f", std::to_string(f)}});
+        // Terminal status remains visible regardless of which full reply was chosen.
+        return outcomeReply(loc, "death_save", grade, "dnd.ds.result", replyArgs) + status;
     }
 
     // ─── DND5e mode toggle + d20 .rc + .buff (临时属性) ───────
@@ -3347,6 +3400,9 @@ private:
         }
 
         std::string detail;
+        std::vector<I18n::Args> roundArgs;
+        std::vector<std::optional<std::string>> roundReplies;
+        bool hasOutcomeReply = false;
         for (int round = 1; round <= turns; ++round) {
             int first = engine_.roll("1d20").modifiedTotal, chosen = first;
             int second = 0;
@@ -3378,12 +3434,32 @@ private:
                 formula += (abilityModifier >= 0 ? "+" : "") + std::to_string(abilityModifier);
                 values += (abilityModifier >= 0 ? "+" : "") + std::to_string(abilityModifier);
             }
-            if (!detail.empty()) detail += "\n";
-            detail += formula + "=" + values + "=" + std::to_string(total);
+            std::string roundDetail = formula + "=" + values + "=" + std::to_string(total);
             if (threshold >= 0) {
-                detail += total > threshold ? ">" : total < threshold ? "<" : "=";
-                detail += std::to_string(threshold) + (total >= threshold ? " 成功" : " 失败");
+                roundDetail += total > threshold ? ">" : total < threshold ? "<" : "=";
+                roundDetail += std::to_string(threshold) + (total >= threshold ? " 成功" : " 失败");
+                const std::string grade = total >= threshold ? "regular" : "failure";
+                auto args = outcomeArgs(displayName(msg), label, reason, formula + "=" + values + "=" + std::to_string(total),
+                    total, threshold, i18n_.tr(loc, "dice.level." + grade));
+                args.insert({{"detail", roundDetail}, {"total", std::to_string(total)},
+                    {"mod", std::to_string(rolledExtra + staticExtra + abilityModifier)},
+                    {"threshold", std::to_string(threshold)}, {"turn", std::to_string(round)}});
+                auto reply = i18n_.trCandidates(loc, check_reply::candidates("dnd_check", grade), args);
+                hasOutcomeReply = hasOutcomeReply || reply.has_value();
+                args["reason"] = reason.empty() ? "" : "（" + reason + "）";
+                roundArgs.push_back(std::move(args));
+                roundReplies.push_back(std::move(reply));
             }
+            if (!detail.empty()) detail += "\n";
+            detail += roundDetail;
+        }
+        if (hasOutcomeReply) {
+            std::string out;
+            for (size_t i = 0; i < roundReplies.size(); ++i) {
+                if (i) out += "\n";
+                out += roundReplies[i] ? *roundReplies[i] : i18n_.tr(loc, "dnd.rdc.result", roundArgs[i]);
+            }
+            return out;
         }
         return i18n_.tr(loc, "dnd.rdc.result", {{"nick", displayName(msg)}, {"attr", label},
             {"reason", reason.empty() ? "" : "（" + reason + "）"}, {"detail", detail},
@@ -4007,14 +4083,19 @@ private:
         SuccessLevel lv = rollSuccessLevel(res, san, getCocRule(msg));
 
         int loss = 0;
+        std::string legacyChange;
         if (lv == SuccessLevel::kFumble) {
             // Fumble = maximum possible loss of the failure expression.
             auto m = maxOfSimpleExpr(failExpr);
-            loss = m ? *m : engine_.roll(failExpr).modifiedTotal;
+            const auto fallback = m ? DiceResult{} : engine_.roll(failExpr);
+            loss = m ? *m : fallback.modifiedTotal;
+            legacyChange = "Max{" + failExpr + "}=" + std::to_string(loss);
         } else if (lv == SuccessLevel::kFailure) {
-            loss = engine_.roll(failExpr).modifiedTotal;
+            const auto cost = engine_.roll(failExpr); loss = cost.modifiedTotal;
+            legacyChange = cost.formattedOutput;
         } else {
-            loss = engine_.roll(sucExpr).modifiedTotal;
+            const auto cost = engine_.roll(sucExpr); loss = cost.modifiedTotal;
+            legacyChange = cost.formattedOutput;
         }
 
         int finalSan = san - loss;
@@ -4025,11 +4106,22 @@ private:
             (lv == SuccessLevel::kFumble) ? "dice.level.fumble" :
             (lv == SuccessLevel::kFailure) ? "dice.level.failure" : "dice.level.regular";
 
-        I18n::Args args = {
-            {"nick", nick}, {"res", std::to_string(res)}, {"san", std::to_string(san)},
+        auto args = outcomeArgs(nick, "理智", "", bpDetail.empty() ? "1D100=" + std::to_string(res) : bpDetail,
+            res, san, i18n_.tr(loc, levelKey(lv)));
+        args["res"] = std::to_string(res);
+        args.insert({{"san", std::to_string(san)},
             {"grade", i18n_.tr(loc, gradeKey)},
-            {"loss", std::to_string(loss)}, {"final", std::to_string(finalSan)}};
-        return i18n_.tr(loc, loss == 0 ? "card.sc.result_noloss" : "card.sc.result", args);
+            {"loss", std::to_string(loss)}, {"final", std::to_string(finalSan)}});
+        if (auto reply = i18n_.trCandidates(loc, check_reply::candidates("sanity", replyGrade(lv)), args)) return *reply;
+        const std::string nativeKey = loss == 0 ? "card.sc.result_noloss" : "card.sc.result";
+        if (!i18n_.hasConfigured(loc, nativeKey) && i18n_.hasConfigured(loc, "dice.compat.sanity.result")) {
+            auto legacyArgs = args;
+            legacyArgs["res"] = args["roll"] + "/" + std::to_string(san);
+            legacyArgs["rank"] = std::to_string(static_cast<int>(lv));
+            legacyArgs["change"] = legacyChange;
+            return i18n_.tr(loc, "dice.compat.sanity.result", legacyArgs);
+        }
+        return i18n_.tr(loc, nativeKey, args);
     }
 
     /// Maximum value of a simple expression ("N", "NdM", "NdM±K"); nullopt otherwise.
@@ -11742,9 +11834,22 @@ private:
         const bool success = r > skill || r > 95;
         const auto nick = displayName(msg);
         const std::string res = "1D100=" + std::to_string(r) + "/" + std::to_string(skill);
+        auto args = outcomeArgs(nick, attr, "", check.formattedOutput, r, skill,
+            i18n_.tr(loc, success ? "dice.level.regular" : "dice.level.failure"));
+        args["res"] = res;
+        args["change"] = "";
+        args["final"] = std::to_string(skill);
         const auto& expression = success ? parsed.success : parsed.failure;
-        if (expression.empty())
-            return i18n_.tr(loc, "card.en.fail", {{"nick", nick}, {"attr", attr}, {"res", res}});
+        auto renderGrowth = [&](const std::string& nativeKey, const std::string& compatibilityKey) {
+            if (auto reply = i18n_.trCandidates(loc, check_reply::candidates("growth", success ? "regular" : "failure"), args)) return *reply;
+            if (!i18n_.hasConfigured(loc, nativeKey) && (i18n_.hasConfigured(loc, "dice.compat.growth.base") ||
+                i18n_.hasConfigured(loc, compatibilityKey))) {
+                auto legacyArgs = args; legacyArgs["res"] += " " + args["level"];
+                return i18n_.tr(loc, compatibilityKey, legacyArgs);
+            }
+            return i18n_.tr(loc, nativeKey, args);
+        };
+        if (expression.empty()) return renderGrowth("card.en.fail", "dice.compat.growth.unchanged");
         // Each side keeps its own sign: -1/+1 means lose on failure, gain on success.
         const auto growth = rollLegacyDice(
             expression.front() == '+' || expression.front() == '-' ? "0" + expression : expression);
@@ -11753,10 +11858,10 @@ private:
         if (final < (std::numeric_limits<int>::min)() || final > (std::numeric_limits<int>::max)())
             return i18n_.tr(loc, "card.en.usage");
         cards_.setAttr(msg.senderId, cardScope(msg), attr, static_cast<int>(final));
-        return i18n_.tr(loc, success ? "card.en.success" : "card.en.fail_grow",
-            {{"nick", nick}, {"attr", attr}, {"res", res},
-             {"change", growth.detail.empty() ? expression + "=" + std::to_string(growth.modifiedTotal) : growth.detail},
-             {"final", std::to_string(final)}});
+        args["change"] = growth.detail.empty() ? expression + "=" + std::to_string(growth.modifiedTotal) : growth.detail;
+        args["final"] = std::to_string(final);
+        return renderGrowth(success ? "card.en.success" : "card.en.fail_grow",
+            success ? "dice.compat.growth.success" : "dice.compat.growth.failure");
     }
 
     // ─── .nn 改名 ────────────────────────────────────────────

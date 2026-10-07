@@ -3,6 +3,7 @@
 #include "../common/logger.h"
 #include "../common/markdown.h"
 #include "../common/sample_template.h"
+#include "../storage/legacy_message_keys.h"
 #include <algorithm>
 
 #include <fstream>
@@ -289,15 +290,13 @@ const json* I18n::lookupNode(Locale loc, const std::string& key) const {
     return (node->is_string()) ? node : nullptr;
 }
 
-std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    auto renderFrom = [&](const auto& source, Locale wanted) -> std::optional<std::string> {
+const I18n::TemplateValue* I18n::findTemplate(Locale loc, const std::string& key, bool skipEmpty) const {
+    auto findIn = [&](const auto& source, Locale wanted) -> const TemplateValue* {
         auto localeIt = source.find(wanted);
-        if (localeIt == source.end()) return std::nullopt;
+        if (localeIt == source.end()) return nullptr;
         auto keyIt = localeIt->second.find(key);
-        if (keyIt == localeIt->second.end()) return std::nullopt;
-        return renderTemplate(keyIt->second, args);
+        if (keyIt == localeIt->second.end() || (skipEmpty && keyIt->second.value.empty())) return nullptr;
+        return &keyIt->second;
     };
 
     const int personaId = scopedPersonaId_.value_or(activePersonaId_);
@@ -307,31 +306,79 @@ std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const
     // global override remains its base/fallback, rather than masking the
     // persona entry with the same key.
     if (personaIt != preparedPersonaBundles_.end())
-        if (auto rendered = renderFrom(personaIt->second, loc)) return *rendered;
-    if (auto rendered = renderFrom(overrides_, loc)) return *rendered;
+        if (auto value = findIn(personaIt->second, loc)) return value;
+    if (auto value = findIn(overrides_, loc)) return value;
     if (outboundCaptureActive_ && outboundPresentationStyle_ != PresentationStyle::kStandard) {
         auto styleIt = preparedStyleBundles_.find(outboundPresentationStyle_);
         if (styleIt != preparedStyleBundles_.end())
-            if (auto rendered = renderFrom(styleIt->second, loc)) return *rendered;
+            if (auto value = findIn(styleIt->second, loc)) return value;
     }
-    if (auto rendered = renderFrom(preparedBundles_, loc)) return *rendered;
+    if (auto value = findIn(preparedBundles_, loc)) return value;
+
+    // A declared empty outcome slot inherits in this language rather than
+    // unexpectedly borrowing an outcome override from the fallback language.
+    if (skipEmpty) {
+        const auto bundle = preparedBundles_.find(loc);
+        if (bundle != preparedBundles_.end() && bundle->second.count(key)) return nullptr;
+    }
 
     // default locale uses the same layer order.
     if (loc != defaultLocale_) {
         if (personaIt != preparedPersonaBundles_.end())
-            if (auto rendered = renderFrom(personaIt->second, defaultLocale_)) return *rendered;
-        if (auto rendered = renderFrom(overrides_, defaultLocale_)) return *rendered;
+            if (auto value = findIn(personaIt->second, defaultLocale_)) return value;
+        if (auto value = findIn(overrides_, defaultLocale_)) return value;
         if (outboundCaptureActive_ && outboundPresentationStyle_ != PresentationStyle::kStandard) {
             auto styleIt = preparedStyleBundles_.find(outboundPresentationStyle_);
             if (styleIt != preparedStyleBundles_.end())
-                if (auto rendered = renderFrom(styleIt->second, defaultLocale_)) return *rendered;
+                if (auto value = findIn(styleIt->second, defaultLocale_)) return value;
         }
-        if (auto rendered = renderFrom(preparedBundles_, defaultLocale_)) return *rendered;
+        if (auto value = findIn(preparedBundles_, defaultLocale_)) return value;
     }
+    return nullptr;
+}
+
+std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (const auto* value = findTemplate(loc, key)) return renderTemplate(*value, args, this, loc);
 
     DICE_LOG_DEBUG("I18n: missing key '{}' for locale '{}'",
                    key, localeToString(loc));
     return key;
+}
+
+std::optional<std::string> I18n::trCandidates(Locale loc, const std::vector<std::string>& keys,
+                                           const Args& args) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& key : keys)
+        if (const auto* value = findTemplate(loc, key, true)) return renderTemplate(*value, args, this, loc);
+    return std::nullopt;
+}
+
+const I18n::TemplateValue* I18n::configuredTemplate(Locale loc, const std::string& key) const {
+    const int persona = scopedPersonaId_.value_or(activePersonaId_);
+    const auto selected = preparedPersonaBundles_.find(persona);
+    if (selected != preparedPersonaBundles_.end()) {
+        const auto locale = selected->second.find(loc);
+        if (locale != selected->second.end()) {
+            const auto entry = locale->second.find(key);
+            if (entry != locale->second.end()) return &entry->second;
+        }
+    }
+    const auto locale = overrides_.find(loc);
+    if (locale == overrides_.end()) return nullptr;
+    const auto entry = locale->second.find(key);
+    return entry == locale->second.end() ? nullptr : &entry->second;
+}
+
+bool I18n::hasConfigured(Locale loc, const std::string& key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return configuredTemplate(loc, key) != nullptr;
+}
+
+std::optional<std::string> I18n::trConfigured(Locale loc, const std::string& key, const Args& args) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (const auto* value = configuredTemplate(loc, key)) return renderTemplate(*value, args, this, loc);
+    return std::nullopt;
 }
 
 ContentFormat I18n::trustedTemplateFormat(const std::string& value) {
@@ -352,6 +399,8 @@ I18n::TemplateValue I18n::prepareTemplate(const std::string& value,
     prepared.plainValue = format == ContentFormat::kMarkdown
         ? markdown::toPlainText(value) : value;
     prepared.format = format;
+    prepared.program = safe_template::compile(legacyv2::normalizeLegacyReferences(value));
+    prepared.plainProgram = safe_template::compile(legacyv2::normalizeLegacyReferences(prepared.plainValue));
     return prepared;
 }
 
@@ -384,24 +433,50 @@ std::string I18n::previewTemplate(const std::string& value, const Args& args, Co
     return renderTemplate(prepareTemplate(value, format), args);
 }
 
-std::string I18n::renderTemplate(const TemplateValue& value, const Args& args) {
+std::string I18n::previewWithReferences(Locale loc, const std::string& value, const Args& args, ContentFormat format) const {
+    const auto prepared = prepareTemplate(value, format);
+    std::lock_guard<std::mutex> lock(mutex_);
+    return renderTemplate(prepared, args, this, loc);
+}
+
+const I18n::TemplateValue& I18n::chooseTemplate(const TemplateValue& value) {
     if (!value.choices.empty()) {
         size_t total = 0;
         for (const auto& choice : value.choices) total += choice.weight;
         size_t ticket = sample_template::choose(total);
         for (const auto& choice : value.choices) {
-            if (ticket < choice.weight) return renderTemplate(choice, args);
+            if (ticket < choice.weight) return chooseTemplate(choice);
             ticket -= choice.weight;
         }
     }
+    return value;
+}
+
+std::string I18n::expandTemplate(const TemplateValue& value, const Args& args, ContentFormat output,
+                               const I18n* owner, Locale loc, unsigned depth, safe_template::Budget& budget) {
+    if (depth >= 32) return {};
+    const auto& selected = chooseTemplate(value);
+    const auto& program = output == ContentFormat::kPlainText ? selected.plainProgram : selected.program;
+    const safe_template::Resolve resolve = [&](const std::string& key, unsigned nested, safe_template::Budget& remaining) -> std::optional<std::string> {
+        if (!owner) return std::nullopt;
+        if (const auto* referenced = owner->findTemplate(loc, key))
+            return expandTemplate(*referenced, args, output, owner, loc, nested, remaining);
+        return std::nullopt;
+    };
+    safe_template::Literal literal;
+    if (output == ContentFormat::kMarkdown && selected.format == ContentFormat::kPlainText)
+        literal = [](std::string_view text) { return markdown::escapeLiteral(std::string(text)); };
+    return safe_template::expand(program.nodes, args, resolve, depth, budget, literal);
+}
+
+std::string I18n::renderTemplate(const TemplateValue& source, const Args& args, const I18n* owner, Locale loc) {
+    const auto& value = chooseTemplate(source);
     const bool usePreparedPlain = value.format == ContentFormat::kMarkdown &&
         outboundCaptureActive_ && outboundPreferredOutput_ == ContentFormat::kPlainText;
     const ContentFormat outputFormat = usePreparedPlain
         ? ContentFormat::kPlainText : value.format;
-    const std::string& cached = usePreparedPlain ? value.plainValue : value.value;
-    const bool hasSample = cached.find("{sample:") != std::string::npos;
-    const std::string sampled = hasSample ? sample_template::expand(cached) : std::string();
-    const std::string& tmpl = hasSample ? sampled : cached;
+    safe_template::Budget budget;
+    const std::string tmpl = expandTemplate(value, args, outputFormat, owner, loc, 0, budget);
     noteOutboundFormat(outputFormat);
     if (outputFormat != ContentFormat::kMarkdown || args.empty())
         return interpolate(tmpl, args);

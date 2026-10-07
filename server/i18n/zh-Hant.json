@@ -89,6 +89,103 @@
     ]
   },
   "dice": {
+    "compat": {
+      "check": {
+        "prefix": "{nick}進行{attr}檢定：",
+        "prefix_reason": "由於{reason} {nick}進行{attr}檢定：",
+        "single": {
+          "critical": "大成功！",
+          "extreme": "極難成功",
+          "hard": "困難成功",
+          "regular": "成功",
+          "failure": "失敗",
+          "fumble": "大失敗！"
+        }
+      },
+      "sanity": {
+        "result": "{nick}的San Check：\n{res} {grade:rank?2={strSuccess}&1={strFailure}&0={strFumble}}\n{case:loss?0=無理智損失√&else=理智減少{change}->剩餘{final}}"
+      },
+      "growth": {
+        "base": "{nick}的{attr}增強或成長檢定：\n{res}",
+        "unchanged": "{strEnRoll}\n{nick}的{attr}值沒有變化",
+        "failure": "{strEnRoll}\n{nick}的{attr}變化{change}點，目前為{final}點",
+        "success": "{strEnRoll}\n{nick}的{attr}增加{change}點，目前為{final}點"
+      }
+    },
+    "outcome": {
+      "standard": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": "",
+        "special": "",
+        "tie": ""
+      },
+      "bonus": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "penalty": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "brp": {
+        "critical": "",
+        "special": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "sanity": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "growth": {
+        "regular": "",
+        "failure": ""
+      },
+      "psychology": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "opposed": {
+        "regular": "",
+        "failure": "",
+        "tie": ""
+      },
+      "resist": {
+        "regular": "",
+        "failure": ""
+      },
+      "dnd_check": {
+        "regular": "",
+        "failure": ""
+      },
+      "death_save": {
+        "critical": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      }
+    },
     "error": {
       "roll": "擲骰錯誤：{error}",
       "non_numeric": "擲骰表達式必須回傳數字。",
@@ -780,6 +877,25 @@
     "list_empty": "（空）"
   },
   "tplvar": {
+    "rank": "舊版成功等級：0大失敗、1失敗、2成功、3困難、4極難、5大成功",
+    "result": "檢定數值（純數字）",
+    "outcome": "規則判定結果",
+    "total": "合計",
+    "mod": "調整值",
+    "threshold": "目標難度",
+    "target": "目標",
+    "receipt": "心理學結果短語",
+    "gid": "群號",
+    "s": "死亡豁免成功次數",
+    "f": "死亡豁免失敗次數",
+    "la": "主動方屬性",
+    "lb": "被動方屬性",
+    "ra": "主動方骰點",
+    "rb": "被動方骰點",
+    "va": "主動方數值",
+    "vb": "被動方數值",
+    "lva": "主動方成功等級",
+    "lvb": "被動方成功等級",
     "nick": "暱稱",
     "res": "出目/結果",
     "reason": "原因",

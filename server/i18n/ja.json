@@ -84,6 +84,103 @@
     ]
   },
   "dice": {
+    "compat": {
+      "check": {
+        "prefix": "{nick}の{attr}判定：",
+        "prefix_reason": "{reason}のため、{nick}の{attr}判定：",
+        "single": {
+          "critical": "クリティカル！",
+          "extreme": "イクストリーム成功",
+          "hard": "ハード成功",
+          "regular": "成功",
+          "failure": "失敗",
+          "fumble": "ファンブル！"
+        }
+      },
+      "sanity": {
+        "result": "{nick}のSANチェック：\n{res} {grade:rank?2={strSuccess}&1={strFailure}&0={strFumble}}\n{case:loss?0=SAN減少なし。&else=SAN減少：{change} → 残り{final}}"
+      },
+      "growth": {
+        "base": "{nick}の{attr}成長判定：\n{res}",
+        "unchanged": "{strEnRoll}\n{nick}の{attr}は変化しません。",
+        "failure": "{strEnRoll}\n{nick}の{attr}の変化：{change} → {final}",
+        "success": "{strEnRoll}\n{nick}の{attr}が{change}増加 → {final}"
+      }
+    },
+    "outcome": {
+      "standard": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": "",
+        "special": "",
+        "tie": ""
+      },
+      "bonus": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "penalty": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "brp": {
+        "critical": "",
+        "special": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "sanity": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "growth": {
+        "regular": "",
+        "failure": ""
+      },
+      "psychology": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "opposed": {
+        "regular": "",
+        "failure": "",
+        "tie": ""
+      },
+      "resist": {
+        "regular": "",
+        "failure": ""
+      },
+      "dnd_check": {
+        "regular": "",
+        "failure": ""
+      },
+      "death_save": {
+        "critical": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      }
+    },
     "error": {
       "roll": "ロールエラー: {error}",
       "non_numeric": "ダイス式の結果は数値でなければなりません。",
@@ -775,6 +872,25 @@
     "list_empty": "（なし）"
   },
   "tplvar": {
+    "rank": "旧版成功段階：0ファンブル、1失敗、2成功、3ハード、4イクストリーム、5クリティカル",
+    "result": "判定値（数値）",
+    "outcome": "ルールによる判定結果",
+    "total": "合計",
+    "mod": "修正値",
+    "threshold": "目標難易度",
+    "target": "対象",
+    "receipt": "心理学の結果文",
+    "gid": "グループ ID",
+    "s": "死亡セーヴ成功回数",
+    "f": "死亡セーヴ失敗回数",
+    "la": "能動側の能力",
+    "lb": "受動側の能力",
+    "ra": "能動側の出目",
+    "rb": "受動側の出目",
+    "va": "能動側の値",
+    "vb": "受動側の値",
+    "lva": "能動側の成功段階",
+    "lvb": "受動側の成功段階",
     "nick": "ニックネーム",
     "res": "ロール/結果",
     "reason": "理由",

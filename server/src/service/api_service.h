@@ -1,5 +1,6 @@
 #pragma once
 #include "../common/weighted_templates.h"
+#include "../common/check_reply.h"
 #include "../common/template_preview.h"
 // ─── Dice!Next v3.0.0 — Real API Service ─────────────────────
 // Direct Drogon handler implementations backed by Database + ConfigManager.
@@ -89,6 +90,29 @@ static inline std::string dnx_u8str(const std::filesystem::path& p) {
 }
 
 using J = nlohmann::json;
+
+inline J outcomeTextMetadata(const I18n& i18n, Locale loc, const std::string& key) {
+    const auto* family = check_reply::familyForKey(key);
+    const bool compatibility = legacy_check_replies::isKey(key);
+    std::vector<std::string> references;
+    bool mapped = false;
+    for (const auto& [original, target] : legacyv2::msgKeyMap()) {
+        references.push_back(original);
+        mapped = mapped || target == key;
+    }
+    if (!family && !compatibility) return mapped ? J{{"legacyReferences", references}} : J::object();
+    J vars = J::array();
+    for (const auto& name : compatibility ? legacy_check_replies::variables(key) : check_reply::variables(key)) {
+        const std::string descKey = "tplvar." + name;
+        const std::string desc = i18n.tr(loc, descKey);
+        vars.push_back(J{{"name", name}, {"desc", desc == descKey ? "" : desc}});
+    }
+    J metadata{{"vars", vars}, {"legacyReferences", references}};
+    if (compatibility) metadata["legacyCompatibility"] = true;
+    else { metadata["outcome"] = {{"family", family->name}, {"grade", check_reply::gradeForKey(key)}};
+        metadata["fallbackKeys"] = check_reply::fallbackKeys(key); }
+    return metadata;
+}
 using CB = std::function<void(const drogon::HttpResponsePtr&)>;
 using Req = const drogon::HttpRequestPtr&;
 
@@ -1737,6 +1761,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         {"example", example},
                         {"vars", deriveVars(def)}
                     });
+                    replies.back().update(outcomeTextMetadata(i18n, loc, key));
                 };
                 if (c.contains("replyKeys") && c["replyKeys"].is_array()) {
                     bool hasRex = c.contains("replyExamples") && c["replyExamples"].is_object();
@@ -1840,9 +1865,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Post});
 
     // Text/card serialization preview only; no real messages or credentials.
-    app.registerHandler("/api/templates/preview", [](Req req, CB&& cb) {
+    app.registerHandler("/api/templates/preview", [&i18n](Req req, CB&& cb) {
         try {
-            jsonReply(ok(outbound::templatePreview(J::parse(req->body()))), std::move(cb));
+            jsonReply(ok(outbound::templatePreview(J::parse(req->body()), &i18n)), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
@@ -1880,6 +1905,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"defaultFormat", contentFormatName(i18n.getDefaultFormat(loc, key))},
                     {"v2key", legacyv2::v2KeyFor(key)}
                 });
+                arr.back().update(outcomeTextMetadata(i18n, loc, key));
             }
             // Override-only keys not in the bundle (e.g. imported legacy.* orphans).
             for (auto& [key, val] : ov) {
@@ -1895,6 +1921,16 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 });
             }
             jsonReply(ok(arr), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get});
+
+    app.registerHandler("/api/legacy/texts/upgrade-report", [st](Req, CB&& cb) {
+        try {
+            if (st) {
+                const auto rows = st->get_all<DiceConfigRow>(orm::where(orm::c(&DiceConfigRow::key) == std::string(legacyv2::checkTextUpgradeMarker)));
+                if (!rows.empty()) { jsonReply(ok(J::parse(rows.front().value)), std::move(cb)); return; }
+            }
+            jsonReply(ok(J{{"items", J::array()}, {"restored", 0}, {"conflicts", 0}, {"preserved", 0}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 

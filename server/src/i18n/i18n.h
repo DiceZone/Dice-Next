@@ -21,6 +21,7 @@
 #include "../common/content_format.h"
 #include "../common/presentation_style.h"
 #include "../common/types.h"
+#include "../common/safe_template.h"
 
 #include <string>
 #include <map>
@@ -63,6 +64,18 @@ public:
                    const std::string& key,
                    const Args& args = {}) const;
 
+    /// Render the first nonempty optional template before weighted/sample
+    /// selection. Missing branches return nullopt for command-specific fallback.
+    std::optional<std::string> trCandidates(Locale loc,
+                   const std::vector<std::string>& keys,
+                   const Args& args = {}) const;
+
+    /// An explicitly configured persona/global entry, including intentional
+    /// empty text. No built-in/style or cross-language fallback is considered.
+    bool hasConfigured(Locale loc, const std::string& key) const;
+    std::optional<std::string> trConfigured(Locale loc, const std::string& key,
+                                           const Args& args = {}) const;
+
     /// Convenience overload accepting a locale code string.
     std::string tr(const std::string& localeCode,
                    const std::string& key,
@@ -100,6 +113,8 @@ public:
     /// Preview uses the same native weighted selection and nested sample renderer.
     static std::string previewTemplate(const std::string& value, const Args& args = {},
                                       ContentFormat format = ContentFormat::kPlainText);
+    std::string previewWithReferences(Locale loc, const std::string& value, const Args& args,
+                                     ContentFormat format = ContentFormat::kPlainText) const;
 
     // ─── User overrides (editable reply templates) ───────────
     // An override replaces the bundle value for one (locale, key). The bundle
@@ -194,11 +209,21 @@ private:
         ContentFormat format = ContentFormat::kPlainText;
         size_t weight = 1;
         std::vector<TemplateValue> choices;
+        safe_template::Program program;
+        safe_template::Program plainProgram;
     };
     static TemplateValue prepareTemplate(const std::string& value,
                                          ContentFormat format);
     static std::string renderTemplate(const TemplateValue& value,
-                                      const Args& args);
+                                      const Args& args, const I18n* owner = nullptr,
+                                      Locale loc = Locale::kZhHans);
+    static const TemplateValue& chooseTemplate(const TemplateValue& value);
+    static std::string expandTemplate(const TemplateValue& value, const Args& args,
+                                      ContentFormat output, const I18n* owner, Locale loc,
+                                      unsigned depth, safe_template::Budget& budget);
+    const TemplateValue* configuredTemplate(Locale loc, const std::string& key) const;
+    const TemplateValue* findTemplate(Locale loc, const std::string& key,
+                                      bool skipEmpty = false) const;
 
     /// All locales this engine knows how to load.
     static std::vector<Locale> supportedLocales();

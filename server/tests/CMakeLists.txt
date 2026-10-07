@@ -16,6 +16,7 @@ set(TEST_SOURCES
     test_config_manager.cpp
     test_persona_manager.cpp
     test_i18n_persona.cpp
+    test_outcome_replies.cpp
     test_sample_template.cpp
     test_presentation_style.cpp
     test_import_v2.cpp
@@ -154,7 +155,6 @@ endif()
 add_executable(dice-next-reply-preview EXCLUDE_FROM_ALL
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/reply-preview.cpp
     ../src/i18n/i18n.cpp
-    ../src/common/logger.cpp
     ../src/common/markdown.cpp
     ../src/common/markdown_md4c.cpp
 )

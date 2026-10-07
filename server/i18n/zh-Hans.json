@@ -90,6 +90,103 @@
     ]
   },
   "dice": {
+    "compat": {
+      "check": {
+        "prefix": "{nick}进行{attr}检定：",
+        "prefix_reason": "由于{reason} {nick}进行{attr}检定：",
+        "single": {
+          "critical": "大成功！",
+          "extreme": "极难成功",
+          "hard": "困难成功",
+          "regular": "成功",
+          "failure": "失败",
+          "fumble": "大失败！"
+        }
+      },
+      "sanity": {
+        "result": "{nick}的San Check：\n{res} {grade:rank?2={strSuccess}&1={strFailure}&0={strFumble}}\n{case:loss?0=无理智损失√&else=理智减少{change}->剩余{final}}"
+      },
+      "growth": {
+        "base": "{nick}的{attr}增强或成长检定：\n{res}",
+        "unchanged": "{strEnRoll}\n{nick}的{attr}值没有变化",
+        "failure": "{strEnRoll}\n{nick}的{attr}变化{change}点，当前为{final}点",
+        "success": "{strEnRoll}\n{nick}的{attr}增加{change}点，当前为{final}点"
+      }
+    },
+    "outcome": {
+      "standard": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": "",
+        "special": "",
+        "tie": ""
+      },
+      "bonus": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "penalty": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "brp": {
+        "critical": "",
+        "special": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "sanity": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "growth": {
+        "regular": "",
+        "failure": ""
+      },
+      "psychology": {
+        "critical": "",
+        "extreme": "",
+        "hard": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      },
+      "opposed": {
+        "regular": "",
+        "failure": "",
+        "tie": ""
+      },
+      "resist": {
+        "regular": "",
+        "failure": ""
+      },
+      "dnd_check": {
+        "regular": "",
+        "failure": ""
+      },
+      "death_save": {
+        "critical": "",
+        "regular": "",
+        "failure": "",
+        "fumble": ""
+      }
+    },
     "error": {
       "roll": "掷骰错误：{error}",
       "non_numeric": "掷骰表达式必须返回数字。",
@@ -781,6 +878,25 @@
     "list_empty": "（空）"
   },
   "tplvar": {
+    "rank": "旧版成功等级：0大失败、1失败、2成功、3困难、4极难、5大成功",
+    "result": "检定数值（纯数字）",
+    "outcome": "规则判定结果",
+    "total": "合计",
+    "mod": "调整值",
+    "threshold": "目标难度",
+    "target": "目标",
+    "receipt": "心理学结果短语",
+    "gid": "群号",
+    "s": "死亡豁免成功次数",
+    "f": "死亡豁免失败次数",
+    "la": "主动方属性",
+    "lb": "被动方属性",
+    "ra": "主动方骰点",
+    "rb": "被动方骰点",
+    "va": "主动方数值",
+    "vb": "被动方数值",
+    "lva": "主动方成功等级",
+    "lvb": "被动方成功等级",
     "nick": "昵称",
     "res": "出目/结果",
     "reason": "原因",

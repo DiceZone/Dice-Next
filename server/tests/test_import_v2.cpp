@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <sqlite_orm/sqlite_orm.h>
 #include "../src/core/deck/card_deck.h"
+#include "../src/common/check_reply.h"
 
 // Provide a complete LuaPluginManager definition so that legacy_import_v2.h's
 // runImport() body compiles. CardDeck uses the real project implementation,
@@ -1026,6 +1027,141 @@ TEST(CustomMessageMigration, NormalizesAuditedLegacyPlaceholders) {
     ASSERT_EQ(normalizeLegacyTemplate("strRollDice", "{pc}掷骰: {res}"), "{nick}掷骰: {res}");
     ASSERT_EQ(normalizeLegacyTemplate("strDeckNotFound", "{self}找不到{deck_name}"), "{self}找不到{name}");
     ASSERT_EQ(normalizeLegacyTemplate("strLogNew", "{game.log_name}"), "{name}");
+    ASSERT_EQ(normalizeLegacyReferences("{strEnRoll} {sample:{strSuccess}|{strFailure}}"),
+        "{text:dice.compat.growth.base} {sample:{text:dice.level.regular}|{text:dice.level.failure}}");
+    ASSERT_EQ(normalizeLegacyReferences("\\{strEnRoll}"), "\\{strEnRoll}");
+}
+
+TEST(CustomMessageMigration, OutcomeSplitPreservesImportedTextsAndExplicitNewOverrides) {
+    const auto root = makeTempDir("custom_msg_outcomes");
+    {
+        Database db; ASSERT_TRUE(db.open((root / "test.db").string()));
+        const auto i18nPath = (fs::path(__FILE__).parent_path().parent_path() / "i18n").u8string();
+        I18n i18n(std::string(i18nPath.begin(), i18nPath.end()));
+        ASSERT_TRUE(i18n.load());
+        const json legacy = {
+            {"strRollDice", "{pc}旧骰：{res}"},
+            {"strRollDiceReason", "{pc}因{reason}旧骰：{res}"},
+            {"strCriticalSuccess", "旧大成功"}, {"strExtremeSuccess", "旧极难成功"},
+            {"strHardSuccess", "旧困难成功"}, {"strSuccess", "旧成功"},
+            {"strFailure", "旧失败"}, {"strFumble", "旧大失败"},
+            {"strRollSkill", "{pc}旧检定前缀："}
+        };
+        { std::ofstream file(root / "CustomMsg.json", std::ios::binary); file << legacy.dump(); }
+        int orphans = 0;
+        ASSERT_EQ(importCustomMsg(db, i18n, root, orphans), 9);
+        ASSERT_EQ(orphans, 0);
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.roll.result", {{"nick", "甲"}, {"res", "42"}}), "甲旧骰：42");
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.roll.result_reason", {{"nick", "甲"}, {"reason", "测试"}, {"res", "42"}}), "甲因测试旧骰：42");
+        const std::vector<std::string> labels{"旧大成功", "旧极难成功", "旧困难成功", "旧成功", "旧失败", "旧大失败"};
+        const auto& grades = check_reply::families()[1].grades;
+        for (size_t i = 0; i < grades.size(); ++i) {
+            ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.level." + grades[i]), labels[i]);
+            for (const auto& family : {"standard", "bonus", "penalty", "sanity", "psychology"})
+                ASSERT_FALSE(i18n.trCandidates(Locale::kZhHans, check_reply::candidates(family, grades[i])).has_value());
+        }
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "legacy.strRollSkill"), "{pc}旧检定前缀：");
+        const auto newKey = check_reply::key("standard", "regular");
+        i18n.setOverride(Locale::kZhHans, newKey, "独立成功回复");
+        orphans = 0;
+        ASSERT_EQ(importCustomMsg(db, i18n, root, orphans), 9);
+        ASSERT_EQ(*i18n.trCandidates(Locale::kZhHans, check_reply::candidates("bonus", "regular")), "独立成功回复");
+        i18n.clearOverride(Locale::kZhHans, newKey);
+        ASSERT_FALSE(i18n.trCandidates(Locale::kZhHans, check_reply::candidates("bonus", "regular")).has_value());
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.level.regular"), "旧成功");
+        ASSERT_EQ(db.getStorage()->count<I18nOverrideRow>(), 10);
+    }
+    cleanupTempDir(root);
+}
+
+TEST(CustomMessageMigration, ReportsActivePartialPreservedAndConflictsWithoutReplacingNewText) {
+    const auto root = makeTempDir("custom_msg_compatibility");
+    {
+        Database db; ASSERT_TRUE(db.open((root / "test.db").string()));
+        const auto path = (fs::path(__FILE__).parent_path().parent_path() / "i18n").u8string();
+        I18n i18n(std::string(path.begin(), path.end())); ASSERT_TRUE(i18n.load());
+        I18nOverrideRow explicitRow; explicitRow.locale = "zh-Hans"; explicitRow.key = "dice.compat.check.prefix";
+        explicitRow.value = "KEEP"; db.getStorage()->insert(explicitRow); i18n.setOverride(Locale::kZhHans, explicitRow.key, explicitRow.value);
+        const json legacy = {
+            {"strRollSkill", "{pc}旧前缀："}, {"strRollRegularSuccess", "单轮成功"},
+            {"strSanityRoll", "{res} {grade:rank?2={strSuccess}&1={strFailure}&0={strFumble}} {case:loss?0=0&else={change}->{final}}"},
+            {"strEnRoll", "{pc}成长：{res}"}, {"strEnRollSuccess", "{strEnRoll} {change}->{final}"},
+            {"strRollHardSuccess", "{unknown_field}困难"},
+            {"strRollFumble", "{js:danger()}"},
+            {"strRollDice", "{js:unsupported()}"},
+            {"strUnknown", "原文"}
+        };
+        { std::ofstream file(root / "CustomMsg.json", std::ios::binary); file << legacy.dump(); }
+        int orphans = 0; json details = json::array();
+        ASSERT_EQ(importCustomMsg(db, i18n, root, orphans, &details), 6); ASSERT_EQ(orphans, 3);
+        ASSERT_EQ(details.size(), size_t(9));
+        std::map<std::string, json> report;
+        for (const auto& item : details) report[item["source"]] = item;
+        ASSERT_EQ(report["strRollSkill"]["status"].get<std::string>(), "conflict");
+        ASSERT_EQ(report["strRollHardSuccess"]["status"].get<std::string>(), "partial");
+        ASSERT_FALSE(report["strRollHardSuccess"]["issues"].empty());
+        ASSERT_EQ(report["strRollFumble"]["status"].get<std::string>(), "preserved");
+        ASSERT_EQ(report["strSanityRoll"]["status"].get<std::string>(), "active");
+        ASSERT_EQ(report["strRollDice"]["status"].get<std::string>(), "partial");
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.roll.result"), "{js:unsupported()}");
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, explicitRow.key), "KEEP");
+        ASSERT_FALSE(i18n.hasConfigured(Locale::kZhHans, "dice.compat.check.single.fumble"));
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "legacy.strRollFumble"), "{js:danger()}");
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.compat.growth.success", {{"nick", "甲"}, {"res", "70/60"}, {"change", "+5"}, {"final", "65"}}),
+            "甲成长：70/60 +5->65");
+        i18n.setOverride(Locale::kZhHans, "dice.compat.growth.base", "EDIT:{res}");
+        ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.compat.growth.success", {{"res", "70/60"}, {"change", "+5"}, {"final", "65"}}),
+            "EDIT:70/60 +5->65");
+    }
+    cleanupTempDir(root);
+}
+
+TEST(CustomMessageMigration, HistoricalUpgradeIsOnceNonDestructiveAndPreservesPersonas) {
+    const auto root = makeTempDir("historical_check_texts");
+    {
+        Database db; ASSERT_TRUE(db.open((root / "test.db").string())); auto* storage = db.getStorage();
+        auto add = [&](const std::string& key, const std::string& text, const std::string& locale = "zh-Hans") {
+            I18nOverrideRow row; row.locale = locale; row.key = key; row.value = text; row.format = "markdown"; storage->insert(row);
+        };
+        add("legacy.strRollSkill", "**{pc}**旧前缀：");
+        add("legacy.strRollRegularSuccess", "OLD"); add("dice.compat.check.single.regular", "");
+        add("dice.crit", "CRIT"); add("legacy.strRollFumble", "{wait:100}");
+        auto persona = [&](const std::string& key, const std::string& text, int id) {
+            PersonaEntryRow row; row.personaId = id; row.locale = "zh-Hans"; row.key = key; row.value = text; storage->insert(row);
+        };
+        // Insert generic before original alias: the untouched original must still win.
+        persona("dice.crit", "GENERIC", 42); persona("legacy.strRollCriticalSuccess", "ORIGINAL", 42);
+        persona("legacy.strEnRoll", "{py:danger()}", 42);
+        persona("legacy.strRollSkill", "old", 43); persona("dice.compat.check.prefix", "new", 43);
+        const auto report = upgradeLegacyCheckTexts(db);
+        ASSERT_EQ(report["restored"].get<int>(), 3);
+        ASSERT_EQ(report["conflicts"].get<int>(), 3);
+        ASSERT_EQ(report["preserved"].get<int>(), 2);
+        auto rows = storage->get_all<I18nOverrideRow>(orm::where(orm::c(&I18nOverrideRow::key) == "dice.compat.check.prefix"));
+        ASSERT_EQ(rows.size(), size_t(1)); ASSERT_EQ(rows[0].value, "**{nick}**旧前缀："); ASSERT_EQ(rows[0].format, "markdown");
+        ASSERT_EQ(storage->count<I18nOverrideRow>(orm::where(orm::c(&I18nOverrideRow::key) == "legacy.strRollSkill")), 1);
+        auto single = storage->get_all<PersonaEntryRow>(orm::where(orm::c(&PersonaEntryRow::personaId) == 42 and
+            orm::c(&PersonaEntryRow::key) == "dice.compat.check.single.critical"));
+        ASSERT_EQ(single.size(), size_t(1)); ASSERT_EQ(single[0].value, "ORIGINAL");
+        storage->remove_all<I18nOverrideRow>(orm::where(orm::c(&I18nOverrideRow::key) == "dice.compat.check.prefix"));
+        const auto again = upgradeLegacyCheckTexts(db);
+        ASSERT_TRUE(again["alreadyApplied"].get<bool>());
+        ASSERT_EQ(again["items"], report["items"]);
+        ASSERT_EQ(storage->count<I18nOverrideRow>(orm::where(orm::c(&I18nOverrideRow::key) == "dice.compat.check.prefix")), 0);
+    }
+    cleanupTempDir(root);
+}
+
+TEST(CustomMessageMigration, ValidatesEveryWeightedVariantAndReportsUnresolvedSyntax) {
+    const auto weighted = weighted_templates::encode(json::array({
+        {{"text", "{case:rank?2=OK&else=NO}"}, {"weight", 1}},
+        {{"text", "{js:danger()}"}, {"weight", 0}}
+    }));
+    ASSERT_EQ(checkTextDetail("strSanityRoll", "dice.compat.sanity.result", weighted)["status"].get<std::string>(), "preserved");
+    ASSERT_EQ(checkTextDetail("strSanityRoll", "dice.compat.sanity.result", "{grade:rank?2={strSuccess}&0={strFumble}}")["status"].get<std::string>(), "active");
+    ASSERT_EQ(checkTextDetail("strRollSkill", "dice.compat.check.prefix", "{case:unavailable?0=A&else=B}")["status"].get<std::string>(), "partial");
+    ASSERT_EQ(checkTextDetail("strEnRoll", "dice.compat.growth.base", "{text:not.registered}")["status"].get<std::string>(), "partial");
+    ASSERT_EQ(checkTextDetail("strEnRoll", "dice.compat.growth.base", "{strEnRoll}")["status"].get<std::string>(), "preserved");
 }
 
 TEST(LegacyLog, ParsesOriginalHeader) {

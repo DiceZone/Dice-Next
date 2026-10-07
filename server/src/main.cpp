@@ -540,6 +540,12 @@ static int realMain(int argc, char* argv[]) {
     // Load editable-template overrides from DB into the i18n engine.
     if (auto* st0 = db.getStorage()) {
         try {
+            const auto legacyTextUpgrade = dice::legacyv2::upgradeLegacyCheckTexts(db);
+            if (!legacyTextUpgrade.value("alreadyApplied", false) && (legacyTextUpgrade.value("restored", 0) || legacyTextUpgrade.value("conflicts", 0)))
+                DICE_LOG_INFO("Legacy check text upgrade: restored={}, conflicts={}",
+                    legacyTextUpgrade.value("restored", 0), legacyTextUpgrade.value("conflicts", 0));
+        } catch (const std::exception& error) { DICE_LOG_WARN("Legacy check text upgrade deferred: {}", error.what()); }
+        try {
             int n = 0;
             for (auto& r : st0->get_all<dice::I18nOverrideRow>()) {
                 i18n.setOverride(dice::localeFromString(r.locale), r.key, r.value, dice::contentFormatFromString(r.format)); ++n;

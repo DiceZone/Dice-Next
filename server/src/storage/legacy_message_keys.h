@@ -6,6 +6,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include "../common/sample_template.h"
 
 namespace dice::legacyv2 {
 
@@ -16,7 +17,20 @@ inline const std::map<std::string, std::string>& msgKeyMap() {
         {"strBotOnAlready", "bot.already_on"}, {"strBotOffAlready", "bot.already_off"},
         {"strHlpMsg", "help.main"}, {"strHlpNotFound", "help.unknown"},
         {"strJrrp", "fun.jrrp"},
-        {"strRollCriticalSuccess", "dice.crit"}, {"strRollFumble", "dice.fumble"},
+        {"strRollCriticalSuccess", "dice.compat.check.single.critical"},
+        {"strRollExtremeSuccess", "dice.compat.check.single.extreme"},
+        {"strRollHardSuccess", "dice.compat.check.single.hard"},
+        {"strRollRegularSuccess", "dice.compat.check.single.regular"},
+        {"strRollFailure", "dice.compat.check.single.failure"},
+        {"strRollFumble", "dice.compat.check.single.fumble"},
+        {"strRollSkill", "dice.compat.check.prefix"}, {"strRollSkillReason", "dice.compat.check.prefix_reason"},
+        {"strRollSkillHidden", "dice.check.hidden"},
+        {"strSanityRoll", "dice.compat.sanity.result"},
+        {"strEnRoll", "dice.compat.growth.base"},
+        {"strEnRollNotChange", "dice.compat.growth.unchanged"},
+        {"strEnRollFailure", "dice.compat.growth.failure"},
+        {"strEnRollSuccess", "dice.compat.growth.success"},
+        {"strEnDefaultName", "card.en.default_name"},
         {"strCriticalSuccess", "dice.level.critical"}, {"strExtremeSuccess", "dice.level.extreme"},
         {"strHardSuccess", "dice.level.hard"}, {"strSuccess", "dice.level.regular"},
         {"strFailure", "dice.level.failure"}, {"strFumble", "dice.level.fumble"},
@@ -62,6 +76,20 @@ inline const std::map<std::string, std::string>& msgKeyMap() {
     return M;
 }
 
+// References remain authored template nodes, not pre-rendered/interpolated
+// values. This preserves sample, nesting, later edits, and persona resolution.
+inline std::string normalizeLegacyReferences(std::string text) {
+    for (const auto& [original, mapped] : msgKeyMap()) {
+        const std::string from = "{" + original + "}", to = "{text:" + mapped + "}";
+        size_t pos = 0;
+        while ((pos = text.find(from, pos)) != std::string::npos) {
+            if (sample_template::escaped(text, pos)) { pos += from.size(); continue; }
+            text.replace(pos, from.size(), to); pos += to.size();
+        }
+    }
+    return text;
+}
+
 // Only normalize placeholders whose destination runtime arguments were audited.
 inline std::string normalizeLegacyTemplate(const std::string&, std::string text) {
     const std::pair<const char*, const char*> generic[] = {
@@ -75,7 +103,7 @@ inline std::string normalizeLegacyTemplate(const std::string&, std::string text)
             pos += std::strlen(to);
         }
     }
-    return text;
+    return normalizeLegacyReferences(std::move(text));
 }
 
 inline std::string v2KeyFor(const std::string& ourKey) {
