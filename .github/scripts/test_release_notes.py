@@ -100,6 +100,19 @@ class FakeGitHub:
 
 
 class ClassificationTests(unittest.TestCase):
+    def test_body_omits_duplicate_release_title_for_initial_and_subsequent_releases(self):
+        for baseline, introduction in (
+                (notes.Baseline(PREVIOUS, A, C, "release-sources", []), "相较于 [" + PREVIOUS + "]"),
+                (notes.Baseline(None, None, None, "first-release", []), "首次发布，")):
+            with self.subTest(previous_tag=baseline.tag):
+                result = notes.render_notes(CURRENT, B, D, baseline, {
+                    "core": [commit("feat: 一条功能说明")]})
+                self.assertTrue(result.startswith(introduction))
+                self.assertNotRegex(result, r"(?m)^# ")
+                self.assertNotIn("# Dice!Next " + CURRENT, result)
+                self.assertIn("## 新增功能\n", result)
+                self.assertIn("## 源码与完整比较\n", result)
+
     def test_feature_fix_performance_and_untyped_changes(self):
         for subject, category, title in [("feat(core): 定时更新", "feat", "定时更新"),
                                          ("fix(webui): 修复弹窗", "fix", "修复弹窗"),

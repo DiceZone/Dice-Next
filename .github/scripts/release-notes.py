@@ -425,7 +425,8 @@ def render_notes(tag, core_head, web_head, baseline, histories):
     tag_order(tag)
     full_sha(core_head)
     full_sha(web_head)
-    lines = [f"# Dice!Next {tag}", ""]
+    # GitHub already displays the release title above this body.
+    lines = []
     if baseline.tag:
         lines.extend([f"相较于 [{baseline.tag}](https://github.com/{REPOSITORIES['core']}/releases/tag/{baseline.tag})，本次包含以下改动。", ""])
     else:
