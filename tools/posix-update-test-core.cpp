@@ -21,9 +21,12 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) arguments.push_back(argv[i]);
     std::ifstream version("web/dist/index.html");
     const std::string text((std::istreambuf_iterator<char>(version)), {});
-    std::ofstream("last-run.json") << nlohmann::json{
-        {"pid", ::getpid()}, {"parent", ::getppid()}, {"cwd", fs::current_path().string()},
-        {"version", text}, {"args", arguments}}.dump();
+    {
+        std::ofstream("last-run.json.tmp") << nlohmann::json{
+            {"pid", ::getpid()}, {"parent", ::getppid()}, {"cwd", fs::current_path().string()},
+            {"version", text}, {"args", arguments}}.dump();
+    }
+    fs::rename("last-run.json.tmp", "last-run.json"); // Never expose a half-written readiness result.
     if (argc > 2 && std::string(argv[2]) == "hold") {
         while (true) ::pause();
     }

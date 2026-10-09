@@ -7,6 +7,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 if (process.argv.length !== 4) throw new Error('Usage: node tools/test-posix-manager.mjs <manager> <fixture-core>');
 const [manager, core] = process.argv.slice(2).map(value => path.resolve(value));
+const startupTimeout = 15000; // Hosted macOS cold-start checks can take more than 3 seconds.
 const fixtures = [];
 const file = (target, text) => { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, text); };
 const metadata = { schema: 1, tag: 'v99.0.0-beta.900', version: '99.0.0', build: 900 };
@@ -38,23 +39,23 @@ function stage(root) {
 }
 function run(root, args = [], env = {}) {
   const result = spawnSync(path.join(root, 'dice-next'), args, {
-    cwd: '/', encoding: 'utf8', timeout: 15000,
+    cwd: '/', encoding: 'utf8', timeout: startupTimeout,
     env: { ...process.env, DICENEXT_CONTAINER: '', DOTNET_RUNNING_IN_CONTAINER: '', container: '', KUBERNETES_SERVICE_HOST: '', ...env },
   });
-  assert.equal(result.status, 0, result.stderr || String(result.error));
+  assert.equal(result.status, 0, result.stderr || String(result.error || result.signal));
   return JSON.parse(fs.readFileSync(path.join(root, 'last-run.json'), 'utf8'));
 }
 const result = root => JSON.parse(fs.readFileSync(path.join(root, 'updates/last-result.json'), 'utf8'));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitFor(callback) {
-  for (let i = 0; i < 200; ++i) { if (callback()) return; await pause(10); }
+  for (let i = 0; i < 1000; ++i) { if (callback()) return; await pause(10); }
   assert.fail('process fixture did not become ready');
 }
 try {
   {
     const root = fixture();
-    const direct = spawnSync(path.join(root, 'dice-next-server'), ['config', 'direct'], { cwd: root, encoding: 'utf8', timeout: 3000 });
-    assert.equal(direct.status, 0, direct.stderr);
+    const direct = spawnSync(path.join(root, 'dice-next-server'), ['config', 'direct'], { cwd: root, encoding: 'utf8', timeout: startupTimeout });
+    assert.equal(direct.status, 0, direct.stderr || String(direct.error || direct.signal));
     const info = JSON.parse(fs.readFileSync(path.join(root, 'last-run.json'), 'utf8'));
     assert.equal(info.pid, Number(fs.readFileSync(path.join(root, 'direct-first'), 'utf8')));
     console.log('PASS: direct exec restart closes the previous instance lock');
@@ -107,12 +108,12 @@ try {
     try {
       await waitFor(() => fs.existsSync(path.join(root, 'last-run.json')));
       corePid = JSON.parse(fs.readFileSync(path.join(root, 'last-run.json'), 'utf8')).pid;
-      const duplicate = spawnSync(path.join(root, 'dice-next'), { encoding: 'utf8', timeout: 3000 });
-      assert.notEqual(duplicate.status, 0);
+      const duplicate = spawnSync(path.join(root, 'dice-next'), { encoding: 'utf8', timeout: startupTimeout });
+      assert.equal(duplicate.status, 1, duplicate.stderr || String(duplicate.error || duplicate.signal));
       child.kill('SIGKILL');
       await waitFor(() => child.signalCode !== null);
-      const orphan = spawnSync(path.join(root, 'dice-next'), { encoding: 'utf8', timeout: 3000 });
-      assert.notEqual(orphan.status, 0);
+      const orphan = spawnSync(path.join(root, 'dice-next'), { encoding: 'utf8', timeout: startupTimeout });
+      assert.equal(orphan.status, 1, orphan.stderr || String(orphan.error || orphan.signal));
       console.log('PASS: duplicate manager and orphaned live core retain the update lock');
     } finally {
       if (corePid) { try { process.kill(corePid, 'SIGTERM'); } catch {} }
