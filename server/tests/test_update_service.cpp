@@ -704,19 +704,27 @@ TEST(UpdateService, ContinuingProgressDoesNotTriggerIdleTimeout) {
             writeResponse(output, downloadManifest());
             return true;
         }
-        for (int i = 1; i <= 6; ++i) {
-            writeResponse(output, std::string(i, 'a'));
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        std::filesystem::create_directories(output.parent_path());
+        std::ofstream transfer(output, std::ios::binary);
+        for (int i = 0; i < 12; ++i) {
+            transfer.put('a');
+            transfer.flush(); // Model a real download: monotonically append, never truncate.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (shouldCancel()) { unexpectedlyCancelled.store(true); return false; }
         }
         return true;
     };
-    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, fetch, quickDownloadPolicy());
+    auto policy = quickDownloadPolicy();
+    policy.idleTimeout = std::chrono::milliseconds(500);
+    policy.attemptTimeout = std::chrono::seconds(5);
+    UpdateService service(config, [] {}, {}, ContainerEnvironment{}, fetch, policy);
     std::string error;
     ASSERT_TRUE(service.requestCheck(true, error));
     ASSERT_TRUE(waitUntil([&] { return service.status()["updateAvailable"].get<bool>(); }));
+    const auto started = std::chrono::steady_clock::now();
     ASSERT_TRUE(service.requestDownload(error));
-    ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }));
+    ASSERT_TRUE(waitUntil([&] { return downloadFinished(service); }, std::chrono::seconds(5)));
+    ASSERT_TRUE(std::chrono::steady_clock::now() - started > policy.idleTimeout);
     ASSERT_FALSE(unexpectedlyCancelled.load());
     ASSERT_TRUE(service.status()["error"].get<std::string>().find("SHA-256 mismatch") != std::string::npos);
 }

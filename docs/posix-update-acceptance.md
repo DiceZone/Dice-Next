@@ -27,3 +27,11 @@
 自动化入口：`dice-next-tests` 的 UpdateSchedule/PosixUpdate/PosixArchive；`node tools/test-posix-manager.mjs <dice-next> <dice-next-update-test-core>`。后者是轻量发布门禁，不替代上述发行包验收。
 
 `Cross-platform update checks` 为分支验证工作流：Linux amd64/arm64 与 macOS arm64 编译真实核心、管理器、测试并打包，校验包内核心和管理器的加载能力；Windows amd64 检查共享更新逻辑回归。自动使用三个仓库的 `cross-platform-update` 分支，复用原依赖缓存，不发布 Release、修改主分支或推送构建号。验证包只保留为 Actions artifacts，不视为正式版本。
+
+## 2026-10-10 分支 CI 问题修复
+
+[首轮跨平台验证](https://github.com/DiceZone/Dice-Next/actions/runs/37898278338) 的三个 POSIX 平台均完成真实核心与测试编译，但回归检查发现两处问题：Linux 的 gzip 尾部截断漏检，以及 macOS 持续下载测试的时序不稳定。这不代表跨平台发布验收已完成。
+
+解包改为流式 `inflate`，要求每个 gzip 成员明确到达 `Z_STREAM_END`，完整验证 CRC32 与原始长度；拒绝缺失头部/尾部、损坏校验字段、尾随垃圾及隐藏的第二个 tar。保留合法的拼接 gzip 和分块读取。下载测试改为追加写入，并明确验证持续下载超过空闲阈值仍不超时；生产下载超时策略不变。
+
+本机 Apple Clang/C++20、zlib 1.3.2 的更新专项 51 用例 / 447 断言通过；系统 zlib 1.2.12 的 POSIX 专项 12 用例 / 126 断言通过。跨平台整包与加载验证仍须以修复后的 CI 结果为准，跨版本实机验收仍按以上清单执行。

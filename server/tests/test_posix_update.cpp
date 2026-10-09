@@ -213,4 +213,76 @@ TEST(PosixArchive, RejectsCorruptionAndSupportsCancellation) {
     fs::resize_file(f.root / "test.tar.gz", fs::file_size(f.root / "test.tar.gz") - 8);
     ASSERT_FALSE(dice::update::extractPosixUpdate(f.root / "test.tar.gz", f.root / "out", error));
 }
+
+TEST(PosixArchive, RejectsTruncatedHeadersAndEveryTrailerByteAndDamagedChecksums) {
+    Fixture original;
+    archive(original.root / "complete.tar.gz", {{"file", "safe"}});
+    const auto bytes = contents(original.root / "complete.tar.gz");
+    std::vector<std::string> invalid;
+    for (size_t length = 0; length < 10; ++length) invalid.push_back(bytes.substr(0, length));
+    for (size_t missing = 1; missing <= 16; ++missing)
+        invalid.push_back(bytes.substr(0, bytes.size() - missing));
+    for (const auto trailerOffset : {8, 4}) { // CRC32 and ISIZE, not just the deflate payload.
+        auto corrupt = bytes;
+        corrupt[corrupt.size() - trailerOffset] ^= 1;
+        invalid.push_back(std::move(corrupt));
+    }
+    invalid.push_back(bytes + "trailing garbage");
+    for (const auto& input : invalid) {
+        Fixture f;
+        fs::create_directory(f.root / "out");
+        file(f.root / "invalid.tar.gz", input);
+        std::string error;
+        ASSERT_FALSE(dice::update::extractPosixUpdate(f.root / "invalid.tar.gz", f.root / "out", error));
+        ASSERT_FALSE(error.empty());
+    }
+}
+
+TEST(PosixArchive, ValidatesEveryConcatenatedGzipMemberAndRejectsHiddenArchives) {
+    Fixture original;
+    archive(original.root / "complete.tar.gz", {{"file", "safe"}});
+    std::array<char, 1024> padding{};
+    auto gz = gzopen((original.root / "padding.gz").c_str(), "wb");
+    ASSERT_TRUE(gz != nullptr);
+    ASSERT_EQ(gzwrite(gz, padding.data(), padding.size()), static_cast<int>(padding.size()));
+    ASSERT_EQ(gzclose(gz), Z_OK);
+    const auto first = contents(original.root / "complete.tar.gz");
+    const auto second = contents(original.root / "padding.gz");
+    {
+        Fixture f;
+        fs::create_directory(f.root / "out");
+        file(f.root / "valid.tar.gz", first + second);
+        std::string error;
+        ASSERT_TRUE(dice::update::extractPosixUpdate(f.root / "valid.tar.gz", f.root / "out", error));
+        ASSERT_EQ(contents(f.root / "out/file"), std::string("safe"));
+    }
+    // A valid first member must never conceal a truncated later member or a
+    // second tar archive hidden after the first archive's end marker.
+    for (const auto& input : {first + second.substr(0, second.size() - 8), first + first}) {
+        Fixture f;
+        fs::create_directory(f.root / "out");
+        file(f.root / "invalid.tar.gz", input);
+        std::string error;
+        ASSERT_FALSE(dice::update::extractPosixUpdate(f.root / "invalid.tar.gz", f.root / "out", error));
+        ASSERT_FALSE(error.empty());
+    }
+}
+
+TEST(PosixArchive, StreamsLargePayloadsAcrossCompressedInputBlocks) {
+    Fixture f;
+    fs::create_directory(f.root / "out");
+    std::string body;
+    uint32_t state = 0x12345678;
+    for (size_t i = 0; i < 200000; ++i) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        body.push_back(static_cast<char>(state & 255));
+    }
+    archive(f.root / "large.tar.gz", {{"file", body}});
+    ASSERT_TRUE(fs::file_size(f.root / "large.tar.gz") > 65536);
+    std::string error;
+    ASSERT_TRUE(dice::update::extractPosixUpdate(f.root / "large.tar.gz", f.root / "out", error));
+    ASSERT_TRUE(contents(f.root / "out/file") == body);
+}
 #endif

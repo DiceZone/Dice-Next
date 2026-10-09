@@ -27,23 +27,93 @@ uint64_t octal(const char* data, size_t size) {
 std::string field(const char* data, size_t size) {
     return std::string(data, strnlen(data, size));
 }
+
+// gzread/gzeof tolerate an unfinished member in some zlib implementations.
+// Require an explicit Z_STREAM_END for every gzip member instead: inflate
+// validates both the CRC and ISIZE before returning it. Keep concatenated
+// gzip members supported, without silently discarding trailing raw bytes.
+class GzipReader {
+public:
+    GzipReader(const fs::path& archive, std::function<bool()> cancelled)
+        : input_(archive, std::ios::binary), cancelled_(std::move(cancelled)) {
+        if (!input_) throw std::runtime_error("cannot open update archive");
+        if (inflateInit2(&stream_, MAX_WBITS + 16) != Z_OK)
+            throw std::runtime_error("cannot initialize gzip decoder");
+    }
+    ~GzipReader() { inflateEnd(&stream_); }
+    GzipReader(const GzipReader&) = delete;
+    GzipReader& operator=(const GzipReader&) = delete;
+
+    size_t read(char* output, size_t length) {
+        if (length == 0) return 0;
+        const auto requested = static_cast<uInt>(std::min<size_t>(length, 65536));
+        stream_.next_out = reinterpret_cast<Bytef*>(output);
+        stream_.avail_out = requested;
+        while (stream_.avail_out != 0) {
+            if (cancelled_ && cancelled_()) throw std::runtime_error("update operation cancelled");
+            if (memberEnded_) {
+                if (!fill()) return requested - stream_.avail_out;
+                // Reset the decoder, preserving any buffered next member and
+                // the caller's remaining output space.
+                auto* nextIn = stream_.next_in;
+                const auto availableIn = stream_.avail_in;
+                auto* nextOut = stream_.next_out;
+                const auto availableOut = stream_.avail_out;
+                if (inflateReset2(&stream_, MAX_WBITS + 16) != Z_OK)
+                    throw std::runtime_error("cannot reset gzip decoder");
+                stream_.next_in = nextIn;
+                stream_.avail_in = availableIn;
+                stream_.next_out = nextOut;
+                stream_.avail_out = availableOut;
+                memberEnded_ = false;
+            } else {
+                fill(); // inflate may still have buffered output at physical EOF.
+            }
+            const auto previousIn = stream_.avail_in, previousOut = stream_.avail_out;
+            const int result = inflate(&stream_, Z_NO_FLUSH);
+            if (result == Z_STREAM_END) {
+                memberEnded_ = true;
+            } else if (result != Z_OK && result != Z_BUF_ERROR) {
+                throw std::runtime_error("invalid or corrupt gzip update archive");
+            } else if (previousIn == stream_.avail_in && previousOut == stream_.avail_out) {
+                if (stream_.avail_in != 0 || !fill())
+                    throw std::runtime_error("truncated gzip update archive");
+            }
+        }
+        return requested;
+    }
+
+private:
+    bool fill() {
+        if (stream_.avail_in != 0) return true;
+        if (input_.eof()) return false;
+        input_.read(reinterpret_cast<char*>(compressed_.data()), compressed_.size());
+        if (input_.bad() || (input_.fail() && !input_.eof()))
+            throw std::runtime_error("cannot read update archive");
+        stream_.next_in = compressed_.data();
+        stream_.avail_in = static_cast<uInt>(input_.gcount());
+        return stream_.avail_in != 0;
+    }
+    std::ifstream input_;
+    std::function<bool()> cancelled_;
+    z_stream stream_{};
+    std::array<Bytef, 65536> compressed_{};
+    bool memberEnded_ = false;
+};
 }
 
 bool extractPosixUpdate(const fs::path& archive, const fs::path& output,
                         std::string& error, const std::function<bool()>& cancelled) {
-    gzFile input = gzopen(archive.c_str(), "rb");
-    if (!input) { error = "cannot open update archive"; return false; }
     try {
-        // gzopen otherwise also accepts uncompressed input.
-        if (gzdirect(input)) throw std::runtime_error("POSIX update must be gzip compressed tar");
+        GzipReader input(archive, cancelled);
         uint64_t readBytes = 0;
         const auto read = [&](char* buffer, size_t length) {
             if (readBytes + length > kExpandedLimit) throw std::runtime_error("update archive exceeds expanded size limit");
             size_t offset = 0;
             while (offset < length) {
                 if (cancelled && cancelled()) throw std::runtime_error("update operation cancelled");
-                const auto count = gzread(input, buffer + offset, static_cast<unsigned>(std::min<size_t>(length - offset, 65536)));
-                if (count <= 0) throw std::runtime_error("truncated or corrupt update archive");
+                const auto count = input.read(buffer + offset, length - offset);
+                if (count == 0) throw std::runtime_error("truncated or corrupt update archive");
                 offset += count;
             }
             readBytes += length;
@@ -65,17 +135,13 @@ bool extractPosixUpdate(const fs::path& archive, const fs::path& output,
                 // Read to gzip EOF to verify its trailer/CRC. Only zero padding
                 // may follow the tar end; hidden additional archives are rejected.
                 std::array<char, 65536> tail{};
-                int count;
-                while ((count = gzread(input, tail.data(), tail.size())) > 0) {
+                size_t count;
+                while ((count = input.read(tail.data(), tail.size())) > 0) {
                     if (cancelled && cancelled()) throw std::runtime_error("update operation cancelled");
                     readBytes += count;
                     if (readBytes > kExpandedLimit || !std::all_of(tail.begin(), tail.begin() + count, [](char ch) { return ch == 0; }))
                         throw std::runtime_error("unexpected data after tar end");
                 }
-                int gzipError = Z_OK;
-                gzerror(input, &gzipError);
-                if (count < 0 || !gzeof(input) || (gzipError != Z_OK && gzipError != Z_STREAM_END))
-                    throw std::runtime_error("corrupt gzip trailer");
                 break;
             }
             if (++entries > 20000) throw std::runtime_error("too many update entries");
@@ -196,10 +262,8 @@ bool extractPosixUpdate(const fs::path& archive, const fs::path& output,
             posix::safeParents(output, relative, false);
             fs::create_symlink(target, output / relative);
         }
-        gzclose(input);
         return true;
     } catch (const std::exception& ex) {
-        gzclose(input);
         error = ex.what();
         return false;
     }
