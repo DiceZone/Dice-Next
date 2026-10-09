@@ -1,0 +1,212 @@
+name: Cross-platform update checks
+
+# This is validation only. Never publish a Release or write the build counter
+# back to main when checking an in-development updater.
+on:
+  push:
+    branches: [cross-platform-update]
+  workflow_dispatch:
+    inputs:
+      webui_ref:
+        description: WebUI branch or commit to package
+        default: main
+        type: string
+      docs_ref:
+        description: Documentation branch or commit to package
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VCPKG_BASELINE: '44819aa2a6c10e56065e2b0330e7d6c89d1d2574'
+  WEBUI_REF: ${{ github.event_name == 'push' && 'cross-platform-update' || inputs.webui_ref || 'main' }}
+  DOCS_REF: ${{ github.event_name == 'push' && 'cross-platform-update' || inputs.docs_ref || 'main' }}
+
+jobs:
+  webui:
+    name: Validation WebUI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: DiceZone/Dice-Next-WebUI
+          ref: ${{ env.WEBUI_REF }}
+          path: web
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Check and build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm test
+          npm run lint
+          npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: update-check-webui
+          path: web/dist
+          if-no-files-found: error
+
+  native:
+    name: Update checks (${{ matrix.platform }})
+    needs: webui
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-24.04
+            triplet: x64-linux-dynamic
+            arch: amd64
+            build_dir: build
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            triplet: arm64-linux-dynamic
+            arch: arm64
+            build_dir: build-arm64
+          - platform: macos-arm64
+            runner: macos-14
+            triplet: arm64-osx
+            arch: arm64
+            build_dir: build
+          - platform: windows-amd64
+            runner: windows-2022
+            triplet: x64-windows
+            arch: amd64
+            build_dir: build
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: main
+          persist-credentials: false
+      - name: Checkout expression engines and documentation
+        shell: bash
+        env:
+          SOURCE_DOCS_REF: ${{ env.DOCS_REF }}
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for repo in onedice-cpp-lib dicescript-c-lib Dice-Next-Doc; do
+            target="$repo"
+            if [ "$repo" = Dice-Next-Doc ]; then target=docs; fi
+            for attempt in 1 2 3; do
+              if git clone --depth 1 "https://github.com/DiceZone/${repo}.git" "$target"; then break; fi
+              if [ "$attempt" = 3 ]; then exit 1; fi
+              sleep 15
+            done
+            [ -d "$target/.git" ] || exit 1
+          done
+          git -C docs fetch --depth 1 origin "$SOURCE_DOCS_REF"
+          git -C docs checkout --detach FETCH_HEAD
+      - uses: actions/download-artifact@v4
+        with:
+          name: update-check-webui
+          path: web/dist
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Install build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git curl zip unzip tar pkg-config libssl-dev libsqlite3-dev
+      - name: Prepare dependencies using the existing cache policy
+        uses: ./main/.github/actions/setup-vcpkg
+        with:
+          triplet: ${{ matrix.triplet }}
+          baseline: ${{ env.VCPKG_BASELINE }}
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
+        working-directory: main
+        run: |
+          cmake -S server -B server/${{ matrix.build_dir }} -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
+      - name: Compile real core, manager and tests (Unix)
+        if: runner.os != 'Windows'
+        working-directory: main
+        run: cmake --build server/${{ matrix.build_dir }} --target dice-next-server dice-next-launcher dice-next-update-test-core dice-next-tests --parallel 2
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: main
+        run: |
+          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DDICENEXT_MSVC_COMPILE_PROCESSES=2 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$env:VCPKG_ROOT/installed"
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
+      - name: Compile regression tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: main
+        run: |
+          cmake --build server/build --config Release --target dice-next-tests --parallel 1
+          if ($LASTEXITCODE -ne 0) { throw 'Test build failed' }
+      - name: Run update and POSIX unit regressions
+        shell: bash
+        working-directory: main
+        env:
+          TEST_BUILD_DIR: ${{ matrix.build_dir }}
+        run: |
+          set -euo pipefail
+          DICENEXT_TEST_FILTER=Update ctest --test-dir "server/$TEST_BUILD_DIR" -C Release -R '^dice_next_tests$' --output-on-failure --no-tests=error --parallel 1 --timeout 900
+          if [ "$RUNNER_OS" != Windows ]; then
+            DICENEXT_TEST_FILTER=Posix ctest --test-dir "server/$TEST_BUILD_DIR" -C Release -R '^dice_next_tests$' --output-on-failure --no-tests=error --parallel 1 --timeout 900
+          fi
+      - name: Test POSIX manager processes
+        if: runner.os != 'Windows'
+        working-directory: main
+        run: node tools/test-posix-manager.mjs server/${{ matrix.build_dir }}/dice-next server/${{ matrix.build_dir }}/dice-next-update-test-core
+      - name: Package Linux validation build
+        if: runner.os == 'Linux'
+        working-directory: main
+        env:
+          DICENEXT_WEB_ROOT: ${{ github.workspace }}/web
+          DICENEXT_DOC_ROOT: ${{ github.workspace }}/docs
+        run: bash cross-compile/scripts/package-linux.sh ${{ matrix.arch }}
+      - name: Package macOS validation build
+        if: runner.os == 'macOS'
+        working-directory: main
+        env:
+          DICENEXT_WEB_ROOT: ${{ github.workspace }}/web
+          DICENEXT_DOC_ROOT: ${{ github.workspace }}/docs
+        run: bash cross-compile/scripts/package-macos.sh
+      - name: Test real packaged core loading
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: main
+        run: |
+          set -euo pipefail
+          fixture=$(mktemp -d)
+          trap 'rm -rf "$fixture"' EXIT
+          archives=(release/*.tar.gz)
+          [ "${#archives[@]}" -eq 1 ]
+          tar -xzf "${archives[0]}" -C "$fixture"
+          package="$fixture/DiceNext-beta"
+          LD_LIBRARY_PATH="$package/lib" "$package/dice-next-server" --update-probe
+          "$package/dice-next" --update-probe
+      - name: Save validation packages (not a Release)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-validation-${{ matrix.platform }}
+          path: main/release/*.tar.gz
+          if-no-files-found: error
+      - name: Save diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-check-diagnostics-${{ matrix.platform }}
+          path: |
+            main/server/**/Testing/Temporary/
+            main/server/**/CMakeConfigureLog.yaml
+          if-no-files-found: ignore

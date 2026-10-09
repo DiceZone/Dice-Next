@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <iomanip>
 #include <sstream>
 #include <mutex>
@@ -19,6 +20,8 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 using namespace dice::update;
@@ -130,16 +133,29 @@ bool downloadFinished(UpdateService& service) {
     return phase == "error" || phase == "cancelled" || phase == "downloaded" || phase == "staged";
 }
 
-#if defined(_WIN32)
 class ScheduledUpdateFixture : public DownloadFixture {
 public:
     ScheduledUpdateFixture() : timezone_(dice::utils::timezoneOffsetMinutes()) {
+#if defined(_WIN32)
         wchar_t value[32768]{};
         if (GetEnvironmentVariableW(L"DICENEXT_MANAGED", value, 32768) > 0) previous_ = value;
         SetEnvironmentVariableW(L"DICENEXT_MANAGED", L"1");
         dice::utils::setTimezoneOffset(480);
         writeResponse(root / "dice-next.exe", "test fixture, never executed");
         writeResponse(root / "app" / "dice-next-core.exe", "test fixture, never executed");
+#else
+        for (const auto* name : {"DICENEXT_MANAGED", "DICENEXT_MANAGER_PID"}) {
+            const char* value = std::getenv(name);
+            environment_.push_back({name, value ? std::optional<std::string>(value) : std::nullopt});
+        }
+        ::setenv("DICENEXT_MANAGED", "1", 1);
+        ::setenv("DICENEXT_MANAGER_PID", std::to_string(::getppid()).c_str(), 1);
+        for (const auto* file : {"dice-next", "dice-next-server"}) {
+            writeResponse(root / file, "test fixture, never executed");
+            std::filesystem::permissions(root / file, std::filesystem::perms::owner_all);
+        }
+        dice::utils::setTimezoneOffset(480);
+#endif
         writeResponse(root / "updates" / "pending" / kUpdateHoldFile, "held");
         writeResponse(root / "updates" / "pending" / "update.json", nlohmann::json{
             {"schema", 1}, {"tag", "v99.0.0-beta.900"}, {"version", "99.0.0"}, {"build", 900},
@@ -147,7 +163,13 @@ public:
         }.dump());
     }
     ~ScheduledUpdateFixture() {
+#if defined(_WIN32)
         SetEnvironmentVariableW(L"DICENEXT_MANAGED", previous_.empty() ? nullptr : previous_.c_str());
+#else
+        for (const auto& [name, value] : environment_) {
+            if (value) ::setenv(name.c_str(), value->c_str(), 1); else ::unsetenv(name.c_str());
+        }
+#endif
         dice::utils::setTimezoneOffset(timezone_);
     }
     void configure(dice::ConfigManager& config) {
@@ -159,9 +181,12 @@ public:
     }
 private:
     int timezone_;
+#if defined(_WIN32)
     std::wstring previous_;
-};
+#else
+    std::vector<std::pair<std::string, std::optional<std::string>>> environment_;
 #endif
+};
 
 }  // namespace
 
@@ -213,7 +238,6 @@ TEST(UpdateSchedule, DefaultsAreOptInAndInvalidSettingsAreRejected) {
     ASSERT_EQ(service.status()["settings"]["installTime"].get<std::string>(), "04:00");
 }
 
-#if defined(_WIN32)
 TEST(UpdateSchedule, PersistsAcrossRestartAndInstallsOnceAtDeadlineEvenWithoutAutoCheck) {
     ScheduledUpdateFixture fixture;
     dice::ConfigManager config((fixture.root / "config").string());
@@ -383,7 +407,7 @@ TEST(UpdateSchedule, ExplicitScheduleAlsoHoldsLegacyStagedPackage) {
     ASSERT_TRUE(service.status()["scheduledInstallAt"].get<std::int64_t>() > 0);
 }
 
-TEST(UpdateSchedule, VerifiedWindowsDownloadHonorsScheduledImmediateAndDownloadOnlyModes) {
+TEST(UpdateSchedule, VerifiedManagedDownloadHonorsScheduledImmediateAndDownloadOnlyModes) {
     for (const auto* mode : {"scheduled", "immediate", "download"}) {
         ScheduledUpdateFixture fixture;
         const auto pending = fixture.root / "updates" / "pending";
@@ -391,14 +415,27 @@ TEST(UpdateSchedule, VerifiedWindowsDownloadHonorsScheduledImmediateAndDownloadO
         std::filesystem::remove(pending / "update.json");
         std::filesystem::remove(pending);
         const auto package = fixture.root / "package";
-        for (const auto* file : {"dice-next.exe", "app/dice-next-core.exe", "app/msvcp140.dll",
+        for (const auto* file : {
+#if defined(_WIN32)
+                                 "dice-next.exe", "app/dice-next-core.exe", "app/msvcp140.dll",
                                  "app/vcruntime140.dll", "app/vcruntime140_1.dll", "i18n/zh-Hans.json",
+#else
+                                 "dice-next", "dice-next-server", "start.sh", "i18n/zh-Hans.json",
+#endif
                                  "web/dist/index.html", "docs/roadmap.md", "install-on-restart"}) {
             writeResponse(package / file, "test package, never executed");
+#ifndef _WIN32
+            std::filesystem::permissions(package / file, std::filesystem::perms::owner_all);
+#endif
         }
+#if defined(_WIN32)
         const auto archive = fixture.root / "fixture.zip";
         const auto packed = dice::proc::run(dice::proc::systemTool("tar.exe"),
             {"-a", "-cf", archive.string(), "package"}, 4096, true, fixture.root);
+#else
+        const auto archive = fixture.root / "fixture.tar.gz";
+        const auto packed = dice::proc::run("/usr/bin/tar", {"-czf", archive.string(), "package"}, 4096, true, fixture.root);
+#endif
         ASSERT_TRUE(packed.ok());
         std::ifstream input(archive, std::ios::binary);
         const std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
@@ -517,7 +554,6 @@ TEST(UpdateSchedule, ExplicitRestartWithoutAReadyPackageIsStillAnOrdinaryRestart
     ASSERT_EQ(restarts.load(), 1);
     ASSERT_FALSE(service.status()["pending"].get<bool>());
 }
-#endif
 
 TEST(UpdateService, CurrentVersionReportsItsActualReleaseChannel) {
     DownloadFixture fixture;

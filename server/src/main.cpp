@@ -31,6 +31,9 @@
 #include "service/backup_service.h"
 #include "platform/instance_guard.h"   // 必须在 tray_win.h(<windows.h>) 之前：先引 winsock2.h
 #include "platform/startup_guard.h"
+#ifndef _WIN32
+#include "platform/posix_update.h"
+#endif
 #include "platform/autostart_win.h"    // Windows 注册表开机自启；其他平台提供 no-op 接口。
 #include "platform/tray_win.h"
 #include "platform/crash_diag_win.h"
@@ -173,11 +176,14 @@ void revokeRequestWebSessions(dice::WebAuth& auth,
     if (!legacy.empty() && legacy != current && auth.validToken(legacy)) auth.revoke(legacy);
 }
 
-/// Request a restart.  dice-next.exe waits for this process to disappear — the
-/// port and the single-instance lock are only free then — applies anything
-/// staged under updates/pending, starts the new core and exits again.  A build
-/// run straight out of the build tree has no launcher beside it and re-launches
-/// itself with the same handshake.  Neither path goes through a shell.
+/// Request a graceful restart. Windows starts a successor manager which waits
+/// for this process to exit; POSIX returns a restart code to the foreground
+/// manager. Both wait for ports, databases and locks to close before applying
+/// an authorized pending update. A direct POSIX core execs itself after shutdown.
+/// None of these paths goes through a shell.
+#ifndef _WIN32
+std::atomic<bool> g_restartRequested{false};
+#endif
 inline void relaunchSelf() {
 #if defined(_WIN32) || defined(_WIN64)
     wchar_t exePath[MAX_PATH] = {0};
@@ -203,6 +209,8 @@ inline void relaunchSelf() {
             CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
         }
     }
+#else
+    g_restartRequested.store(true);
 #endif
     std::thread([] {
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -3005,7 +3013,7 @@ static int realMain(int argc, char* argv[]) {
         dice::cloudban::CloudbanService::instance().reportToCloud(tt, id, "other", reason);
     };
 
-    // GitHub Release 更新服务：复用 Windows 管理器的退出码与 pending 目录。
+    // GitHub Release 更新服务：各平台管理器在核心完全退出后应用 pending。
     dice::update::UpdateService updateService(
         configMgr, [] { relaunchSelf(); },
         [&configMgr, &adapterMgr](const std::string& event, const std::string& message) {
@@ -4492,10 +4500,39 @@ static int realMain(int argc, char* argv[]) {
 // ── 崩溃诊断：main 整体包裹——未捕获 C++ 异常在此直接拿到 what() 落盘
 // （SEH 兜底只有异常码 0xE06D7363，这里可读性最好）。
 int main(int argc, char* argv[]) {
+#ifndef _WIN32
+    // A staged executable must pass its dynamic loader before any replacement.
+    // This probe deliberately precedes diagnostics, logging, restore and config.
+    if (argc == 2 && std::string(argv[1]) == "--update-probe") {
+        std::cout << "Dice!Next " << dice::releaseTag() << '\n';
+        return 0;
+    }
+    const auto originalExecutable = dice::update::posix::executablePath();
+    if (const char* descriptor = std::getenv("DICENEXT_MANAGER_LOCK_FD")) {
+        try {
+            const int fd = std::stoi(descriptor);
+            if (fd >= 3 && dice::update::posix::managedLaunch(std::filesystem::current_path()))
+                ::fcntl(fd, F_SETFD, FD_CLOEXEC); // Subprocesses must not retain the manager lock.
+        } catch (...) {}
+    }
+#endif
     // Must precede crash diagnostics, logging, backups and config/database initialization.
     if (!dice::startup::prepareCoreLaunch()) return 2;
     try {
-        return realMain(argc, argv);
+        const int result = realMain(argc, argv);
+#ifndef _WIN32
+        if (result == 0 && g_restartRequested.load()) {
+            if (dice::update::posix::managedLaunch(std::filesystem::current_path()))
+                return dice::update::posix::kRestartExitCode;
+            // Source-build/direct-core restart: keep PID, CWD and all arguments;
+            // full package installation still requires the manager.
+            argv[0] = const_cast<char*>(originalExecutable.c_str());
+            ::execv(originalExecutable.c_str(), argv);
+            std::cerr << "Dice!Next restart failed: " << std::strerror(errno) << '\n';
+            return 1;
+        }
+#endif
+        return result;
     } catch (const std::exception& e) {
         dice::crashdiag::reportFatal("uncaught std::exception in main", e.what());
         return 3;

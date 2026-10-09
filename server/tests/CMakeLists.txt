@@ -29,6 +29,7 @@ set(TEST_SOURCES
     test_expression_fallback.cpp
     test_roll_command_parser.cpp
     test_update_service.cpp
+    test_posix_update.cpp
     test_check_roll_override.cpp
     test_markdown.cpp
     test_outbound_payload.cpp
@@ -62,6 +63,7 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/version.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/subprocess.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_service.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_archive.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/cloud_card_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/identity_email_service.cpp
     ${VERSION_BUILD_SOURCE}

@@ -5,6 +5,10 @@
 #include "../common/version.h"
 #include "../common/utils.h"
 #include "../common/update_schedule.h"
+#include "update_archive.h"
+#ifndef _WIN32
+#include "../platform/posix_update.h"
+#endif
 
 #include <openssl/evp.h>
 
@@ -721,7 +725,7 @@ bool UpdateService::installSupported() const {
         fs::is_regular_file("dice-next.exe", ec) &&
         fs::is_regular_file(fs::path("app") / "dice-next-core.exe", ec);
 #else
-    return false;
+    return posix::managedLaunch(fs::current_path()) && ::access(".", W_OK) == 0;
 #endif
 }
 
@@ -822,7 +826,7 @@ bool UpdateService::updateSettings(const Json& values, std::string& error) {
             }
             next.scheduledInstall = values["scheduledInstall"].get<bool>();
             if (next.scheduledInstall && !installSupported()) {
-                error = "scheduled installation requires the Windows dice-next.exe manager";
+                error = "scheduled installation requires the Dice!Next package manager (dice-next.exe or start.sh)";
                 return false;
             }
         }
@@ -867,7 +871,7 @@ bool UpdateService::updateSettings(const Json& values, std::string& error) {
                 return false;
             }
             if (next.action == "install" && !installSupported()) {
-                error = "automatic installation requires the Windows dice-next.exe manager";
+                error = "automatic installation requires the Dice!Next package manager (dice-next.exe or start.sh)";
                 return false;
             }
         }
@@ -1004,7 +1008,7 @@ bool UpdateService::requestInstall(std::string& error) {
         return false;
     }
     if (!installSupported()) {
-        error = "automatic installation requires the Windows dice-next.exe manager";
+        error = "automatic installation requires the Dice!Next package manager (dice-next.exe or start.sh)";
         return false;
     }
     if (!fs::is_directory(fs::path("updates") / "pending")) {
@@ -1696,15 +1700,9 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
     return false;
 }
 
-bool UpdateService::prepareWindowsStage(const fs::path& archive,
-                                        const ReleaseManifest& manifest,
-                                        std::string& error) {
-#if !defined(_WIN32)
-    (void)archive;
-    (void)manifest;
-    error = "automatic staging is currently available only for Windows packages";
-    return false;
-#else
+bool UpdateService::prepareStage(const fs::path& archive,
+                                 const ReleaseManifest& manifest,
+                                 std::string& error) {
     const auto sequence = updaterTemporarySuffix();
     const fs::path updates = fs::path("updates");
     const fs::path extractRoot = updates / ("extract-" + sequence);
@@ -1712,6 +1710,10 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
     const fs::path pending = updates / "pending";
     const fs::path pendingOld = updates / ("pending-old-" + sequence);
     std::error_code ec;
+#ifndef _WIN32
+    try { posix::safeParents(fs::current_path(), extractRoot / "probe", false); }
+    catch (const std::exception& ex) { error = ex.what(); return false; }
+#endif
 
     fs::remove_all(extractRoot, ec);
     fs::remove_all(pendingNew, ec);
@@ -1722,6 +1724,11 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
         return false;
     }
 
+    const auto shouldCancel = [this] {
+        return stopping_.load(std::memory_order_acquire) ||
+            downloadCancelled_.load(std::memory_order_acquire);
+    };
+#if defined(_WIN32)
     const std::wstring archiveText = fs::absolute(archive).wstring();
     const std::wstring extractText = fs::absolute(extractRoot).wstring();
     if (archiveText.find(L'"') != std::wstring::npos || extractText.find(L'"') != std::wstring::npos) {
@@ -1732,10 +1739,6 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
 
     const std::string tar = dice::proc::systemTool("tar.exe");
     const fs::path archivePath = fs::absolute(archive);
-    const auto shouldCancel = [this] {
-        return stopping_.load(std::memory_order_acquire) ||
-            downloadCancelled_.load(std::memory_order_acquire);
-    };
     const dice::proc::Result listed =
         dice::proc::runPathsCancellable(
             tar, {"-tf", archivePath}, shouldCancel, 8 * 1024 * 1024);
@@ -1776,15 +1779,27 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
         fs::remove_all(extractRoot, ec);
         return false;
     }
+#else
+    if (!extractPosixUpdate(fs::absolute(archive), fs::absolute(extractRoot), error, shouldCancel)) {
+        fs::remove_all(extractRoot, ec);
+        return false;
+    }
+#endif
 
     fs::path packageRoot;
-    if (fs::is_regular_file(extractRoot / "app" / "dice-next-core.exe", ec)) {
+    const fs::path coreRelative =
+#if defined(_WIN32)
+        fs::path("app") / "dice-next-core.exe";
+#else
+        "dice-next-server";
+#endif
+    if (fs::is_regular_file(extractRoot / coreRelative, ec)) {
         packageRoot = extractRoot;
     } else {
         for (const auto& candidate : fs::directory_iterator(extractRoot, ec)) {
             if (ec) break;
             if (candidate.is_directory(ec) &&
-                fs::is_regular_file(candidate.path() / "app" / "dice-next-core.exe", ec)) {
+                fs::is_regular_file(candidate.path() / coreRelative, ec)) {
                 if (!packageRoot.empty()) {
                     error = "update archive has multiple package roots";
                     fs::remove_all(extractRoot, ec);
@@ -1795,6 +1810,7 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
         }
     }
 
+#if defined(_WIN32)
     const auto missing = packageRoot.empty()
         ? std::vector<std::string>{"package root"}
         : missingWindowsPackageComponents(packageRoot);
@@ -1809,6 +1825,16 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
         fs::remove_all(extractRoot, ec);
         return false;
     }
+#else
+    try {
+        if (packageRoot.empty()) throw std::runtime_error("update archive has no POSIX package root");
+        posix::validatePackage(packageRoot);
+    } catch (const std::exception& ex) {
+        error = ex.what();
+        fs::remove_all(extractRoot, ec);
+        return false;
+    }
+#endif
     {
         nlohmann::json metadata{
             {"schema", 1},
@@ -1879,7 +1905,6 @@ bool UpdateService::prepareWindowsStage(const fs::path& archive,
     }
     fs::remove_all(pendingOld, ec);
     return true;
-#endif
 }
 
 void UpdateService::doDownload() {
@@ -1957,17 +1982,22 @@ void UpdateService::doDownload() {
         return;
     }
 
-#if defined(_WIN32)
     std::string stageError;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!downloadCancelled_.load(std::memory_order_acquire)) phase_ = "preparing";
-    }
-    if (!prepareWindowsStage(archive, manifest, stageError)) {
-        fail(std::move(stageError));
-        return;
-    }
+#if defined(_WIN32)
+    const bool prepare = true;
+#else
+    const bool prepare = installSupported();
 #endif
+    if (prepare) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!downloadCancelled_.load(std::memory_order_acquire)) phase_ = "preparing";
+        }
+        if (!prepareStage(archive, manifest, stageError)) {
+            fail(std::move(stageError));
+            return;
+        }
+    }
 
     Settings current;
     bool installQueued = false;
@@ -1984,11 +2014,7 @@ void UpdateService::doDownload() {
             phase_ = "cancelled";
             return;
         }
-#if defined(_WIN32)
-        phase_ = "staged";
-#else
-        phase_ = "downloaded";
-#endif
+        phase_ = prepare ? "staged" : "downloaded";
         DICE_LOG_INFO("Verified update {} downloaded from {} to {}",
             manifest.tag, usedSource, archive.string());
 
@@ -2054,7 +2080,7 @@ void UpdateService::doInstall() {
         return;
     }
 
-    DICE_LOG_INFO("Handing staged update to dice-next.exe manager");
+    DICE_LOG_INFO("Handing staged update to the Dice!Next package manager");
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if (wake_.wait_for(lock, std::chrono::milliseconds(350), [&] {

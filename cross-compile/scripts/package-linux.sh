@@ -28,9 +28,11 @@ if [[ "$ARCH" == "arm64" ]]; then
     TRIPLET="arm64-linux-dynamic"
 fi
 SERVER_BIN="$SERVER_DIR/$BUILD_DIR/dice-next-server"
+MANAGER_BIN="$SERVER_DIR/$BUILD_DIR/dice-next"
 VERSION_SOURCE="$SERVER_DIR/$BUILD_DIR/generated/version_build.cpp"
 
 [[ -f "$SERVER_BIN" ]] || { echo "Missing $SERVER_BIN; run ./build-linux.sh $ARCH first" >&2; exit 1; }
+[[ -f "$MANAGER_BIN" ]] || { echo "Missing $MANAGER_BIN; rebuild the package manager first" >&2; exit 1; }
 [[ -d "$WEB_DIST" ]] || { echo "Missing $WEB_DIST; build Dice-Next-WebUI first or set DICENEXT_WEB_ROOT" >&2; exit 1; }
 [[ -d "$DOCS_ROOT" ]] || { echo "Missing documentation project; set DICENEXT_DOC_ROOT" >&2; exit 1; }
 for required in decks helpdoc plugins/js; do
@@ -64,6 +66,7 @@ mkdir -p "$STAGING_DIR" "$RELEASE_DIR"
 echo "Packaging $PACKAGE_NAME ..."
 
 install -m 0755 "$SERVER_BIN" "$STAGING_DIR/dice-next-server"
+install -m 0755 "$MANAGER_BIN" "$STAGING_DIR/dice-next"
 cp -a "$SERVER_DIR/i18n" "$STAGING_DIR/i18n"
 # Update mirrors ship as package data rather than string literals in the
 # binary, so they can be edited without a rebuild.
@@ -98,8 +101,7 @@ cat > "$STAGING_DIR/start.sh" << 'EOF'
 #!/usr/bin/env bash
 set -e
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export LD_LIBRARY_PATH="$ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$ROOT/dice-next-server" "$@"
+exec "$ROOT/dice-next" "$@"
 EOF
 chmod +x "$STAGING_DIR/start.sh"
 
@@ -113,7 +115,10 @@ Run:
 
 Notes:
   - First launch creates the config/ directory automatically.
-  - Package-local runtime libraries are loaded by start.sh.
+  - start.sh runs the foreground manager; it loads package-local libraries.
+  - The WebUI supports install/restart and optional scheduled automatic updates.
+    Replacements preserve config, databases, user decks and non-bundled plugins.
+  - For systemd, use start.sh or dice-next as ExecStart, not dice-next-server.
   - Upgrade by replacing the program, lib, i18n, web/dist and data files;
     keep your config and database files.
   - This is a Beta build. Feedback: QQ group 933145116.

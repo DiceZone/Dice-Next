@@ -15,10 +15,12 @@ WEB_DIST="$WEB_ROOT/dist"
 DEFAULT_DATA="$SERVER_DIR/resources/default-data"
 RELEASE_DIR="$PROJECT_ROOT/release"
 SERVER_BIN="$SERVER_DIR/build/dice-next-server"
+MANAGER_BIN="$SERVER_DIR/build/dice-next"
 VERSION_SOURCE="$SERVER_DIR/build/generated/version_build.cpp"
 TRIPLET="arm64-osx"
 
 [[ -f "$SERVER_BIN" ]] || { echo "Missing $SERVER_BIN" >&2; exit 1; }
+[[ -f "$MANAGER_BIN" ]] || { echo "Missing $MANAGER_BIN; rebuild the package manager first" >&2; exit 1; }
 [[ -d "$WEB_DIST" ]] || { echo "Missing $WEB_DIST; build Dice-Next-WebUI first or set DICENEXT_WEB_ROOT" >&2; exit 1; }
 [[ -d "$DOCS_ROOT" ]] || { echo "Missing documentation project; set DICENEXT_DOC_ROOT" >&2; exit 1; }
 for required in decks helpdoc plugins/js; do
@@ -48,6 +50,7 @@ ARCHIVE="$RELEASE_DIR/$PACKAGE_NAME.tar.gz"
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR" "$RELEASE_DIR"
 install -m 0755 "$SERVER_BIN" "$STAGING_DIR/dice-next-server"
+install -m 0755 "$MANAGER_BIN" "$STAGING_DIR/dice-next"
 cp -a "$SERVER_DIR/i18n" "$STAGING_DIR/i18n"
 # Update mirrors ship as package data rather than string literals in the
 # binary, so they can be edited without a rebuild.
@@ -69,12 +72,12 @@ done
 cp -a "$WEB_DIST" "$STAGING_DIR/web/dist"
 
 # macOS test packages use the static vcpkg triplet.  Keep the distribution to a
-# single application executable: Gatekeeper should only need to assess that one
-# file, not every bundled third-party dylib.  System frameworks remain dynamic
+# statically linked core and dependency-free manager: Gatekeeper need not
+# assess dozens of bundled third-party dylibs. System frameworks remain dynamic
 # and are trusted by macOS.  Refuse to create a misleading "single file" package
 # if a vcpkg dylib was linked by accident.
 if command -v otool >/dev/null 2>&1; then
-    external_libs="$(otool -L "$SERVER_BIN" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' || true)"
+    external_libs="$(otool -L "$SERVER_BIN" "$MANAGER_BIN" | awk '/^[[:space:]]/{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' || true)"
     if [[ -n "$external_libs" ]]; then
         echo "Unexpected non-system dynamic dependencies in static macOS build:" >&2
         echo "$external_libs" >&2
@@ -86,7 +89,7 @@ cat > "$STAGING_DIR/start.sh" << 'EOF'
 #!/usr/bin/env bash
 set -e
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$ROOT/dice-next-server" "$@"
+exec "$ROOT/dice-next" "$@"
 EOF
 chmod +x "$STAGING_DIR/start.sh"
 
@@ -102,7 +105,10 @@ Notes:
   - First launch creates the config/ directory automatically.
   - If macOS blocks the binary, allow it in Privacy & Security.
   - This package statically links third-party dependencies. macOS may ask to
-    allow dice-next-server once because this beta build is not Apple-signed.
+    allow dice-next and dice-next-server because this beta build is not Apple-signed.
+  - start.sh runs the foreground manager with install/restart and scheduled updates.
+    No Gatekeeper or system security checks are disabled by the updater.
+  - For launchd, run start.sh or dice-next, not dice-next-server.
   - Upgrade by replacing the program, i18n, web/dist and data files;
     keep your config and database files.
   - Feedback: QQ group 933145116.
