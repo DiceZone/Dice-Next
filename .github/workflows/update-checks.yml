@@ -136,7 +136,12 @@ jobs:
       - name: Compile real core, manager and tests (Unix)
         if: runner.os != 'Windows'
         working-directory: main
-        run: cmake --build server/${{ matrix.build_dir }} --target dice-next-server dice-next-launcher dice-next-update-test-core dice-next-tests --parallel 2
+        run: |
+          # Tests also prepare a build number. Build the release core last so
+          # its linked version, generated source and committed local counter
+          # still agree when packaging; do not bypass the freshness check.
+          cmake --build server/${{ matrix.build_dir }} --target dice-next-tests dice-next-launcher dice-next-update-test-core --parallel 2
+          cmake --build server/${{ matrix.build_dir }} --target dice-next-server --parallel 2
       - name: Configure (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
