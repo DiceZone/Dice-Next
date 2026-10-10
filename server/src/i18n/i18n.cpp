@@ -429,6 +429,23 @@ void I18n::noteOutboundFormat(ContentFormat format) {
         outboundCaptureMarkdown_ = true;
 }
 
+ReplyContent I18n::captureFragment(const std::function<std::string()>& render) {
+    const bool active = outboundCaptureActive_, markdown = outboundCaptureMarkdown_;
+    outboundCaptureActive_ = true;
+    outboundCaptureMarkdown_ = false;
+    auto restore = [&] {
+        outboundCaptureMarkdown_ = markdown || (active && outboundCaptureMarkdown_);
+        outboundCaptureActive_ = active;
+    };
+    try {
+        ReplyContent result;
+        result.text = render();
+        result.format = outboundCaptureMarkdown_ ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
+        restore();
+        return result;
+    } catch (...) { restore(); throw; }
+}
+
 std::string I18n::previewTemplate(const std::string& value, const Args& args, ContentFormat format) {
     return renderTemplate(prepareTemplate(value, format), args);
 }

@@ -1038,6 +1038,7 @@ static int realMain(int argc, char* argv[]) {
     // eventMsg 还漏了 JS 非指令钩子），统一后不再漂移。
     auto replyFallback = [&cmdRouter, &replyManager, &jsMod, &luaMod, &causalMgr](
             const dice::Message& m, std::string& replySrc) -> std::string {
+        if (cmdRouter.lastShortcutHandled()) return {}; // Includes intentionally silent shortcut targets.
         std::string reply;
         const bool pv = m.type == dice::MessageType::kPrivate;
         const bool pluginsOn = cmdRouter.groupFeatureEnabled(m, "plugin");
@@ -1176,6 +1177,33 @@ static int realMain(int argc, char* argv[]) {
     cmdRouter.setLuaTaskBridge(
         [&luaMod](const std::string& name) { return luaMod.hasTask(name); },
         [&luaMod](const std::string& name, std::string* error) { return luaMod.runTask(name, error); });
+    // Shortcut targets have already passed CommandRouter's target gates. Only
+    // invoke actual plugin commands here, never ordinary chat/AI reply rules.
+    cmdRouter.setShortcutPluginBridge([&cmdRouter, &jsMod, &luaMod](
+            const dice::Message& message, const std::string& body) -> std::optional<std::string> {
+        if (cmdRouter.isBlocked(message) || cmdRouter.isGroupLocked(message) ||
+            !cmdRouter.groupFeatureEnabled(message, "plugin")) return std::nullopt;
+        std::string word = body.substr(0, body.find_first_of(" \t"));
+        if (dice::plugin_command_priority::isReservedCoreCommand(word) || cmdRouter.isLegacyTextCommandName(word))
+            return std::nullopt;
+        if (jsMod.ready() && jsMod.hasCommand(message, word)) {
+            auto result = jsMod.handle(message, body, cmdRouter.jsPrivilegeLevel(message));
+            if (result.matched) return result.reply;
+        }
+        if (!luaMod.ready()) return std::nullopt;
+        const bool pv = message.type == dice::MessageType::kPrivate;
+        const auto group = pv ? std::string() : message.targetId;
+        const auto nick = message.senderName.empty() ? message.senderId : message.senderName;
+        const auto card = message.extra.is_object() ? message.extra.value("card", std::string()) : std::string();
+        const int trust = cmdRouter.jsPrivilegeLevel(message) >= 70 ? 4 : 0;
+        if (!luaMod.hasCommandTrigger(word, message.senderId, group, nick, card, pv, trust, message.platform, message.adapterId) &&
+            !luaMod.hasCommandTrigger("." + word, message.senderId, group, nick, card, pv, trust, message.platform, message.adapterId))
+            return std::nullopt;
+        auto result = luaMod.dispatch(message.content, message.senderId, group, nick, card, pv, trust, message.platform, message.adapterId);
+        if (!result.matched && message.content != "." + body)
+            result = luaMod.dispatch("." + body, message.senderId, group, nick, card, pv, trust, message.platform, message.adapterId);
+        return result.matched ? std::optional<std::string>(result.reply) : std::nullopt;
+    });
     // WebUI 定时任务的「执行插件指令」：构造一个最低权限的虚拟消息，
     // 只进入 JS/Lua 插件指令层，不把定时任务扩大成内置管理指令后门。
     cmdRouter.setScheduledPluginCommandBridge(
@@ -1407,12 +1435,12 @@ static int realMain(int argc, char* argv[]) {
         dice::ContentFormat replyFormat = dice::I18n::endOutboundCapture();
         bool didCommand = !reply.empty();
         dice::JsPluginManager::Result commandHook;
-        if (didCommand && jsMod.ready() && (!cmdRouter.isGroupDisabled(msg) || forcedByAt))
+        if (didCommand && !cmdRouter.lastShortcutWasPlugin() && jsMod.ready() && (!cmdRouter.isGroupDisabled(msg) || forcedByAt))
             if (auto body = cmdRouter.commandBody(msg.content); body && !body->empty())
                 commandHook = jsMod.handleCommandReceived(msg, *body, cmdRouter.jsPrivilegeLevel(msg));
 
         // 阶段3：回复来源分类（builtin/plugin/reply），供 AI 翻译按范围过滤。
-        std::string replySrc = "builtin";
+        std::string replySrc = cmdRouter.lastShortcutWasPlugin() ? "plugin_command" : "builtin";
         // No command matched → custom replies, unless the group is disabled or has
         // custom replies turned off (.group +禁用回复).
         bool replyOff = msg.type == dice::MessageType::kGroup && !msg.targetId.empty()

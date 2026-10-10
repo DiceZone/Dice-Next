@@ -3,6 +3,30 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-10: SealDice-style command shortcuts
+
+- Windows Release backend, tests and the credential-free preview driver built
+  successfully. CTest passed the full core suite: 566 cases / 5569 assertions;
+  the existing Lua compatibility suite passed 17 cases / 165 assertions.
+- The shortcut-specific scope passed 20 cases / 396 assertions, covering group
+  and personal CRUD, scope precedence and per-account isolation, appended
+  arguments, caller permissions, bot-off/lock/blacklist/command/feature gates,
+  recursion protection, rule-pack target rewriting, persistence and verified
+  identity migration. Legacy account permission links remain intact under
+  `.admin account-alias`; shortcut storage never replaces `dice/aliases`.
+- A real Seal-compatible JS extension exercised solve/command hooks, expanded
+  message text and segments, caller ID and privilege, and plugin disablement.
+  Mock bridges also checked deliberate silence and ordinary plugin-generated
+  messages. Markdown/plain composition, persona overrides, nested capture and
+  exception restoration were tested; no live Lua alias delivery is claimed.
+- WebUI type check, production build and all 205 tests passed, including the
+  real backend preview renderer for localized shortcut variables/nested sample.
+  The four-locale documentation catalog linked all 891 editable texts per locale,
+  and the documentation production build passed.
+- These are isolated local checks, not a new Release/CI result, browser visual
+  acceptance or real bot/platform delivery. Optional external Lua corpora were
+  not supplied for this run.
+
 ## 2026-10-05: Scheduled update installation and installation on any restart
 
 - Windows Release builds of the backend, tests and launcher succeeded. The full

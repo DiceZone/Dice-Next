@@ -444,7 +444,7 @@
     "target_higher": "相手の信頼レベルが自分未満ではないため変更できません。"
   },
   "admin": {
-    "usage": "管理者 .admin\n.admin add <@ユーザー/QQ> // 管理者を付与\n.admin del <@ユーザー/QQ> // 管理者を剥奪\n.admin list // 管理者を一覧\n.admin clock // グローバル Lua またはチャット別プラグイン定時タスクを管理\n.admin censor // センシティブワードを管理\nマスターのみ。",
+    "usage": "管理者 .admin\n.admin add <@ユーザー/QQ> // 管理者を付与\n.admin del <@ユーザー/QQ> // 管理者を剥奪\n.admin list // 管理者を一覧\n.admin clock // グローバル Lua またはチャット別プラグイン定時タスクを管理\n.admin censor // センシティブワードを管理\nマスターのみ。\n.admin account-alias // 旧アカウント権限リンク",
     "added": "{user} に管理権限を付与しました √",
     "removed": "{user} の管理権限を剥奪しました √",
     "not_admin": "そのユーザーに管理権限はありません。",
@@ -488,8 +488,28 @@
     "set": "このウィンドウを通知ウィンドウに設定、購読レベル：{level} √",
     "removed": "このウィンドウのマスター通知を無効化しました √"
   },
+  "shortcut": {
+    "usage": "ショートカット .alias\n.alias <名前> <コマンド> // グループではグループ用を作成\n.alias --my <名前> <コマンド> // 個人用を作成。個別チャットの既定\n.alias del/rm [--my] <名前> // 対応する範囲から削除\n.alias show/list // 現在のグループ用と自分の個人用を一覧\n.&<名前> [引数] / .a <名前> [引数] // 引数を末尾に追加して実行\n同名ではグループ用を優先。呼び出した人の権限で実行し、再帰呼び出しは禁止。",
+    "execute_usage": "実行：.&<名前> [引数] または .a <名前> [引数]\n.alias で作成、置換、削除できます。",
+    "personal": "個人",
+    "group": "グループ",
+    "added": "{source}用ショートカット「{shortcut}」を追加：{command}",
+    "replaced": "{source}用ショートカット「{shortcut}」を置換：{command}",
+    "removed": "{source}用ショートカット「{shortcut}」を削除しました。",
+    "not_found": "ショートカット「{shortcut}」が見つかりません。",
+    "list": "利用可能なショートカット（グループ用を優先）：\n{list}",
+    "list_item": "[{source}] .&{shortcut} → {command}",
+    "list_empty": "利用可能なショートカットはありません。",
+    "invalid_name": "名前は空白・制御文字を含まない 1〜80 バイトにしてください。",
+    "invalid_target": "有効な接頭辞を持つ単一のコマンド（最大 4096 バイト）が必要です。.a / .& と .bind は指定できません。旧アカウント権限の管理は .admin account-alias を使用してください。",
+    "recursion": "別のショートカットは呼び出せません。実行を停止しました。",
+    "target_unknown": "利用可能な組み込み・プラグインコマンドに一致しません：{command}",
+    "limit": "ユーザーまたはグループの範囲ごとに最大 100 件です。不要な項目を削除してください。",
+    "storage_error": "ショートカットを読み込み・保存できません。データベースを確認してください。",
+    "trigger_prefix": "※ {source}用ショートカット {command}\n"
+  },
   "alias": {
-    "usage": "アカウント別名 .alias\n.alias add <別名ID> <主ID> // アカウント別名を紐付け\n.alias del <別名ID> // 解除\n.alias list // 別名を一覧\n別名アカウントの信頼とマスター身分は主アカウントに従う。マスターのみ。",
+    "usage": "旧アカウント権限リンク（マスターのみ）\n.admin account-alias add <副ID> <主ID>\n.admin account-alias del <副ID>\n.admin account-alias list\n信頼・マスター権限のみを共有し、データは統合しません。クロスプラットフォームの本人確認は .bind を使用してください。",
     "added": "別名を紐付けました：{alias} -> {main} √",
     "removed": "別名 {alias} を解除しました √",
     "not_found": "その別名は見つかりません。",
@@ -872,6 +892,9 @@
     "list_empty": "（なし）"
   },
   "tplvar": {
+    "shortcut": "ショートカット名",
+    "source": "ショートカットの範囲（グループ・個人）",
+    "command": "展開後の完全なコマンド",
     "rank": "旧版成功段階：0ファンブル、1失敗、2成功、3ハード、4イクストリーム、5クリティカル",
     "result": "判定値（数値）",
     "outcome": "ルールによる判定結果",

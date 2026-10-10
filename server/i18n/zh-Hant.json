@@ -449,7 +449,7 @@
     "target_higher": "對方的信任等級不低於你，無法修改。"
   },
   "admin": {
-    "usage": "管理員 .admin\n.admin add <@某人/QQ號> // 授予管理員\n.admin del <@某人/QQ號> // 撤銷管理員\n.admin list // 列出管理員\n.admin clock // 管理 Lua 全域或本視窗外掛定時任務\n.admin censor // 管理敏感詞\n僅骰主可用。",
+    "usage": "管理員 .admin\n.admin add <@某人/QQ號> // 授予管理員\n.admin del <@某人/QQ號> // 撤銷管理員\n.admin list // 列出管理員\n.admin clock // 管理 Lua 全域或本視窗外掛定時任務\n.admin censor // 管理敏感詞\n僅骰主可用。\n.admin account-alias // 主副號權限關聯",
     "added": "已添加 {user} 的管理權限√",
     "removed": "已收回 {user} 的管理權限√",
     "not_admin": "該用戶沒有管理權限。",
@@ -493,8 +493,28 @@
     "set": "已將本視窗設為通知視窗，訂閱級別：{level}√",
     "removed": "已取消本視窗的骰主通知√"
   },
+  "shortcut": {
+    "usage": "快捷指令 .alias\n.alias <名稱> <指令> // 群聊預設建立群快捷指令\n.alias --my <名稱> <指令> // 建立個人快捷指令；私聊預設為個人\n.alias del/rm [--my] <名稱> // 刪除對應作用域的快捷指令\n.alias show/list // 列出目前群及自己的快捷指令\n.&<名稱> [參數] / .a <名稱> [參數] // 執行，參數附加到原指令後\n同名時群優先。按呼叫者權限執行，不能遞迴呼叫快捷指令。",
+    "execute_usage": "執行快捷指令：.&<名稱> [參數] 或 .a <名稱> [參數]\n使用 .alias 建立、修改或刪除快捷指令。",
+    "personal": "個人",
+    "group": "群",
+    "added": "已新增{source}快捷指令「{shortcut}」：{command}",
+    "replaced": "已替換{source}快捷指令「{shortcut}」：{command}",
+    "removed": "已刪除{source}快捷指令「{shortcut}」。",
+    "not_found": "未找到快捷指令「{shortcut}」。",
+    "list": "目前可用快捷指令（同名時群優先）：\n{list}",
+    "list_item": "[{source}] .&{shortcut} → {command}",
+    "list_empty": "目前沒有可用的快捷指令。",
+    "invalid_name": "快捷指令名稱不能為空、包含空白或控制字元，且不能超過 80 位元組。",
+    "invalid_target": "目標必須是一條帶有效指令前綴的指令，最多 4096 位元組；不能呼叫 .a / .& 或 .bind。舊帳號權限關聯請使用 .admin account-alias。",
+    "recursion": "快捷指令不能呼叫其他快捷指令，已停止執行。",
+    "target_unknown": "快捷指令的目標未符合可用的內建或外掛指令：{command}",
+    "limit": "每個使用者或群作用域最多儲存 100 條快捷指令，請先刪除不再使用的項目。",
+    "storage_error": "快捷指令讀取或儲存失敗，請檢查資料庫狀態。",
+    "trigger_prefix": "※ {source}快捷指令 {command}\n"
+  },
   "alias": {
-    "usage": "帳號別名 .alias\n.alias add <別名ID> <主ID> // 綁定帳號別名\n.alias del <別名ID> // 解綁\n.alias list // 列出全部別名\n別名帳號的信任與骰主身份按主號計算。僅骰主可用。",
+    "usage": "主副號權限關聯（僅骰主）\n.admin account-alias add <副號ID> <主號ID>\n.admin account-alias del <副號ID>\n.admin account-alias list\n僅關聯信任與骰主權限，不合併帳號資料。跨平台身分綁定請用 .bind。",
     "added": "已綁定別名 {alias} -> {main}√",
     "removed": "已解綁別名 {alias}√",
     "not_found": "未找到該別名。",
@@ -877,6 +897,9 @@
     "list_empty": "（空）"
   },
   "tplvar": {
+    "shortcut": "快捷指令名稱",
+    "source": "快捷指令來源（群／個人）",
+    "command": "快捷指令展開後的完整指令",
     "rank": "舊版成功等級：0大失敗、1失敗、2成功、3困難、4極難、5大成功",
     "result": "檢定數值（純數字）",
     "outcome": "規則判定結果",

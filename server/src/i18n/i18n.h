@@ -19,6 +19,7 @@
 // looks up  { "dice": { "error": { "roll": "Roll error: {error}" } } }.
 
 #include "../common/content_format.h"
+#include "../common/reply_content.h"
 #include "../common/presentation_style.h"
 #include "../common/types.h"
 #include "../common/safe_template.h"
@@ -29,6 +30,7 @@
 #include <mutex>
 #include <optional>
 #include <utility>
+#include <functional>
 #include <nlohmann/json.hpp>
 
 namespace dice {
@@ -142,6 +144,9 @@ public:
         ContentFormat preferredOutput = ContentFormat::kMarkdown,
         PresentationStyle style = PresentationStyle::kStandard);
     static ContentFormat endOutboundCapture();
+    /// Measure one fragment without resetting the caller's preferred format,
+    /// presentation style or accumulated format. Supports nested composition.
+    static ReplyContent captureFragment(const std::function<std::string()>& render);
     static PresentationStyle outboundPresentationStyle();
 
     /// Flatten the whole bundle for @p loc into {dotted-key → default value} for

@@ -443,7 +443,7 @@
     "target_higher": "That user's trust level is not below yours; cannot modify."
   },
   "admin": {
-    "usage": "Admins .admin\n.admin add <@user/QQ> // grant admin\n.admin del <@user/QQ> // revoke admin\n.admin list // list admins\n.admin clock // manage global Lua or per-chat plugin schedules\n.admin censor // manage sensitive words\nMaster only.",
+    "usage": "Admins .admin\n.admin add <@user/QQ> // grant admin\n.admin del <@user/QQ> // revoke admin\n.admin list // list admins\n.admin clock // manage global Lua or per-chat plugin schedules\n.admin censor // manage sensitive words\nMaster only.\n.admin account-alias // legacy account permission links",
     "added": "Granted admin to {user} √",
     "removed": "Revoked admin from {user} √",
     "not_admin": "That user has no admin permission.",
@@ -487,8 +487,28 @@
     "set": "This window is now a notice window, level: {level} √",
     "removed": "Owner notices for this window disabled √"
   },
+  "shortcut": {
+    "usage": "Command shortcuts .alias\n.alias <name> <command> // create a group shortcut in group chat\n.alias --my <name> <command> // create a personal shortcut; default in private chat\n.alias del/rm [--my] <name> // delete a shortcut in that scope\n.alias show/list // list this group's and your personal shortcuts\n.&<name> [arguments] / .a <name> [arguments] // append arguments and execute\nGroup shortcuts take priority. Execution uses the caller's permissions. Recursive shortcuts are not allowed.",
+    "execute_usage": "Execute a shortcut: .&<name> [arguments] or .a <name> [arguments]\nUse .alias to create, replace or delete shortcuts.",
+    "personal": "Personal",
+    "group": "Group",
+    "added": "{source} shortcut '{shortcut}' added: {command}",
+    "replaced": "{source} shortcut '{shortcut}' replaced: {command}",
+    "removed": "{source} shortcut '{shortcut}' deleted.",
+    "not_found": "Shortcut '{shortcut}' was not found.",
+    "list": "Available shortcuts (group takes priority):\n{list}",
+    "list_item": "[{source}] .&{shortcut} → {command}",
+    "list_empty": "No shortcuts are currently available.",
+    "invalid_name": "A shortcut name must be nonempty, contain no whitespace/control characters and be at most 80 bytes.",
+    "invalid_target": "The target must be a single command with an active prefix, at most 4096 bytes; .a / .& and .bind targets are not allowed. Manage legacy account permissions with .admin account-alias.",
+    "recursion": "Shortcuts cannot invoke other shortcuts. Execution stopped.",
+    "target_unknown": "No available built-in or plugin command matched this shortcut target: {command}",
+    "limit": "Each user or group scope can store up to 100 shortcuts. Delete an unused entry first.",
+    "storage_error": "Could not read or save shortcuts. Check the database status.",
+    "trigger_prefix": "※ {source} shortcut {command}\n"
+  },
   "alias": {
-    "usage": "Account alias .alias\n.alias add <alias ID> <main ID> // bind an account alias\n.alias del <alias ID> // unbind\n.alias list // list all aliases\nAn alias account's trust and Master status follow the main account. Master only.",
+    "usage": "Legacy account permission links (Master only)\n.admin account-alias add <secondary ID> <primary ID>\n.admin account-alias del <secondary ID>\n.admin account-alias list\nShares trust and Master permissions, without merging account data. Use .bind for verified cross-platform identities.",
     "added": "Alias bound: {alias} -> {main} √",
     "removed": "Alias {alias} unbound √",
     "not_found": "Alias not found.",
@@ -871,6 +891,9 @@
     "list_empty": "(none)"
   },
   "tplvar": {
+    "shortcut": "Shortcut name",
+    "source": "Shortcut scope (group or personal)",
+    "command": "Fully expanded shortcut command",
     "rank": "Legacy success rank: 0 fumble, 1 failure, 2 success, 3 hard, 4 extreme, 5 critical",
     "result": "Check value (number)",
     "outcome": "Rule-specific outcome",
