@@ -1,4 +1,5 @@
 #include "test_framework.h"
+#include "test_watchdog.h"
 #include "../src/core/mod/lua_plugin_manager.h"
 
 #include <chrono>
@@ -69,6 +70,76 @@ private:
 #endif
 
 }  // namespace
+
+TEST(LuaPluginCompat, ExecutionTimeoutCannotBeCaughtOrRemovedAndRuntimeRecovers) {
+    TestWatchdog watchdog;
+    TempWorkspace workspace("dice_next_lua_deadline_");
+    LuaPluginManager manager(std::chrono::milliseconds(100), 8 * 1024 * 1024);
+    ASSERT_TRUE(manager.init());
+    for (const std::string code : {
+        "while true do end",
+        "while true do pcall(function() while true do end end) end",
+        "pcall(debug.sethook); while true do end",
+        "local co=coroutine.create(function() while true do end end); while true do coroutine.resume(co) end",
+        "local co=coroutine.wrap(function() while true do end end); while true do pcall(co) end"
+    }) {
+        std::string error;
+        ASSERT_FALSE(manager.eval(code, &error));
+        ASSERT_TRUE(error.find("超时") != std::string::npos);
+        ASSERT_TRUE(manager.eval("assert(1 + 1 == 2)"));
+    }
+    std::string error;
+    ASSERT_FALSE(manager.eval("huge = string.rep('x', 32 * 1024 * 1024)", &error));
+    ASSERT_TRUE(manager.eval("assert(2 + 2 == 4)"));
+    ASSERT_FALSE(manager.eval("os.exit(0)", &error));
+    ASSERT_TRUE(error.find("os.exit") != std::string::npos);
+}
+
+TEST(LuaPluginCompat, NativeCommandsAndFinalizersCannotKeepTheRuntimeBusyForever) {
+    TestWatchdog watchdog;
+    TempWorkspace workspace("dice_next_lua_native_");
+    LuaPluginManager manager(std::chrono::milliseconds(100));
+    ASSERT_TRUE(manager.init());
+    ASSERT_TRUE(manager.eval("local f=assert(io.popen('echo probe')); assert(f:read('*a'):find('probe')); assert(f:close())"));
+#ifdef _WIN32
+    const std::string slow = "ping -n 15 127.0.0.1 >nul";
+#else
+    const std::string slow = "sleep 10";
+#endif
+    std::string error;
+    ASSERT_FALSE(manager.eval("os.execute('" + slow + "')", &error));
+    ASSERT_TRUE(error.find("超时") != std::string::npos);
+    ASSERT_FALSE(manager.eval("io.popen('" + slow + "')", &error));
+    ASSERT_TRUE(error.find("超时") != std::string::npos);
+    ASSERT_TRUE(manager.eval("holder=setmetatable({}, {__gc=function() while true do pcall(function() while true do end end) end end})"));
+    manager.freeRuntime();
+    ASSERT_TRUE(manager.init());
+    ASSERT_TRUE(manager.eval("assert(4 + 4 == 8)"));
+}
+
+TEST(LuaPluginCompat, TimedOutPluginIsSuspendedButManagementAndHealthyRepliesRecover) {
+    TestWatchdog watchdog;
+    TempWorkspace workspace("dice_next_lua_circuit_");
+    writeText(workspace.root() / "data/plugin/loop.lua", R"LUA(
+msg_order = { loop = 'loop', healthy = 'healthy' }
+function loop(msg) while true do end end
+function healthy(msg) return 'healthy' end
+)LUA");
+    LuaPluginManager manager(std::chrono::milliseconds(100));
+    ASSERT_TRUE(manager.init());
+    manager.loadDir("data/mod");
+    ASSERT_TRUE(manager.dispatch("loop", "u", "g", "tester", "", false).matched);
+    ASSERT_FALSE(manager.dispatch("healthy", "u", "g", "tester", "", false).matched);
+    const auto mods = manager.mods();
+    ASSERT_TRUE(!mods.empty());
+    ASSERT_TRUE(!mods.front().compatibilityWarnings.empty());
+    writeText(workspace.root() / "data/plugin/loop.lua", R"LUA(
+msg_order = { healthy = 'healthy' }
+function healthy(msg) return 'healthy' end
+)LUA");
+    manager.reload();
+    ASSERT_EQ(manager.dispatch("healthy", "u", "g", "tester", "", false).reply, std::string("healthy"));
+}
 
 TEST(LuaPluginCompat, UnsupportedLegacyActionsAreVisibleAndNeverRunPartialFallbacks) {
     TempWorkspace workspace("dice_next_lua_diagnostics_");

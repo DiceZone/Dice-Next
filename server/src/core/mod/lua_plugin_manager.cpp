@@ -2,6 +2,7 @@
 #include "common/logger.h"
 #include "common/utils.h"
 #include "common/subprocess.h"
+#include "common/bounded_regex.h"
 
 #include <nlohmann/json.hpp>
 #include <yaml-cpp/yaml.h>
@@ -16,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <regex>
+#include <cstdlib>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -50,6 +52,8 @@ static inline std::string dnx_u8str(const std::filesystem::path& p) {
 // 宽路径读全文（fs::path 构造 ifstream 走宽字符 API，任何文件名都能打开——
 // 窄 .string() 对 emoji 等抛异常，u8 串又打不开 GBK 中文名，两头都不行）。
 static inline bool dnx_readFile(const std::filesystem::path& p, std::string& out) {
+    std::error_code ec;
+    if (fs::file_size(p, ec) > 4 * 1024 * 1024 || ec) return false;
     std::ifstream f(p, std::ios::binary);
     if (!f) return false;
     out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -170,18 +174,148 @@ static inline int dnx_loadfile(lua_State* L, const std::filesystem::path& p) {
     return luaL_loadbuffer(L, src.data() + off, src.size() - off, chunk.c_str());
 }
 
-static int dnx_errorTraceback(lua_State* L) {
-    const char* message = lua_tostring(L, 1);
-    luaL_traceback(L, L, message ? message : "non-string Lua error", 1);
-    return 1;
+static thread_local unsigned dnx_luaProtected = 0;
+static thread_local bool dnx_allowSleep = false;
+static void dnx_executionHook(lua_State* L, lua_Debug*) {
+    if (!ScriptExecution::expired()) return;
+    // Yield from a host-owned root coroutine instead of throwing a catchable
+    // Lua error: while true do pcall(...) end must not defeat the timeout.
+    if (lua_isyieldable(L)) { lua_yield(L, 0); return; }
+    luaL_error(L, "插件执行超时");
+}
+static int dnx_resume(lua_State* coroutine, lua_State* from, int arguments, int* results, bool allowSleep = false) {
+    lua_sethook(coroutine, dnx_executionHook, LUA_MASKCOUNT, 10000);
+    ++dnx_luaProtected;
+    const bool previousSleep = dnx_allowSleep;
+    dnx_allowSleep = allowSleep;
+    const int status = lua_resume(coroutine, from, arguments, results);
+    dnx_allowSleep = previousSleep;
+    --dnx_luaProtected;
+    if (ScriptExecution::expired()) {
+        lua_settop(coroutine, 0);
+        lua_pushliteral(coroutine, "插件执行超时，已中断本次操作（重载后可重新启用）");
+        *results = 1;
+        return LUA_ERRRUN; // never mistake a watchdog yield for sleepTime
+    }
+    return status;
 }
 static int dnx_pcall(lua_State* L, int arguments, int results) {
-    const int function = lua_gettop(L) - arguments;
-    lua_pushcfunction(L, dnx_errorTraceback);
-    lua_insert(L, function);
-    const int status = lua_pcall(L, arguments, results, function);
-    lua_remove(L, function);
+    const int base = lua_gettop(L) - arguments - 1;
+    lua_State* coroutine = lua_newthread(L);
+    const int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_xmove(L, coroutine, arguments + 1);
+    int count = 0;
+    int status = dnx_resume(coroutine, L, arguments, &count);
+    if (status == LUA_YIELD) {
+        lua_settop(coroutine, 0);
+        lua_pushliteral(coroutine, "此调用不支持协程挂起，请在 msg_order 中使用 sleepTime");
+        status = LUA_ERRRUN;
+    }
+    if (status == LUA_OK && (count > 1024 || !lua_checkstack(L, count))) {
+        lua_settop(coroutine, 0);
+        lua_pushliteral(coroutine, "Lua 返回值过多");
+        status = LUA_ERRRUN;
+    }
+    if (status != LUA_OK) {
+        const char* message = lua_tostring(coroutine, -1);
+        luaL_traceback(L, coroutine, message ? message : "non-string Lua error", 0);
+    } else {
+        lua_xmove(coroutine, L, count);
+        if (results != LUA_MULTRET) lua_settop(L, base + results);
+    }
+    luaL_unref(L, LUA_REGISTRYINDEX, ref);
     return status;
+}
+static int dnx_dostring(lua_State* L, const char* source) {
+    const int status = luaL_loadstring(L, source);
+    return status == LUA_OK ? dnx_pcall(L, 0, LUA_MULTRET) : status;
+}
+static int dnx_sethook(lua_State* L) {
+    return luaL_error(L, "debug.sethook 不可用：宿主执行时限保护不能被插件覆盖");
+}
+static int dnx_checkExecution(lua_State* L) {
+    if (ScriptExecution::expired()) return luaL_error(L, "插件执行超时");
+    return 0;
+}
+static int dnx_forbidExit(lua_State* L) {
+    return luaL_error(L, "插件不能调用 os.exit 关闭整个骰子，请使用管理面板或托盘退出");
+}
+static int dnx_finalizer(lua_State* L) {
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    // Lua disables hooks on the GC caller; a fresh host-owned coroutine still
+    // has hooks and can yield out of an uncatchable watchdog timeout.
+    if (dnx_pcall(L, 1, 0) != LUA_OK) return lua_error(L);
+    return 0;
+}
+static int dnx_setmetatable(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    if (lua_istable(L, 2)) {
+        lua_pushliteral(L, "__gc"); lua_rawget(L, 2);
+        if (lua_isfunction(L, -1) && !lua_iscfunction(L, -1)) {
+            lua_pushcclosure(L, dnx_finalizer, 1);
+            lua_pushliteral(L, "__gc"); lua_insert(L, -2); lua_rawset(L, 2);
+        } else lua_pop(L, 1);
+    }
+    lua_settop(L, 2);
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    lua_call(L, 2, 1); // preserved builtin also checks protected metatables
+    return 1;
+}
+struct DnxPipe { luaL_Stream stream; int exitCode; };
+static int dnx_processClose(lua_State* L) {
+    auto* pipe = static_cast<DnxPipe*>(luaL_checkudata(L, 1, LUA_FILEHANDLE));
+    const int status = std::fclose(pipe->stream.f);
+    pipe->stream.f = nullptr;
+    if (status != 0) return luaL_fileresult(L, 0, nullptr);
+    if (pipe->exitCode == 0) lua_pushboolean(L, 1); else lua_pushnil(L);
+    lua_pushliteral(L, "exit"); lua_pushinteger(L, pipe->exitCode);
+    return 3;
+}
+static int dnx_popen(lua_State* L) {
+    const char* command = luaL_checkstring(L, 1);
+    const char* mode = luaL_optstring(L, 2, "r");
+    if (std::string_view(mode) != "r") {
+        lua_pushnil(L); lua_pushliteral(L, "受控 io.popen 仅支持读取模式 r"); return 2;
+    }
+    // Allocate the handle before spawning, so a Lua allocation failure cannot
+    // leak a native process or FILE. The result owns only bounded captured data.
+    auto* pipe = static_cast<DnxPipe*>(lua_newuserdatauv(L, sizeof(DnxPipe), 0));
+    auto* stream = &pipe->stream;
+    stream->f = nullptr; stream->closef = nullptr;
+    luaL_setmetatable(L, LUA_FILEHANDLE);
+    bool failed = false;
+    {
+        const auto result = proc::legacyShellCancellable(command, [] { return ScriptExecution::expired(); });
+        pipe->exitCode = result.exitCode;
+        failed = result.cancelled || result.truncated || result.exitCode < 0;
+        if (!failed) {
+            stream->f = std::tmpfile();
+            failed = !stream->f;
+            if (!failed) {
+                failed = std::fwrite(result.output.data(), 1, result.output.size(), stream->f) != result.output.size();
+                std::rewind(stream->f);
+            }
+        }
+    }
+    if (failed) {
+        if (stream->f) { std::fclose(stream->f); stream->f = nullptr; }
+        lua_pushnil(L); lua_pushliteral(L, "外部命令超时、输出过大或执行失败"); return 2;
+    }
+    stream->closef = dnx_processClose;
+    return 1;
+}
+static int dnx_execute(lua_State* L) {
+    if (lua_isnoneornil(L, 1)) { lua_pushboolean(L, 1); return 1; }
+    int exitCode = -1;
+    {
+        const auto result = proc::legacyShellCancellable(luaL_checkstring(L, 1), [] { return ScriptExecution::expired(); });
+        exitCode = result.cancelled ? 124 : result.exitCode;
+    }
+    if (exitCode == 0) lua_pushboolean(L, 1); else lua_pushnil(L);
+    lua_pushliteral(L, "exit"); lua_pushinteger(L, exitCode);
+    return 3;
 }
 static std::string dnx_coroutineError(lua_State* L) {
     // lua_resume does not accept an error handler. Its failed stack still keeps
@@ -785,7 +919,7 @@ static int l_sleepTime(lua_State* L) {
     if (!(milliseconds > 0.0)) return 0;
     // dispatch 会把含 sleepTime 的旧式 msg_order 函数放进协程。其它调用栈
     // 不可 yield 时维持旧有“立即返回”行为，绝不阻塞适配器事件线程。
-    if (!lua_isyieldable(L)) return 0;
+    if (!dnx_allowSleep || !lua_isyieldable(L)) return 0;
     lua_pushnumber(L, milliseconds / 1000.0);
     return lua_yield(L, 1);
 }
@@ -1165,12 +1299,47 @@ void LuaPluginManager::registerGlobals() {
 bool LuaPluginManager::s_cpathStrict = false;   // cpath 收窄开关（兼容优先默认关）
 
 bool LuaPluginManager::init() {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (state_) return true;
-    state_ = luaL_newstate();
+    state_ = lua_newstate([](void* opaque, void* pointer, size_t oldSize, size_t newSize) -> void* {
+        auto& manager = *static_cast<LuaPluginManager*>(opaque);
+        if (!pointer) oldSize = 0; // Lua passes a type tag on new allocations
+        if (!newSize) {
+            manager.allocatedBytes_ -= oldSize;
+            std::free(pointer);
+            return nullptr;
+        }
+        // Only fail allocation inside protected lua_resume. Returning nullptr
+        // from an unprotected host stack setup would invoke Lua's abort/panic.
+        if (dnx_luaProtected && newSize > oldSize &&
+            newSize - oldSize > manager.memoryLimit_ - std::min(manager.memoryLimit_, manager.allocatedBytes_))
+            return nullptr;
+        void* next = std::realloc(pointer, newSize);
+        if (next) manager.allocatedBytes_ = manager.allocatedBytes_ - oldSize + newSize;
+        return next;
+    }, this);
     if (!state_) { DICE_LOG_ERROR("[lua] luaL_newstate failed"); return false; }
     ++runtimeGeneration_;
     luaL_openlibs(state_);
+    lua_getglobal(state_, "setmetatable");
+    lua_pushcclosure(state_, dnx_setmetatable, 1); lua_setglobal(state_, "setmetatable");
+    lua_pushcfunction(state_, dnx_checkExecution); lua_setglobal(state_, "__dnx_check_execution");
+    lua_getglobal(state_, "os"); lua_pushcfunction(state_, dnx_execute); lua_setfield(state_, -2, "execute"); lua_pop(state_, 1);
+    lua_getglobal(state_, "os"); lua_pushcfunction(state_, dnx_forbidExit); lua_setfield(state_, -2, "exit"); lua_pop(state_, 1);
+    lua_getglobal(state_, "io"); lua_pushcfunction(state_, dnx_popen); lua_setfield(state_, -2, "popen"); lua_pop(state_, 1);
+    lua_sethook(state_, dnx_executionHook, LUA_MASKCOUNT, 10000);
+    lua_getglobal(state_, "debug");
+    lua_pushcfunction(state_, dnx_sethook); lua_setfield(state_, -2, "sethook");
+    lua_pop(state_, 1);
+    // Check outside the original protected call too. In non-yieldable __gc or
+    // metamethod frames, a repeated pcall must not swallow watchdog errors.
+    dnx_dostring(state_, R"lua(do
+        local check = __dnx_check_execution
+        local call, xcall, resume = pcall, xpcall, coroutine.resume
+        pcall = function(...) check(); return call(...) end
+        xpcall = function(...) check(); return xcall(...) end
+        coroutine.resume = function(...) check(); return resume(...) end
+    end)lua");
     lua_pushlightuserdata(state_, this);
     lua_setfield(state_, LUA_REGISTRYINDEX, "DiceMgr");
     registerGlobals();
@@ -1431,7 +1600,7 @@ do
   end
 end
 )lua";
-    if (luaL_dostring(state_, kBootstrap) != LUA_OK) {
+    if (dnx_dostring(state_, kBootstrap) != LUA_OK) {
         DICE_LOG_WARN("[lua] bootstrap error: {}", argStr(state_, -1));
     }
     // ── 审计包装：io.open/io.popen/os.execute/package.loadlib 等记录到审计日志 ──
@@ -1474,7 +1643,7 @@ if __dnx_audit then
   end
 end
 )lua";
-    if (luaL_dostring(state_, kAuditWrap) != LUA_OK) {
+    if (dnx_dostring(state_, kAuditWrap) != LUA_OK) {
         DICE_LOG_WARN("[lua] audit wrap error: {}", argStr(state_, -1));
     }
 
@@ -1483,11 +1652,11 @@ end
 }
 
 void LuaPluginManager::freeRuntime() {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     ++runtimeGeneration_;                    // 让已经排队的续跑回调自动失效
     pendingCoroutines_.clear();
     taskCalls_.clear();
-    if (state_) { lua_close(state_); state_ = nullptr; }
+    if (state_) { lua_close(state_); state_ = nullptr; allocatedBytes_ = 0; }
 }
 
 void LuaPluginManager::openConfStore() {
@@ -1724,18 +1893,20 @@ bool LuaPluginManager::confSetBatch(
 }
 
 bool LuaPluginManager::eval(const std::string& code, std::string* err) {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!state_ && !init()) { if (err) *err = "no state"; return false; }
-    if (luaL_dostring(state_, code.c_str()) != LUA_OK) {
+    const int base = lua_gettop(state_);
+    if (dnx_dostring(state_, code.c_str()) != LUA_OK) {
         if (err) *err = argStr(state_, -1);
-        lua_pop(state_, 1);
+        lua_settop(state_, base);
         return false;
     }
+    lua_settop(state_, base);
     return true;
 }
 
 int LuaPluginManager::loadDir(const std::string& dir) {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!state_ && !init()) return 0;
     return loadDirLocked(dir);
 }
@@ -1796,6 +1967,7 @@ static void parseModDescriptor(const fs::path& descPath, LuaPluginManager::LuaMo
 int LuaPluginManager::loadDirLocked(const std::string& dir) {
     dir_ = dir;
     mods_.clear();
+    suspendedMods_.clear();
     speech_.clear();
     replyRules_.clear();   // echo refs 随旧 state 关闭已失效
     cycleEvents_.clear();  // 已排队回调靠 runtimeGeneration_ 自动失效
@@ -2190,6 +2362,7 @@ static std::vector<DnxLegacyTomlReply> dnx_parseLegacyReplyToml(const fs::path& 
 
 // 载入一个旧 Dice! mod 的 speech + reply(.lua/.toml) + event(.lua)。
 void LuaPluginManager::loadModReplies(LuaMod& mod) {
+    ScriptFaultScope fault(suspendedMods_, mod.name);
     auto compatibilityWarning = [&](std::string text) {
         if (mod.compatibilityWarnings.size() < 100) mod.compatibilityWarnings.push_back(std::move(text));
     };
@@ -2481,8 +2654,11 @@ void LuaPluginManager::scheduleCycleEvent(const std::string& id, bool runNow) {
 }
 
 void LuaPluginManager::runCycleEvent(const std::string& id, uint64_t generation) {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!state_ || generation != runtimeGeneration_) return;
+    const auto event = cycleEvents_.find(id);
+    if (event == cycleEvents_.end() || suspendedMods_.count(event->second.modName)) return;
+    ScriptFaultScope fault(suspendedMods_, event->second.modName);
     // 先重排再执行，保持与 Dice! Scheduler 的周期行为一致；重载会通过 generation
     // 让旧回调静默失效，而新运行时只保留一套事件。
     scheduleCycleEvent(id, true);
@@ -2499,6 +2675,7 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     m.singleFile = true;
     m.enabled = enabled;
     if (!enabled) { mods_.push_back(std::move(m)); return; }
+    ScriptFaultScope fault(suspendedMods_, m.name);
 
     LogOperation operation(DICE_LOG_SOURCE, "lua", "load_plugin", "file=" + dnx_u8str(path));
     loadingModDir_ = path.parent_path().string();
@@ -2573,7 +2750,7 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
 
 int LuaPluginManager::reload() {
     LogOperation operation(DICE_LOG_SOURCE, "lua", "reload");
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     operation.phase("runtime_lock_acquired");
     freeRuntime();
     if (!init()) { operation.fail("runtime initialization failed"); return 0; }
@@ -2594,12 +2771,15 @@ int LuaPluginManager::reload() {
 }
 
 std::vector<LuaPluginManager::LuaMod> LuaPluginManager::mods() const {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
-    return mods_;
+    std::lock_guard<ScriptMutex> lk(mutex_);
+    auto result = mods_;
+    for (auto& mod : result) if (suspendedMods_.count(mod.name))
+        mod.compatibilityWarnings.push_back("已暂停：插件执行超时。请修复插件后重载。");
+    return result;
 }
 
 std::vector<std::string> LuaPluginManager::taskNames() const {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     std::vector<std::string> out;
     out.reserve(taskCalls_.size());
     for (const auto& [name, task] : taskCalls_) out.push_back(name);
@@ -2607,17 +2787,22 @@ std::vector<std::string> LuaPluginManager::taskNames() const {
 }
 
 bool LuaPluginManager::hasTask(const std::string& name) const {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     return state_ && taskCalls_.find(name) != taskCalls_.end();
 }
 
 bool LuaPluginManager::runTask(const std::string& name, std::string* error) {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     const auto it = taskCalls_.find(name);
     if (!state_ || it == taskCalls_.end()) {
         if (error) *error = "Lua task not found: " + name;
         return false;
     }
+    if (suspendedMods_.count(it->second.modName)) {
+        if (error) *error = "此 Lua 插件已因执行超时暂停，请修复后重载";
+        return false;
+    }
+    ScriptFaultScope fault(suspendedMods_, it->second.modName);
     const int base = lua_gettop(state_);
     const std::string previousDir = loadingModDir_;
     loadingModDir_ = it->second.modDir;
@@ -2654,7 +2839,7 @@ bool LuaPluginManager::runTask(const std::string& name, std::string* error) {
 static std::string scrubUtf8(const std::string& s) { return dnx_normalizeLuaText(s); }
 
 std::vector<LuaPluginManager::ModCommand> LuaPluginManager::commandsOf(const std::string& modName) const {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     std::vector<ModCommand> out;
     std::set<std::string> seen;
     auto push = [&](const std::string& raw, const char* kind) {
@@ -2675,7 +2860,7 @@ std::vector<LuaPluginManager::ModCommand> LuaPluginManager::commandsOf(const std
 }
 
 std::vector<LuaPluginManager::HelpItem> LuaPluginManager::helpEntries() const {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     std::vector<HelpItem> out;
     for (const auto& m : mods_) {
         if (!m.enabled) continue;
@@ -2692,7 +2877,7 @@ std::vector<LuaPluginManager::HelpItem> LuaPluginManager::helpEntries() const {
 }
 
 bool LuaPluginManager::setModEnabled(const std::string& name, bool enabled) {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (dir_.empty()) return false;
     std::error_code ec;
     // 三种形态成对处理：<name>.json（描述档）/<name>（目录）/<name>.lua（单文件）。
@@ -2720,7 +2905,7 @@ bool LuaPluginManager::setModEnabled(const std::string& name, bool enabled) {
 }
 
 bool LuaPluginManager::deleteMod(const std::string& name) {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (dir_.empty()) return false;
     std::error_code ec; bool removed = false;
     auto u8 = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };
@@ -2738,7 +2923,7 @@ bool LuaPluginManager::importUpload(const std::string& filename, const std::stri
                                     std::string* err, std::vector<std::string>* imported,
                                     bool dryRun, std::vector<std::string>* permissions,
                                     std::vector<std::string>* risks) {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     auto fail = [&](const std::string& e) { if (err) *err = e; return false; };
     if (bytes.empty()) return fail("empty/invalid file");
     auto u8 = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };
@@ -2957,7 +3142,7 @@ std::string LuaPluginManager::formatTemplate(const std::string& text,
 }
 
 std::string LuaPluginManager::resolveAmp(const std::string& key) const {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     return valueOf(key, {}, 0);
 }
 
@@ -3009,7 +3194,7 @@ std::string LuaPluginManager::finishCoroutine(PendingCoroutine& pending, lua_Sta
 }
 
 void LuaPluginManager::resumeCoroutine(int threadRef) {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<ScriptMutex> lock(mutex_);
     auto it = pendingCoroutines_.find(threadRef);
     if (!state_ || it == pendingCoroutines_.end()) return;
     PendingCoroutine& pending = it->second;
@@ -3033,7 +3218,7 @@ void LuaPluginManager::resumeCoroutine(int threadRef) {
     activePlatform_ = pending.platform;
     loadingModDir_ = pending.modDir;
     int resultCount = 0;
-    const int status = lua_resume(coroutine, state_, 0, &resultCount);
+    const int status = dnx_resume(coroutine, state_, 0, &resultCount, true);
     activePlatform_ = oldPlatform;
     loadingModDir_ = oldDir;
     if (status == LUA_YIELD) {
@@ -3045,6 +3230,7 @@ void LuaPluginManager::resumeCoroutine(int threadRef) {
     std::string error;
     if (status == LUA_OK) reply = finishCoroutine(pending, coroutine, resultCount);
     else error = dnx_normalizeLuaText(dnx_coroutineError(coroutine));
+    if (ScriptExecution::expired()) suspendedMods_.insert(pending.modName);
     const std::string platform = pending.platform;
     const std::string gid = pending.gid;
     const std::string uid = pending.uid;
@@ -3111,7 +3297,7 @@ bool LuaPluginManager::hasCommandTrigger(
         const std::string& text, const std::string& uid, const std::string& gid,
         const std::string& nick, const std::string& groupCard, bool isPrivate,
         int trust, const std::string& platform, const std::string& adapterId) {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!state_ || text.empty() || replyRules_.empty()) return false;
     std::map<std::string, std::string> vars = {
         {"uid", uid}, {"user", uid}, {"gid", gid}, {"grp", gid},
@@ -3119,6 +3305,7 @@ bool LuaPluginManager::hasCommandTrigger(
         {"fromMsg", text}, {"fromUser", uid}, {"fromGroup", gid},
     };
     for (const auto& rule : replyRules_) {
+        if (suspendedMods_.count(rule.modName)) continue;
         if (rule.groupOnly && (isPrivate || gid.empty())) continue;
         if (rule.trustAtLeast > 0 && trust < rule.trustAtLeast) continue;
         if (groupGate_ && !gid.empty() && !groupGate_(platform, gid, "lua:" + rule.modName, adapterId)) continue;
@@ -3137,7 +3324,7 @@ bool LuaPluginManager::hasCommandTrigger(
 LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         const std::string& text, const std::string& uid, const std::string& gid,
         const std::string& nick, const std::string& groupCard, bool isPrivate, int trust, const std::string& platform, const std::string& adapterId) {
-    std::lock_guard<std::recursive_mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     DispatchResult res;
     if (!state_ || replyRules_.empty()) return res;
 
@@ -3147,6 +3334,8 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         {"fromMsg", text}, {"fromUser", uid}, {"fromGroup", gid},
     };
     for (auto& rule : replyRules_) {
+        if (suspendedMods_.count(rule.modName)) continue;
+        ScriptFaultScope fault(suspendedMods_, rule.modName);
         if (rule.groupOnly && (isPrivate || gid.empty())) continue;
         if (rule.trustAtLeast > 0 && trust < rule.trustAtLeast) continue;   // 权限门槛
         if (groupGate_ && !gid.empty() && !groupGate_(platform, gid, "lua:" + rule.modName, adapterId)) continue;  // 分群停用
@@ -3172,10 +3361,10 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         if (!hit && text.size() <= 400) for (const auto& p : rule.regexPatterns) {
             if (p.empty()) continue;
             try {
-                std::smatch match;
-                if (std::regex_match(text, match, std::regex(p, std::regex::ECMAScript | std::regex::icase))) {
+                const auto match = boundedRegex(p, text, RegexMode::Full);
+                if (match.matched) {
                     hit = true;
-                    if (match.size() > 1) suffix = match[1].str();
+                    if (match.groups.size() > 1) suffix = match.groups[1];
                     break;
                 }
             } catch (const std::regex_error& ex) {
@@ -3259,6 +3448,15 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
             fs::path sp = fs::path(rule.modDir) / "script" / (erel + ".lua");
             callOk = (dnx_dofile(state_, sp) == LUA_OK);
         } else if (rule.maySleep && scheduler_) {
+            if (pendingCoroutines_.size() >= 256) {
+                DICE_LOG_WARN("[lua] suspended coroutine limit reached; refusing reply '{}'", rule.name);
+                lua_settop(state_, sbase);
+                activePlatform_ = previousPlatform;
+                loadingModDir_.clear();
+                res.matched = true;
+                res.reply = "Lua 插件等待中的任务过多，请稍后重试。";
+                return res;
+            }
             usedCoroutine = true;
             lua_getglobal(state_, "msg");
             const int messageRef = luaL_ref(state_, LUA_REGISTRYINDEX);
@@ -3270,13 +3468,13 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
             lua_rawgeti(state_, LUA_REGISTRYINDEX, messageRef);
             lua_xmove(state_, coroutine, 1);
             int resultCount = 0;
-            const int status = lua_resume(coroutine, state_, 1, &resultCount);
+            const int status = dnx_resume(coroutine, state_, 1, &resultCount, true);
             if (status == LUA_YIELD) {
                 PendingCoroutine pending;
                 pending.generation = runtimeGeneration_;
                 pending.threadRef = threadRef;
                 pending.messageRef = messageRef;
-                pending.ruleName = rule.name; pending.modDir = rule.modDir;
+                pending.ruleName = rule.name; pending.modName = rule.modName; pending.modDir = rule.modDir;
                 pending.platform = platform; pending.gid = gid; pending.uid = uid;
                 pending.vars = base;
                 pendingCoroutines_[threadRef] = std::move(pending);

@@ -139,23 +139,54 @@ Result runWide(const std::wstring& commandLine, std::size_t outputLimit,
     mutableCommand.push_back(L'\0');
 
     PROCESS_INFORMATION process{};
+    HANDLE job = nullptr;
+    if (cancelled) {
+        job = CreateJobObjectW(nullptr, nullptr);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+            if (job) CloseHandle(job);
+            CloseHandle(writeEnd); CloseHandle(readEnd);
+            if (nullInput != INVALID_HANDLE_VALUE) CloseHandle(nullInput);
+            if (ownedError && ownedError != INVALID_HANDLE_VALUE) CloseHandle(ownedError);
+            return result;
+        }
+    }
     const BOOL started =
-        CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+        CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, TRUE,
+                       CREATE_NO_WINDOW | (job ? CREATE_SUSPENDED : 0),
                        nullptr, directory.empty() ? nullptr : directory.c_str(), &startup,
                        &process);
     CloseHandle(writeEnd);
     if (nullInput != INVALID_HANDLE_VALUE) CloseHandle(nullInput);
     if (ownedError && ownedError != INVALID_HANDLE_VALUE) CloseHandle(ownedError);
     if (!started) {
+        if (job) CloseHandle(job);
         CloseHandle(readEnd);
         return result;
+    }
+    if (job) {
+        if (!AssignProcessToJobObject(job, process.hProcess)) {
+            TerminateProcess(process.hProcess, 1);
+            WaitForSingleObject(process.hProcess, 5000);
+            CloseHandle(job); CloseHandle(readEnd);
+            CloseHandle(process.hThread); CloseHandle(process.hProcess);
+            return result;
+        }
+        if (ResumeThread(process.hThread) == static_cast<DWORD>(-1)) {
+            TerminateJobObject(job, 1);
+            CloseHandle(job); CloseHandle(readEnd);
+            CloseHandle(process.hThread); CloseHandle(process.hProcess);
+            return result;
+        }
     }
 
     char buffer[kReadChunk];
     while (true) {
         if (!result.cancelled && cancelled && cancelled()) {
             result.cancelled = true;
-            TerminateProcess(process.hProcess, ERROR_CANCELLED);
+            if (job) TerminateJobObject(job, ERROR_CANCELLED);
+            else TerminateProcess(process.hProcess, ERROR_CANCELLED);
         }
 
         DWORD available = 0;
@@ -168,8 +199,8 @@ Result runWide(const std::wstring& commandLine, std::size_t outputLimit,
         }
 
         if (WaitForSingleObject(process.hProcess, 20) == WAIT_OBJECT_0) {
-            while (PeekNamedPipe(readEnd, nullptr, 0, nullptr, &available, nullptr) &&
-                   available > 0) {
+            for (int chunk = 0; chunk < 64 && PeekNamedPipe(readEnd, nullptr, 0, nullptr, &available, nullptr) &&
+                   available > 0; ++chunk) {
                 DWORD count = 0;
                 const DWORD wanted = (std::min)(available, static_cast<DWORD>(sizeof(buffer)));
                 if (!ReadFile(readEnd, buffer, wanted, &count, nullptr) || count == 0) break;
@@ -184,6 +215,7 @@ Result runWide(const std::wstring& commandLine, std::size_t outputLimit,
     GetExitCodeProcess(process.hProcess, &exitCode);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
+    if (job) CloseHandle(job);
     result.exitCode = static_cast<int>(exitCode);
     return result;
 }
@@ -236,6 +268,7 @@ Result runCancellable(const std::string& program, const std::vector<std::string>
     const std::string directory =
         workingDirectory.empty() ? std::string() : workingDirectory.string();
 
+    const bool managed = static_cast<bool>(cancelled);
     const pid_t child = fork();
     if (child < 0) {
         close(channel[0]);
@@ -243,6 +276,7 @@ Result runCancellable(const std::string& program, const std::vector<std::string>
         return result;
     }
     if (child == 0) {
+        if (managed && setpgid(0, 0) != 0) _exit(127);
         close(channel[0]);
         dup2(channel[1], STDOUT_FILENO);
         if (captureStderr) dup2(channel[1], STDERR_FILENO);
@@ -267,7 +301,7 @@ Result runCancellable(const std::string& program, const std::vector<std::string>
     auto cancelledAt = std::chrono::steady_clock::time_point{};
     while (!finished) {
         ssize_t count = 0;
-        while ((count = read(channel[0], buffer, sizeof(buffer))) > 0) {
+        for (int chunk = 0; chunk < 64 && (count = read(channel[0], buffer, sizeof(buffer))) > 0; ++chunk) {
             appendLimited(result.output, buffer, static_cast<std::size_t>(count), outputLimit,
                           result.truncated);
         }
@@ -285,23 +319,33 @@ Result runCancellable(const std::string& program, const std::vector<std::string>
         if (!result.cancelled && cancelled && cancelled()) {
             result.cancelled = true;
             cancelledAt = std::chrono::steady_clock::now();
-            kill(child, SIGTERM);
+            kill(managed ? -child : child, SIGTERM);
         } else if (result.cancelled &&
                    std::chrono::steady_clock::now() - cancelledAt >
                        std::chrono::milliseconds(500)) {
-            kill(child, SIGKILL);
+            kill(managed ? -child : child, SIGKILL);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
     ssize_t count = 0;
-    while ((count = read(channel[0], buffer, sizeof(buffer))) > 0) {
+    for (int chunk = 0; chunk < 64 && (count = read(channel[0], buffer, sizeof(buffer))) > 0; ++chunk) {
         appendLimited(result.output, buffer, static_cast<std::size_t>(count), outputLimit,
                       result.truncated);
     }
     close(channel[0]);
+    if (result.cancelled && managed) kill(-child, SIGKILL); // stop stubborn descendants too
     result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     return result;
+#endif
+}
+
+Result legacyShellCancellable(const std::string& command, CancellationCheck cancelled, std::size_t outputLimit) {
+#if defined(_WIN32)
+    const auto line = quoteArgument(widen(systemTool("cmd.exe"))) + L" /d /s /c \"" + widen(command) + L"\"";
+    return runWide(line, outputLimit, false, {}, cancelled);
+#else
+    return runCancellable("/bin/sh", {"-c", command}, std::move(cancelled), outputLimit);
 #endif
 }
 

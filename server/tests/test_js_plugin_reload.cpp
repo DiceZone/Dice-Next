@@ -1,4 +1,6 @@
 #include "test_framework.h"
+#include "test_watchdog.h"
+#include <future>
 #include "../src/core/mod/js_plugin_manager.h"
 #include "../src/adapter/adapter_interface.h"
 
@@ -8,6 +10,59 @@
 
 using namespace dice;
 namespace fs = std::filesystem;
+
+TEST(JsPluginManager, ExecutionTimeoutMemoryLimitAndRecovery) {
+    TestWatchdog watchdog;
+    JsPluginManager manager(std::chrono::milliseconds(100), 8 * 1024 * 1024);
+    ASSERT_TRUE(manager.init());
+    ASSERT_FALSE(manager.evalString("while (true) {}"));
+    ASSERT_TRUE(manager.evalString("1 + 1") == std::optional<std::string>("2"));
+    ASSERT_FALSE(manager.evalString("while(true) { try { while(true) {} } catch(e) {} }"));
+    ASSERT_FALSE(manager.evalString("({toString() { while(true) {} }})"));
+    ASSERT_FALSE(manager.evalString("'x'.repeat(32 * 1024 * 1024)"));
+    ASSERT_TRUE(manager.evalString("'recovered'") == std::optional<std::string>("recovered"));
+}
+
+TEST(JsPluginManager, BusyRuntimeRejectsManagementQuickly) {
+    TestWatchdog watchdog;
+    JsPluginManager manager(std::chrono::milliseconds(600));
+    ASSERT_TRUE(manager.init());
+    std::promise<void> entered;
+    manager.setHttpFetch([&](const std::string&, const std::string&, const std::string&, const std::string&, int& status) {
+        entered.set_value();
+        status = 200;
+        return std::string("ok");
+    });
+    auto running = std::async(std::launch::async, [&] { return manager.evalString("fetch('https://example.invalid'); while(true) {}"); });
+    entered.get_future().wait();
+    const auto start = std::chrono::steady_clock::now();
+    bool busy = false;
+    try { manager.listAll(); } catch (const ScriptBusy&) { busy = true; }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    const auto result = running.get();
+    ASSERT_TRUE(busy);
+    ASSERT_TRUE(elapsed < std::chrono::milliseconds(400));
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(manager.evalString("'available'") == std::optional<std::string>("available"));
+}
+
+TEST(JsPluginManager, TimerFailureStopsRepeatingAndBridgeDoesNotSelfDeadlock) {
+    TestWatchdog watchdog;
+    JsPluginManager manager(std::chrono::milliseconds(100));
+    std::vector<std::function<void()>> callbacks;
+    manager.setScheduler([&](double, std::function<void()> callback) { callbacks.push_back(std::move(callback)); });
+    ASSERT_TRUE(manager.init());
+    ASSERT_TRUE(manager.evalString("setInterval(() => { while(true) {} }, 250)").has_value());
+    ASSERT_EQ(callbacks.size(), size_t(1));
+    auto callback = std::move(callbacks.front()); callbacks.clear(); callback();
+    ASSERT_TRUE(callbacks.empty());
+    // Clearing a timer within its callback must not free the JS_Call callee.
+    ASSERT_TRUE(manager.evalString("globalThis.t = setInterval(() => clearInterval(t), 250)").has_value());
+    callback = std::move(callbacks.front()); callbacks.clear(); callback();
+    ASSERT_TRUE(callbacks.empty());
+    manager.setScheduler({});
+    ASSERT_TRUE(manager.evalString("WebSocket.call({}, 'wss://example.invalid').readyState") == std::optional<std::string>("0"));
+}
 
 TEST(JsPluginManager, ReloadAfterInitializationDoesNotSelfDeadlock) {
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -27,6 +82,9 @@ TEST(JsPluginManager, ReloadAfterInitializationDoesNotSelfDeadlock) {
                   "seal.ext.register(ext);\n";
         plugin.close();
         ASSERT_EQ(manager.reload(root.string()), 1);
+        std::string error;
+        ASSERT_TRUE(manager.deletePlugin("upload-regression.js", error));
+        ASSERT_EQ(manager.reload(root.string()), 0);
     }
 
     fs::remove_all(root, ec);

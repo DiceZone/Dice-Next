@@ -53,6 +53,12 @@ Result runCancellable(const std::string& program,
                       bool captureStderr = false,
                       const std::filesystem::path& workingDirectory = {});
 
+/// For legacy Lua os.execute/io.popen ONLY: commands are intentionally shell
+/// syntax, not URLs/paths constructed by the application. Managed cancellation
+/// terminates the process tree, not just the shell waiting for its child.
+Result legacyShellCancellable(const std::string& command, CancellationCheck cancelled,
+                              std::size_t outputLimit = 2 * 1024 * 1024);
+
 /// Same as run(), with every argument given as a path.  On Windows they reach
 /// the child as wide strings, so an install directory the system code page
 /// cannot represent still works.  Plain flags may be passed too.

@@ -8,6 +8,7 @@ set(TEST_SOURCES
     # Test framework + test cases
     test_main.cpp
     test_logger.cpp
+    test_runtime_reliability.cpp
     test_startup_guard.cpp
     test_tray_settings.cpp
     test_cooldown_manager.cpp
@@ -136,6 +137,7 @@ target_include_directories(dice-next-lua-tests PRIVATE
     ${LUA_INCLUDE_DIR}
 )
 target_link_libraries(dice-next-lua-tests PRIVATE
+    qjs
     Drogon::Drogon
     nlohmann_json::nlohmann_json
     spdlog::spdlog

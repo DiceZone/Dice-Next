@@ -36,3 +36,5 @@
 ## 本地回归
 
 `tools/test-plugin-reload.mjs <core-binary> [lua-file]` 使用临时数据、回环监听和独立 API 密钥，不连接机器人或外部服务。它验证插件上传、启停、删除、并发重载和正常退出，也会主动触发 JS/Lua 错误，检查实际日志文件、首页读取和密钥脱敏。该驱动仅测试 POSIX 正常退出，不代替 Windows 托盘实测。
+
+增加 `--reliability` 可运行死循环、超时恢复和大日志读取的故障注入。执行预算、暂停与兼容性变化见[故障保护说明](runtime-reliability.md)。

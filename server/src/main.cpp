@@ -1,4 +1,5 @@
 #include "common/logger.h"
+#include "common/bounded_executor.h"
 #include "common/types.h"
 #include "common/errors.h"
 #include "common/utils.h"
@@ -56,6 +57,7 @@
 #include "i18n/locale_resolver.h"
 
 #include <optional>
+#include <cmath>
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -653,7 +655,9 @@ static int realMain(int argc, char* argv[]) {
     cmdRouter.setPersonaManager(&personaMgr);
 
     // 初始化 JS 插件子系统并从 plugins/js 加载插件。
-    dice::JsPluginManager jsMod;
+    const auto pluginTimeout = std::chrono::milliseconds(std::clamp(
+        configMgr.get<int>("dice/plugin_timeout_ms", 5000), 100, 60000));
+    dice::JsPluginManager jsMod(pluginTimeout);
     jsMod.init();
     jsMod.setDeckDraw([&cardDeck](const std::string& name, bool /*shuffle*/) -> std::string {
         return cardDeck.has(name) ? cardDeck.drawFromDeck(name).value_or("") : std::string();
@@ -671,10 +675,18 @@ static int realMain(int argc, char* argv[]) {
     jsMod.setUpdateFetch([&cmdRouter](const std::string& url, int& status) {
         return cmdRouter.fetchPluginUrl(url, status);
     });
-    // 真计时器：把 JS setTimeout/setInterval 排到 drogon 事件循环。
-    jsMod.setScheduler([](double sec, std::function<void()> cb) {
-        drogon::app().getLoop()->runAfter(sec, std::move(cb));
-    });
+    auto jsCallbacks = std::make_shared<dice::BoundedExecutor>();
+    auto pluginScheduler = [](const std::shared_ptr<dice::BoundedExecutor>& worker) {
+        return [weak = std::weak_ptr<dice::BoundedExecutor>(worker)](double seconds, std::function<void()> callback) {
+            if (!std::isfinite(seconds)) throw std::invalid_argument("plugin timer delay must be finite");
+            seconds = std::clamp(seconds, 0.0, 7.0 * 24 * 3600);
+            drogon::app().getLoop()->runAfter(seconds, [weak, callback = std::move(callback)]() mutable {
+                if (auto target = weak.lock(); target && !target->submit(std::move(callback)))
+                    DICE_LOG_WARN("[plugin] background callback dropped: worker stopped or queue full");
+            });
+        };
+    };
+    jsMod.setScheduler(pluginScheduler(jsCallbacks));
     // 插件分群启停（地基）：JS 指令派发前问「该群是否启用此插件（按源文件）」。
     jsMod.setGroupGate([&cmdRouter](const std::string& platform, const std::string& group, const std::string& pluginId, const std::string& adapterId) {
         return cmdRouter.isPluginEnabledInGroup(platform, group, pluginId, adapterId);
@@ -830,15 +842,14 @@ static int realMain(int argc, char* argv[]) {
     dice::CommandRouter::loadJsGameSystems();
 
     // 初始化 Lua 插件子系统：引擎、模块发现和核心 API。
-    dice::LuaPluginManager luaMod;
+    dice::LuaPluginManager luaMod(pluginTimeout);
     dice::LuaPluginManager::setCpathStrict(configMgr.get<bool>("dice/lua_cpath_strict", false));   // 兼容优先默认关
     luaMod.init();
     luaMod.setHelpLookup([&cmdRouter](const std::string& topic) {
         return cmdRouter.helpEntryContent(topic);
     });
-    luaMod.setScheduler([](double seconds, std::function<void()> callback) {
-        drogon::app().getLoop()->runAfter(seconds, std::move(callback));
-    });
+    auto luaCallbacks = std::make_shared<dice::BoundedExecutor>();
+    luaMod.setScheduler(pluginScheduler(luaCallbacks));
     luaMod.setRuleGate([&luaMod](const std::string&, const std::string& group,
                                  const std::string& user, const std::string& required,
                                  const std::string&) {
@@ -2079,12 +2090,14 @@ static int realMain(int argc, char* argv[]) {
                     if (hid > 0 && dice::chatimg::hasRemoteImage(r.content)) {
                         std::string cap = r.content;
                         std::thread([&db, hid, cap]() {
+                            try {
                             std::string local = dice::chatimg::localize(cap);
                             if (local == cap) return;
                             if (auto* c = db.getChatStorage()) {
                                 try { auto row = c->get<dice::ChatMsgRow>(hid); row.content = local; c->update(row); }
-                                catch (...) {}
+                                catch (...) { DICE_LOG_EXCEPTION("history image database update"); }
                             }
+                            } catch (...) { DICE_LOG_EXCEPTION("history image localization"); }
                         }).detach();
                     }
                     ++added;
@@ -4535,6 +4548,11 @@ static int realMain(int argc, char* argv[]) {
         hotReload = nullptr;
     }
 
+    // Drain the active (time-bounded) turn and discard queued plugin work before
+    // closing the DB or destroying runtime/native bridge targets.
+    jsCallbacks->stop();
+    luaCallbacks->stop();
+    adapterMgr.stopAll();
     db.close();
     DICE_LOG_INFO("Dice!Next stopped. Goodbye!");
 

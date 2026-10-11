@@ -84,11 +84,15 @@ public:
         auto autoWork = pendingAutoReports(false);
         auto work = enabled() ? pendingReports(false) : std::vector<WorkItem>{};
         if ((work.empty() && autoWork.empty()) || busy_.exchange(true)) return;
-        std::thread([this, work = std::move(work), autoWork = std::move(autoWork)]() {
-            for (const auto& item : autoWork) doAutoReport(item.target.adapter, item.status, false, 15);
-            for (const auto& item : work) doReport(item.target, item.status, false, 15);
-            busy_.store(false);
-        }).detach();
+        try {
+            std::thread([this, work = std::move(work), autoWork = std::move(autoWork)]() {
+                try {
+                    for (const auto& item : autoWork) doAutoReport(item.target.adapter, item.status, false, 15);
+                    for (const auto& item : work) doReport(item.target, item.status, false, 15);
+                } catch (...) { DICE_LOG_EXCEPTION("heart background reporting"); }
+                busy_.store(false);
+            }).detach();
+        } catch (...) { busy_.store(false); DICE_LOG_EXCEPTION("heart worker creation"); }
     }
 
     /// WebUI 立即测试所有已配置 Key 的适配器。

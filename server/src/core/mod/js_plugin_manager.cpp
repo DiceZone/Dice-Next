@@ -50,6 +50,7 @@ static std::string getStrProp(JSContext* ctx, JSValueConst obj, const char* key)
 }
 
 static std::string jsErrorDetails(JSContext* ctx, JSValueConst error) {
+    if (ScriptExecution::expired()) return "插件执行超时，已中断本次操作（重载后可重新启用）";
     const char* raw = JS_ToCString(ctx, error);
     const std::string message = raw ? raw : "JavaScript exception (message conversion failed)";
     if (raw) JS_FreeCString(ctx, raw);
@@ -584,6 +585,8 @@ static JSValue jsRequire(JSContext* ctx, JSValueConst, int argc, JSValueConst* a
                            fs::path(dir) / name / (name + ".js") })
         if (fs::is_regular_file(c, ec)) { resolved = c; break; }
     if (resolved.empty()) return JS_ThrowTypeError(ctx, "Cannot find module '%s'", name.c_str());
+    if (fs::file_size(resolved, ec) > 4 * 1024 * 1024 || ec)
+        return JS_ThrowTypeError(ctx, "require: module exceeds 4 MiB source limit or cannot be read");
     JSValue g = JS_GetGlobalObject(ctx);
     JSValue cache = JS_GetPropertyStr(ctx, g, "__requireCache");
     if (!JS_IsObject(cache)) { cache = JS_NewObject(ctx); JS_SetPropertyStr(ctx, g, "__requireCache", JS_DupValue(ctx, cache)); }
@@ -625,10 +628,10 @@ static std::string jsTsToJs(const std::string& src, const std::string& file) {
             { std::ofstream f(tmpTs, std::ios::binary); f << src; }
             // Capturing the output replaces the >nul / >/dev/null tail, which
             // was the only reason this needed a shell.
-            dice::proc::runPaths("esbuild",
+            dice::proc::runPathsCancellable("esbuild",
                                  {tmpTs, "--loader=ts", "--format=cjs",
                                   "--outfile=" + tmpJs.string()},
-                                 4096, true);
+                                 [] { return ScriptExecution::expired(); }, 4096, true);
             std::string out;
             if (fs::is_regular_file(tmpJs, ec)) {
                 std::ifstream f(tmpJs, std::ios::binary);
@@ -1037,7 +1040,7 @@ static std::mutex sWsMutex;
 static std::map<int64_t, drogon::WebSocketClientPtr> sWsConns;
 
 void JsPluginManager::wsConnect(JSContext* ctx, JSValue obj, const std::string& url) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!ctx_) return;
     const int64_t id = ++wsSeq_;
     wsObjs_[id] = JS_DupValue(ctx, obj);
@@ -1046,18 +1049,22 @@ void JsPluginManager::wsConnect(JSContext* ctx, JSValue obj, const std::string& 
     if (!scheduler_) return;
     scheduler_(0.0, [this, id, url] {
         try {
+            std::lock_guard<ScriptMutex> lock(mutex_);
+            if (!ctx_ || !wsObjs_.count(id)) return; // reload may precede the queued connect
             auto client = drogon::WebSocketClient::newWebSocketClient(url);
-            client->setMessageHandler([this, id](std::string&& msg, const drogon::WebSocketClientPtr&, const drogon::WebSocketMessageType&) {
-                wsFire(id, "message", msg);
+            client->setMessageHandler([schedule = scheduler_, this, id](std::string&& msg, const drogon::WebSocketClientPtr&, const drogon::WebSocketMessageType&) {
+                if (schedule) schedule(0, [this, id, data = std::move(msg)] { wsFire(id, "message", data); });
             });
-            client->setConnectionClosedHandler([this, id](const drogon::WebSocketClientPtr&) {
-                wsFire(id, "close", "");
+            client->setConnectionClosedHandler([schedule = scheduler_, this, id](const drogon::WebSocketClientPtr&) {
+                if (schedule) schedule(0, [this, id] { wsFire(id, "close", ""); });
             });
             auto req = drogon::HttpRequest::newHttpRequest();
             req->setPath("/");
-            client->connectToServer(req, [this, id](drogon::ReqResult r, const drogon::HttpResponsePtr&, const drogon::WebSocketClientPtr&) {
-                if (r == drogon::ReqResult::Ok) wsFire(id, "open", "");
-                else wsFire(id, "error", "connect failed");
+            client->connectToServer(req, [schedule = scheduler_, this, id](drogon::ReqResult r, const drogon::HttpResponsePtr&, const drogon::WebSocketClientPtr&) {
+                if (schedule) schedule(0, [this, id, r] {
+                    if (r == drogon::ReqResult::Ok) wsFire(id, "open", "");
+                    else wsFire(id, "error", "connect failed");
+                });
             });
             { std::lock_guard<std::mutex> lk2(sWsMutex); sWsConns[id] = client; }
         } catch (const std::exception& e) { wsFire(id, "error", e.what()); }
@@ -1065,7 +1072,7 @@ void JsPluginManager::wsConnect(JSContext* ctx, JSValue obj, const std::string& 
 }
 
 void JsPluginManager::wsFire(int64_t id, const char* evt, const std::string& data) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!ctx_) return;
     auto it = wsObjs_.find(id);
     if (it == wsObjs_.end()) return;
@@ -1106,7 +1113,7 @@ void JsPluginManager::wsClose(int64_t id) {
 }
 
 void JsPluginManager::wsCleanup() {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     wsCleanupLocked();
 }
 
@@ -1168,6 +1175,9 @@ bool JsPluginManager::init() {
     if (ctx_) return true;
     rt_ = JS_NewRuntime();
     if (!rt_) return false;
+    JS_SetMemoryLimit(rt_, memoryLimit_);
+    JS_SetMaxStackSize(rt_, 1024 * 1024);
+    JS_SetInterruptHandler(rt_, [](JSRuntime*, void*) { return ScriptExecution::expired() ? 1 : 0; }, nullptr);
     ctx_ = JS_NewContext(rt_);
     if (!ctx_) { JS_FreeRuntime(rt_); rt_ = nullptr; return false; }
     JS_SetContextOpaque(ctx_, this);
@@ -1420,9 +1430,12 @@ void JsPluginManager::installGlobals() {
 }
 
 std::vector<std::string> JsPluginManager::extNamesForFile(const std::string& file) const {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     std::vector<std::string> names;
+    if (rt_) JS_UpdateStackTop(rt_);
     for (auto& e : exts_) {
+        if (suspendedFiles_.count(e.second)) continue;
+        ScriptFaultScope fault(suspendedFiles_, e.second);
         if (e.second != file) continue;
         std::string nm = getStrProp(ctx_, e.first, "name");
         if (!nm.empty() && std::find(names.begin(), names.end(), nm) == names.end())
@@ -1439,7 +1452,7 @@ void JsPluginManager::registerExt(JSValueConst ext) {
 }
 
 int JsPluginManager::loadDir(const std::string& dir) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!ctx_ && !init()) return 0;
     return loadDirLocked(dir);
 }
@@ -1451,11 +1464,13 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
     modDir_ = (fs::path(dir).parent_path().parent_path() / "mod").string();
     rulePluginFiles_.clear();
     gameSystemTemplates_.clear();
+    suspendedFiles_.clear();
+    jobsSuspended_ = false;
     int n = 0;
 
     // Pass 1: read every enabled (.js) file's source + metadata, from BOTH the main
     // plugin dir and data/mod (rule-compat plugins are migrated there).
-    struct Entry { std::string src; PluginMeta meta; };
+    struct Entry { std::string src; PluginMeta meta; bool tooLarge = false; };
     std::vector<Entry> entries;
     auto scan = [&](const std::string& dstr, bool fromMod) {
         std::error_code e2;
@@ -1463,6 +1478,14 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
         if (!fs::is_directory(d, e2)) return;
         for (auto& e : fs::directory_iterator(d, e2)) {
             if (e2 || !e.is_regular_file() || (e.path().extension() != ".js" && e.path().extension() != ".ts")) continue;
+            if (e.file_size() > 4 * 1024 * 1024) {
+                DICE_LOG_ERROR("[js] plugin '{}' exceeds the 4 MiB source limit; skipped", dnx_u8str(e.path().filename()));
+                PluginMeta meta;
+                meta.name = dnx_u8str(e.path().stem()); meta.file = dnx_u8str(e.path().filename());
+                meta.inMod = fromMod; meta.desc = "未加载：源文件超过 4 MiB 上限，请拆分模块后重试。";
+                entries.push_back(Entry{{}, std::move(meta), true});
+                continue;
+            }
             std::ifstream f(e.path(), std::ios::binary);
             std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
             PluginMeta meta = parseMeta(src);
@@ -1499,12 +1522,14 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
     // Pass 3: register the winners; record all (superseded ones are listed but not run).
     for (auto& e : entries) {
         plugins_.push_back(e.meta);
+        if (e.tooLarge) continue;
         if (e.meta.superseded) {
             DICE_LOG_INFO("[js] '{}' ({}) superseded by v{} — not activated",
                           e.meta.file, e.meta.version, e.meta.supersededBy);
             continue;
         }
         loadingFile_ = e.meta.file;
+        ScriptFaultScope fault(suspendedFiles_, e.meta.file);
         LogOperation operation(DICE_LOG_SOURCE, "js", "load_plugin", "file=" + e.meta.file);
         // 每个插件包进独立函数作用域，避免多文件顶层 let/const（如 ext）互相冲突；
         // 并提供 module/exports（部分插件是打包过的 CommonJS 模块）。
@@ -1524,6 +1549,8 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
     // SealDice marks extensions loaded only after every script has evaluated,
     // preserving cross-plugin lookup/order semantics for onLoad().
     for (auto& e : exts_) {
+        if (suspendedFiles_.count(e.second)) continue;
+        ScriptFaultScope fault(suspendedFiles_, e.second);
         JS_SetPropertyStr(ctx_, e.first, "isLoaded", JS_NewBool(ctx_, 1));
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, "onLoad");
         if (JS_IsFunction(ctx_, fn)) {
@@ -1577,21 +1604,23 @@ void JsPluginManager::clearTimer(int64_t id) {   // caller holds mutex_
 }
 
 void JsPluginManager::fireTimer(int64_t id) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     auto it = timers_.find(id);
     if (it == timers_.end() || !ctx_) return;     // cleared, or runtime gone (reload)
     JS_UpdateStackTop(rt_);
-    JSValue cb = it->second.cb;
+    JSValue cb = JS_DupValue(ctx_, it->second.cb); // clearInterval may free its own timer
     double interval = it->second.intervalSec;
     bool prev = capturing_; capturing_ = false;   // timer runs outside a message turn → replies route
     JSValue r = JS_Call(ctx_, cb, JS_UNDEFINED, 0, nullptr);
-    if (JS_IsException(r)) { JSValue e = JS_GetException(ctx_); DICE_LOG_ERROR("[js] timer error: {}", jsErrorDetails(ctx_, e)); JS_FreeValue(ctx_, e); }
+    const bool failed = JS_IsException(r);
+    if (failed) { JSValue e = JS_GetException(ctx_); DICE_LOG_ERROR("[js] timer error: {}", jsErrorDetails(ctx_, e)); JS_FreeValue(ctx_, e); }
     JS_FreeValue(ctx_, r);
     drainJobs();
+    JS_FreeValue(ctx_, cb);
     capturing_ = prev;
     it = timers_.find(id);                          // callback may have cleared itself
     if (it == timers_.end()) return;
-    if (interval > 0) { scheduler_(interval, [this, id] { fireTimer(id); }); }   // re-arm
+    if (interval > 0 && !failed && !ScriptExecution::expired()) { scheduler_(interval, [this, id] { fireTimer(id); }); }   // re-arm
     else { JS_FreeValue(ctx_, it->second.cb); timers_.erase(it); }               // one-shot
 }
 
@@ -1602,6 +1631,8 @@ void JsPluginManager::routeReply(const std::string& platform, bool isPrivate,
 
 JSValue JsPluginManager::findExt(const std::string& name) const {
     for (auto& e : exts_) {
+        if (suspendedFiles_.count(e.second)) continue;
+        ScriptFaultScope fault(suspendedFiles_, e.second);
         if (getStrProp(ctx_, e.first, "name") == name) return JS_DupValue(ctx_, e.first);
     }
     return JS_NULL;
@@ -1614,12 +1645,15 @@ bool JsPluginManager::hasCommand(const std::string& word) {
 }
 
 bool JsPluginManager::hasCommand(const Message& message, const std::string& word) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!ctx_ || word.empty()) return false;
+    JS_UpdateStackTop(rt_);
     const std::string groupId = message.type == MessageType::kPrivate
         ? std::string() : message.targetId;
     bool found = false;
     for (auto& e : exts_) {
+        if (suspendedFiles_.count(e.second)) continue;
+        ScriptFaultScope fault(suspendedFiles_, e.second);
         if (groupGate_ && !groupId.empty() && !e.second.empty()
             && !groupGate_(message.platform, groupId, "js:" + e.second, message.adapterId)) continue;
         JSValue cmdMap = JS_GetPropertyStr(ctx_, e.first, "cmdMap");
@@ -1666,7 +1700,7 @@ int JsPluginManager::reload(const std::string& dir) {
     LogOperation operation(DICE_LOG_SOURCE, "js", "reload");
     // Hold the mutex across the WHOLE teardown+reload so a live message running on
     // the adapter thread can't use ctx_/rt_ while we free and rebuild them.
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     operation.phase("runtime_lock_acquired");
     freeRuntime();
     plugins_.clear();
@@ -1689,8 +1723,9 @@ int JsPluginManager::reload(const std::string& dir) {
 }
 
 std::optional<std::string> JsPluginManager::evalString(const std::string& script) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!ctx_) return std::nullopt;
+    JS_UpdateStackTop(rt_);
     JSValue r = JS_Eval(ctx_, script.c_str(), script.size(), "<card-template>", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(r)) {
         JSValue exc = JS_GetException(ctx_);
@@ -1701,6 +1736,7 @@ std::optional<std::string> JsPluginManager::evalString(const std::string& script
     }
     std::string out = toStr(ctx_, r);
     JS_FreeValue(ctx_, r);
+    if (ScriptExecution::expired()) { JS_FreeValue(ctx_, JS_GetException(ctx_)); return std::nullopt; }
     return out;
 }
 
@@ -1714,18 +1750,24 @@ void JsPluginManager::addConfig(const std::string& ext, const std::string& key, 
 }
 
 std::vector<JsPluginManager::ConfigItem> JsPluginManager::configs() const {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     return configs_;
 }
 
 void JsPluginManager::drainJobs() {
-    if (!rt_) return;
+    if (!rt_ || jobsSuspended_) return;
     JSContext* cctx = nullptr;
     // Bounded loop: run queued promise jobs until none remain (or error).
     for (int i = 0; i < 100000; ++i) {
+        if (ScriptExecution::expired()) {
+            jobsSuspended_ = true;
+            DICE_LOG_ERROR("[js] Promise queue suspended after execution timeout; reload to recover");
+            break;
+        }
         int err = JS_ExecutePendingJob(rt_, &cctx);
         if (err == 0) break;            // no more jobs
         if (err < 0) {                  // a job threw — surface and stop
+            if (ScriptExecution::expired()) jobsSuspended_ = true;
             JSValue exc = JS_GetException(cctx ? cctx : ctx_);
             DICE_LOG_ERROR("[js] async job error: {}", jsErrorDetails(cctx ? cctx : ctx_, exc));
             JS_FreeValue(cctx ? cctx : ctx_, exc);
@@ -1735,13 +1777,16 @@ void JsPluginManager::drainJobs() {
 }
 
 std::vector<JsPluginManager::PluginMeta> JsPluginManager::listAll() const {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     std::vector<PluginMeta> out = plugins_;   // loaded (enabled) ones
     // Count commands per source file by enumerating each ext's live cmdMap
     // (some plugins add commands after register, so count now, not at load).
     if (ctx_) {
+        JS_UpdateStackTop(rt_);
         std::unordered_map<std::string, std::vector<std::string>> cmdNames;
         for (auto& e : exts_) {
+            if (suspendedFiles_.count(e.second)) continue;
+            ScriptFaultScope fault(suspendedFiles_, e.second);
             JSValue cmdMap = JS_GetPropertyStr(ctx_, e.first, "cmdMap");
             if (JS_IsObject(cmdMap)) {
                 JSPropertyEnum* tab = nullptr; uint32_t len = 0;
@@ -1773,6 +1818,14 @@ std::vector<JsPluginManager::PluginMeta> JsPluginManager::listAll() const {
             if (ec || !e.is_regular_file()) continue;
             std::string fname = dnx_u8str(e.path().filename());
             if (fname.size() < 12 || fname.substr(fname.size() - 12) != ".js.disabled") continue;
+            if (e.file_size() > 4 * 1024 * 1024) {
+                PluginMeta meta;
+                meta.name = dnx_u8str(e.path().stem().stem()); meta.file = fname;
+                meta.enabled = false; meta.inMod = fromMod;
+                meta.desc = "源文件超过 4 MiB 上限，请拆分模块后启用。";
+                out.push_back(std::move(meta));
+                continue;
+            }
             std::ifstream f(e.path(), std::ios::binary);
             std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
             PluginMeta m = parseMeta(src);
@@ -1787,12 +1840,14 @@ std::vector<JsPluginManager::PluginMeta> JsPluginManager::listAll() const {
     };
     scanDisabled(dir_, false);
     if (!modDir_.empty() && modDir_ != dir_) scanDisabled(modDir_, true);
+    for (auto& plugin : out) if (suspendedFiles_.count(plugin.file))
+        plugin.desc += "\n已暂停：插件执行超时。请修复插件后重载。";
     return out;
 }
 
 // 定位某插件文件实际所在目录（主目录或 data/mod），找不到则回退主目录。
 std::string JsPluginManager::dirForFile(const std::string& file) const {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     std::error_code ec;
     std::string base = file;
     if (base.size() > 9 && base.substr(base.size() - 9) == ".disabled") base = base.substr(0, base.size() - 9);
@@ -1805,12 +1860,15 @@ std::string JsPluginManager::dirForFile(const std::string& file) const {
 }
 
 std::vector<JsPluginManager::CmdHelp> JsPluginManager::commandHelps() const {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     std::vector<CmdHelp> out;
     if (!ctx_) return out;
+    JS_UpdateStackTop(rt_);
     std::unordered_map<std::string, std::string> fileName;   // 源文件 → 插件显示名
     for (auto& p : plugins_) fileName[p.file] = p.name.empty() ? p.file : p.name;
     for (auto& e : exts_) {
+        if (suspendedFiles_.count(e.second)) continue;
+        ScriptFaultScope fault(suspendedFiles_, e.second);
         std::string pname = fileName.count(e.second) ? fileName[e.second] : e.second;
         JSValue cmdMap = JS_GetPropertyStr(ctx_, e.first, "cmdMap");
         if (JS_IsObject(cmdMap)) {
@@ -1837,7 +1895,8 @@ std::vector<JsPluginManager::CmdHelp> JsPluginManager::commandHelps() const {
 JsPluginManager::UpdateInfo JsPluginManager::checkUpdate(const std::string& file) const {
     UpdateInfo info;
     if (!updateFetch_) { info.error = "update fetch not available"; return info; }
-    std::string dir = dir_.empty() ? "data/plugins/js" : dir_;
+    std::string dir = pluginDir();
+    if (dir.empty()) dir = "data/plugins/js";
     std::ifstream f(fs::path(dir) / file, std::ios::binary);
     if (!f) { info.error = "file not found"; return info; }
     std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -1858,7 +1917,7 @@ JsPluginManager::UpdateInfo JsPluginManager::checkUpdate(const std::string& file
 
 
 bool JsPluginManager::deletePlugin(const std::string& file, std::string& err) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     std::string dir = dirForFile(file);
     std::error_code ec;
     if (!fs::remove(fs::path(dir) / file, ec)) {
@@ -1873,7 +1932,8 @@ bool JsPluginManager::deletePlugin(const std::string& file, std::string& err) {
 }
 bool JsPluginManager::updatePlugin(const std::string& file, std::string& err) {
     if (!updateFetch_) { err = "update fetch not available"; return false; }
-    std::string dir = dir_.empty() ? "data/plugins/js" : dir_;
+    std::string dir = pluginDir();
+    if (dir.empty()) dir = "data/plugins/js";
     std::ifstream f(fs::path(dir) / file, std::ios::binary);
     if (!f) { err = "file not found"; return false; }
     std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -1918,7 +1978,7 @@ JsPluginManager::PluginMeta JsPluginManager::parseMeta(const std::string& src) {
 }
 
 std::vector<JsPluginManager::PluginMeta> JsPluginManager::plugins() const {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
     return plugins_;
 }
 
@@ -2187,6 +2247,8 @@ void JsPluginManager::dispatchCommandHookLocked(const Message& message, JSValueC
     JSValueConst args[3] = { jctx, jmsg, jargs };
     const std::string groupId = message.type == MessageType::kPrivate ? std::string() : message.targetId;
     for (auto& e : exts_) {
+        if (suspendedFiles_.count(e.second)) continue;
+        ScriptFaultScope fault(suspendedFiles_, e.second);
         if (groupGate_ && !groupId.empty() && !e.second.empty()
             && !groupGate_(message.platform, groupId, "js:" + e.second, message.adapterId)) continue;
         JSValue hook = JS_GetPropertyStr(ctx_, e.first, "onCommandReceived");
@@ -2219,8 +2281,8 @@ JsPluginManager::Result JsPluginManager::handleNonCommand(const std::string& pla
 JsPluginManager::Result JsPluginManager::dispatchMessageHook(
         const Message& message, int privilege, const char* hook) {
     Result res;
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!ctx_ || exts_.empty()) return res;
-    std::lock_guard<std::mutex> lk(mutex_);
     JS_UpdateStackTop(rt_);
     JSValue jctx, jmsg;
     buildCtxMsg(message, privilege, jctx, jmsg);
@@ -2230,6 +2292,8 @@ JsPluginManager::Result JsPluginManager::dispatchMessageHook(
     JSValueConst args[2] = { jctx, jmsg };
     const std::string groupId = message.type == MessageType::kPrivate ? std::string() : message.targetId;
     for (auto& e : exts_) {
+        if (suspendedFiles_.count(e.second)) continue;
+        ScriptFaultScope fault(suspendedFiles_, e.second);
         if (groupGate_ && !groupId.empty() && !e.second.empty()
             && !groupGate_(message.platform, groupId, "js:" + e.second, message.adapterId)) continue;
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, hook);
@@ -2264,8 +2328,8 @@ JsPluginManager::Result JsPluginManager::handleMessageReceived(const Message& me
 void JsPluginManager::handleMessageSend(const Message& contextMessage,
                                         const Message& sentMessage,
                                         const std::string& flag, int privilege) {
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!ctx_ || exts_.empty()) return;
-    std::lock_guard<std::mutex> lk(mutex_);
     JS_UpdateStackTop(rt_);
 
     JSValue jctx, unusedIncoming;
@@ -2286,6 +2350,8 @@ void JsPluginManager::handleMessageSend(const Message& contextMessage,
     const std::string groupId = sentMessage.type == MessageType::kPrivate
         ? std::string() : sentMessage.targetId;
     for (auto& e : exts_) {
+        if (suspendedFiles_.count(e.second)) continue;
+        ScriptFaultScope fault(suspendedFiles_, e.second);
         if (groupGate_ && !groupId.empty() && !e.second.empty()
             && !groupGate_(sentMessage.platform, groupId, "js:" + e.second, sentMessage.adapterId)) continue;
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, "onMessageSend");
@@ -2307,7 +2373,6 @@ void JsPluginManager::handleMessageSend(const Message& contextMessage,
 JsPluginManager::Result JsPluginManager::handleCommandReceived(
         const Message& message, const std::string& cmdLine, int privilege) {
     Result res;
-    if (!ctx_ || exts_.empty()) return res;
     std::string line = cmdLine;
     line.erase(0, line.find_first_not_of(" \t"));
     const size_t split = line.find_first_of(" \t");
@@ -2315,7 +2380,8 @@ JsPluginManager::Result JsPluginManager::handleCommandReceived(
     const std::string rest = split == std::string::npos ? std::string() : line.substr(split + 1);
     if (command.empty()) return res;
 
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
+    if (!ctx_ || exts_.empty()) return res;
     JS_UpdateStackTop(rt_);
     JSValue jctx, jmsg;
     buildCtxMsg(message, privilege, jctx, jmsg);
@@ -2334,7 +2400,6 @@ JsPluginManager::Result JsPluginManager::handleCommandReceived(
     return res;
 }
 void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
-    if (!ctx_ || exts_.empty()) return;
 
     const auto extraId = [&](const char* key) -> std::string {
         if (!event.extra.is_object() || !event.extra.contains(key)) return {};
@@ -2390,7 +2455,8 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
         return;
     }
 
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> lk(mutex_);
+    if (!ctx_ || exts_.empty()) return;
     JS_UpdateStackTop(rt_);
     JSValue jctx, jmsg;
     buildCtxMsg(message, privilege, jctx, jmsg);
@@ -2417,6 +2483,8 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
     capturing_ = false;
     JSValueConst args[2] = { jctx, hookArg };
     for (auto& e : exts_) {
+        if (suspendedFiles_.count(e.second)) continue;
+        ScriptFaultScope fault(suspendedFiles_, e.second);
         if (groupGate_ && !event.groupId.empty() && !e.second.empty()
             && !groupGate_(event.platform, event.groupId, "js:" + e.second, event.adapterId)) continue;
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, hook);
@@ -2456,8 +2524,8 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
     const std::string& platform = message.platform;
     const std::string groupId = message.type == MessageType::kPrivate ? std::string() : message.targetId;
     Result res;
+    std::lock_guard<ScriptMutex> lk(mutex_);
     if (!ctx_) return res;
-    std::lock_guard<std::mutex> lk(mutex_);
     // Re-baseline the stack-overflow check for THIS thread — live messages run on
     // the adapter thread, not the thread that created the runtime; without this
     // quickjs mis-measures depth and every call throws "Maximum call stack size
@@ -2473,15 +2541,18 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
 
     // 实时在所有已注册 ext 的 cmdMap 里找指令名。
     JSValue cmd = JS_UNDEFINED;
+    std::string commandFile;
     std::string matchedWord = word;
     for (auto& e : exts_) {
+        if (suspendedFiles_.count(e.second)) continue;
+        ScriptFaultScope fault(suspendedFiles_, e.second);
         // 插件分群启停（地基）：该源文件在本群被禁用 → 跳过其全部指令。
         if (groupGate_ && !groupId.empty() && !e.second.empty()
             && !groupGate_(platform, groupId, "js:" + e.second, message.adapterId)) continue;
         JSValue cmdMap = JS_GetPropertyStr(ctx_, e.first, "cmdMap");
         if (JS_IsObject(cmdMap)) {
             JSValue c = JS_GetPropertyStr(ctx_, cmdMap, word.c_str());
-            if (JS_IsObject(c)) { cmd = c; JS_FreeValue(ctx_, cmdMap); break; }
+            if (JS_IsObject(c)) { cmd = c; commandFile = e.second; JS_FreeValue(ctx_, cmdMap); break; }
             JS_FreeValue(ctx_, c);
             // Some legacy plugins register cmd.name as `.foo` rather than the
             // API's normal `foo`. CommandRouter has already consumed the
@@ -2492,7 +2563,7 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
                 if (JS_IsObject(c)) { cmd = c; matchedWord = legacy; break; }
                 JS_FreeValue(ctx_, c);
             }
-            if (JS_IsObject(cmd)) { JS_FreeValue(ctx_, cmdMap); break; }
+            if (JS_IsObject(cmd)) { commandFile = e.second; JS_FreeValue(ctx_, cmdMap); break; }
         }
         JS_FreeValue(ctx_, cmdMap);
     }
@@ -2514,6 +2585,7 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
         return res;
     }
 
+    ScriptFaultScope commandFault(suspendedFiles_, commandFile);
     JSValue solve = JS_GetPropertyStr(ctx_, cmd, "solve");
 
     JSValue jctx, jmsg;

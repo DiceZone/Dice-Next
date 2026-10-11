@@ -1,5 +1,6 @@
 #include "causal_rule_manager.h"
 #include "../../common/logger.h"
+#include "../../common/bounded_regex.h"
 #include "../../common/utils.h"
 
 #include <sqlite_orm/sqlite_orm.h>
@@ -606,10 +607,7 @@ bool CausalRuleManager::matchText(const std::string& msg, const std::string& pat
         case CausalCondType::Search:
             return msgLower.find(patLower) != std::string::npos;
         case CausalCondType::Regex:
-            try {
-                std::regex re(pattern, std::regex::ECMAScript | std::regex::icase);
-                return std::regex_search(msg, re);
-            } catch (...) { return false; }
+            return boundedRegex(pattern, msg).matched;
         default:
             return false;
     }

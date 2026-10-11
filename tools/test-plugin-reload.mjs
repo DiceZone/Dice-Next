@@ -1,5 +1,5 @@
 // POSIX live-core regression; isolated data, no bot accounts or external services.
-// Usage: node tools/test-plugin-reload.mjs <core-binary> [lua-file]
+// Usage: node tools/test-plugin-reload.mjs <core-binary> [lua-file] [--reliability]
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -11,16 +11,19 @@ import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 
 if (process.platform === 'win32') throw new Error('This smoke driver tests POSIX graceful shutdown; run CTest on Windows.');
-if (process.argv.length < 3 || process.argv.length > 4)
-  throw new Error('Usage: node tools/test-plugin-reload.mjs <core-binary> [lua-file]');
-const core = path.resolve(process.argv[2]);
+const args = process.argv.slice(2);
+const reliability = args.at(-1) === '--reliability';
+if (reliability) args.pop();
+if (args.length < 1 || args.length > 2)
+  throw new Error('Usage: node tools/test-plugin-reload.mjs <core-binary> [lua-file] [--reliability]');
+const core = path.resolve(args[0]);
 const resources = fileURLToPath(new URL('../server/', import.meta.url));
-const lua = process.argv[3] ? fs.readFileSync(process.argv[3]) : Buffer.from(`
+const lua = args[1] ? fs.readFileSync(args[1]) : Buffer.from(`
 msg_order = {}
 function reload_probe(msg) return "reload-probe-ok" end
 msg_order["reload-probe"] = "reload_probe"
 `);
-const filename = process.argv[3] ? path.basename(process.argv[3]) : 'reload-probe.lua';
+const filename = args[1] ? path.basename(args[1]) : 'reload-probe.lua';
 assert.equal(path.extname(filename).toLowerCase(), '.lua');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dicenext-plugin-reload-'));
 const apiKey = randomUUID();
@@ -45,7 +48,8 @@ try {
   config('events', {});
   config('webui', {});
   config('i18n', { resource_dir: 'i18n', default_locale: 'zh-Hans' });
-  config('dice', { heart_enabled: false, cloudban_enabled: false, console_start_hidden: false });
+  config('dice', { heart_enabled: false, cloudban_enabled: false, console_start_hidden: false,
+    plugin_timeout_ms: reliability ? 250 : 5000 });
   config('update', { auto_check: false });
   config('backup', { auto_enabled: false });
   config('hot_reload', { enabled: false });
@@ -92,12 +96,12 @@ try {
     }
   }
   await healthy();
-  if (!process.argv[3])
+  if (!args[1])
     assert.equal((await request('/api/test/message', { text: 'reload-probe' })).reply, 'reload-probe-ok');
   for (const enabled of [false, true]) {
     await ok('/api/mod/lua/toggle', { name, enabled });
     await healthy();
-    if (!process.argv[3])
+    if (!args[1])
       assert.equal((await request('/api/test/message', { text: 'reload-probe' })).matched, enabled);
   }
   await ok('/api/mod/lua/reload', {});
@@ -106,7 +110,7 @@ try {
   const deleted = await ok('/api/mod/lua/delete', { name });
   assert.ok(!deleted.data.some(mod => mod.name === name));
   await healthy();
-  if (!process.argv[3])
+  if (!args[1])
     assert.equal((await request('/api/test/message', { text: 'reload-probe' })).matched, false);
   await ok('/api/mod/lua/upload', upload);
   await healthy();
@@ -132,8 +136,59 @@ msg_order["diag-lua"] = "diag_lua"
   await ok('/api/mod/lua/upload', { filename: 'diagnostics-probe.lua', content: errorLua.toString('base64') });
   await request('/api/test/message', { text: 'diag-lua' });
   await healthy();
+  if (reliability) {
+    const js = `const ext = seal.ext.new('fault-probe', 'test', '1'); seal.ext.register(ext);
+const cmd = seal.ext.newCmdItemInfo(); cmd.name = 'faultjs';
+cmd.solve = () => { while(true) { try { while(true) {} } catch(e) {} } }; ext.cmdMap.faultjs = cmd;`;
+    await ok('/api/plugins/js/upload', { filename: 'fault-probe.js', content: js });
+    const running = request('/api/test/message', { text: '.faultjs' });
+    await delay(25);
+    const start = performance.now();
+    await Promise.all(Array.from({ length: 12 }, () => request('/api/auth/status')));
+    assert.ok(performance.now() - start < 1500, 'Runtime contention must not exhaust all WebUI workers');
+    await running;
+    await healthy();
+    const state = await ok('/api/plugins/js');
+    assert.ok(JSON.stringify(state).includes('已暂停'), 'Timed-out plugin should have a visible recovery hint');
+    await ok('/api/plugins/js/delete', { file: 'fault-probe.js' });
+    await healthy();
+
+    await ok('/api/plugins/js/upload', { filename: 'fault-load.js', content: 'while(true) {}' });
+    await healthy();
+    await ok('/api/plugins/js/delete', { file: 'fault-load.js' });
+    const loopLua = Buffer.from(`msg_order = { faultlua = 'faultlua' }
+function faultlua(msg) while true do pcall(function() while true do end end) end end`);
+    await ok('/api/mod/lua/upload', { filename: 'fault-probe.lua', content: loopLua.toString('base64') });
+    await request('/api/test/message', { text: 'faultlua' });
+    await healthy();
+    await ok('/api/mod/lua/delete', { name: 'fault-probe' });
+
+    const asyncLua = Buffer.from(`msg_order = { faultasync = 'faultasync' }
+function faultasync(msg) sleepTime(10); while true do end end`);
+    await ok('/api/mod/lua/upload', { filename: 'fault-async.lua', content: asyncLua.toString('base64') });
+    await request('/api/test/message', { text: 'faultasync' });
+    await delay(500);
+    await healthy();
+    await ok('/api/mod/lua/delete', { name: 'fault-async' });
+    // A large/old log must not be scanned in full on every dashboard poll.
+    const largeLog = path.join(root, 'data/logs/app/dice-fault-large.log');
+    fs.writeFileSync(largeLog, `${'ignored historical log\n'.repeat(800000)}[2026-10-12 01:00:00.000] [error] [test] bounded-tail-marker\n`);
+    const future = new Date(Date.now() + 60000);
+    fs.utimesSync(largeLog, future, future);
+    const dashboardStart = performance.now();
+    const largeDashboard = await ok('/api/dashboard/stats');
+    assert.ok(JSON.stringify(largeDashboard).includes('bounded-tail-marker'));
+    assert.ok(performance.now() - dashboardStart < 1500, 'Large log must not stall dashboard polling');
+    fs.rmSync(largeLog); // exact file created by this isolated fixture
+    console.log('PASS: live JS/Lua infinite loops, load failure, async continuation, API contention, deletion and core recovery');
+  }
   const dashboard = await ok('/api/dashboard/stats');
   assert.ok(dashboard.data.recent_logs.some(line => line.level === 'error'), 'Dashboard must still parse error levels');
+  if (reliability) {
+    await ok('/api/plugins/js/upload', { filename: 'fault-shutdown.js', content:
+      "setInterval(() => { while(true) {} }, 200);" });
+    await delay(220); // quit while the worker is in the infinite callback
+  }
   child.kill('SIGTERM');
   const exit = await Promise.race([exited, delay(5000).then(() => { throw new Error('Graceful shutdown timed out'); })]);
   assert.equal(exit.code, 0, JSON.stringify(exit));

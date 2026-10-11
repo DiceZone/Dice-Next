@@ -1,6 +1,7 @@
 #pragma once
 #include "../common/logger.h"
 #include "../common/http_log.h"
+#include "../common/script_execution.h"
 #include <drogon/drogon.h>
 #include <atomic>
 
@@ -23,9 +24,12 @@ inline void installHttpDiagnostics(drogon::HttpAppFramework& app) {
         DICE_LOG_ERROR("[http] request={} {} {} unhandled exception: {}", trace.id, req->methodString(), req->path(),
             current ? describeException(current) : sanitizeLogText(error.what()));
         auto response = drogon::HttpResponse::newHttpResponse();
-        response->setStatusCode(drogon::k500InternalServerError);
+        const bool busy = dynamic_cast<const ScriptBusy*>(&error) != nullptr;
+        response->setStatusCode(busy ? drogon::k503ServiceUnavailable : drogon::k500InternalServerError);
         response->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-        response->setBody("{\"code\":500,\"message\":\"internal_error\"}");
+        response->setBody(busy ? "{\"code\":503,\"message\":\"插件运行时忙碌，请稍后重试\"}"
+                              : "{\"code\":500,\"message\":\"internal_error\"}");
+        if (busy) response->addHeader("Retry-After", "1");
         callback(response);
     });
     app.registerPreSendingAdvice([](const drogon::HttpRequestPtr& req, const drogon::HttpResponsePtr& response) {

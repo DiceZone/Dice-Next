@@ -153,7 +153,12 @@ public:
             if (epoch() - lastSyncAt_ < syncInterval()) return;
         }
         if (busy_.load()) return;
-        std::thread([this]() { syncNow(false); }).detach();
+        try {
+            std::thread([this]() {
+                try { syncNow(false); }
+                catch (...) { DICE_LOG_EXCEPTION("cloudban background sync"); }
+            }).detach();
+        } catch (...) { DICE_LOG_EXCEPTION("cloudban worker creation"); }
     }
 
     /// 全量/增量同步一轮（同步执行——调用方自己放分离线程）。
@@ -165,6 +170,7 @@ public:
         if (!enabled()) { r.error = "\xe4\xba\x91\xe9\xbb\x91\xe5\x8a\x9f\xe8\x83\xbd\xe6\x9c\xaa\xe5\xbc\x80\xe5\x90\xaf"; return r; }   // 云黑功能未开启
         (void)force;
         if (busy_.exchange(true)) { r.error = "\xe5\x90\x8c\xe6\xad\xa5\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad"; return r; }   // 同步进行中
+        struct BusyReset { std::atomic<bool>& flag; ~BusyReset() { flag.store(false); } } reset{busy_};
         {
             std::lock_guard<std::mutex> lk(mu_);
             lastSyncAt_ = epoch();
@@ -276,12 +282,14 @@ public:
             {"reason", rs},
         };
         std::thread([base, payload = body.dump(), targetId]() {
+            try {
             int st = 0;
             dice::ai::httpPostJson(base + "/api/v1/report", "", payload, 15, st);
             if (st == 200)
                 DICE_LOG_INFO("[\xe4\xba\x91\xe9\xbb\x91] \xe5\xb7\xb2\xe4\xb8\x8a\xe6\x8a\xa5 {} \xe5\xbe\x85\xe6\xa0\xb8\xe9\xaa\x8c", targetId);   // 已上报 X 待核验
             else
                 DICE_LOG_DEBUG("[\xe4\xba\x91\xe9\xbb\x91] \xe4\xb8\x8a\xe6\x8a\xa5\xe5\xa4\xb1\xe8\xb4\xa5\xef\xbc\x88HTTP {}\xef\xbc\x89", st);   // 上报失败（静默）
+            } catch (...) { DICE_LOG_EXCEPTION("cloudban background report"); }
         }).detach();
     }
 

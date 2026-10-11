@@ -2342,9 +2342,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (!f) { f.open("logs/dice.log"); }          // 兼容旧位置
                 if (!f) { f.open("../logs/dice.log"); }
                 if (!f) return arr;
+                // Dashboard polling must not scan/retain an entire day's log.
+                constexpr std::streamoff tailBytes = 512 * 1024;
+                f.seekg(0, std::ios::end);
+                const auto bytes = f.tellg();
+                if (bytes > tailBytes) {
+                    f.seekg(bytes - tailBytes);
+                    std::string partial;
+                    std::getline(f, partial); // discard the cut-off first line
+                } else { f.seekg(0); }
                 std::vector<std::string> lines;
                 std::string line;
-                while (std::getline(f, line)) {
+                while (f.tellg() < bytes && std::getline(f, line)) {
                     // Strip invalid UTF-8 bytes to avoid JSON serialization errors
                     std::string clean;
                     for (size_t j = 0; j < line.size(); ) {

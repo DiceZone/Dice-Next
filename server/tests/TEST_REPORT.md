@@ -3,6 +3,27 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-12: Runtime reliability fault injection
+
+- Final local macOS arm64 Debug core, unit tests and real Lua runtime compiled.
+  The full core suite passed 598 cases / 5816 assertions and Lua passed 20 cases /
+  191 assertions, including metadata stack baselines and direct JS deletion.
+- New watchdog-bounded tests exercise JS/Lua infinite loops, caught errors,
+  getters/string conversion, nested coroutines, memory exhaustion/recovery,
+  timed mutex admission, failed/self-clearing timers, pathological regex,
+  queue overflow, worker exceptions, native subprocess timeout and looping Lua
+  finalizers. Tests fail the process rather than hang CI if interruption breaks.
+- Isolated real POSIX service smoke passed with `--reliability`: timed-out JS
+  commands and loading, Lua commands and sleep continuations, concurrent auth
+  reads, visible suspension hints, deletion/reload, normal roll recovery and
+  shutdown while a JS worker was executing an infinite loop. A 16+ MiB synthetic
+  log also verified bounded dashboard tail reads. The supplied standalone
+  `是还是不是.lua` passed the normal upload/delete/reload/exit smoke with the final
+  binary. No bot accounts, real messages or external APIs were used.
+- Windows native process-tree/tray behavior and malicious native library/process
+  isolation were not tested locally. Optional external Lua corpus variables were
+  not supplied. CI workflows and compile parallelism settings were not changed.
+
 ## 2026-10-12: Runtime logging and exception diagnostics
 
 - Local macOS arm64 Debug backend, core tests and Lua tests compiled with the

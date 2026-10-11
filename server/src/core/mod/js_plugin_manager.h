@@ -19,6 +19,7 @@
 #include <functional>
 #include <optional>
 #include <array>
+#include "common/script_execution.h"
 
 #include <quickjs.h>
 
@@ -30,13 +31,15 @@ struct BotEvent;
 
 class JsPluginManager {
 public:
-    JsPluginManager() = default;
+    explicit JsPluginManager(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
+                             size_t memoryLimit = 256 * 1024 * 1024)
+        : mutex_(timeout), memoryLimit_(memoryLimit) {}
     ~JsPluginManager();
 
     bool init();                                   // 初始化运行时与全局对象
     int  loadDir(const std::string& dir);          // 加载目录下 *.js
     int  reload(const std::string& dir);           // 清空并重载
-    bool ready() const { return ctx_ != nullptr; }
+    bool ready() const { std::lock_guard<ScriptMutex> lock(mutex_); return ctx_ != nullptr; }
 
     /// 求值一段 JS 脚本并返回其字符串化结果（异常/未初始化返回 nullopt）。
     /// 供卡片模板的 "js:" 表达式等调用。
@@ -115,15 +118,15 @@ public:
     std::vector<PluginMeta> listAll() const;
     /// The directory passed to the last loadDir/reload (so the WebUI can write /
     /// remove / toggle plugin files there and then reload).
-    std::string pluginDir() const { return dir_; }
+    std::string pluginDir() const { std::lock_guard<ScriptMutex> lock(mutex_); return dir_; }
     /// 规则类 JS 插件目录（data/mod，由主插件目录推导）。loadDir 会一并扫描它。
-    std::string modDir() const { return modDir_; }
+    std::string modDir() const { std::lock_guard<ScriptMutex> lock(mutex_); return modDir_; }
     /// 标记「当前正在加载的插件」为规则类（gameSystem/coc.registerRule 桥接调用）。
     void markCurrentRulePlugin() { if (!loadingFile_.empty()) rulePluginFiles_.insert(loadingFile_); }
     /// seal.gameSystem.newTemplate(ByYaml) 的模板原文（JSON/YAML）收集，供宿主解析属性别名/衍生。
     void addGameSystemTemplate(std::string s) { if (!s.empty()) gameSystemTemplates_.push_back(std::move(s)); }
     std::vector<std::string> gameSystemTemplates() const {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::lock_guard<ScriptMutex> lk(mutex_);
         return gameSystemTemplates_;
     }
     /// 返回某插件文件（foo.js / foo.js.disabled）实际所在目录（主目录或 data/mod），
@@ -276,7 +279,10 @@ public:
     }
 
     // 除主目录外，额外扫描的 js 插件目录（规则包 data/rulepacks/<包>/js/）。reload 时一并加载。
-    void setExtraDirs(std::vector<std::string> dirs) { extraDirs_ = std::move(dirs); }
+    void setExtraDirs(std::vector<std::string> dirs) {
+        std::lock_guard<ScriptMutex> lock(mutex_);
+        extraDirs_ = std::move(dirs);
+    }
 
     // HTTP 注入（全局 fetch）。接到 CommandRouter 的受控 curl（白名单 + 开关 + SSRF 防护）。
     // 返回响应体；headerLines = "\n" 分隔的 "K: V"；status 出参带回 HTTP 状态码（0=失败/被拒）。
@@ -310,7 +316,10 @@ private:
 
     JSRuntime* rt_ = nullptr;
     JSContext* ctx_ = nullptr;
-    mutable std::mutex mutex_;
+    mutable ScriptMutex mutex_;
+    size_t memoryLimit_;
+    mutable std::set<std::string> suspendedFiles_;
+    bool jobsSuspended_ = false;
 
     // 保存已注册的 ext 对象（Dup 持有）；派发时实时读 ext.cmdMap，
     // 与「先 register 后加指令」的插件顺序无关。

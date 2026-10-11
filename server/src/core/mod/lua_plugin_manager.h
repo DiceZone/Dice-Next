@@ -1,4 +1,5 @@
 #pragma once
+#include "common/script_execution.h"
 // ─── Dice!Next — Lua 插件子系统 ───────────────────────────────────
 // 嵌入 Lua，并提供模块目录与全局函数接口：
 //   data/mod/<模块名>/descriptor.json   模块元数据（title/ver/author/brief/helpdoc）
@@ -33,18 +34,23 @@ namespace dice {
 
 class LuaPluginManager {
 public:
-    LuaPluginManager() = default;
+    explicit LuaPluginManager(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
+                              size_t memoryLimit = 256 * 1024 * 1024)
+        : mutex_(timeout), memoryLimit_(memoryLimit) {}
     ~LuaPluginManager();
 
     bool init();                       // 创建 lua_State + 注册全局 + 打开配置库
     void freeRuntime();                // 关闭 lua_State（配置库另行管理）
-    bool ready() const { return state_ != nullptr; }
+    bool ready() const { std::lock_guard<ScriptMutex> lock(mutex_); return state_ != nullptr; }
 
     int  loadDir(const std::string& dir);   // 扫描 data/mod/<mod>/descriptor.json
     int  reload();                          // freeRuntime + init + loadDir(dir_)
     std::string modDir() const { return dir_; }
     // 除主目录外，额外扫描的 mod 目录（规则包 data/rulepacks/<包>/lua/）。reload 时一并加载。
-    void setExtraDirs(std::vector<std::string> dirs) { extraDirs_ = std::move(dirs); }
+    void setExtraDirs(std::vector<std::string> dirs) {
+        std::lock_guard<ScriptMutex> lock(mutex_);
+        extraDirs_ = std::move(dirs);
+    }
 
     // 直接求值一段 Lua（供测试/脚本调用）。返回是否成功；err 写错误信息。
     bool eval(const std::string& code, std::string* err = nullptr);
@@ -316,7 +322,7 @@ private:
         uint64_t generation = 0;
         int threadRef = 0;
         int messageRef = 0;
-        std::string ruleName, modDir, platform, gid, uid;
+        std::string ruleName, modName, modDir, platform, gid, uid;
         std::map<std::string, std::string> vars;
     };
     void scheduleCoroutineResume(int threadRef, double delaySeconds);
@@ -325,7 +331,10 @@ private:
     static double yieldedDelaySeconds(lua_State* coroutine, int resultCount);
 
     lua_State* state_ = nullptr;
-    mutable std::recursive_mutex mutex_;
+    mutable ScriptMutex mutex_;
+    size_t memoryLimit_;
+    size_t allocatedBytes_ = 0;
+    std::set<std::string> suspendedMods_;
     std::string dir_;
     std::vector<std::string> extraDirs_;   // 规则包附加 mod 目录
     std::vector<LuaMod> mods_;

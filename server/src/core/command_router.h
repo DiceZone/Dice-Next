@@ -14,6 +14,7 @@
 #include "../common/check_reply.h"
 #include "../common/legacy_check_replies.h"
 #include "../common/subprocess.h"
+#include "../common/bounded_regex.h"
 #include "../adapter/adapter_manager.h"
 #include "../core/dice/dice_engine.h"
 #include "../core/dice/roll_command_parser.h"
@@ -9504,12 +9505,9 @@ public:
         std::vector<std::string> groups;
         if (type == MatchType::kRegex) {
             try {
-                std::regex re(matchContent, std::regex::ECMAScript | std::regex::icase);
-                std::smatch m;
                 // Anchored at start, mirroring ReplyMatcher::matchRegex, so the
                 // captured groups line up with what actually triggered the rule.
-                if (std::regex_search(msg.content, m, re, std::regex_constants::match_continuous))
-                    for (auto& g : m) groups.push_back(g.str());
+                groups = boundedRegex(matchContent, msg.content, RegexMode::Prefix).groups;
             } catch (...) {}
         } else if (type == MatchType::kPrefix) {
             // Prefix match exposes everything after the prefix as the 1st (and only)
@@ -9918,7 +9916,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         for (char c : method) m += (char)std::toupper((unsigned char)c);
         if (m.empty()) m = "GET";
 
-        static long long seq = 0;                        // unique temp names (called under jsMod mutex)
+        static std::atomic<long long> seq{0};            // JS and Lua can fetch concurrently
         long long id = ++seq;
         fs::path tmp = fs::temp_directory_path();
         fs::path cfgF  = tmp / ("dnfetch_" + std::to_string(id) + ".cfg");
@@ -9944,8 +9942,11 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
             }
         } catch (...) { fs::remove(cfgF, ec); fs::remove(bodyF, ec); return ""; }
 
-        std::string out = dice::proc::curlConfig(cfgF, 2 * 1024 * 1024).output;
+        auto fetched = dice::proc::curlConfigCancellable(cfgF,
+            [] { return ScriptExecution::expired(); }, 2 * 1024 * 1024);
         fs::remove(cfgF, ec); fs::remove(bodyF, ec);
+        if (fetched.cancelled || !fetched.ok()) return "";
+        std::string out = std::move(fetched.output);
 
         auto nl = out.find_last_of('\n');                // split off the trailing status line
         if (nl != std::string::npos) {
