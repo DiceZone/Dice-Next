@@ -127,7 +127,8 @@ public:
         cacheOfficialGroupNickname(routed);
         ensureInboundGroup(routed);
         for (auto& handler : messageHandlers_) {
-            handler(routed);
+            try { handler(routed); }
+            catch (...) { DICE_LOG_EXCEPTION("message handler adapter=" + routed.adapterId + " platform=" + routed.platform); }
         }
     }
 
@@ -152,7 +153,10 @@ public:
                 if (!publicId.empty()) routed.groupId = publicId;
             }
         }
-        for (auto& handler : eventHandlers_) handler(routed);
+        for (auto& handler : eventHandlers_) {
+            try { handler(routed); }
+            catch (...) { DICE_LOG_EXCEPTION("event handler adapter=" + routed.adapterId + " platform=" + routed.platform); }
+        }
     }
 
     /// Register an event handler (called for every notice/request event).

@@ -596,6 +596,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     app.registerHandler("/api/plugins/js/reload", [&jsMod](Req, CB&& cb) {
         int n = jsMod.reload(jsMod.pluginDir().empty() ? "data/plugins/js" : jsMod.pluginDir());
+        CommandRouter::reloadJsGameSystems(jsMod.gameSystemTemplates());
         jsonReply(ok(J{{"loaded", n}, {"plugins", pluginsJson(jsMod)}}), std::move(cb));
     }, {drogon::Post});
 
@@ -2403,6 +2404,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             }), std::move(cb));
         } catch (const std::exception&) {
             // Fallback: return stats without logs if log parsing fails
+            DICE_LOG_WARN_EXCEPTION("dashboard statistics/log loading; returning fallback");
             jsonReply(ok(J{
                 {"uptime_seconds", static_cast<int>(std::time(nullptr) - utils::getStartupEpoch())},
                 {"active_connections", 0},

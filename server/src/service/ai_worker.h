@@ -14,6 +14,7 @@
 #include <functional>
 #include <mutex>
 #include <thread>
+#include "../common/logger.h"
 
 namespace dice::aiwork {
 
@@ -51,7 +52,7 @@ private:
                 job = std::move(q_.front());
                 q_.pop_front();
             }
-            try { job(); } catch (...) {}
+            try { job(); } catch (...) { DICE_LOG_EXCEPTION("AI background job"); }
         }
     }
 

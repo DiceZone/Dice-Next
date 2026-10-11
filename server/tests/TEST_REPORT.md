@@ -3,6 +3,67 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-12: Runtime logging and exception diagnostics
+
+- Local macOS arm64 Debug backend, core tests and Lua tests compiled with the
+  same pinned temporary dependencies used for the rule-reload fix. The final
+  complete core suite passed 592 cases / 5780 assertions; Lua compatibility
+  passed 17 cases / 156 assertions. Optional external corpus environment
+  variables were not supplied. These are local results, not Release/CI or
+  Windows/Linux live acceptance.
+- Nine logger cases cover JSON/query/header/URL credential redaction, configured
+  and short credentials, idempotence, multiline/control-character handling,
+  UTF-8 truncation, nested/non-standard exceptions, log-level fallback, HTTP
+  business failures, polling noise and native framework/file output. The
+  registered Drogon exception callback is invoked with a nested exception to
+  verify its HTTP 500 response, private request-body/header exclusion and
+  preserved file-log cause; this is not a production broken-endpoint test.
+- Two runtime diagnostics cases verify error-notification reentry/concurrent
+  throttling and isolation of throwing message/event handlers. Existing
+  rule-reload regressions remain in the full suite. Production notification
+  delivery is queued to the event loop, with lifetime checks, so logging while
+  holding a config/plugin lock does not synchronously send a notification.
+- Both the minimal fixture and the supplied `是还是不是.lua` passed the expanded
+  real-core POSIX smoke driver: upload/precheck, enable/disable, Lua/JS reload,
+  delete/reupload, concurrent API reads and rolls, deliberate JS/Lua execution
+  failures, request IDs, operation phases/durations, source/traceback records,
+  dashboard parsing, API-key exclusion from files and graceful shutdown.
+  No bot account, QQ UI or external service was used.
+- One lightweight logger test compilation unit was added to the existing core
+  test executable. No extra CI job, build matrix, dependency or heavy router
+  compilation unit was introduced. See [runtime logging](../../docs/runtime-logging.md)
+  for format, levels, privacy limitations and troubleshooting.
+
+## 2026-10-11: Plugin deletion/upload rule-reload deadlock
+
+- The supplied single-file Lua was not an infinite loop. Upload, toggle, delete
+  and reload all called `reloadRulePacks`, whose exclusive `rulesLock` was
+  reacquired by default-skill normalization through `canonical`. Waiting HTTP
+  handlers also prevented a normal server shutdown. Default-skill lookup had a
+  second recursive shared-lock path; both now use the existing unlocked query
+  while their caller owns the lock.
+- JS template reload now owns the same exclusive rules lock, its source
+  templates are copied under the JS runtime mutex, and the explicit JS reload
+  API synchronizes templates just like upload/toggle/delete already do.
+- macOS arm64 local Debug backend, core tests and Lua tests compiled with the
+  pinned library versions (temporary non-vcpkg dependency installation). The
+  complete core suite passed 581 cases / 5729 assertions; Lua compatibility
+  passed 17 cases / 156 assertions. New rule-reload tests cover default/alias
+  restoration after upload, disable, enable and deletion, writer exclusion and
+  concurrent default-skill checks. A bounded watchdog reports lock regressions
+  instead of leaving CI hung; no extra compilation unit or CI target was added.
+- `node tools/test-plugin-reload.mjs <core-binary> [lua-file]` starts a real core
+  with complete split configuration, loopback-only HTTP, isolated temporary
+  storage, no adapters, and automatic update/backup/cloud services disabled.
+  Both the supplied Lua and a minimal reply plugin passed precheck/upload,
+  disable/enable, Lua/JS reload, delete/reupload, concurrent API reads and rolls,
+  followed by a successful graceful POSIX shutdown with no leftover process.
+  The minimal plugin also verifies that disabled/deleted replies do not fire.
+- These are local checks, not Release/CI or Windows tray acceptance. Windows
+  tray exit still needs a Windows live run; the POSIX smoke tool explicitly
+  does not claim to test Windows console/tray shutdown or arbitrary scripts'
+  execution time limits. Optional external Lua corpora were not supplied.
+
 ## 2026-10-10: SealDice-style command shortcuts
 
 - Windows Release backend, tests and the credential-free preview driver built

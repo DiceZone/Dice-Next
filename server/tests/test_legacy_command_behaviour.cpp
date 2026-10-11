@@ -8,6 +8,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <fstream>
+#include <future>
+#include <thread>
 
 using namespace dice;
 
@@ -94,7 +97,103 @@ public:
     void setGroupKick(const std::string&, const std::string&) override {}
     void setGroupBan(const std::string&, const std::string&, int) override {}
 };
+
+// A lock regression must fail in bounded time instead of hanging the CI runner.
+struct RuleReloadDeadline {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool finished = false;
+    std::thread watchdog{[this] {
+        std::unique_lock lock(mutex);
+        if (!cv.wait_for(lock, std::chrono::seconds(20), [&] { return finished; })) {
+            std::cerr << "RuleReload: possible recursive rulesLock deadlock\n";
+            std::abort();
+        }
+    }};
+    ~RuleReloadDeadline() {
+        { std::lock_guard lock(mutex); finished = true; }
+        cv.notify_all();
+        watchdog.join();
+    }
+};
+
+struct RuleReloadDirectory {
+    std::filesystem::path previous = std::filesystem::current_path();
+    explicit RuleReloadDirectory(const std::filesystem::path& path) {
+        std::filesystem::current_path(path);
+    }
+    ~RuleReloadDirectory() {
+        CommandRouter::reloadJsGameSystems({});
+        CommandRouter::reloadRulePacks({});
+        std::filesystem::current_path(previous);
+    }
+};
 } // namespace
+
+TEST(RuleReload, UploadDisableEnableAndDeleteRestoreAliasesAndSkillDefaults) {
+    RuleReloadDeadline deadline;
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    RuleReloadDirectory cwd(f.dir.path);
+    // First reload also exercises lazy initialization under the exclusive lock.
+    ASSERT_EQ(CommandRouter::reloadRulePacks({}), 0);
+    ASSERT_TRUE(f.run(".ra(1) 急救").find("/30") != std::string::npos);
+
+    std::filesystem::create_directory("rules");
+    const auto file = std::filesystem::path("rules/reload-test.json");
+    { std::ofstream out(file); out << R"({"name":"reload-test","alias":{"急救":["reloadaid"]},"defaults":{"reloadaid":77}})"; }
+    ASSERT_EQ(CommandRouter::reloadRulePacks({"rules"}), 1);
+    ASSERT_EQ(CharacterCardStore::canonical("reloadaid"), std::string("急救"));
+    ASSERT_TRUE(f.run(".ra(1) reloadaid").find("/77") != std::string::npos);
+    ASSERT_TRUE(f.run(".ra(1) 急救").find("/77") != std::string::npos);
+
+    std::filesystem::rename(file, "rules/reload-test.json.disabled");
+    ASSERT_EQ(CommandRouter::reloadRulePacks({"rules"}), 1);
+    ASSERT_FALSE(CommandRouter::rulePacks().front().enabled);
+    ASSERT_EQ(CharacterCardStore::canonical("reloadaid"), std::string("reloadaid"));
+    ASSERT_TRUE(f.run(".ra(1) 急救").find("/30") != std::string::npos);
+    std::filesystem::rename("rules/reload-test.json.disabled", file);
+    ASSERT_EQ(CommandRouter::reloadRulePacks({"rules"}), 1);
+    ASSERT_TRUE(f.run(".ra(1) reloadaid").find("/77") != std::string::npos);
+
+    ASSERT_TRUE(std::filesystem::remove(file));
+    ASSERT_EQ(CommandRouter::reloadRulePacks({"rules"}), 0);
+    ASSERT_EQ(CharacterCardStore::canonical("reloadaid"), std::string("reloadaid"));
+    ASSERT_TRUE(f.run(".ra(1) 急救").find("/30") != std::string::npos);
+    ASSERT_FALSE(f.run(".r 1").empty());
+}
+
+TEST(RuleReload, JsTemplatesWaitForReadersAndConcurrentDefaultChecksRemainUsable) {
+    RuleReloadDeadline deadline;
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    RuleReloadDirectory cwd(f.dir.path);
+    CommandRouter::reloadRulePacks({});
+
+    std::shared_lock reader(rulesLock());
+    std::promise<void> started;
+    auto writer = std::async(std::launch::async, [&] {
+        started.set_value();
+        CommandRouter::reloadJsGameSystems({R"({"alias":{"生命值":["reloadhp"]},"defaultsComputed":{"闪避":"敏捷/2"}})"});
+    });
+    started.get_future().wait();
+    const auto state = writer.wait_for(std::chrono::milliseconds(50));
+    reader.unlock(); // Release before assertions or future destruction.
+    writer.get();
+    ASSERT_TRUE(state == std::future_status::timeout);
+    ASSERT_EQ(CharacterCardStore::canonical("reloadhp"), std::string("生命值"));
+
+    auto checks = std::async(std::launch::async, [&] {
+        for (int i = 0; i < 100; ++i)
+            if (f.run(".ra(1) 急救").find("/30") == std::string::npos) return false;
+        return true;
+    });
+    for (int i = 0; i < 30; ++i) {
+        CommandRouter::reloadRulePacks({});
+        CommandRouter::reloadJsGameSystems({});
+    }
+    ASSERT_TRUE(checks.get());
+}
 
 TEST(LegacyMod, GlobalManagementIsNotTheGroupPluginSwitch) {
     LegacyFixture f;
@@ -128,6 +227,37 @@ TEST(LegacyMod, GlobalManagementIsNotTheGroupPluginSwitch) {
     ASSERT_EQ(actions.back(), std::string("reload:demo"));
     f.run(".mod del demo");
     ASSERT_EQ(actions.back(), std::string("delete:demo"));
+}
+
+TEST(RuntimeDiagnostics, NotificationErrorReentryAndConcurrentErrorsDoNotDeadlock) {
+    RuleReloadDeadline deadline;
+    std::atomic<int> delivered{0};
+    std::shared_ptr<notice::ErrorNotifySink> sink;
+    const spdlog::details::log_msg error{{}, "diagnostic-test", spdlog::level::err, "notification failure"};
+    sink = std::make_shared<notice::ErrorNotifySink>([&](const auto&) {
+        ++delivered;
+        sink->log(error); // An adapter/send failure logs while sending the first notification.
+    });
+    sink->log(error);
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 8; ++i) workers.emplace_back([&] { sink->log(error); });
+    for (auto& worker : workers) worker.join();
+    ASSERT_EQ(delivered.load(), 1);
+}
+
+TEST(RuntimeDiagnostics, FailedMessageAndEventHandlersDoNotTerminateAdapterDispatch) {
+    LegacyFixture f;
+    int messages = 0, events = 0;
+    f.adapters.onMessage([](const Message&) { throw std::runtime_error("diagnostic message failure"); });
+    f.adapters.onMessage([&](const Message&) { ++messages; });
+    f.adapters.routeMessage(f.msg);
+    BotEvent event;
+    event.platform = "onebot_v11"; event.adapterId = "test";
+    f.adapters.onEvent([](const BotEvent&) { throw 7; });
+    f.adapters.onEvent([&](const BotEvent&) { ++events; });
+    f.adapters.routeEvent(event);
+    ASSERT_EQ(messages, 1);
+    ASSERT_EQ(events, 1);
 }
 
 TEST(IdentityBind, EmailFlowBindsOnlyTheRequestingNativeIdentityOnAllSupportedPlatforms) {

@@ -27,9 +27,8 @@ CharacterCardStore::CharacterCardStore(Database& db) : db_(db) {}
 // packs present; rule packs (rules/*.json "alias") merge in additively at
 // startup via loadRulePackAliases (P1 of the rule-pack system: GLOBAL merge —
 // any alias works regardless of active system; per-rule scoping is later).
-// ⚠️ Registration is startup-only; canonical() reads it concurrently during
-// message handling, so all loadRulePackAliases/registerAlias calls MUST finish
-// before serving begins (no locking on the hot read path).
+// Runtime reloads write under rulesLock() exclusively; canonical() reads under
+// a shared lock. Callers already holding either lock use canonicalUnlocked().
 static std::map<std::string, std::string> builtinAliases() {
     return {
         // ── 八大属性 + 英文缩写 ──

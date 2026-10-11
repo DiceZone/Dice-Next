@@ -290,7 +290,9 @@ inline void notify(ConfigManager& cfg, AdapterManager& adapters, int level, cons
 // spdlog 自定义 sink：捕获 ERROR 级日志 → 通知订阅了 kError 的窗口。
 // 防护：① thread_local 重入保护（notify 发送本身出错打日志时不再递归）；
 //       ② 节流：60 秒窗口内只推第一条（其余仍在日志文件里）。
-class ErrorNotifySink : public spdlog::sinks::base_sink<std::mutex> {
+// No mutex may be held across cb_: sending a notification can log another error.
+// The callback is immutable, throttling is atomic and reentry is thread-local.
+class ErrorNotifySink : public spdlog::sinks::base_sink<spdlog::details::null_mutex> {
 public:
     using Callback = std::function<void(const std::string&)>;
     explicit ErrorNotifySink(Callback cb) : cb_(std::move(cb)) {}
@@ -305,7 +307,8 @@ protected:
         if (now - prev < 60) return;                           // 节流：60s 一条
         if (!lastSent.compare_exchange_strong(prev, now)) return;
         inNotify = true;
-        try { cb_(std::string(msg.payload.data(), msg.payload.size())); } catch (...) {}
+        try { cb_(std::string(msg.payload.data(), msg.payload.size())); }
+        catch (...) { DICE_LOG_EXCEPTION("error notification delivery"); }
         inNotify = false;
     }
     void flush_() override {}

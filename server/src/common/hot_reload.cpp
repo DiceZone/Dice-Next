@@ -35,8 +35,8 @@ HotReloadMonitor::~HotReloadMonitor() {
 // ─── Public API ──────────────────────────────────────────────
 
 bool HotReloadMonitor::start(const std::string& path, int debounceMs, ChangeCallback callback) {
-    if (running_.load()) {
-        DICE_LOG_WARN("HotReloadMonitor: already running, stopping first");
+    if (running_.load() || watcherThread_.joinable()) {
+        DICE_LOG_WARN("HotReloadMonitor: joining previous watcher before restart");
         stop();
     }
 
@@ -45,14 +45,18 @@ bool HotReloadMonitor::start(const std::string& path, int debounceMs, ChangeCall
     callback_ = std::move(callback);
 
     running_.store(true);
-    watcherThread_ = std::thread(&HotReloadMonitor::watchLoop, this);
+    watcherThread_ = std::thread([this] {
+        try { watchLoop(); }
+        catch (...) { DICE_LOG_EXCEPTION("configuration watcher stopped unexpectedly"); }
+        running_.store(false);
+    });
 
     DICE_LOG_INFO("HotReloadMonitor: started watching '{}' (debounce {}ms)", watchPath_, debounceMs_);
     return true;
 }
 
 void HotReloadMonitor::stop() {
-    if (!running_.load()) return;
+    if (!running_.load() && !watcherThread_.joinable()) return;
 
     running_.store(false);
 
@@ -71,6 +75,13 @@ void HotReloadMonitor::stop() {
 }
 
 // ─── Watch Loop (platform-agnostic skeleton) ─────────────────
+
+void HotReloadMonitor::notifyChange(const std::string& filename) noexcept {
+    try {
+        LogOperation operation(DICE_LOG_SOURCE, "config", "file_change", "file=" + filename);
+        if (callback_) callback_(filename);
+    } catch (...) { DICE_LOG_EXCEPTION("configuration reload callback file=" + filename); }
+}
 
 void HotReloadMonitor::watchLoop() {
     DICE_LOG_DEBUG("HotReloadMonitor: watch loop started for '{}'", watchPath_);
@@ -133,9 +144,7 @@ void HotReloadMonitor::watchLoop() {
                 read(inotifyFd_, drainBuf, sizeof(drainBuf));
             }
 
-            if (callback_) {
-                callback_(changedFile);
-            }
+            notifyChange(changedFile);
         }
     }
 
@@ -215,9 +224,7 @@ void HotReloadMonitor::watchLoop() {
                 // whole OS notification batch as one logical configuration
                 // change instead of reloading once for every file.
                 std::this_thread::sleep_for(std::chrono::milliseconds(debounceMs_));
-                if (callback_) {
-                    callback_(changedFile);
-                }
+                notifyChange(changedFile);
             }
 
             ResetEvent(overlapped.hEvent);

@@ -7,6 +7,7 @@ cmake_minimum_required(VERSION 3.20)
 set(TEST_SOURCES
     # Test framework + test cases
     test_main.cpp
+    test_logger.cpp
     test_startup_guard.cpp
     test_tray_settings.cpp
     test_cooldown_manager.cpp
