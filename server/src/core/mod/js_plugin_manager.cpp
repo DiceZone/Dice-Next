@@ -49,6 +49,22 @@ static std::string getStrProp(JSContext* ctx, JSValueConst obj, const char* key)
     return s;
 }
 
+static std::string jsErrorDetails(JSContext* ctx, JSValueConst error) {
+    const char* raw = JS_ToCString(ctx, error);
+    const std::string message = raw ? raw : "JavaScript exception (message conversion failed)";
+    if (raw) JS_FreeCString(ctx, raw);
+    else JS_FreeValue(ctx, JS_GetException(ctx));
+    if (!JS_IsObject(error)) return message;
+    JSValue stack = JS_GetPropertyStr(ctx, error, "stack");
+    if (JS_IsException(stack)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return message;
+    }
+    const auto trace = JS_IsString(stack) ? toStr(ctx, stack) : std::string();
+    JS_FreeValue(ctx, stack);
+    return trace.empty() ? message : message + "\n" + trace;
+}
+
 // Wrap @p value in an already-resolved Promise (takes ownership of value).
 // Used by fetch()/Response.json()/.text(): the HTTP call is synchronous, so we
 // hand back resolved promises and let drainJobs() run any `await` continuations.
@@ -1063,7 +1079,7 @@ void JsPluginManager::wsFire(int64_t id, const char* evt, const std::string& dat
         JSValue arg = JS_UNDEFINED;
         if (ev == "message") { arg = JS_NewObject(ctx_); JS_SetPropertyStr(ctx_, arg, "data", JS_NewString(ctx_, data.c_str())); }
         JSValue r = JS_Call(ctx_, cb, obj, JS_IsUndefined(arg) ? 0 : 1, &arg);
-        if (JS_IsException(r)) { JSValue e = JS_GetException(ctx_); DICE_LOG_ERROR("[js] ws {} error: {}", ev, toStr(ctx_, e)); JS_FreeValue(ctx_, e); }
+        if (JS_IsException(r)) { JSValue e = JS_GetException(ctx_); DICE_LOG_ERROR("[js] ws {} error: {}", ev, jsErrorDetails(ctx_, e)); JS_FreeValue(ctx_, e); }
         JS_FreeValue(ctx_, r);
         if (!JS_IsUndefined(arg)) JS_FreeValue(ctx_, arg);
     }
@@ -1489,6 +1505,7 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
             continue;
         }
         loadingFile_ = e.meta.file;
+        LogOperation operation(DICE_LOG_SOURCE, "js", "load_plugin", "file=" + e.meta.file);
         // 每个插件包进独立函数作用域，避免多文件顶层 let/const（如 ext）互相冲突；
         // 并提供 module/exports（部分插件是打包过的 CommonJS 模块）。
         std::string wrapped = "(function(){const module={exports:{}};const exports=module.exports;\n"
@@ -1496,7 +1513,8 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
         JSValue r = JS_Eval(ctx_, wrapped.c_str(), wrapped.size(), e.meta.file.c_str(), JS_EVAL_TYPE_GLOBAL);
         if (JS_IsException(r)) {
             JSValue exc = JS_GetException(ctx_);
-            DICE_LOG_ERROR("[js] plugin '{}' load error: {}", e.meta.file, toStr(ctx_, exc));
+            DICE_LOG_ERROR("[js] plugin '{}' load error: {}", e.meta.file, jsErrorDetails(ctx_, exc));
+            operation.fail("file=" + e.meta.file + " script evaluation failed");
             JS_FreeValue(ctx_, exc);
         } else { ++n; }
         JS_FreeValue(ctx_, r);
@@ -1509,10 +1527,12 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
         JS_SetPropertyStr(ctx_, e.first, "isLoaded", JS_NewBool(ctx_, 1));
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, "onLoad");
         if (JS_IsFunction(ctx_, fn)) {
+            LogOperation operation(DICE_LOG_SOURCE, "js", "on_load", "file=" + e.second);
             JSValue r = JS_Call(ctx_, fn, e.first, 0, nullptr);
             if (JS_IsException(r)) {
                 JSValue exc = JS_GetException(ctx_);
-                DICE_LOG_ERROR("[js] onLoad error: {}", toStr(ctx_, exc));
+                DICE_LOG_ERROR("[js] plugin '{}' onLoad error: {}", e.second, jsErrorDetails(ctx_, exc));
+                operation.fail("file=" + e.second + " onLoad callback failed");
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, r);
@@ -1565,7 +1585,7 @@ void JsPluginManager::fireTimer(int64_t id) {
     double interval = it->second.intervalSec;
     bool prev = capturing_; capturing_ = false;   // timer runs outside a message turn → replies route
     JSValue r = JS_Call(ctx_, cb, JS_UNDEFINED, 0, nullptr);
-    if (JS_IsException(r)) { JSValue e = JS_GetException(ctx_); DICE_LOG_ERROR("[js] timer error: {}", toStr(ctx_, e)); JS_FreeValue(ctx_, e); }
+    if (JS_IsException(r)) { JSValue e = JS_GetException(ctx_); DICE_LOG_ERROR("[js] timer error: {}", jsErrorDetails(ctx_, e)); JS_FreeValue(ctx_, e); }
     JS_FreeValue(ctx_, r);
     drainJobs();
     capturing_ = prev;
@@ -1643,21 +1663,27 @@ int JsPluginManager::compareVersions(const std::string& a, const std::string& b)
 }
 
 int JsPluginManager::reload(const std::string& dir) {
+    LogOperation operation(DICE_LOG_SOURCE, "js", "reload");
     // Hold the mutex across the WHOLE teardown+reload so a live message running on
     // the adapter thread can't use ctx_/rt_ while we free and rebuild them.
     std::lock_guard<std::mutex> lk(mutex_);
+    operation.phase("runtime_lock_acquired");
     freeRuntime();
     plugins_.clear();
     configs_.clear();
-    if (!init()) return 0;
+    if (!init()) { operation.fail("runtime initialization failed"); return 0; }
     // 与 Lua 一致：规则包删除会使附加目录瞬间消失。加载中的异常必须留在
     // 插件层处理，不能把 HTTP 处理线程或骰娘主服务带进半重载状态。
     try {
-        return loadDirLocked(dir);
+        const int count = loadDirLocked(dir);
+        operation.detail("loaded=" + std::to_string(count));
+        return count;
     } catch (const std::exception& e) {
         DICE_LOG_ERROR("[js] reload failed; runtime remains available with no newly loaded plugins: {}", e.what());
+        operation.fail("plugin scan failed");
     } catch (...) {
         DICE_LOG_ERROR("[js] reload failed with an unknown error; runtime remains available with no newly loaded plugins");
+        operation.fail("plugin scan failed");
     }
     return 0;
 }
@@ -1668,7 +1694,7 @@ std::optional<std::string> JsPluginManager::evalString(const std::string& script
     JSValue r = JS_Eval(ctx_, script.c_str(), script.size(), "<card-template>", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(r)) {
         JSValue exc = JS_GetException(ctx_);
-        DICE_LOG_WARN("[js] evalString error: {}", toStr(ctx_, exc));
+        DICE_LOG_WARN("[js] evalString error: {}", jsErrorDetails(ctx_, exc));
         JS_FreeValue(ctx_, exc);
         JS_FreeValue(ctx_, r);
         return std::nullopt;
@@ -1701,7 +1727,7 @@ void JsPluginManager::drainJobs() {
         if (err == 0) break;            // no more jobs
         if (err < 0) {                  // a job threw — surface and stop
             JSValue exc = JS_GetException(cctx ? cctx : ctx_);
-            DICE_LOG_ERROR("[js] async job error: {}", toStr(cctx ? cctx : ctx_, exc));
+            DICE_LOG_ERROR("[js] async job error: {}", jsErrorDetails(cctx ? cctx : ctx_, exc));
             JS_FreeValue(cctx ? cctx : ctx_, exc);
             break;
         }
@@ -2168,7 +2194,7 @@ void JsPluginManager::dispatchCommandHookLocked(const Message& message, JSValueC
             JSValue result = JS_Call(ctx_, hook, e.first, 3, args);
             if (JS_IsException(result)) {
                 JSValue exc = JS_GetException(ctx_);
-                DICE_LOG_ERROR("[js] onCommandReceived error: {}", toStr(ctx_, exc));
+                DICE_LOG_ERROR("[js] onCommandReceived plugin='{}' error: {}", e.second, jsErrorDetails(ctx_, exc));
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, result);
@@ -2211,7 +2237,8 @@ JsPluginManager::Result JsPluginManager::dispatchMessageHook(
             JSValue r = JS_Call(ctx_, fn, e.first, 2, args);
             if (JS_IsException(r)) {
                 JSValue exc = JS_GetException(ctx_);
-                DICE_LOG_ERROR("[js] {} error: {}", hook, toStr(ctx_, exc));
+                DICE_LOG_ERROR("[js] plugin '{}' hook={} adapter={} platform={} error: {}", e.second, hook,
+                    message.adapterId, message.platform, jsErrorDetails(ctx_, exc));
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, r);
@@ -2266,7 +2293,7 @@ void JsPluginManager::handleMessageSend(const Message& contextMessage,
             JSValue rv = JS_Call(ctx_, fn, e.first, 3, args);
             if (JS_IsException(rv)) {
                 JSValue exc = JS_GetException(ctx_);
-                DICE_LOG_ERROR("[js] onMessageSend error: {}", toStr(ctx_, exc));
+                DICE_LOG_ERROR("[js] onMessageSend plugin='{}' error: {}", e.second, jsErrorDetails(ctx_, exc));
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, rv);
@@ -2397,7 +2424,7 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
             JSValue rv = JS_Call(ctx_, fn, e.first, 2, args);
             if (JS_IsException(rv)) {
                 JSValue exc = JS_GetException(ctx_);
-                DICE_LOG_ERROR("[js] {} error: {}", hook, toStr(ctx_, exc));
+                DICE_LOG_ERROR("[js] {} plugin='{}' error: {}", hook, e.second, jsErrorDetails(ctx_, exc));
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, rv);
@@ -2502,7 +2529,8 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
         rv = JS_Call(ctx_, solve, cmd, 3, callArgs);
         if (JS_IsException(rv)) {
             JSValue exc = JS_GetException(ctx_);
-            DICE_LOG_ERROR("[js] command '{}' error: {}", word, toStr(ctx_, exc));
+            DICE_LOG_ERROR("[js] command='{}' adapter={} platform={} error: {}", word,
+                message.adapterId, message.platform, jsErrorDetails(ctx_, exc));
             JS_FreeValue(ctx_, exc);
         } else if (JS_IsObject(rv)) {
             JSValue sh = JS_GetPropertyStr(ctx_, rv, "showHelp");

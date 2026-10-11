@@ -15,6 +15,7 @@
 #include <drogon/HttpResponse.h>
 
 #include "service/api_service.h"
+#include "service/http_diagnostics.h"
 #include "service/web_auth.h"          // WebUI 登录鉴权
 #include "service/chat_image.h"        // 模拟聊天图片本地化
 #include "service/image_host.h"        // 图床（QQ 官方富媒体需要公网 URL）
@@ -397,6 +398,8 @@ static int realMain(int argc, char* argv[]) {
 
     dice::ConfigManager configMgr(configPath);
     const bool configLoaded = configMgr.load();
+    dice::configureLogger(configMgr.getAll());
+    configMgr.onConfigChanged([&configMgr] { dice::configureLogger(configMgr.getAll()); });
     const bool obsoleteDefaultConfigDiscarded = configMgr.discardedObsoleteDefaultConfig();
     if (configLoaded) {
         // Consume settings written by builds that exposed legacy Dice! fields
@@ -1604,7 +1607,7 @@ static int realMain(int argc, char* argv[]) {
                             rout.content = reply; rout.self = 1;
                             rout.time = static_cast<int64_t>(std::time(nullptr));
                             cst->insert(rout);
-                        } catch (...) {}
+                        } catch (...) { DICE_LOG_EXCEPTION("outgoing chat message database write"); }
                     }
                 }
             }
@@ -1761,7 +1764,7 @@ static int realMain(int argc, char* argv[]) {
                                 for (auto it = rows.rbegin(); it != rows.rend(); ++it)
                                     ctx += it->sender + "\xef\xbc\x9a" + dice::aichat::cleanForAi(configMgr, it->content) + "\n";
                             }
-                        } catch (...) {}
+                        } catch (...) { DICE_LOG_EXCEPTION("AI chat context database read"); }
                     }
                     // 阶段B：注入本群滚动摘要（快速读）；阶段C：按当前消息向量检索相关持久事实
                     //（embedding 同样是网络调用，必须在后台线程）。
@@ -1863,15 +1866,16 @@ static int realMain(int argc, char* argv[]) {
                     if (inId > 0 && dice::chatimg::hasRemoteImage(chatContent)) {
                         std::string cap = chatContent;
                         std::thread([&db, inId, cap]() {
-                            std::string local = dice::chatimg::localize(cap);
-                            if (local == cap) return;
-                            if (auto* c = db.getChatStorage()) {
-                                try { auto row = c->get<dice::ChatMsgRow>(inId); row.content = local; c->update(row); }
-                                catch (...) {}
-                            }
+                            try {
+                                std::string local = dice::chatimg::localize(cap);
+                                if (local == cap) return;
+                                if (auto* c = db.getChatStorage()) {
+                                    auto row = c->get<dice::ChatMsgRow>(inId); row.content = local; c->update(row);
+                                }
+                            } catch (...) { DICE_LOG_EXCEPTION("chat image localization or database update"); }
                         }).detach();
                     }
-                } catch (...) {}
+                } catch (...) { DICE_LOG_EXCEPTION("incoming chat message database write"); }
             }
             // 阶段B/C：后台折叠 —— 存完消息后异步更新本群记忆（滚动摘要 + 抽取持久事实，
             // 攒够一批才真正调模型，天然限频）。放后台线程避免阻塞消息处理。默认全关。
@@ -1880,7 +1884,8 @@ static int realMain(int argc, char* argv[]) {
                 && cmdRouter.aiWhitelistOk(msg.platform, msg.targetId, true)) { // AI 白名单模式
                 std::string plat = msg.platform, gid = msg.targetId;
                 std::thread([&configMgr, &db, plat, gid]() {
-                    dice::aimemory::maybeFold(configMgr, db.getChatStorage(), plat, gid);
+                    try { dice::aimemory::maybeFold(configMgr, db.getChatStorage(), plat, gid); }
+                    catch (...) { DICE_LOG_EXCEPTION("AI memory background update"); }
                 }).detach();
             }
         }
@@ -2697,10 +2702,20 @@ static int realMain(int argc, char* argv[]) {
 
     // 运行报错推送：挂接 spdlog 错误 sink，
     // ERROR 级日志推送给订阅了「错误」级别的骰主通知窗口（60s 节流 + 防递归）。
+    // Defer delivery: the logging thread may currently own config/plugin locks.
+    // A weak lifetime prevents queued/global-sink callbacks using dead services
+    // after realMain unwinds on startup failure or normal shutdown.
+    auto errorNotificationLifetime = std::make_shared<int>(0);
     dice::getLogger()->sinks().push_back(std::make_shared<dice::notice::ErrorNotifySink>(
-        [&configMgr, &adapterMgr](const std::string& m) {
-            dice::notice::notify(configMgr, adapterMgr, dice::notice::kError,
-                "\xe8\xbf\x90\xe8\xa1\x8c\xe9\x94\x99\xe8\xaf\xaf\xef\xbc\x9a" + m, "", "", "error");
+        [lifetime = std::weak_ptr<int>(errorNotificationLifetime), &configMgr, &adapterMgr](const std::string& m) {
+            if (lifetime.expired()) return;
+            drogon::app().getLoop()->queueInLoop([lifetime, &configMgr, &adapterMgr, m] {
+                if (lifetime.expired()) return;
+                try {
+                    dice::notice::notify(configMgr, adapterMgr, dice::notice::kError,
+                        "\xe8\xbf\x90\xe8\xa1\x8c\xe9\x94\x99\xe8\xaf\xaf\xef\xbc\x9a" + m, "", "", "error");
+                } catch (...) { DICE_LOG_EXCEPTION("deferred error notification delivery"); }
+            });
         }));
 
     // ── 9. Start drogon HTTP server ──────────────────────────
@@ -2711,6 +2726,7 @@ static int realMain(int argc, char* argv[]) {
 
     auto& app = drogon::app();
     app.setLogLevel(trantor::Logger::kWarn);
+    dice::installHttpDiagnostics(app);
     app.addListener(host, static_cast<uint16_t>(port));
     app.setThreadNum(4);
     // 上传体积上限：规则包(含 lua/js mod)、牌堆、图片都走 base64 塞进 JSON body，
@@ -4561,10 +4577,15 @@ int main(int argc, char* argv[]) {
         }
 #endif
         return result;
-    } catch (const std::exception& e) {
-        dice::crashdiag::reportFatal("uncaught std::exception in main", e.what());
+    } catch (const std::exception&) {
+        const auto detail = dice::describeException(std::current_exception());
+        DICE_LOG_CRITICAL("[startup] uncaught exception in main: {}", detail);
+        dice::getLogger()->flush();
+        dice::crashdiag::reportFatal("uncaught std::exception in main", detail.c_str());
         return 3;
     } catch (...) {
+        DICE_LOG_CRITICAL("[startup] uncaught non-standard exception in main");
+        dice::getLogger()->flush();
         dice::crashdiag::reportFatal("uncaught non-std exception in main", "?");
         return 3;
     }

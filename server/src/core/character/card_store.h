@@ -112,15 +112,15 @@ public:
 
     /// Canonicalize an attribute name (synonyms → canonical Chinese name).
     static std::string canonical(const std::string& name);
-    /// Lock-free variant for rule-pack reload internals. The caller must already
-    /// hold rulesLock() exclusively (or run before message handling starts).
+    /// Lock-free variant for queries inside an existing rule-registry lock.
+    /// The caller must hold rulesLock() shared/exclusively, or run at startup.
     static std::string canonicalUnlocked(const std::string& name);
 
     /// Register one alias→canonical mapping into the global synonym table.
-    /// ⚠️ Startup-only (no locking; canonical() reads concurrently while serving).
+    /// Caller must hold rulesLock() exclusively, or run at startup.
     static void registerAlias(const std::string& alias, const std::string& canonName);
     /// Reset the synonym table back to the built-in defaults (drops rule-pack
-    /// merges). Used when reloading rule packs. ⚠️ Not for use while serving.
+    /// merges). Caller must hold rulesLock() exclusively, or run at startup.
     static void resetAliases();
 
     /// Load every rule pack in @p dir (rules/*.json) and merge each pack's

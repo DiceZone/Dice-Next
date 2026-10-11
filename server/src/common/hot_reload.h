@@ -49,6 +49,7 @@ private:
     // ─── Platform-specific implementations ───────────────────
 
     void watchLoop();
+    void notifyChange(const std::string& filename) noexcept;
 
 #ifdef __linux__
     bool initLinuxWatcher();

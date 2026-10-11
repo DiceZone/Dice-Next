@@ -170,9 +170,32 @@ static inline int dnx_loadfile(lua_State* L, const std::filesystem::path& p) {
     return luaL_loadbuffer(L, src.data() + off, src.size() - off, chunk.c_str());
 }
 
+static int dnx_errorTraceback(lua_State* L) {
+    const char* message = lua_tostring(L, 1);
+    luaL_traceback(L, L, message ? message : "non-string Lua error", 1);
+    return 1;
+}
+static int dnx_pcall(lua_State* L, int arguments, int results) {
+    const int function = lua_gettop(L) - arguments;
+    lua_pushcfunction(L, dnx_errorTraceback);
+    lua_insert(L, function);
+    const int status = lua_pcall(L, arguments, results, function);
+    lua_remove(L, function);
+    return status;
+}
+static std::string dnx_coroutineError(lua_State* L) {
+    // lua_resume does not accept an error handler. Its failed stack still keeps
+    // the suspended call frames, so collect the traceback before releasing it.
+    const char* message = lua_tostring(L, -1);
+    luaL_traceback(L, L, message ? message : "non-string Lua error", 0);
+    const char* trace = lua_tostring(L, -1);
+    std::string result = trace ? trace : "Lua coroutine failed";
+    lua_pop(L, 1);
+    return result;
+}
 static inline int dnx_dofile(lua_State* L, const std::filesystem::path& p) {
     if (const int status = dnx_loadfile(L, p); status != LUA_OK) return status;
-    return lua_pcall(L, 0, LUA_MULTRET, 0);
+    return dnx_pcall(L, 0, LUA_MULTRET);
 }
 
 // ─── helpers ─────────────────────────────────────────────────
@@ -220,7 +243,7 @@ static int dnx_loadLegacyEnvironment(lua_State* L, const fs::path& path) {
         lua_pushliteral(L, "legacy plugin chunk has no _ENV upvalue");
         return LUA_ERRRUN;
     }
-    const int callStatus = lua_pcall(L, 0, 0, 0);
+    const int callStatus = dnx_pcall(L, 0, 0);
     if (callStatus != LUA_OK) lua_remove(L, env);
     return callStatus;
 }
@@ -453,7 +476,7 @@ static int l_getPlayerCard(lua_State* L) {
         lua_pushlstring(L, uid.data(), uid.size());
         lua_pushlstring(L, scope.data(), scope.size());
         lua_pushboolean(L, byName ? 1 : 0);
-        if (lua_pcall(L, 3, 1, 0) == LUA_OK) return 1;
+        if (dnx_pcall(L, 3, 1) == LUA_OK) return 1;
         DICE_LOG_ERROR("[lua] getPlayerCard Actor construction failed: {}", argStr(L, -1));
         lua_pop(L, 1);
         lua_pushnil(L);
@@ -1028,7 +1051,7 @@ static int l_loadLua(lua_State* L) {
     }
     const int chunk = lua_absindex(L, -1);
     if (dnx_pushCallerEnvironment(L)) lua_setupvalue(L, chunk, 1);
-    if (lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK) {
+    if (dnx_pcall(L, 0, LUA_MULTRET) != LUA_OK) {
         DICE_LOG_ERROR("[lua] loadLua '{}' error: {}", name, argStr(L, -1));
         lua_settop(L, stackBefore); lua_pushnil(L); return 1;
     }
@@ -2477,6 +2500,7 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     m.enabled = enabled;
     if (!enabled) { mods_.push_back(std::move(m)); return; }
 
+    LogOperation operation(DICE_LOG_SOURCE, "lua", "load_plugin", "file=" + dnx_u8str(path));
     loadingModDir_ = path.parent_path().string();
     std::string pluginSource;
     dnx_readFile(path, pluginSource);
@@ -2484,6 +2508,7 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     const int stackBase = lua_gettop(state_);
     if (dnx_loadLegacyEnvironment(state_, path) != LUA_OK) {
         DICE_LOG_ERROR("[lua] plugin '{}' load error: {}", m.name, argStr(state_, -1));
+        operation.fail("file=" + dnx_u8str(path) + " script evaluation failed");
         lua_settop(state_, stackBase); loadingModDir_.clear(); mods_.push_back(std::move(m)); return;
     }
     const int env = lua_absindex(state_, -1);
@@ -2542,21 +2567,28 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     }
     lua_settop(state_, stackBase);  // isolated discovery environment
     loadingModDir_.clear();
+    operation.detail("file=" + dnx_u8str(path) + " replies=" + std::to_string(m.replies));
     mods_.push_back(std::move(m));
 }
 
 int LuaPluginManager::reload() {
+    LogOperation operation(DICE_LOG_SOURCE, "lua", "reload");
     std::lock_guard<std::recursive_mutex> lk(mutex_);
+    operation.phase("runtime_lock_acquired");
     freeRuntime();
-    if (!init()) return 0;
+    if (!init()) { operation.fail("runtime initialization failed"); return 0; }
     // 规则包热卸载时目录可能刚被移除，或其中有损坏的脚本。不能让一次插件扫描
     // 异常逃到 WebUI 请求线程，否则运行时已被销毁而骰娘会停在半重载状态。
     try {
-        return loadDirLocked(dir_);
+        const int count = loadDirLocked(dir_);
+        operation.detail("loaded=" + std::to_string(count) + " replies=" + std::to_string(replyRules_.size()));
+        return count;
     } catch (const std::exception& e) {
         DICE_LOG_ERROR("[lua] reload failed; runtime remains available with no newly loaded mods: {}", e.what());
+        operation.fail("plugin scan failed");
     } catch (...) {
         DICE_LOG_ERROR("[lua] reload failed with an unknown error; runtime remains available with no newly loaded mods");
+        operation.fail("plugin scan failed");
     }
     return 0;
 }
@@ -2597,7 +2629,7 @@ bool LuaPluginManager::runTask(const std::string& name, std::string* error) {
         lua_getfield(state_, env, it->second.functionName.c_str());
         if (lua_isfunction(state_, -1)) {
             lua_remove(state_, env);  // function closure keeps its isolated _ENV alive
-            status = lua_pcall(state_, 0, LUA_MULTRET, 0);
+            status = dnx_pcall(state_, 0, LUA_MULTRET);
         } else {
             lua_pop(state_, 1);
             lua_remove(state_, env);
@@ -3012,7 +3044,7 @@ void LuaPluginManager::resumeCoroutine(int threadRef) {
     std::string reply;
     std::string error;
     if (status == LUA_OK) reply = finishCoroutine(pending, coroutine, resultCount);
-    else error = dnx_normalizeLuaText(argStr(coroutine, -1));
+    else error = dnx_normalizeLuaText(dnx_coroutineError(coroutine));
     const std::string platform = pending.platform;
     const std::string gid = pending.gid;
     const std::string uid = pending.uid;
@@ -3185,7 +3217,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         if (lua_isfunction(state_, -1)) {
             lua_pushvalue(state_, -2);
             lua_pushinteger(state_, trust);
-            if (lua_pcall(state_, 2, 1, 0) == LUA_OK) lua_remove(state_, -2);
+            if (dnx_pcall(state_, 2, 1) == LUA_OK) lua_remove(state_, -2);
             else { DICE_LOG_ERROR("[lua] wrap_msg: {}", argStr(state_, -1)); lua_pop(state_, 1); }
         } else lua_pop(state_, 1);
         lua_setglobal(state_, "msg");
@@ -3266,7 +3298,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
                     tmpl = dnx_normalizeLuaText(argStr(coroutine, firstResult));
                 }
                 callOk = true;
-            } else callError = dnx_normalizeLuaText(argStr(coroutine, -1));
+            } else callError = dnx_normalizeLuaText(dnx_coroutineError(coroutine));
             lua_rawgeti(state_, LUA_REGISTRYINDEX, messageRef);
             lua_setglobal(state_, "msg");
             luaL_unref(state_, LUA_REGISTRYINDEX, messageRef);
@@ -3275,7 +3307,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
             if (!legacyCallableReady)
                 lua_rawgeti(state_, LUA_REGISTRYINDEX, rule.echoRef);
             lua_getglobal(state_, "msg");
-            callOk = (lua_pcall(state_, 1, LUA_MULTRET, 0) == LUA_OK);
+            callOk = (dnx_pcall(state_, 1, LUA_MULTRET) == LUA_OK);
         }
         activePlatform_ = previousPlatform;
         loadingModDir_.clear();

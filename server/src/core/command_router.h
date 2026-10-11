@@ -3104,9 +3104,10 @@ private:
     /// 公式里引用的属性：先取卡值，没有则递归取其衍生值（如 生命→max_hp→公式）。无则 nullopt。
     std::optional<int> derivedAttr(const Message& msg, const std::string& attr, int depth = 0) const {
         if (depth > 8) return std::nullopt;   // 防环
-        std::string canon = CharacterCardStore::canonical(attr), formula;
+        std::string formula;
         {
             std::shared_lock<std::shared_mutex> lk(rulesLock());
+            const auto canon = CharacterCardStore::canonicalUnlocked(attr);
             // 规则包声明的派生关系优先（可覆盖内置/model.xml 同名公式）。
             auto& rp = rulePackDerivedRegistry();
             if (auto itp = rp.find(canon); itp != rp.end()) formula = itp->second;
@@ -4312,7 +4313,7 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
                     }
                     if (!k.empty() && !txt.empty()) { helpDocs().push_back({k, txt, pack}); ++added; }
                 }
-            } catch (...) { /* 跳过坏文件 */ }
+            } catch (...) { DICE_LOG_WARN_EXCEPTION("loading help file " + u8str(it->path())); }
         }
         return added;
     }
@@ -5118,8 +5119,12 @@ public:
     static std::vector<std::string>& jsGameSystemTemplates() { static std::vector<std::string> v; return v; }
     /// jsMod 重载后重新同步 gameSystem 属性模板（重设原文 + 重扫 model.xml/JS 别名衍生）。
     static void reloadJsGameSystems(std::vector<std::string> tpls) {
+        LogOperation operation(DICE_LOG_SOURCE, "rules", "sync_js_templates");
+        std::unique_lock<std::shared_mutex> lk(rulesLock());
+        operation.phase("rules_lock_acquired");
         jsGameSystemTemplates() = std::move(tpls);
         loadModelTemplates();
+        operation.detail("templates=" + std::to_string(jsGameSystemTemplates().size()));
     }
     /// 解析 JS 规则插件的 gameSystem 模板（JSON 或 YAML）：alias→同义词表、defaultsComputed→衍生值。
     static int loadJsGameSystems() {
@@ -5320,22 +5325,28 @@ public:
                     for (auto& [k, v] : j["help"].items()) if (v.is_string()) p.helpEntries[k] = v.get<std::string>();
                 rulePacks().push_back(std::move(p));
                 ++n;
-            } catch (...) {}
+            } catch (...) { DICE_LOG_WARN_EXCEPTION("loading rule file " + u8str(e.path())); }
         }
         return n;
     }
     /// 重新加载规则包：清空注册表 + 把 alias/computed 重置为内置默认 + 重新扫描。
-    /// 供 WebUI 导入/删除后热生效。⚠️ 非服务期并发安全，仅在请求线程串行调用。
+    /// 供 WebUI 导入/删除后热生效。低层加载/重建函数必须使用 Unlocked 查询，
+    /// 不得在持有独占锁时再次获取 rulesLock() 的读锁或写锁。
     static int reloadRulePacks(const std::vector<std::string>& dirs) {
+        LogOperation operation(DICE_LOG_SOURCE, "rules", "reload");
         std::unique_lock<std::shared_mutex> lk(rulesLock());   // 独占：阻塞所有读者
+        operation.phase("rules_lock_acquired");
         rulePacks().clear();
         CharacterCardStore::resetAliases();
         resetComputed();
         resetDefaults();                    // 默认值/派生随规则包重载重建
         rulePackDerivedRegistry().clear();
+        operation.phase("defaults_reset");
         int n = 0; for (const auto& d : dirs) n += loadRulePacks(d);
         loadRulePackBundles();   // 重新扫描 data/rulepacks/<包>/（并入各包 rules）
+        operation.phase("rule_files_loaded");
         loadModelTemplates();    // 规则 mod 的 model/*.xml 属性别名（alias 已被 resetAliases 清空，须重注册）
+        operation.detail("packs=" + std::to_string(rulePacks().size()));
         return n;
     }
     /// 按 setKey（如 coc7/dnd/5e）查规则包，**返回副本**（避免重载后指针失效）；无则空。
@@ -6436,7 +6447,7 @@ public:
                     orm::c(&PlayerProfileRow::platform) == msg.platform
                         and orm::c(&PlayerProfileRow::trustLevel) >= kTrustAdmin));
                 for (auto& r : rows) out += (out.empty() ? "" : "\n") + r.userId + (r.nickname.empty() ? "" : "(" + r.nickname + ")");
-            } catch (...) {}
+            } catch (...) { DICE_LOG_EXCEPTION("listing player administrators"); }
             return i18n_.tr(loc, "admin.list", {{"list", out.empty() ? i18n_.tr(loc, "admin.none") : out}});
         }
         std::string target = atTarget(msg);
@@ -8401,17 +8412,17 @@ private:
             {"读唇", 1},   {"催眠", 1},     {"炮术", 1},     {"斗殴", 25},
         };
     }
-    /// key 统一 canonical 化（别名/同义词归并后查得到）。
-    static std::map<std::string, int> normalizeDefaults(const std::map<std::string, int>& in) {
+    /// 调用者须持有规则读/写锁，或处于单线程启动期；不得在此重复加锁。
+    static std::map<std::string, int> normalizeDefaultsUnlocked(const std::map<std::string, int>& in) {
         std::map<std::string, int> out;
-        for (auto& [k, v] : in) out[CharacterCardStore::canonical(k)] = v;
+        for (auto& [k, v] : in) out[CharacterCardStore::canonicalUnlocked(k)] = v;
         return out;
     }
     static std::map<std::string, int>& defaultsRegistry() {
-        static std::map<std::string, int> reg = normalizeDefaults(builtinSkillDefaults());
+        static std::map<std::string, int> reg = normalizeDefaultsUnlocked(builtinSkillDefaults());
         return reg;
     }
-    static void resetDefaults() { defaultsRegistry() = normalizeDefaults(builtinSkillDefaults()); }
+    static void resetDefaults() { defaultsRegistry() = normalizeDefaultsUnlocked(builtinSkillDefaults()); }
     /// 规则包声明的派生公式（查询优先于 derivedRegistry；重载规则包时清空重建）。
     static std::map<std::string, std::string>& rulePackDerivedRegistry() {
         static std::map<std::string, std::string> m; return m;
@@ -8420,7 +8431,7 @@ private:
     static std::optional<int> defaultAttr(const std::string& attr) {
         std::shared_lock<std::shared_mutex> lk(rulesLock());
         auto& reg = defaultsRegistry();
-        auto it = reg.find(CharacterCardStore::canonical(attr));
+        auto it = reg.find(CharacterCardStore::canonicalUnlocked(attr));
         if (it != reg.end()) return it->second;
         return std::nullopt;
     }

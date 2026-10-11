@@ -122,7 +122,10 @@ public:
     void markCurrentRulePlugin() { if (!loadingFile_.empty()) rulePluginFiles_.insert(loadingFile_); }
     /// seal.gameSystem.newTemplate(ByYaml) 的模板原文（JSON/YAML）收集，供宿主解析属性别名/衍生。
     void addGameSystemTemplate(std::string s) { if (!s.empty()) gameSystemTemplates_.push_back(std::move(s)); }
-    const std::vector<std::string>& gameSystemTemplates() const { return gameSystemTemplates_; }
+    std::vector<std::string> gameSystemTemplates() const {
+        std::lock_guard<std::mutex> lk(mutex_);
+        return gameSystemTemplates_;
+    }
     /// 返回某插件文件（foo.js / foo.js.disabled）实际所在目录（主目录或 data/mod），
     /// 找不到则回退主目录。供 WebUI 的启停/删除按文件定位。
     std::string dirForFile(const std::string& file) const;

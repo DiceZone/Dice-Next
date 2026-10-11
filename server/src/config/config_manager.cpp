@@ -360,6 +360,9 @@ bool ConfigManager::save() {
             DICE_LOG_ERROR("ConfigManager: failed to save config: {}", e.what());
         }
     }
+    // Logger updates are separate from general reload callbacks: replaying those
+    // on every save would reload plugins and could recursively save again.
+    if (ok) configureLogger(snapshot);
     if (ok && snapshotWriter) {
         try { snapshotWriter(snapshot); }
         catch (const std::exception& e) { DICE_LOG_ERROR("ConfigManager: failed to persist database snapshot: {}", e.what()); }
@@ -429,6 +432,8 @@ void ConfigManager::emitConfigChanged() {
             cb();
         } catch (const std::exception& e) {
             DICE_LOG_ERROR("ConfigManager: change callback threw: {}", e.what());
+        } catch (...) {
+            DICE_LOG_EXCEPTION("configuration change callback");
         }
     }
 }
