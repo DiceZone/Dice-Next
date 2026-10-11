@@ -18,6 +18,7 @@
 #include <cstdio>
 #pragma comment(lib, "ws2_32.lib")
 #else
+#include <fcntl.h>
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -42,7 +43,7 @@ inline bool acquireInstanceLock(const std::string& lockFilePath) {
     DWORD wr = 0; if (n > 0) WriteFile(h, buf, static_cast<DWORD>(n), &wr, nullptr);
     return true;   // 句柄随进程存活，退出/崩溃由 OS 释放并删除锁文件
 #else
-    int fd = ::open(lockFilePath.c_str(), O_CREAT | O_RDWR, 0644);
+    int fd = ::open(lockFilePath.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0644);
     if (fd < 0) return false;
     if (::flock(fd, LOCK_EX | LOCK_NB) != 0) { ::close(fd); return false; }
     return true;   // fd 随进程存活

@@ -89,6 +89,7 @@ set(SOURCES
     src/common/hot_reload.cpp
     src/common/subprocess.cpp
     src/service/update_service.cpp
+    src/service/update_archive.cpp
     src/service/cloud_card_service.cpp
     src/service/identity_email_service.cpp
     src/config/config_manager.cpp
@@ -230,6 +231,15 @@ if(WIN32)
     target_sources(dice-next-server PRIVATE
         src/resources/app.rc
         src/resources/version_core.rc)
+endif()
+
+if(UNIX)
+    add_executable(dice-next-launcher src/platform/launcher_posix.cpp)
+    set_target_properties(dice-next-launcher PROPERTIES OUTPUT_NAME "dice-next")
+    target_link_libraries(dice-next-launcher PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_options(dice-next-launcher PRIVATE -Wall -Wextra -Wpedantic)
+    add_executable(dice-next-update-test-core EXCLUDE_FROM_ALL ../tools/posix-update-test-core.cpp)
+    target_link_libraries(dice-next-update-test-core PRIVATE nlohmann_json::nlohmann_json)
 endif()
 
 if(UNIX AND NOT APPLE)

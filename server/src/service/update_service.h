@@ -155,7 +155,7 @@ private:
     bool downloadAsset(const ReleaseManifest& manifest, const ReleaseAsset& asset,
                        const std::vector<Source>& sources, std::filesystem::path& archive,
                        std::string& usedSource, std::string& error);
-    bool prepareWindowsStage(const std::filesystem::path& archive,
+    bool prepareStage(const std::filesystem::path& archive,
                              const ReleaseManifest& manifest, std::string& error);
 
     static bool fetchToFile(const std::string& url, const std::filesystem::path& output,

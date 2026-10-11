@@ -217,6 +217,11 @@ jobs:
       - name: Compile release
         working-directory: main
         run: cmake --build server/${{ matrix.build_dir }} --parallel "$(nproc)"
+      - name: Test POSIX package manager
+        working-directory: main
+        run: |
+          cmake --build server/${{ matrix.build_dir }} --target dice-next-update-test-core --parallel 2
+          node tools/test-posix-manager.mjs server/${{ matrix.build_dir }}/dice-next server/${{ matrix.build_dir }}/dice-next-update-test-core
       - name: Package
         working-directory: main
         env:
@@ -414,6 +419,11 @@ jobs:
       - name: Compile release
         working-directory: main
         run: cmake --build server/build --parallel "$(sysctl -n hw.ncpu)"
+      - name: Test POSIX package manager
+        working-directory: main
+        run: |
+          cmake --build server/build --target dice-next-update-test-core --parallel 2
+          node tools/test-posix-manager.mjs server/build/dice-next server/build/dice-next-update-test-core
       - name: Package
         working-directory: main
         env:
