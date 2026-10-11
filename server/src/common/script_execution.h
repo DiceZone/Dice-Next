@@ -19,7 +19,8 @@ class ScriptExecution {
 public:
     explicit ScriptExecution(std::chrono::milliseconds timeout)
         : previous_(current_), deadline_(std::chrono::steady_clock::now() + timeout) {
-        if (previous_) deadline_ = std::min(deadline_, previous_->deadline_);
+        // Windows headers can define a function-like min macro before this header.
+        if (previous_) deadline_ = (std::min)(deadline_, previous_->deadline_);
         current_ = this;
     }
     ~ScriptExecution() { current_ = previous_; }

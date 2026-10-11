@@ -95,12 +95,32 @@ TEST(LuaPluginCompat, ExecutionTimeoutCannotBeCaughtOrRemovedAndRuntimeRecovers)
     ASSERT_TRUE(error.find("os.exit") != std::string::npos);
 }
 
+TEST(LuaPluginCompat, NativePipeCapturesOutputAndExitStatus) {
+    TestWatchdog watchdog;
+    TempWorkspace workspace("dice_next_lua_pipe_");
+    // A healthy shell needs headroom for Windows process startup. Keep the
+    // separate cancellation/finalizer test at 100 ms; don't weaken its budget.
+    LuaPluginManager manager(std::chrono::seconds(2));
+    ASSERT_TRUE(manager.init());
+    std::string error;
+    const bool healthyPipe = manager.eval("local f, err=io.popen('echo probe'); assert(f, err); assert(f:read('*a'):find('probe')); local ok, kind, status=f:close(); assert(ok and kind=='exit' and status==0)", &error);
+    if (!healthyPipe) std::cerr << "  native pipe probe: " << error << '\n';
+    ASSERT_TRUE(healthyPipe);
+#ifdef _WIN32
+    const std::string failedCommand = "exit /b 7";
+#else
+    const std::string failedCommand = "exit 7";
+#endif
+    const bool failedPipe = manager.eval("local f, err=io.popen('" + failedCommand + "'); assert(f, err); local ok, kind, status=f:close(); assert(ok==nil and kind=='exit' and status==7)", &error);
+    if (!failedPipe) std::cerr << "  native pipe exit status: " << error << '\n';
+    ASSERT_TRUE(failedPipe);
+}
+
 TEST(LuaPluginCompat, NativeCommandsAndFinalizersCannotKeepTheRuntimeBusyForever) {
     TestWatchdog watchdog;
     TempWorkspace workspace("dice_next_lua_native_");
     LuaPluginManager manager(std::chrono::milliseconds(100));
     ASSERT_TRUE(manager.init());
-    ASSERT_TRUE(manager.eval("local f=assert(io.popen('echo probe')); assert(f:read('*a'):find('probe')); assert(f:close())"));
 #ifdef _WIN32
     const std::string slow = "ping -n 15 127.0.0.1 >nul";
 #else

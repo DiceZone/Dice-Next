@@ -3,6 +3,24 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-12: Windows Release macro compatibility
+
+- Release run 38178243240 failed both Windows package builds at
+  `script_execution.h:22`: Windows' function-like `min` macro expanded the
+  new `std::min` call. The macro-safe call preserves the shared nested deadline;
+  no production execution budget or cancellation mechanism was relaxed.
+- A separate lightweight compilation unit deliberately defines `min`/`max`
+  before including the header on every platform. Its two cases / ten assertions
+  verify expired outer deadlines and restoration after a shorter inner budget.
+- Local Windows amd64 Release backend and both test executables built. CTest
+  passed all 587 core cases / 5689 assertions and 21 Lua cases / 202 assertions;
+  all 31 Release automation tests passed. Optional Lua corpora were not supplied.
+- The healthy Lua native-pipe test now has a two-second startup budget and checks
+  captured output plus successful/nonzero exit status. Slow-command cancellation
+  and looping finalizers remain in the separate 100 ms watchdog-bounded test.
+- These are isolated local checks, not an ARM64 build, live bot delivery or a
+  claim that the replacement Release has completed.
+
 ## 2026-10-12: Runtime reliability fault injection
 
 - Final local macOS arm64 Debug core, unit tests and real Lua runtime compiled.
