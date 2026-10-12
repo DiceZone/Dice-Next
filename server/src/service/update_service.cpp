@@ -559,7 +559,14 @@ UpdateService::UpdateService(ConfigManager& config, std::function<void()> restar
 }
 
 UpdateService::~UpdateService() {
-    stopping_.store(true, std::memory_order_release);
+    {
+        // An atomic flag alone cannot prevent a notification from falling
+        // between the worker's predicate check and entry into wait(). Use the
+        // waiter's mutex so shutdown and the check-to-sleep transition cannot
+        // interleave; join only after releasing it.
+        std::lock_guard<std::mutex> lock(mutex_);
+        stopping_.store(true, std::memory_order_release);
+    }
     wake_.notify_all();
     if (worker_.joinable()) worker_.join();
 }

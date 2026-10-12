@@ -3,6 +3,36 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-12: Release Linux timeout and updater shutdown race
+
+- Release run 38234306582 compiled and packaged all five platforms, but Linux
+  `dice_next_tests` timed out after 900.04 seconds while running
+  `ExplicitRestartInsideContainerIsStillAnOrdinaryRestart`. The separate Lua
+  executable passed; publication was skipped. This was a test-process hang,
+  not a compiler error.
+- Before patching production code, a new local Windows stress case reproduced
+  the hang on the fourth repeated run of 2000 updater lifecycles. Its 15-second
+  watchdog terminated the process with exit code 2. The idle worker can read a
+  false stop predicate, miss a notification sent without its mutex, then sleep
+  forever while the destructor waits in `join()`.
+- The updater now changes its atomic stop flag while holding the same mutex as
+  the worker's condition-variable wait. Notification and joining remain outside
+  that lock. Atomic reads still support cancellation in active manifest probes
+  and download transfers; installation/container policy is unchanged.
+- Three regression cases cover immediate/yielded/ordinary-restart shutdown
+  across 2000 lifecycles, active-download cancellation with transfer joining and
+  partial-file cleanup, and queued-install cancellation without restarting or
+  releasing a held package. The original container-restart, portable-worker and
+  active-manifest shutdown cases also have watchdog protection.
+- Final local Windows amd64 Release server and test executables compiled.
+  The targeted `Update` filter passed 45 cases / 999 assertions. Twenty further
+  stress runs completed all 40000 lifecycles. Full CTest then passed 615 core
+  cases / 6672 assertions and 22 Lua cases / 209 assertions in 80.76 seconds.
+- No usable local Linux/WSL environment was available. The shared fix has not
+  yet been verified by a new Linux CI run, and these checks do not certify a new
+  Release. These were local verification checks only; no listening server or
+  firewall change was involved. Release success requires the subsequent CI run.
+
 ## 2026-10-12: QQ official faces and repeated configuration reloads
 
 - Local Windows amd64 Release server and test executables built successfully.

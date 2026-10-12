@@ -1,4 +1,5 @@
 #include "test_framework.h"
+#include "test_watchdog.h"
 #include "../src/common/subprocess.h"
 #include "../src/common/version.h"
 #include "../src/common/update_schedule.h"
@@ -532,6 +533,7 @@ TEST(UpdateSchedule, ExplicitRestartInstallsEarlyOnlyWhenAutomaticInstallationIs
 }
 
 TEST(UpdateSchedule, ExplicitRestartInsideContainerIsStillAnOrdinaryRestart) {
+    TestWatchdog watchdog;
     ScheduledUpdateFixture fixture;
     dice::ConfigManager config((fixture.root / "config").string());
     fixture.configure(config);
@@ -1043,7 +1045,31 @@ TEST(UpdateContainer, IgnoresFalseMarkersAndBlocksEveryMutationEntry) {
     fs::remove_all(configPath, ec);
 }
 
+TEST(UpdateService, RepeatedIdleShutdownDoesNotLoseWorkerWakeup) {
+    TestWatchdog watchdog(std::chrono::seconds(15));
+    DownloadFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<bool>("update/auto_check", false);
+    config.set<std::string>("update/auto_action", "notify");
+    std::atomic<int> restarts{0};
+    constexpr int iterations = 2000;
+    for (int i = 0; i < iterations; ++i) {
+        auto service = std::make_unique<UpdateService>(
+            config, [&] { ++restarts; }, UpdateService::NotifyCallback{}, ContainerEnvironment{});
+        // Cover shutdown before worker admission, after a scheduler handoff,
+        // and after the same ordinary-restart path that stalled Linux CI.
+        if (i % 3 == 1) std::this_thread::yield();
+        if (i % 3 == 2) {
+            std::string error;
+            ASSERT_TRUE(service->requestManualRestart(error));
+        }
+        service.reset();
+    }
+    ASSERT_EQ(restarts.load(), iterations / 3);
+}
+
 TEST(UpdateService, PortableWorkerStartsAndStopsCleanly) {
+    TestWatchdog watchdog;
     namespace fs = std::filesystem;
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const fs::path configPath = fs::temp_directory_path() /
@@ -1055,6 +1081,63 @@ TEST(UpdateService, PortableWorkerStartsAndStopsCleanly) {
     }
     std::error_code ec;
     fs::remove_all(configPath, ec);
+}
+
+TEST(UpdateService, StopCancelsAnActiveDownloadAndJoinsTransfer) {
+    TestWatchdog watchdog;
+    DownloadFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    config.set<std::string>("update/source", "direct");
+    config.set<std::string>("update/auto_action", "notify");
+    std::atomic<bool> transferStarted{false};
+    std::atomic<bool> observedCancellation{false};
+    std::atomic<int> transfersFinished{0};
+    std::atomic<int> restarts{0};
+    auto fetch = [&](const std::string& url, const std::filesystem::path& output, std::uint64_t,
+                     int, std::string& error, const UpdateService::CancellationCheck& cancelled) {
+        if (url.find("update-manifest.json") != std::string::npos) {
+            writeResponse(output, downloadManifest());
+            return true;
+        }
+        writeResponse(output, "a");
+        transferStarted.store(true, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!cancelled() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        observedCancellation.store(cancelled(), std::memory_order_release);
+        ++transfersFinished;
+        error = "cancelled";
+        return false;
+    };
+    auto service = std::make_unique<UpdateService>(
+        config, [&] { ++restarts; }, UpdateService::NotifyCallback{}, ContainerEnvironment{}, fetch);
+    std::string error;
+    ASSERT_TRUE(service->requestCheck(true, error));
+    ASSERT_TRUE(waitUntil([&] { return service->status()["phase"] == "available"; }));
+    ASSERT_TRUE(service->requestDownload(error));
+    ASSERT_TRUE(waitUntil([&] { return transferStarted.load(std::memory_order_acquire); }));
+    const auto stoppingAt = std::chrono::steady_clock::now();
+    service.reset();
+    ASSERT_TRUE(std::chrono::steady_clock::now() - stoppingAt < std::chrono::seconds(1));
+    ASSERT_TRUE(observedCancellation.load(std::memory_order_acquire));
+    ASSERT_EQ(transfersFinished.load(), 1);
+    ASSERT_EQ(restarts.load(), 0);
+    ASSERT_TRUE(std::filesystem::is_empty(fixture.root / "updates" / "downloads"));
+}
+
+TEST(UpdateService, StopCancelsQueuedInstallationWithoutRestarting) {
+    TestWatchdog watchdog;
+    ScheduledUpdateFixture fixture;
+    dice::ConfigManager config((fixture.root / "config").string());
+    fixture.configure(config);
+    std::atomic<int> restarts{0};
+    auto service = std::make_unique<UpdateService>(
+        config, [&] { ++restarts; }, UpdateService::NotifyCallback{}, ContainerEnvironment{});
+    std::string error;
+    ASSERT_TRUE(service->requestInstall(error));
+    service.reset();
+    ASSERT_EQ(restarts.load(), 0);
+    ASSERT_TRUE(pendingUpdateHeld(fixture.root / "updates" / "pending"));
 }
 
 TEST(UpdateSubprocess, CancellationTerminatesAndReapsChildPromptly) {
@@ -1079,6 +1162,7 @@ TEST(UpdateSubprocess, CancellationTerminatesAndReapsChildPromptly) {
 }
 
 TEST(UpdateService, StopCancelsAnActiveManifestFetch) {
+    TestWatchdog watchdog;
     namespace fs = std::filesystem;
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const fs::path root = fs::temp_directory_path() /
