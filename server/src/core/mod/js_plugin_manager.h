@@ -20,6 +20,7 @@
 #include <optional>
 #include <array>
 #include "common/script_execution.h"
+#include "common/log_context.h"
 
 #include <quickjs.h>
 
@@ -45,7 +46,9 @@ public:
     /// 供卡片模板的 "js:" 表达式等调用。
     std::optional<std::string> evalString(const std::string& script);
 
-    struct Result { bool matched = false; std::string reply; };
+    struct Result { bool matched = false; std::string reply; std::vector<ProcessingSource> sources; bool failed = false, pending = false; };
+    ProcessingSource loggingSource(const std::string& file, const std::string& entry = {}) const;
+    ProcessingContext loggingContextForCall() const;
     /// 用已注册 JS 指令处理一条消息；cmdLine = 去前缀后的文本（如 "seal ABC"）。
     /// Preferred SealDice-compatible entry points.  They preserve raw message
     /// identity, guild/channel IDs, segments, timestamps and adapter metadata.
@@ -153,6 +156,7 @@ public:
     void setGroupAdmin(GroupAdminFn f) { groupAdmin_ = std::move(f); }
     void groupAdmin(const std::string& platform, const std::string& op, const std::string& groupId,
                     const std::string& userId, int64_t num, const std::string& text) const {
+        ProcessingScope logScope(loggingContextForCall());
         if (groupAdmin_) groupAdmin_(platform, op, groupId, userId, num, text);
     }
     using BanFn = std::function<void(const std::string& op, const std::string& id, const std::string& reason)>;
@@ -177,7 +181,11 @@ public:
     bool hasCommand(const Message& message, const std::string& word);  // same, respecting per-group enable state
 
     // 供内嵌的 C 函数回调使用（经 JS_GetContextOpaque 取到 this）。
-    void appendReply(const std::string& s) { if (!pendingReply_.empty()) pendingReply_ += "\n"; pendingReply_ += s; }
+    void appendReply(const std::string& s) {
+        if (!pendingReply_.empty()) pendingReply_ += "\n";
+        pendingReply_ += s;
+        if (!s.empty()) for (const auto& source : activeProcessingContext.sources) addProcessingSource(pendingSources_, source);
+    }
     void markSideEffectReply() { sideEffectReply_ = true; }
     void registerExt(JSValueConst ext);            // 登记 ext.cmdMap 里的指令
     // 持久化 KV（seal.vars / ext.storage），存 data/plugins.db 的 js_kv 表。
@@ -304,7 +312,7 @@ private:
     static std::string kvNamespace(const std::string& key);  // 从扁平 key 推导 ns 列
     // Drain the JS microtask/job queue (resolves promises, e.g. awaited fetch),
     // so an async solve() driven by synchronous (blocking) fetch runs to completion.
-    void drainJobs();
+    bool drainJobs(); // false when the queue fails, times out or remains pending
     // 构造 ctx / msg 两个 JS 对象（caller 负责 JS_FreeValue）。
     void buildCtxMsg(const Message& msg, int privilege, JSValue& outCtx, JSValue& outMsg);
     JSValue buildCmdArgs(const Message& msg, const std::string& cmdLine,
@@ -328,6 +336,8 @@ private:
     std::vector<ConfigItem> configs_;   // 插件注册的配置项元数据（每次 (re)load 重建）
 
     std::string pendingReply_;     // solve 期间 replyToSender 累积
+    std::vector<ProcessingSource> pendingSources_;
+    bool pendingFailed_ = false;
     bool sideEffectReply_ = false; // replyPerson 等已直接投递的回复
     std::string loadingFile_;      // 当前加载文件名
     std::string selfId_, selfNick_;   // 机器人自身账号/昵称（ctx.endPoint.userId/nickname）
@@ -365,12 +375,14 @@ private:
     BanQueryFn banQuery_;
     void wsFire(int64_t id, const char* evt, const std::string& data);   // drogon loop 线程调用
     std::map<int64_t, JSValue> wsObjs_;   // 连接 id → JS 对象引用（持 mutex_）
+    std::map<int64_t, ProcessingContext> wsContexts_;
     int64_t wsSeq_ = 0;
 
-    struct Timer { JSValue cb; double intervalSec; };
+    struct Timer { JSValue cb; double intervalSec; ProcessingContext context; };
     std::map<int64_t, Timer> timers_;     // active setTimeout/setInterval callbacks
     int64_t timerSeq_ = 0;
     bool capturing_ = false;              // inside a message turn → replies accumulate
+    int lastLoadErrors_ = 0;
 };
 
 } // namespace dice

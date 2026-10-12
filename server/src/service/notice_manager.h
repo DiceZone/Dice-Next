@@ -223,6 +223,9 @@ inline void smtpSendAsync(const json& s, const std::string& subject, const std::
 inline void notify(ConfigManager& cfg, AdapterManager& adapters, int level, const std::string& msg,
                    const std::string& originPlatform = "", const std::string& originChat = "",
                    const std::string& op = "", const std::string& originAdapterId = "") {
+    ProcessingScope source(ProcessingContext{{{"通知", op.empty() ? "系统通知" : op, "", ""}},
+        activeProcessingContext.trigger, "通知内容已生成"});
+    OutboundScope independentNotification(nullptr);
     std::string origin = originChat.empty() ? std::string() : (originPlatform + ":" + originChat);
     audit(level, msg, op, origin);
     json c = conf(cfg);

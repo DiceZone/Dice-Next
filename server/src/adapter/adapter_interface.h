@@ -17,6 +17,7 @@
 namespace dice {
 
 namespace qq_rich { struct Card; } // Opaque QQ-only presentation; generic adapters never render it.
+struct PreparedOutput;
 
 using json = nlohmann::json;
 
@@ -58,6 +59,11 @@ struct Message {
     std::vector<presentation::Action> presentationActions;
     bool forcePlainText = false; // Outbound conversation preference, captured before async work.
     bool textPreferenceCaptured = false;
+    // Outbound-only immutable logging context; copied through HTTP/media retries.
+    // Never deserialize these fields from an inbound platform payload.
+    std::shared_ptr<const PreparedOutput> logOutput;
+    size_t logPart = 0, logParts = 0;
+    std::string logMediaSummary;
 };
 
 // ═══════════════════════════════════════════════════════════════

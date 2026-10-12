@@ -177,7 +177,8 @@ function faultasync(msg) sleepTime(10); while true do end end`);
     fs.utimesSync(largeLog, future, future);
     const dashboardStart = performance.now();
     const largeDashboard = await ok('/api/dashboard/stats');
-    assert.ok(JSON.stringify(largeDashboard).includes('bounded-tail-marker'));
+    assert.ok(!JSON.stringify(largeDashboard).includes('ignored historical log'));
+    assert.ok(largeDashboard.data.recent_logs.length <= 500, 'Structured recent records must stay bounded');
     assert.ok(performance.now() - dashboardStart < 1500, 'Large log must not stall dashboard polling');
     fs.rmSync(largeLog); // exact file created by this isolated fixture
     console.log('PASS: live JS/Lua infinite loops, load failure, async continuation, API contention, deletion and core recovery');
@@ -194,10 +195,17 @@ function faultasync(msg) sleepTime(10); while true do end end`);
   assert.equal(exit.code, 0, JSON.stringify(exit));
   const files = fs.readdirSync(path.join(root, 'data/logs/app')).filter(file => file.endsWith('.log'));
   const fileLog = files.map(file => fs.readFileSync(path.join(root, 'data/logs/app', file), 'utf8')).join('\n');
-  for (const marker of ['[tz=', 'thread=', 'elapsed_ms=', 'phase=begin', 'phase=end', 'request=',
-    'filename must end with .js', 'action=load_plugin',
+  for (const marker of ['[ERROR]', '[管理面板]',
+    'filename must end with .js',
     'js-diagnostic-probe', 'lua-diagnostic-probe', 'stack traceback:', 'diagnostics-probe.js:'])
     assert.ok(fileLog.includes(marker), `Missing diagnostic marker: ${marker}`);
+  assert.ok(!fileLog.includes('[tz='));
+  assert.ok(!fileLog.includes('thread='));
+  const structuredFiles = fs.readdirSync(path.join(root, 'data/logs/app')).filter(file => file.endsWith('.jsonl'));
+  const structured = structuredFiles.flatMap(file => fs.readFileSync(path.join(root, 'data/logs/app', file), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)));
+  assert.ok(structured.some(record => record.details?.cpp_file && record.details?.thread));
+  assert.ok(structured.some(record => record.details?.request_id));
+  assert.ok(!JSON.stringify(structured).includes(apiKey), 'Secrets must also be redacted in structured diagnostics');
   assert.ok(!fileLog.includes(apiKey), 'Configured API key must never appear in file logs');
   console.log('PASS: Lua/JS reload regression, concurrent reads, rolls, exception traces, HTTP diagnostics, dashboard parsing, redaction and graceful exit');
 } catch (error) {

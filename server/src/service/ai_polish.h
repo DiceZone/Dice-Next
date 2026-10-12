@@ -72,7 +72,7 @@ inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const 
     ai::Model m;
     if (!pickModel(cfg, m)) return replyText;
 
-    DICE_LOG_INFO("[AI polish] start model={} mode={} reply_len={} user_msg_len={}", m.id, conf(cfg).value("mode","text"), replyText.size(), userMsg.size());
+    DICE_LOG_DEBUG("开始润色：模型「{}」，模式 {}，回复 {} 字节、用户输入 {} 字节。", m.id, conf(cfg).value("mode","text"), replyText.size(), userMsg.size());
     json c = conf(cfg);
     std::string mode = c.value("mode", std::string("text"));
     std::string persona = c.value("persona", std::string());
@@ -90,7 +90,7 @@ inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const 
     int maxTok = (int)(replyText.size()) + 256;
     if (maxTok > 1024) maxTok = 1024;
     ai::Result r = ai::chat(cfg, m, sys, user, maxTok, 20, /*tempOverride=*/0.3);
-    if (!r.ok || r.reply.empty()) { if (!r.ok) DICE_LOG_WARN("[AI polish] failed model={} error={} latency={}ms", m.id, r.error, r.latencyMs); return replyText; }
+    if (!r.ok || r.reply.empty()) { if (!r.ok) DICE_LOG_WARN("模型「{}」润色失败：{}，耗时 {} 毫秒；继续使用原回复。", m.id, r.error, r.latencyMs); return replyText; }
     std::string out = r.reply;
     auto b = out.find_first_not_of(" \t\r\n");
     auto e = out.find_last_not_of(" \t\r\n");
@@ -100,12 +100,12 @@ inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const 
                             (out.front() == '\'' && out.back() == '\''))) out = out.substr(1, out.size() - 2);
     if (out.empty()) return replyText;
     // 关键：润色后若丢失/改动了原文的任何数字 → 判为破坏了骰点结果，直接发原文。
-    if (!ai::preservesNumbers(replyText, out)) { DICE_LOG_WARN("[AI polish] numbers changed, falling back to original"); return replyText; }
-    if (!ai::preservesActionCommands(replyText, out)) { DICE_LOG_WARN("[AI polish] action command changed, falling back to original"); return replyText; }
+    if (!ai::preservesNumbers(replyText, out)) { DICE_LOG_WARN("润色结果改变了数字，已拒绝替换，使用原回复。"); return replyText; }
+    if (!ai::preservesActionCommands(replyText, out)) { DICE_LOG_WARN("润色结果改变了操作指令，已拒绝替换，使用原回复。"); return replyText; }
     if (format == ContentFormat::kMarkdown && !markdown::preservesStructure(replyText, out)) {
-        DICE_LOG_WARN("[AI polish] Markdown structure changed, falling back to original"); return replyText;
+        DICE_LOG_WARN("润色结果破坏了 Markdown 结构，使用原回复。"); return replyText;
     }
-    DICE_LOG_INFO("[AI polish] ok model={} tokens={} latency={}ms in_len={} out_len={}", m.id, r.totalTokens, r.latencyMs, replyText.size(), out.size());
+    DICE_LOG_DEBUG("模型「{}」润色完成：使用 {} Token，耗时 {} 毫秒；输入 {} 字节、输出 {} 字节。", m.id, r.totalTokens, r.latencyMs, replyText.size(), out.size());
     return out;
 }  // polish
 }  // namespace dice::aipolish

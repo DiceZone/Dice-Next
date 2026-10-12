@@ -14,15 +14,17 @@ inline void installHttpDiagnostics(drogon::HttpAppFramework& app) {
         RequestTrace trace{++nextRequest, std::chrono::steady_clock::now()};
         req->attributes()->insert("dice.diagnostic", trace);
         if (logManagementRequest(req->path(), req->methodString()))
-            DICE_LOG_INFO("[http] request={} {} {} phase=begin", trace.id, req->methodString(), req->path());
+            writeLog(DICE_LOG_SOURCE, LogLevel::Debug, "管理面板", fmt::format("开始处理管理请求：{} {}", req->methodString(), req->path()),
+                {{"request_id", trace.id}, {"phase", "begin"}});
     });
     app.setExceptionHandler([](const std::exception& error, const drogon::HttpRequestPtr& req,
                                std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
         const auto& trace = req->attributes()->get<RequestTrace>("dice.diagnostic");
         // No request body, query string, cookies or authorization headers.
         const auto current = std::current_exception();
-        DICE_LOG_ERROR("[http] request={} {} {} unhandled exception: {}", trace.id, req->methodString(), req->path(),
-            current ? describeException(current) : sanitizeLogText(error.what()));
+        writeLog(DICE_LOG_SOURCE, LogLevel::Error, "管理面板", fmt::format("{} {} 处理失败：{}；已返回错误响应。",
+            req->methodString(), req->path(), current ? describeException(current) : sanitizeLogText(error.what())),
+            {{"request_id", trace.id}});
         auto response = drogon::HttpResponse::newHttpResponse();
         const bool busy = dynamic_cast<const ScriptBusy*>(&error) != nullptr;
         response->setStatusCode(busy ? drogon::k503ServiceUnavailable : drogon::k500InternalServerError);
@@ -42,15 +44,16 @@ inline void installHttpDiagnostics(drogon::HttpAppFramework& app) {
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - trace.start).count();
             const auto status = static_cast<int>(response->statusCode());
             const bool denied = status == 401 || status == 403;
-            auto severity = status >= 500 ? spdlog::level::err : result.failed && !denied ? spdlog::level::warn
-                : logManagementRequest(req->path(), req->methodString()) ? spdlog::level::info : spdlog::level::debug;
+            auto severity = status >= 500 ? LogLevel::Error : result.failed && !denied ? LogLevel::Info
+                : logManagementRequest(req->path(), req->methodString()) ? LogLevel::Info : LogLevel::Debug;
             // Browser polling is debug-only. Slow calls remain visible at warn.
-            if (ms >= 2000 && !denied && severity < spdlog::level::warn) severity = spdlog::level::warn;
-            getLogger()->log(DICE_LOG_SOURCE, severity,
-                "[http] request={} {} {} phase=end status={} code={} result={} elapsed_ms={} {}",
-                trace.id, req->methodString(), req->path(), status, result.code,
-                result.failed ? "failed" : "completed", ms,
-                req->path().rfind("/api/auth/", 0) == 0 ? std::string() : result.reason);
+            if (ms >= 2000 && !denied && severity < LogLevel::Warn) severity = LogLevel::Warn;
+            writeLog(DICE_LOG_SOURCE, severity, "管理面板",
+                fmt::format("{} {} {}；HTTP {}，耗时 {} 毫秒{}", req->methodString(), req->path(),
+                    result.failed ? "未完成" : "处理完成", status, ms,
+                    req->path().rfind("/api/auth/", 0) == 0 || result.reason.empty() ? "。" : "；原因：" + result.reason),
+                {{"request_id", trace.id}, {"http_status", status}, {"business_code", result.code},
+                    {"phase", "end"}, {"elapsed_ms", ms}});
         } catch (...) { DICE_LOG_EXCEPTION("HTTP response diagnostics"); }
     });
 }

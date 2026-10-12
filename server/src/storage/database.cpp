@@ -18,7 +18,7 @@ Database::~Database() {
 
 bool Database::open(const std::string& path) {
     if (isOpen()) {
-        DICE_LOG_WARN("Database: already open, closing first");
+        DICE_LOG_WARN("数据库已打开，先关闭旧连接再重新打开。");
         close();
     }
 
@@ -29,7 +29,7 @@ bool Database::open(const std::string& path) {
         std::filesystem::path dbDir = std::filesystem::path(path).parent_path();
         if (!dbDir.empty() && !std::filesystem::exists(dbDir)) {
             std::filesystem::create_directories(dbDir);
-            DICE_LOG_INFO("Database: created directory '{}'", dbDir.string());
+            DICE_LOG_INFO("已创建数据目录「{}」。", dbDir.string());
         }
 
         // Construct storage with all registered tables
@@ -347,7 +347,7 @@ bool Database::open(const std::string& path) {
         storage_->sync_schema();
         storage_->open_forever();  // keep connection alive with WAL mode
 
-        DICE_LOG_INFO("Database: opened '{}' ({} tables)", path,
+        DICE_LOG_INFO("主数据库「{}」已打开，共 {} 张表。", path,
             storage_->table_names().size());
 
         // ── Separate transcript-log database (logs.db, same directory) ──
@@ -383,7 +383,7 @@ bool Database::open(const std::string& path) {
         );
         logStorage_->sync_schema();
         logStorage_->open_forever();
-        DICE_LOG_INFO("Database: opened log store '{}' ({} tables)", logDbPath_,
+        DICE_LOG_INFO("跑团日志数据库「{}」已打开，共 {} 张表。", logDbPath_,
             logStorage_->table_names().size());
 
         // ── separate chat-history database (chat.db, same directory) ──
@@ -423,7 +423,7 @@ bool Database::open(const std::string& path) {
         );
         chatStorage_->sync_schema();
         chatStorage_->open_forever();
-        DICE_LOG_INFO("Database: opened chat store '{}' ({} tables)", chatDbPath_,
+        DICE_LOG_INFO("聊天历史数据库「{}」已打开，共 {} 张表。", chatDbPath_,
             chatStorage_->table_names().size());
 
         // ── Separate character-card database (cards.db, same directory) ──
@@ -453,17 +453,17 @@ bool Database::open(const std::string& path) {
                 if (!legacy.empty()) {
                     for (auto row : legacy) { row.id = 0; cardStorage_->insert(row); }
                     storage_->remove_all<CharacterCardRow>();
-                    DICE_LOG_INFO("Database: migrated {} character cards → cards.db", legacy.size());
+                    DICE_LOG_INFO("已将 {} 张人物卡迁移至独立 cards.db。", legacy.size());
                 }
             }
         } catch (const std::exception& e) {
-            DICE_LOG_WARN("Database: card migration skipped: {}", e.what());
+            DICE_LOG_WARN("人物卡迁移未完成，具体原因：{}", e.what());
         }
-        DICE_LOG_INFO("Database: opened card store '{}' ({} tables)", cardDbPath_,
+        DICE_LOG_INFO("人物卡数据库「{}」已打开，共 {} 张表。", cardDbPath_,
             cardStorage_->table_names().size());
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("Database: failed to open '{}': {}", path, e.what());
+        DICE_LOG_ERROR("无法打开数据库「{}」：{}", path, e.what());
         storage_.reset();
         return false;
     }
@@ -482,9 +482,9 @@ void Database::close() {
     if (storage_) {
         try {
             storage_.reset();
-            DICE_LOG_INFO("Database: closed '{}'", dbPath_);
+            DICE_LOG_INFO("数据库「{}」已关闭。", dbPath_);
         } catch (const std::exception& e) {
-            DICE_LOG_ERROR("Database: error closing: {}", e.what());
+            DICE_LOG_ERROR("关闭数据库时发生错误：{}", e.what());
         }
         storage_.reset();
     }
@@ -501,7 +501,7 @@ bool Database::checkpoint() {
         int logFrames = 0, checkpointed = 0;
         int rc = sqlite3_wal_checkpoint_v2(raw, nullptr, SQLITE_CHECKPOINT_TRUNCATE, &logFrames, &checkpointed);
         if (rc != SQLITE_OK) {
-            DICE_LOG_WARN("Database: WAL checkpoint failed for '{}': {}", path, sqlite3_errmsg(raw));
+            DICE_LOG_WARN("数据库「{}」写前日志整理未完成：{}", path, sqlite3_errmsg(raw));
             ok = false;
         }
         sqlite3_close(raw);
@@ -511,7 +511,7 @@ bool Database::checkpoint() {
 
 bool Database::execute(const std::string& sql) {
     if (!isOpen()) {
-        DICE_LOG_ERROR("Database: execute called but not open");
+        DICE_LOG_ERROR("数据库未打开，无法执行本次写入操作。");
         return false;
     }
 
@@ -519,7 +519,7 @@ bool Database::execute(const std::string& sql) {
         sqlite3* rawDb = nullptr;
         int rc = sqlite3_open(dbPath_.c_str(), &rawDb);
         if (rc != SQLITE_OK) {
-            DICE_LOG_ERROR("Database: execute — cannot open raw connection: {}", 
+            DICE_LOG_ERROR("无法建立数据库执行连接：{}",
                 rawDb ? sqlite3_errmsg(rawDb) : "unknown");
             if (rawDb) sqlite3_close(rawDb);
             return false;
@@ -527,13 +527,13 @@ bool Database::execute(const std::string& sql) {
         char* errMsg = nullptr;
         rc = sqlite3_exec(rawDb, sql.c_str(), nullptr, nullptr, &errMsg);
         if (rc != SQLITE_OK) {
-            DICE_LOG_ERROR("Database: execute failed: {}", errMsg ? errMsg : "unknown");
+            DICE_LOG_ERROR("数据库操作失败：{}", errMsg ? errMsg : "unknown");
             sqlite3_free(errMsg);
         }
         sqlite3_close(rawDb);
         return rc == SQLITE_OK;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("Database: execute failed: {}", e.what());
+        DICE_LOG_ERROR("数据库操作失败：{}", e.what());
         return false;
     }
 }

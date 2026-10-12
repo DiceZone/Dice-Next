@@ -266,7 +266,7 @@ bool ConfigManager::load() {
             std::string error;
             config_ = makeDefaultConfig();
             if (!writeSplitConfig(configPath_, config_, error)) {
-                DICE_LOG_ERROR("ConfigManager: failed to create default configuration: {}", error);
+                DICE_LOG_ERROR("无法创建默认配置：{}；请检查配置目录权限。", error);
                 return false;
             }
             splitLayout_ = true;
@@ -274,7 +274,7 @@ bool ConfigManager::load() {
             return true;
         }
         if (!fs::is_directory(configPath_)) {
-            DICE_LOG_ERROR("ConfigManager: '{}' must be a configuration directory", configPath_);
+            DICE_LOG_ERROR("配置路径「{}」必须是目录，当前配置未加载。", configPath_);
             return false;
         }
         const fs::path configDir = configDirectory(configPath_);
@@ -282,34 +282,34 @@ bool ConfigManager::load() {
             std::error_code ec;
             fs::remove(configDir / "default_config.json", ec);
             if (ec) {
-                DICE_LOG_WARN("ConfigManager: obsolete default_config.json was ignored but could not be removed: {}", ec.message());
+                DICE_LOG_WARN("已忽略旧 default_config.json，但清理文件失败：{}", ec.message());
             } else {
-                DICE_LOG_WARN("ConfigManager: discarded obsolete default_config.json; recovering split configuration from database snapshot");
+                DICE_LOG_WARN("已丢弃旧默认配置，正在从数据库快照恢复拆分配置。");
             }
             discardedObsoleteDefaultConfig_ = true;
             return false;
         }
         json loaded; std::string error;
         if (!readSplitConfig(configPath_, loaded, error) || !validateConfig(loaded, error)) {
-            DICE_LOG_ERROR("ConfigManager: configuration validation failed: {}", error);
+            DICE_LOG_ERROR("配置校验失败，本次配置未应用：{}", error);
             return false;
         }
         if (loaded["server"].value("api_key", std::string()).empty()) {
             loaded["server"]["api_key"] = utils::generateUuidV4();
-            DICE_LOG_INFO("ConfigManager: auto-generated API key");
+            DICE_LOG_INFO("首次运行已生成管理 API 密钥；密钥内容不写入日志。");
         }
         config_ = std::move(loaded);
         splitLayout_ = true;
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("ConfigManager: failed to load config: {}", e.what());
+        DICE_LOG_ERROR("配置读取失败：{}", e.what());
         return false;
     }
 }
 
 bool ConfigManager::reload() {
-    if (writing_->load() > 0) { DICE_LOG_DEBUG("ConfigManager: skip reload (self-write in progress)"); return true; }
-    DICE_LOG_INFO("ConfigManager: reloading from '{}'" , configPath_);
+    if (writing_->load() > 0) { DICE_LOG_DEBUG("配置正在由本程序写入，跳过重复重载。"); return true; }
+    DICE_LOG_INFO("正在重新读取配置目录「{}」。" , configPath_);
 
     bool ok = load();
     if (ok) {
@@ -327,7 +327,7 @@ bool ConfigManager::reload() {
             try {
                 snapshotWriter(snapshot);
             } catch (const std::exception& e) {
-                DICE_LOG_ERROR("ConfigManager: failed to persist database snapshot: {}", e.what());
+                DICE_LOG_ERROR("配置数据库快照保存失败：{}", e.what());
                 ok = false;
             }
         }
@@ -349,15 +349,15 @@ bool ConfigManager::save() {
             std::string error;
             if (validateConfig(config_, error) && writeSplitConfig(configPath_, config_, error)) {
                 splitLayout_ = true;
-                DICE_LOG_INFO("ConfigManager: config saved to '{}'", configPath_);
+                DICE_LOG_DEBUG("配置已保存至「{}」。", configPath_);
                 snapshot = config_;
                 snapshotWriter = snapshotWriter_;
                 ok = true;
             } else {
-                DICE_LOG_ERROR("ConfigManager: failed to save config: {}", error);
+                DICE_LOG_ERROR("配置保存失败：{}；此次修改可能不会在重启后保留。", error);
             }
         } catch (const std::exception& e) {
-            DICE_LOG_ERROR("ConfigManager: failed to save config: {}", e.what());
+            DICE_LOG_ERROR("配置保存失败：{}；此次修改可能不会在重启后保留。", e.what());
         }
     }
     // Logger updates are separate from general reload callbacks: replaying those
@@ -365,7 +365,7 @@ bool ConfigManager::save() {
     if (ok) configureLogger(snapshot);
     if (ok && snapshotWriter) {
         try { snapshotWriter(snapshot); }
-        catch (const std::exception& e) { DICE_LOG_ERROR("ConfigManager: failed to persist database snapshot: {}", e.what()); }
+        catch (const std::exception& e) { DICE_LOG_ERROR("配置数据库快照保存失败：{}", e.what()); }
     }
     // Delay decrement to cover the file-watcher debounce window
     auto writing = writing_;
@@ -377,7 +377,7 @@ bool ConfigManager::restoreSnapshot(const json& snapshot) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string error;
     if (!validateConfig(snapshot, error)) {
-        DICE_LOG_ERROR("ConfigManager: database configuration snapshot is invalid: {}", error);
+        DICE_LOG_ERROR("配置数据库快照无效，未应用该快照：{}", error);
         return false;
     }
     config_ = snapshot;
@@ -407,7 +407,7 @@ void ConfigManager::setSnapshotWriter(std::function<void(const json&)> writer) {
 void ConfigManager::resetDefault() {
     std::lock_guard<std::mutex> lock(mutex_);
     config_ = makeDefaultConfig();
-    DICE_LOG_INFO("ConfigManager: reset to defaults (not persisted)");
+    DICE_LOG_INFO("配置已恢复默认值，目前尚未写入文件。");
 }
 
 // ─── Hot-reload Callbacks ────────────────────────────────────
@@ -415,7 +415,7 @@ void ConfigManager::resetDefault() {
 void ConfigManager::onConfigChanged(ConfigChangeCallback callback) {
     std::lock_guard<std::mutex> lock(mutex_);
     changeCallbacks_.push_back(std::move(callback));
-    DICE_LOG_DEBUG("ConfigManager: registered change callback (total: {})", changeCallbacks_.size());
+    DICE_LOG_DEBUG("已注册配置变更监听器，当前共 {} 个。", changeCallbacks_.size());
 }
 
 void ConfigManager::emitConfigChanged() {
@@ -426,12 +426,12 @@ void ConfigManager::emitConfigChanged() {
         callbacksCopy = changeCallbacks_;
     }
 
-    DICE_LOG_INFO("ConfigManager: emitting config change to {} listener(s)", callbacksCopy.size());
+    DICE_LOG_DEBUG("正在通知 {} 个监听器处理配置变更。", callbacksCopy.size());
     for (auto& cb : callbacksCopy) {
         try {
             cb();
         } catch (const std::exception& e) {
-            DICE_LOG_ERROR("ConfigManager: change callback threw: {}", e.what());
+            DICE_LOG_ERROR("配置变更监听器执行失败：{}；其他监听器继续处理。", e.what());
         } catch (...) {
             DICE_LOG_EXCEPTION("configuration change callback");
         }

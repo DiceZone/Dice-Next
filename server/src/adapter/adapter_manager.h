@@ -9,6 +9,7 @@
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
 #include "../common/utils.h"
+#include "../common/log_context.h"
 
 #include <map>
 #include <mutex>
@@ -50,7 +51,7 @@ public:
         adapter->onEvent([this](const BotEvent& ev) {
             routeEvent(ev);
         });
-        DICE_LOG_INFO("AdapterManager: registered '{}' ({})", adapter->name(), adapter->id());
+        DICE_LOG_INFO("已注册适配器「{}」（{}）。", adapter->name(), adapter->id());
     }
 
     /// Start a specific adapter (connect to platform)
@@ -58,10 +59,10 @@ public:
         auto a = getAdapter(id);
         if (!a) return false;
         if (a->start()) {
-            DICE_LOG_INFO("AdapterManager: '{}' started", a->name());
+            DICE_LOG_INFO("适配器「{}」启动请求已提交，连接结果由适配器报告。", a->name());
             return true;
         }
-        DICE_LOG_ERROR("AdapterManager: '{}' start failed: {}", a->name(), a->lastError());
+        DICE_LOG_ERROR("适配器「{}」启动失败：{}", a->name(), a->lastError());
         return false;
     }
 
@@ -70,16 +71,16 @@ public:
         auto a = getAdapter(id);
         if (!a) return;
         a->stop();
-        DICE_LOG_INFO("AdapterManager: '{}' stopped", a->name());
+        DICE_LOG_INFO("适配器「{}」已停止。", a->name());
     }
 
     /// Start all registered adapters
     void startAll() {
         for (auto& [id, a] : adapters_) {
             if (a->start()) {
-                DICE_LOG_INFO("AdapterManager: '{}' online", a->name());
+                DICE_LOG_INFO("适配器「{}」启动请求已提交，尚不代表平台已经连接。", a->name());
             } else {
-                DICE_LOG_ERROR("AdapterManager: '{}' failed: {}", a->name(), a->lastError());
+                DICE_LOG_ERROR("适配器「{}」启动失败：{}", a->name(), a->lastError());
             }
         }
     }
@@ -87,7 +88,7 @@ public:
     /// Stop all adapters
     void stopAll() {
         for (auto& [id, a] : adapters_) a->stop();
-        DICE_LOG_INFO("AdapterManager: all adapters stopped");
+        DICE_LOG_INFO("所有适配器已停止。");
     }
 
     /// Unregister (remove) an adapter
@@ -97,7 +98,7 @@ public:
         if (it != adapters_.end()) {
             if (it->second->isConnected()) it->second->stop();
             adapters_.erase(it);
-            DICE_LOG_INFO("AdapterManager: '{}' unregistered", id);
+            DICE_LOG_INFO("适配器「{}」已移除。", id);
         }
     }
 
@@ -126,9 +127,19 @@ public:
         normalizeIdentity(routed);
         cacheOfficialGroupNickname(routed);
         ensureInboundGroup(routed);
+        const auto adapter = getAdapter(routed.adapterId);
+        const std::string adapterName = adapter ? adapter->name() : routed.adapterId;
+        const bool privateMessage = routed.type == MessageType::kPrivate;
+        const std::string groupName = !privateMessage && adapter ? adapter->getGroupName(routed.targetId) : "";
+        writeLog(DICE_LOG_SOURCE, LogLevel::Info, "消息", fmt::format("收↩ [{}「{}」] [{}{}({})] {}({})：{}",
+            routed.platform, adapterName, privateMessage ? "私聊 " : "群 ", groupName, routed.targetId,
+            routed.senderName.empty() ? routed.senderId : routed.senderName, routed.senderId,
+            routed.displayContent.empty() ? routed.content : routed.displayContent),
+            {{"adapter", routed.adapterId}, {"platform", routed.platform}, {"platform_msg_id", routed.id}});
+        ProcessingScope incoming(ProcessingContext{{}, "用户消息：" + routed.content, "正在处理用户消息"});
         for (auto& handler : messageHandlers_) {
             try { handler(routed); }
-            catch (...) { DICE_LOG_EXCEPTION("message handler adapter=" + routed.adapterId + " platform=" + routed.platform); }
+            catch (...) { DICE_LOG_EXCEPTION("消息处理未完成；适配器 " + routed.adapterId + "，平台 " + routed.platform); }
         }
     }
 

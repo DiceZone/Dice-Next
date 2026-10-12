@@ -1,4 +1,5 @@
 #pragma once
+#include "outbound_logging.h"
 
 // Milky protocol adapter. API calls use HTTP /api/:api and events use the
 // /event WebSocket. WebHook ingress is intentionally disabled for now.
@@ -353,7 +354,31 @@ public:
         try { return future.get(); } catch (...) { return json(); }
     }
     void invokeActionAsync(const std::string& action, const json& params, ActionCallback cb) override {
-        std::thread([self = shared_from_this(), action, params, cb = std::move(cb)]() mutable { cb(self->performAction(action, params)); }).detach();
+        auto outgoing = prepareActionLog("Milky「" + name_ + "」", action, params);
+        auto context = activeProcessingContext;
+        std::thread([self = shared_from_this(), action, params, outgoing, context, cb = std::move(cb)]() mutable {
+            ProcessingScope scope(context);
+            json result;
+            try {
+                result = self->performAction(action, params, outgoing);
+                if (outgoing) {
+                    if (apiOk(result)) outgoing->accepted(logJsonId(result.value("data", json::object()), "message_seq"));
+                    else outgoing->failed(result.value("message", std::string("平台未提供具体原因")));
+                }
+            } catch (...) {
+                if (outgoing) outgoing->failed(describeException(std::current_exception()));
+                else DICE_LOG_EXCEPTION("Milky 平台接口请求失败");
+                return;
+            }
+            try {
+                if (cb) cb(std::move(result));
+            } catch (...) {
+                // A callback failure must not relabel an accepted platform send.
+                writeLog(DICE_LOG_SOURCE, LogLevel::Error, "适配器",
+                    "Milky 平台接口已返回，但后续处理失败：" + describeException(std::current_exception()),
+                    outgoing ? outgoing->details() : context.json());
+            }
+        }).detach();
     }
 
     // Shared event-payload parser used by the Milky event WebSocket and tests.
@@ -419,13 +444,13 @@ private:
             if (type != drogon::WebSocketMessageType::Text && type != drogon::WebSocketMessageType::Binary) return;
             auto event = json::parse(raw, nullptr, false);
             if (event.is_discarded() || !self->handleEventPayload(event))
-                DICE_LOG_WARN("Milky '{}': ignored invalid event WebSocket payload", self->name_);
+                DICE_LOG_WARN("Milky「{}」收到无效事件数据，已忽略该条事件。", self->name_);
         });
         wsClient_->setConnectionClosedHandler([self](const drogon::WebSocketClientPtr&) {
             self->wsConnecting_ = false;
             self->connected_ = false;
             if (!self->stopping_) {
-                DICE_LOG_WARN("Milky '{}': event WebSocket disconnected", self->name_);
+                DICE_LOG_WARN("Milky「{}」事件连接断开，将按当前重连策略处理。", self->name_);
                 self->scheduleEventReconnect();
             }
         });
@@ -433,7 +458,7 @@ private:
         auto request = drogon::HttpRequest::newHttpRequest();
         request->setPath(eventPath);
         if (!accessToken_.empty()) request->addHeader("Authorization", "Bearer " + accessToken_);
-        DICE_LOG_INFO("Milky '{}': connecting event WebSocket {}", name_, eventEndpoint_);
+        DICE_LOG_INFO("Milky「{}」正在连接事件 WebSocket：{}。", name_, eventEndpoint_);
         wsClient_->connectToServer(request,
             [self](drogon::ReqResult result, const drogon::HttpResponsePtr& response,
                    const drogon::WebSocketClientPtr&) {
@@ -453,7 +478,7 @@ private:
                     std::lock_guard<std::mutex> lk(self->stateMutex_);
                     self->lastError_.clear();
                 }
-                DICE_LOG_INFO("Milky '{}': event WebSocket connected", self->name_);
+                DICE_LOG_SUCCESS("Milky「{}」事件连接已建立，可以接收平台事件。", self->name_);
             });
     }
 
@@ -593,9 +618,10 @@ private:
         }
         return result;
     }
-    json performAction(const std::string& action, const json& params) {
+    json performAction(const std::string& action, const json& params,
+                       const std::optional<OutboundAttempt>& outgoing = std::nullopt) {
         ApiSpec s = spec(action, params); if (s.path.empty()) return json{{"status", "failed"}, {"retcode", -1}, {"message", "unsupported Milky action"}};
-        json result = normalizeActionResponse(action, httpPost(s.path, s.body));
+        json result = normalizeActionResponse(action, httpPost(s.path, s.body, outgoing));
         if (!apiOk(result)) { std::lock_guard<std::mutex> lk(stateMutex_); lastError_ = result.value("message", std::string("Milky API request failed")); }
         return result;
     }
@@ -603,7 +629,8 @@ private:
         invokeActionAsync(action, p, [cb = std::move(cb)](json r) { if (cb) cb(std::move(r)); });
     }
     static std::string jsonBody(const json& j) { return j.dump(-1, ' ', false, json::error_handler_t::replace); }
-    json httpPost(const std::string& path, const json& body) const {
+    json httpPost(const std::string& path, const json& body,
+                  const std::optional<OutboundAttempt>& outgoing = std::nullopt) const {
         namespace fs = std::filesystem;
         static std::atomic<uint64_t> requestSeq{0};
         const auto tag = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(++requestSeq);
@@ -616,6 +643,7 @@ private:
           if (!accessToken_.empty()) out << "header = \"Authorization: Bearer " << esc(accessToken_) << "\"\n";
           out << "data-binary = \"@" << esc(bodyFile.string()) << "\"\nwrite-out = \"\\n__DICE_STATUS__%{http_code}\"\n";
         }
+        if (outgoing) outgoing->submitted();
         auto r = proc::curlConfig(cfgFile, 4 * 1024 * 1024); std::error_code ec; fs::remove(bodyFile, ec); fs::remove(cfgFile, ec);
         const std::string marker = "__DICE_STATUS__"; size_t at = r.output.rfind(marker); int status = 0; std::string content = r.output;
         if (at != std::string::npos) { try { status = std::stoi(r.output.substr(at + marker.size())); } catch (...) {} content.resize(at > 0 && r.output[at - 1] == '\n' ? at - 1 : at); }

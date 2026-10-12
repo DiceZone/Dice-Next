@@ -1,4 +1,5 @@
 #pragma once
+#include "outbound_logging.h"
 #include "../common/outbound_payload.h"
 
 // KOOK (开黑啦) Bot adapter — Gateway WebSocket + REST v3。
@@ -147,8 +148,13 @@ private:
     /// REST 调用（www.kookapp.cn）。回调只在 HTTP 2xx 且 code==0 时收到 data 对象。
     void restRequest(drogon::HttpMethod method, const std::string& path, const json& body,
                      std::function<void(const json&)> onOk) {
+        std::optional<OutboundAttempt> outgoing;
+        if (method == drogon::Post && (path == "/api/v3/message/create" || path == "/api/v3/direct-message/create"))
+            outgoing = OutboundAttempt::prepare("KOOK「" + name_ + "」", "目标 " + logJsonId(body, "target_id"), body.value("content", std::string()));
+        else if (method == drogon::Post)
+            outgoing = prepareRestEventLog("KOOK「" + name_ + "」", "POST", path, body);
         const auto ip = resolveIpv4("www.kookapp.cn");
-        if (ip.empty()) { fail("无法解析 www.kookapp.cn"); return; }
+        if (ip.empty()) { if (outgoing) outgoing->failed("无法解析平台域名 www.kookapp.cn"); fail("无法解析 www.kookapp.cn"); return; }
         auto client = drogon::HttpClient::newHttpClient(ip, 443, true);
         auto req = drogon::HttpRequest::newHttpRequest();
         req->setMethod(method);
@@ -157,23 +163,28 @@ private:
         req->addHeader("Authorization", "Bot " + token_);
         if (!body.is_null()) { req->setContentTypeCode(drogon::CT_APPLICATION_JSON); req->setBody(body.dump()); }
         auto self = shared_from_this();
-        client->sendRequest(req, [self, path, onOk = std::move(onOk)](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
+        if (outgoing) outgoing->submitted();
+        client->sendRequest(req, [self, path, outgoing, onOk = std::move(onOk)](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
             if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
                 self->lastError_ = "KOOK 请求失败: " + path;
                 self->connecting_ = false;
-                DICE_LOG_WARN("KOOK '{}': {} failed: HTTP {} {}", self->name_, path,
+                if (outgoing) outgoing->failed(fmt::format("平台请求未成功：HTTP {}；{}", resp ? static_cast<int>(resp->statusCode()) : 0,
+                    resp ? std::string(resp->body()) : drogon::to_string(rr)));
+                else DICE_LOG_WARN("KOOK '{}': {} failed: HTTP {} {}", self->name_, path,
                               resp ? static_cast<int>(resp->statusCode()) : 0,
                               resp ? std::string(resp->body()) : std::string("网络请求未完成"));
                 return;
             }
             auto j = json::parse(resp->body(), nullptr, false);
-            if (j.is_discarded()) return;
+            if (j.is_discarded()) { if (outgoing) outgoing->failed("平台响应不是有效 JSON，无法确认发送结果"); return; }
             if (j.value("code", -1) != 0) {
                 self->lastError_ = "KOOK: " + j.value("message", std::string("请求被拒绝"));
-                DICE_LOG_WARN("KOOK '{}': {} code={} {}", self->name_, path, j.value("code", -1), j.value("message", std::string()));
+                if (outgoing) outgoing->failed(j.value("message", std::string("平台拒绝本次消息")));
+                else DICE_LOG_WARN("KOOK '{}': {} code={} {}", self->name_, path, j.value("code", -1), j.value("message", std::string()));
                 return;
             }
             if (onOk) onOk(j.value("data", json::object()));
+            if (outgoing) outgoing->accepted(logJsonId(j.value("data", json::object()), "msg_id"));
         }, 15.0);
     }
 
@@ -240,7 +251,7 @@ private:
                 sessionId_ = d.value("session_id", std::string());
                 connected_ = true; connecting_ = false;
                 beginPing();
-                DICE_LOG_INFO("KOOK '{}': connected as {}({})", name_, loginName_, loginId_);
+                DICE_LOG_SUCCESS("KOOK「{}」连接就绪：账号「{}」（{}）。", name_, loginName_, loginId_);
             } else if (s == 3) {   // pong
             } else if (s == 5) {   // reconnect 指令：按协议丢弃 sn 重新拉取网关
                 sn_ = 0; sessionId_.clear();
@@ -248,7 +259,7 @@ private:
             } else if (s == 0) {   // event
                 dispatchMessage(objOf(p, "d"));
             }
-        } catch (const std::exception& e) { DICE_LOG_WARN("KOOK parse: {}", e.what()); }
+        } catch (const std::exception& e) { DICE_LOG_WARN("KOOK 平台事件解析失败：{}", e.what()); }
     }
 
     void beginPing() {

@@ -270,11 +270,11 @@ void CausalRuleManager::loadRules() {
         // Sort by priority descending
         std::sort(next->begin(), next->end(),
                   [](const CausalRule& a, const CausalRule& b) { return a.priority > b.priority; });
-        DICE_LOG_INFO("CausalRuleManager: loaded {} rules", next->size());
+        DICE_LOG_DEBUG("已读取 {} 条因果回复规则。", next->size());
         std::lock_guard<std::mutex> lock(rulesMutex_);
         rules_ = std::move(next);
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("CausalRuleManager: loadRules failed: {}", e.what());
+        DICE_LOG_ERROR("因果规则读取失败：{}", e.what());
     }
 }
 
@@ -334,10 +334,10 @@ int CausalRuleManager::addRule(const CausalRule& rule) {
 
         int newId = (int)st->insert(row);
         loadRules();  // hot reload
-        DICE_LOG_INFO("CausalRuleManager: added rule '{}' (id={})", rule.name, newId);
+        DICE_LOG_INFO("已新增因果规则「{}」（#{}）。", rule.name, newId);
         return newId;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("CausalRuleManager: addRule failed: {}", e.what());
+        DICE_LOG_ERROR("因果规则新增失败：{}", e.what());
         return -1;
     }
 }
@@ -404,10 +404,10 @@ bool CausalRuleManager::updateRule(int id, const CausalRule& rule) {
         // Clear cooldown for this rule on edit
         // (the key pattern includes ruleId, so we can't easily clear all;
         //  CooldownManager.clearAll is a sledgehammer but acceptable)
-        DICE_LOG_INFO("CausalRuleManager: updated rule id={}", id);
+        DICE_LOG_INFO("因果规则 #{} 已更新。", id);
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("CausalRuleManager: updateRule({}) failed: {}", id, e.what());
+        DICE_LOG_ERROR("因果规则 #{} 修改失败：{}", id, e.what());
         return false;
     }
 }
@@ -419,10 +419,10 @@ bool CausalRuleManager::deleteRule(int id) {
         st->remove_all<CausalRuleRow>(orm::where(orm::c(&CausalRuleRow::id) == id));
         counterStore_.deleteByRule(id);
         loadRules();  // hot reload
-        DICE_LOG_INFO("CausalRuleManager: deleted rule id={}", id);
+        DICE_LOG_INFO("因果规则 #{} 已删除。", id);
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("CausalRuleManager: deleteRule({}) failed: {}", id, e.what());
+        DICE_LOG_ERROR("因果规则 #{} 删除失败：{}", id, e.what());
         return false;
     }
 }
@@ -441,7 +441,7 @@ bool CausalRuleManager::toggleRule(int id) {
         loadRules();
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("CausalRuleManager: toggleRule({}) failed: {}", id, e.what());
+        DICE_LOG_ERROR("因果规则 #{} 启停设置失败：{}", id, e.what());
         return false;
     }
 }
@@ -472,7 +472,7 @@ CausalMatchResult CausalRuleManager::matchAndExecute(const std::string& msg,
         // Conditions met — check cooldown
         std::string cdKey = buildCooldownKey(rule, userId, groupId);
         if (!dryRun && cooldownMgr_.isCooling(cdKey, rule.cooldownMs)) {
-            DICE_LOG_DEBUG("CausalRuleManager: rule '{}' on cooldown (key={})", rule.name, cdKey);
+            DICE_LOG_DEBUG("因果规则「{}」尚在冷却，本次不执行；作用域 {}。", rule.name, cdKey);
             continue;
         }
 

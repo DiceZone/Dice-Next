@@ -95,7 +95,7 @@ int CardDeck::loadDirLocked(const std::string& dir, bool bundled) {   // caller 
     std::string d = dir;
     if (!fs::exists(d) && fs::exists("../" + dir)) d = "../" + dir;
     if (!fs::exists(d)) {
-        DICE_LOG_INFO("CardDeck: no deck dir '{}' (skipping)", dir);
+        DICE_LOG_DEBUG("牌堆目录「{}」不存在，本次跳过该目录。", dir);
         return 0;
     }
     // 文件名转 UTF-8：Windows 上 path::string() 返回系统 ANSI 码页(中文系统=GBK)，
@@ -125,9 +125,9 @@ int CardDeck::loadDirLocked(const std::string& dir, bool bundled) {   // caller 
                     ++count;
                 }
             }
-            DICE_LOG_INFO("CardDeck: loaded decks from {}", u8name(entry.path().filename()));
+            DICE_LOG_DEBUG("已读取牌堆文件「{}」。", u8name(entry.path().filename()));
         } catch (const std::exception& e) {
-            DICE_LOG_WARN("CardDeck: failed to parse {}: {}", u8name(entry.path().filename()), e.what());
+            DICE_LOG_WARN("牌堆文件「{}」解析失败，已跳过：{}", u8name(entry.path().filename()), e.what());
         }
     }
     return count;

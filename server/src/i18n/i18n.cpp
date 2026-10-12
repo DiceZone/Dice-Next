@@ -69,7 +69,7 @@ bool I18n::load() {
     for (Locale loc : supportedLocales()) {
         fs::path file = fs::path(dir) / (std::string(localeToString(loc)) + ".json");
         if (!fs::exists(file)) {
-            DICE_LOG_WARN("I18n: resource file missing: {}", file.string());
+            DICE_LOG_WARN("翻译资源文件不存在：{}", file.string());
             continue;
         }
         try {
@@ -78,10 +78,10 @@ bool I18n::load() {
             in >> j;
             bundles_[loc] = std::move(j);
             ++loaded;
-            DICE_LOG_INFO("I18n: loaded locale '{}' from {}",
+            DICE_LOG_DEBUG("语言「{}」已从「{}」读取。",
                           localeToString(loc), file.string());
         } catch (const std::exception& e) {
-            DICE_LOG_ERROR("I18n: failed to parse {}: {}", file.string(), e.what());
+            DICE_LOG_ERROR("翻译资源「{}」解析失败：{}", file.string(), e.what());
         }
     }
 
@@ -101,9 +101,9 @@ bool I18n::load() {
             Locale loc = registerCustomLocale(code);
             bundles_[loc] = std::move(j);
             ++loaded;
-            DICE_LOG_INFO("I18n: loaded CUSTOM locale '{}' from {}", code, e.path().string());
+            DICE_LOG_INFO("自定义语言「{}」已从「{}」读取。", code, e.path().string());
         } catch (const std::exception& ex) {
-            DICE_LOG_ERROR("I18n: failed to parse custom locale {}: {}", e.path().string(), ex.what());
+            DICE_LOG_ERROR("自定义翻译「{}」解析失败：{}", e.path().string(), ex.what());
         }
     }
 
@@ -156,7 +156,7 @@ bool I18n::load() {
                 for (const auto& [key, value] : flat)
                     prepared.emplace(key, prepareTemplate(value, trustedTemplateFormat(value)));
             } catch (const std::exception& e) {
-                DICE_LOG_ERROR("I18n: failed to parse presentation overlay {}: {}", file.string(), e.what());
+                DICE_LOG_ERROR("回复显示预设「{}」解析失败：{}", file.string(), e.what());
             }
         }
     }
@@ -214,7 +214,7 @@ std::vector<std::pair<std::string, std::string>> I18n::listLocales() const {
 }
 
 bool I18n::reload() {
-    DICE_LOG_INFO("I18n: reloading translation bundles");
+    DICE_LOG_INFO("正在重新读取回复翻译资源。");
     return load();
 }
 
@@ -341,7 +341,7 @@ std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const
     std::lock_guard<std::mutex> lock(mutex_);
     if (const auto* value = findTemplate(loc, key)) return renderTemplate(*value, args, this, loc);
 
-    DICE_LOG_DEBUG("I18n: missing key '{}' for locale '{}'",
+    DICE_LOG_DEBUG("回复词条「{}」在语言「{}」中未找到。",
                    key, localeToString(loc));
     return key;
 }
@@ -672,7 +672,7 @@ ContentFormat I18n::lookupPersonaFormat(Locale loc, const std::string& key) cons
 void I18n::setPersona(int personaId) {
     std::lock_guard<std::mutex> lock(mutex_);
     activePersonaId_ = personaId;
-    DICE_LOG_INFO("I18n: persona set to ID {}", personaId);
+    DICE_LOG_INFO("回复人格已切换至 #{}。", personaId);
 }
 
 int I18n::getActivePersonaId() const {
@@ -706,7 +706,7 @@ void I18n::setPersonaBundles(int personaId, Locale loc, const json& bundles,
     personaBundles_[personaId][loc] = bundles;
     personaFormats_[personaId][loc] = formats.is_object() ? formats : json::object();
     preparedPersonaBundles_[personaId][loc] = std::move(prepared);
-    DICE_LOG_INFO("I18n: persona {} bundles cached for locale '{}' ({} entries)",
+    DICE_LOG_DEBUG("人格 #{} 的语言「{}」已缓存，共 {} 个词条。",
                   personaId, localeToString(loc), personaBundles_[personaId][loc].size());
 }
 void I18n::clearPersonaBundles(int personaId) {
@@ -715,7 +715,7 @@ void I18n::clearPersonaBundles(int personaId) {
     personaBundles_.erase(personaId);
     personaFormats_.erase(personaId);
     preparedPersonaBundles_.erase(personaId);
-    DICE_LOG_INFO("I18n: persona {} bundles evicted", personaId);
+    DICE_LOG_DEBUG("人格 #{} 的旧缓存已清除。", personaId);
 }
 
 }  // namespace dice

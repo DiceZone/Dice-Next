@@ -41,7 +41,7 @@ Locale LocaleResolver::resolve(const Message& msg) const {
                         if (!rows.empty() && !rows.front().value.empty())
                             accountLocale = localeFromString(rows.front().value);
                     } catch (const std::exception& e) {
-                        DICE_LOG_WARN("LocaleResolver: account locale lookup failed: {}", e.what());
+                        DICE_LOG_WARN("适配器账号的回复语言读取失败：{}", e.what());
                     }
                 }
             }
@@ -80,7 +80,7 @@ std::optional<Locale> LocaleResolver::platformDefault(const std::string& platfor
                 all["i18n"]["platform_defaults"][platform].get<std::string>());
         }
     } catch (const std::exception& e) {
-        DICE_LOG_DEBUG("LocaleResolver: platformDefault lookup failed: {}", e.what());
+        DICE_LOG_DEBUG("平台默认回复语言读取失败：{}", e.what());
     }
     return std::nullopt;
 }
@@ -102,7 +102,7 @@ std::optional<Locale> LocaleResolver::getOverride(const std::string& scope,
             return localeFromString(rows.front().locale);
         }
     } catch (const std::exception& e) {
-        DICE_LOG_WARN("LocaleResolver: getOverride failed: {}", e.what());
+        DICE_LOG_WARN("会话语言覆盖设置读取失败：{}", e.what());
     }
     return std::nullopt;
 }
@@ -130,7 +130,7 @@ bool LocaleResolver::setOverride(const std::string& scope,
         }
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("LocaleResolver: setOverride failed: {}", e.what());
+        DICE_LOG_ERROR("会话语言覆盖设置保存失败：{}", e.what());
         return false;
     }
 }
@@ -145,7 +145,7 @@ bool LocaleResolver::clearOverride(const std::string& scope, const std::string& 
                        and orm::c(&LocaleSettingRow::scopeKey) == scopeKey));
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("LocaleResolver: clearOverride failed: {}", e.what());
+        DICE_LOG_ERROR("会话语言覆盖设置清除失败：{}", e.what());
         return false;
     }
 }

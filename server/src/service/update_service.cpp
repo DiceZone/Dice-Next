@@ -570,9 +570,9 @@ void UpdateService::emitNotification(const std::string& event,
     try {
         notify_(event, message);
     } catch (const std::exception& ex) {
-        DICE_LOG_WARN("Update notification {} failed: {}", event, ex.what());
+        DICE_LOG_WARN("更新通知「{}」发送失败：{}", event, ex.what());
     } catch (...) {
-        DICE_LOG_WARN("Update notification {} failed", event);
+        DICE_LOG_WARN("更新通知「{}」发送失败，未取得具体原因。", event);
     }
 }
 
@@ -1099,7 +1099,7 @@ void UpdateService::workerLoop() {
             automaticDownload_ = false;
             phase_ = cancelled ? "cancelled" : "error";
             error_ = cancelled ? "" : ex.what();
-            DICE_LOG_ERROR("Update service failed: {}", ex.what());
+            DICE_LOG_ERROR("自动更新任务异常：{}；本次更新未完成。", ex.what());
         }
     }
 }
@@ -1383,7 +1383,7 @@ void UpdateService::doCheck(bool force) {
         phase_ = "error";
         error_ = std::move(details);
         checkedAt_ = epochSeconds();
-        DICE_LOG_WARN("Update check failed: {}", error_);
+        DICE_LOG_WARN("版本检查未完成：{}；继续运行当前版本。", error_);
         return;
     }
 
@@ -1431,7 +1431,7 @@ void UpdateService::doCheck(bool force) {
         checkedAt_ = epochSeconds();
         error_.clear();
         phase_ = scheduledInstallAt_ > 0 ? "scheduled" : available ? "available" : "up_to_date";
-        DICE_LOG_INFO("Update check via {}: latest {} (current {})",
+        DICE_LOG_DEBUG("通过 {} 完成版本检查：最新版本 {}，当前版本 {}。",
             activeSource_, latest_.tag, releaseTag());
 
         const Settings activeSettings = settings();
@@ -1462,7 +1462,7 @@ void UpdateService::doCheck(bool force) {
             "\n发布页：" + checkedReleaseUrl);
         config_.set<std::string>("update/last_notified_tag", checkedTag);
         if (!config_.save()) {
-            DICE_LOG_WARN("Could not persist update notification dedup tag {}", checkedTag);
+            DICE_LOG_WARN("更新通知去重标记 {} 未能保存，后续可能重复通知。", checkedTag);
         }
     }
 }
@@ -1659,7 +1659,7 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
                 failures += source.label;
                 if (downloadName != asset.name) failures += " (" + downloadName + ")";
                 failures += ": size or SHA-256 mismatch";
-                DICE_LOG_WARN("Rejected update asset {} from {}: integrity check failed",
+                DICE_LOG_WARN("更新包 {}（来自 {}）未通过完整性校验，已拒绝安装。",
                     downloadName, source.label);
                 continue;
             }
@@ -1689,7 +1689,7 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
                 totalBytes_ = asset.size;
             }
             if (downloadName != asset.name) {
-                DICE_LOG_INFO("Recovered legacy update manifest asset {} as {}",
+                DICE_LOG_INFO("已将旧版更新清单的安装包名称 {} 兼容为 {}。",
                     asset.name, downloadName);
             }
             usedSource = source.label;
@@ -1950,7 +1950,7 @@ void UpdateService::doDownload() {
             automaticDownload_ = false;
         }
         if (cancelled) return;
-        DICE_LOG_WARN("Update download failed: {}", message);
+        DICE_LOG_ERROR("更新包下载失败：{}；尚未进入安装阶段。", message);
         if (automatic) {
             emitNotification("update_error",
                 "Dice!Next 自动更新失败" +
@@ -2015,7 +2015,7 @@ void UpdateService::doDownload() {
             return;
         }
         phase_ = prepare ? "staged" : "downloaded";
-        DICE_LOG_INFO("Verified update {} downloaded from {} to {}",
+        DICE_LOG_SUCCESS("更新 {} 已从 {} 下载至 {}，完整性校验通过；当前程序尚未替换。",
             manifest.tag, usedSource, archive.string());
 
         if (!reconcilePendingLocked(current, pendingError, true)) {
@@ -2061,12 +2061,12 @@ void UpdateService::doInstall() {
                     metadata["install_at"] = 0;
                     if (!writePendingMetadata(path, metadata, ignored)) DICE_LOG_WARN("{}", ignored);
                 } catch (const std::exception& ex) {
-                    DICE_LOG_WARN("Could not cancel failed installation plan: {}", ex.what());
+                    DICE_LOG_WARN("失败的更新安装计划清理未完成：{}", ex.what());
                 }
                 scheduledInstallJob_ = false;
             }
         }
-        DICE_LOG_WARN("Update installation failed: {}", message);
+        DICE_LOG_ERROR("更新安装尝试失败：{}；当前程序状态以安装器实际结果为准。", message);
         emitNotification("update_error",
             "Dice!Next 更新安装失败。\n原因：" + message);
     };
@@ -2080,7 +2080,7 @@ void UpdateService::doInstall() {
         return;
     }
 
-    DICE_LOG_INFO("Handing staged update to the Dice!Next package manager");
+    DICE_LOG_INFO("已向程序管理器提交待更新包，开始安装与重启；此时尚不能确认更新完成。");
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if (wake_.wait_for(lock, std::chrono::milliseconds(350), [&] {

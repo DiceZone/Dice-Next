@@ -1,5 +1,6 @@
 #pragma once
 #include "common/script_execution.h"
+#include "common/log_context.h"
 // ─── Dice!Next — Lua 插件子系统 ───────────────────────────────────
 // 嵌入 Lua，并提供模块目录与全局函数接口：
 //   data/mod/<模块名>/descriptor.json   模块元数据（title/ver/author/brief/helpdoc）
@@ -60,7 +61,8 @@ public:
     void setBotId(const std::string& id) { botId_ = id; }   // getDiceQQ() 返回值
     std::string botId() const { return botId_; }
     // 对一条消息派发 msg_reply 因果回复：keyword 匹配 → echo() → 模板格式化。
-    struct DispatchResult { bool matched = false; std::string reply; };
+    struct DispatchResult { bool matched = false; std::string reply; std::vector<ProcessingSource> sources; bool failed = false, pending = false; };
+    ProcessingSource loggingSource(const std::string& mod, const std::string& entry = {}) const;
     DispatchResult dispatch(const std::string& text, const std::string& uid,
                             const std::string& gid, const std::string& nick,
                             const std::string& groupCard, bool isPrivate,
@@ -324,6 +326,7 @@ private:
         int messageRef = 0;
         std::string ruleName, modName, modDir, platform, gid, uid;
         std::map<std::string, std::string> vars;
+        ProcessingContext logContext;
     };
     void scheduleCoroutineResume(int threadRef, double delaySeconds);
     void resumeCoroutine(int threadRef);
@@ -344,6 +347,7 @@ private:
     std::map<std::string, LegacyTask> taskCalls_;
     std::unordered_map<int, PendingCoroutine> pendingCoroutines_;
     std::atomic<uint64_t> runtimeGeneration_{0};
+    int lastLoadErrors_ = 0;
     std::string selfName_ = "\xe9\xaa\xb0\xe5\xa8\x98";   // 骰娘（默认自称，main 注入覆盖）
     std::string botId_;                                   // 机器人账号（getDiceQQ）
 

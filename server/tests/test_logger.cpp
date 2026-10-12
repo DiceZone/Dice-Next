@@ -1,5 +1,7 @@
 #include "test_framework.h"
 #include "common/logger.h"
+#include "common/log_context.h"
+#include "adapter/outbound_logging.h"
 #include "common/http_log.h"
 #include "service/http_diagnostics.h"
 #include <trantor/utils/Logger.h>
@@ -99,7 +101,7 @@ TEST(Logger, PollingAndCommandPreviewsDoNotGenerateManagementRecords) {
     ASSERT_TRUE(logManagementRequest("/api/replies", "DELETE"));
 }
 
-TEST(Logger, FrameworkWarningsAndSourceLocationsReachTheFile) {
+TEST(Logger, HumanRecordsHaveFourFieldsAndDiagnosticsAreSeparate) {
     getLogger();
     const auto nonce = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     const auto marker = "framework-warning-probe-" + nonce;
@@ -112,14 +114,112 @@ TEST(Logger, FrameworkWarningsAndSourceLocationsReachTheFile) {
         std::ifstream file(entry.path());
         std::string line;
         while (std::getline(file, line)) {
-            if (line.find(marker) != std::string::npos) warning = line.find("[warning]") != std::string::npos;
+            if (line.find(marker) != std::string::npos) warning = line.find("[WARN]") != std::string::npos;
             if (line.find("source-location-probe-" + nonce) != std::string::npos)
-                source = line.find("test_logger.cpp:") != std::string::npos && line.find("thread=") != std::string::npos
-                    && line.find("tz=") != std::string::npos;
+                source = line.find("[WARN] [系统]") != std::string::npos && line.find("thread=") == std::string::npos
+                    && line.find("tz=") == std::string::npos && line.find("test_logger.cpp:") == std::string::npos;
         }
     }
     ASSERT_TRUE(warning);
     ASSERT_TRUE(source);
+    bool detail = false;
+    for (const auto& record : recentLogRecords(1000))
+        if (record["message"].get<std::string>().find("source-location-probe-" + nonce) != std::string::npos)
+            detail = record["details"]["cpp_file"] == "test_logger.cpp" && record["details"].contains("thread") && record["module"] == "系统";
+    ASSERT_TRUE(detail);
+}
+
+TEST(Logger, SixLevelsUseIndependentSuccessThresholdAndLegacyAliases) {
+    const auto old = std::string(logLevelName(logRecordingLevel()));
+    configureLogger(nlohmann::json{{"server", {{"log_level", "success"}}}});
+    ASSERT_FALSE(shouldRecordLog(LogLevel::Info));
+    ASSERT_TRUE(shouldRecordLog(LogLevel::Success));
+    ASSERT_TRUE(shouldRecordLog(LogLevel::Warn));
+    const auto nonce = newLogCorrelationId();
+    DICE_LOG_INFO_M("测试", "hidden-info-{}", nonce);
+    DICE_LOG_SUCCESS_M("测试", "visible-success-{}", nonce);
+    bool success = false, info = false;
+    for (const auto& record : recentLogRecords(1000)) {
+        const auto text = record["message"].get<std::string>();
+        if (text == "visible-success-" + nonce) success = record["level"] == "success";
+        if (text == "hidden-info-" + nonce) info = true;
+    }
+    configureLogger(nlohmann::json{{"server", {{"log_level", old}}}});
+    ASSERT_TRUE(success); ASSERT_FALSE(info);
+    ASSERT_TRUE(parseLogLevel("warning") == LogLevel::Warn);
+    ASSERT_TRUE(parseLogLevel("critical") == LogLevel::Error);
+    ASSERT_TRUE(parseLogLevel("invalid") == LogLevel::Info);
+    ASSERT_FALSE(validLogLevel("critical"));
+}
+
+TEST(Logger, PreparedActualAndFailureRecordsShareIdsAndRetainOrigins) {
+    const auto old = std::string(logLevelName(logRecordingLevel()));
+    configureLogger(nlohmann::json{{"server", {{"log_level", "debug"}}}});
+    auto plan = std::make_shared<PreparedOutput>("群 1001", "**上签**",
+        ProcessingContext{{{"Lua 插件", "求签", "求签.lua", "draw"}}, "用户指令 .求签", "处理完成，生成 1 条回复"});
+    {
+        OutboundScope scope(plan, 1, 2);
+        auto attempt = OutboundAttempt::prepare("OneBot 测试", "群 1001", "上签");
+        attempt.submitted(); attempt.accepted("platform-id"); attempt.failed("test failure");
+    }
+    int count = 0; bool planned = false, actual = false, failed = false;
+    for (const auto& record : recentLogRecords(1000)) {
+        if (record.value("msg_id", std::string()) != plan->id) continue;
+        ++count;
+        const auto text = record["message"].get<std::string>();
+        if (record["module"] == "处理") planned = text.find("**上签**") != std::string::npos && text.find("求签") != std::string::npos;
+        if (record["module"] == "消息" && record["level"] == "info") actual = text.find("骰娘：上签") != std::string::npos && text.find("**") == std::string::npos;
+        if (record["level"] == "error") failed = record["details"]["processing"]["sources"][0]["name"] == "求签";
+    }
+    configureLogger(nlohmann::json{{"server", {{"log_level", old}}}});
+    ASSERT_EQ(count, 4); ASSERT_TRUE(planned); ASSERT_TRUE(actual); ASSERT_TRUE(failed);
+    ASSERT_TRUE(newLogCorrelationId() != plan->id);
+}
+
+TEST(Logger, ScopesRestoreAcrossNestedAndAsynchronousWork) {
+    ProcessingContext saved;
+    {
+        ProcessingScope first(ProcessingSource{"JS 插件", "DailyNews", "news.js", "dailynews"}, "定时任务");
+        saved = activeProcessingContext;
+        { ProcessingScope second(ProcessingSource{"Lua 插件", "求签", "签.lua", "draw"});
+          ASSERT_EQ(activeProcessingContext.sources[0].name, std::string("求签")); }
+        ASSERT_EQ(activeProcessingContext.sources[0].name, std::string("DailyNews"));
+    }
+    ASSERT_TRUE(activeProcessingContext.sources.empty());
+    ProcessingScope timer(saved);
+    ASSERT_EQ(activeProcessingContext.sources[0].name, std::string("DailyNews"));
+    ASSERT_EQ(activeProcessingContext.trigger, std::string("定时任务"));
+}
+
+TEST(Logger, ProtocolPayloadLoggingDoesNotDumpFileBodiesOrPollAsMessages) {
+    ASSERT_FALSE(prepareActionLog("test", "get_group_list", nlohmann::json::object()).has_value());
+    const auto text = logPayloadText(nlohmann::json::array({
+        {{"type", "text"}, {"data", {{"text", "结果"}}}},
+        {{"type", "image"}, {"data", {{"file", "base64://private-file-body"}}}}
+    }));
+    ASSERT_TRUE(text.find("结果") != std::string::npos);
+    ASSERT_TRUE(text.find("图片") != std::string::npos);
+    ASSERT_TRUE(text.find("private-file-body") == std::string::npos);
+    const auto raw = sanitizeLogText("结果 [CQ:image,file=base64://private-file-body] data:image/png;base64,private-inline-body");
+    ASSERT_TRUE(raw.find("private-file-body") == std::string::npos);
+    ASSERT_TRUE(raw.find("private-inline-body") == std::string::npos);
+    ASSERT_TRUE(raw.find("结果") != std::string::npos);
+    ASSERT_EQ(logPayloadText(nlohmann::json{{"type", "at"}, {"data", nullptr}}), std::string("[提及：未提供]"));
+    ASSERT_EQ(logPayloadText(nlohmann::json{{"type", "text"}, {"data", {{"text", 123}}}}), std::string("123"));
+    ASSERT_EQ(logPayloadText(nlohmann::json{{"type", "image"}, {"data", {{"file", 42}}}}), std::string("[图片：42]"));
+    ASSERT_FALSE(prepareRestEventLog("Discord", "GET", "/api/v10/guilds/123/members/456", nullptr).has_value());
+    const auto kick = prepareRestEventLog("KOOK", "POST", "/api/v3/guild/kickout", {{"guild_id", "123"}, {"target_id", "456"}});
+    ASSERT_TRUE(kick && kick->module == "事件" && kick->content.find("456") != std::string::npos);
+    const auto unmute = prepareRestEventLog("Discord", "PATCH", "/api/v10/guilds/123/members/456", {{"communication_disabled_until", nullptr}});
+    ASSERT_TRUE(unmute && unmute->content.find("解除") != std::string::npos);
+}
+
+TEST(Logger, MalformedPluginBytesAndSecretDetailsCannotBreakDashboardJson) {
+    writeLog({}, LogLevel::Error, "插件", std::string("bad-byte-") + char(0xba), {{"password", "probe-secret"}, {"detail", "token=probe-token"}});
+    const auto last = recentLogRecords(1)[0];
+    ASSERT_TRUE(last.dump().find("probe-secret") == std::string::npos);
+    ASSERT_TRUE(last.dump().find("probe-token") == std::string::npos);
+    ASSERT_EQ(last["details"]["password"].get<std::string>(), std::string("[REDACTED]"));
 }
 
 TEST(Logger, HttpExceptionBoundaryKeepsNestedCausesPrivateFromClients) {

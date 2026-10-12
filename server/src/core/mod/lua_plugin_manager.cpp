@@ -731,8 +731,16 @@ static int l_isPlayerCardLocked(lua_State* L) {
 // ─── core C functions (复刻原版 DiceLua 全局，阶段一子集) ─────────
 static int l_log(lua_State* L) {
     std::string s; int n = lua_gettop(L);
-    for (int i = 1; i <= n; ++i) { if (i > 1) s += '\t'; s += argStr(L, i); }
-    DICE_LOG_INFO("[lua] {}", s);
+    for (int i = 1; i <= n; ++i) {
+        if (i > 1) s += '\t';
+        size_t length = 0;
+        const char* value = luaL_tolstring(L, i, &length);
+        if (value) s.append(value, length);
+        lua_pop(L, 1);
+    }
+    const auto level = lua_isinteger(L, lua_upvalueindex(1))
+        ? static_cast<LogLevel>(lua_tointeger(L, lua_upvalueindex(1))) : LogLevel::Info;
+    logPluginText(level, dnx_normalizeLuaText(s));
     return 0;
 }
 static int l_ranint(lua_State* L) {
@@ -950,6 +958,7 @@ static int l_audit(lua_State* L) {
 }
 // sendMsg(text, groupId, userId)：插件主动发消息（经注入的 sender 路由适配器）。
 static int l_sendMsg(lua_State* L) {
+    OutboundScope newOutput(nullptr);
     auto* m = mgrOf(L);
     std::string text = dnx_normalizeLuaText(argStr(L, 1));
     std::string gid = dnx_normalizeLuaText(argStr(L, 2));
@@ -1294,6 +1303,13 @@ void LuaPluginManager::registerGlobals() {
         {nullptr, nullptr},
     };
     for (const luaL_Reg* f = fns; f->name; ++f) lua_register(state_, f->name, f->func);
+    lua_register(state_, "print", l_log);
+    for (const auto& [name, level] : std::vector<std::pair<const char*, LogLevel>>{
+        {"logTrace", LogLevel::Trace}, {"logDebug", LogLevel::Debug}, {"logInfo", LogLevel::Info},
+        {"logSuccess", LogLevel::Success}, {"logWarn", LogLevel::Warn}, {"logError", LogLevel::Error}}) {
+        lua_pushinteger(state_, static_cast<int>(level));
+        lua_pushcclosure(state_, l_log, 1); lua_setglobal(state_, name);
+    }
 }
 
 bool LuaPluginManager::s_cpathStrict = false;   // cpath 收窄开关（兼容优先默认关）
@@ -1647,7 +1663,7 @@ end
         DICE_LOG_WARN("[lua] audit wrap error: {}", argStr(state_, -1));
     }
 
-    DICE_LOG_INFO("[lua] runtime initialized");
+    DICE_LOG_DEBUG("Lua 运行时已初始化，旧版接口与日志桥接已就绪。");
     return true;
 }
 
@@ -1895,6 +1911,7 @@ bool LuaPluginManager::confSetBatch(
 bool LuaPluginManager::eval(const std::string& code, std::string* err) {
     std::lock_guard<ScriptMutex> lk(mutex_);
     if (!state_ && !init()) { if (err) *err = "no state"; return false; }
+    ProcessingScope logScope(ProcessingSource{"Lua 脚本", "临时执行", "<eval>", "求值"});
     const int base = lua_gettop(state_);
     if (dnx_dostring(state_, code.c_str()) != LUA_OK) {
         if (err) *err = argStr(state_, -1);
@@ -1965,6 +1982,7 @@ static void parseModDescriptor(const fs::path& descPath, LuaPluginManager::LuaMo
 }
 
 int LuaPluginManager::loadDirLocked(const std::string& dir) {
+    lastLoadErrors_ = 0;
     dir_ = dir;
     mods_.clear();
     suspendedMods_.clear();
@@ -2197,7 +2215,7 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
         scheduleCycleEvent(id, true);
     }
 
-    DICE_LOG_INFO("[lua] loaded from {} (+plugin): {} mod/plugin(s), {} reply rule(s)",
+    DICE_LOG_INFO("插件扫描结束：目录「{}」及插件目录共发现 {} 个模组／插件，注册 {} 条回复规则。",
                   dir, (int)mods_.size(), (int)replyRules_.size());
     return (int)mods_.size();
 }
@@ -2363,6 +2381,7 @@ static std::vector<DnxLegacyTomlReply> dnx_parseLegacyReplyToml(const fs::path& 
 // 载入一个旧 Dice! mod 的 speech + reply(.lua/.toml) + event(.lua)。
 void LuaPluginManager::loadModReplies(LuaMod& mod) {
     ScriptFaultScope fault(suspendedMods_, mod.name);
+    ProcessingScope logScope(ProcessingSource{"Lua 插件", mod.title.empty() ? mod.name : mod.title, mod.dir, "加载"}, "插件加载");
     auto compatibilityWarning = [&](std::string text) {
         if (mod.compatibilityWarnings.size() < 100) mod.compatibilityWarnings.push_back(std::move(text));
     };
@@ -2554,7 +2573,8 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
         lua_newtable(state_); lua_setglobal(state_, "msg_reply");
         lua_newtable(state_); lua_setglobal(state_, "event");
         if (dnx_dofile(state_, file) != LUA_OK) {
-            DICE_LOG_ERROR("[lua] mod definition '{}' load error: {}", dnx_u8str(file.filename()), argStr(state_, -1));
+            ++lastLoadErrors_;
+            DICE_LOG_ERROR("模组定义「{}」加载失败：{}", dnx_u8str(file.filename()), argStr(state_, -1));
             compatibilityWarning(dnx_u8str(file.filename()) + " 加载失败，请查看运行日志。");
             lua_pop(state_, 1); return;
         }
@@ -2634,6 +2654,7 @@ void LuaPluginManager::scheduleCycleEvent(const std::string& id, bool runNow) {
     enqueue();
     if (runNow) {
         const LegacyCycleEvent event = it->second;
+        ProcessingScope logScope(loggingSource(event.modName, event.actionLua), "Lua 周期事件「" + id + "」");
         const int base = state_ ? lua_gettop(state_) : 0;
         if (!state_) return;
         loadingModDir_ = event.modDir;
@@ -2676,6 +2697,7 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     m.enabled = enabled;
     if (!enabled) { mods_.push_back(std::move(m)); return; }
     ScriptFaultScope fault(suspendedMods_, m.name);
+    ProcessingScope logScope(ProcessingSource{"Lua 插件", m.title, dnx_u8str(path), "加载"}, "插件加载");
 
     LogOperation operation(DICE_LOG_SOURCE, "lua", "load_plugin", "file=" + dnx_u8str(path));
     loadingModDir_ = path.parent_path().string();
@@ -2684,7 +2706,8 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     const bool maySleep = pluginSource.find("sleepTime") != std::string::npos;
     const int stackBase = lua_gettop(state_);
     if (dnx_loadLegacyEnvironment(state_, path) != LUA_OK) {
-        DICE_LOG_ERROR("[lua] plugin '{}' load error: {}", m.name, argStr(state_, -1));
+        ++lastLoadErrors_;
+        DICE_LOG_ERROR("插件「{}」加载失败：{}", m.name, argStr(state_, -1));
         operation.fail("file=" + dnx_u8str(path) + " script evaluation failed");
         lua_settop(state_, stackBase); loadingModDir_.clear(); mods_.push_back(std::move(m)); return;
     }
@@ -2759,6 +2782,7 @@ int LuaPluginManager::reload() {
     try {
         const int count = loadDirLocked(dir_);
         operation.detail("loaded=" + std::to_string(count) + " replies=" + std::to_string(replyRules_.size()));
+        if (lastLoadErrors_) operation.partial(std::to_string(lastLoadErrors_) + " 项 Lua 加载失败，其余内容已载入");
         return count;
     } catch (const std::exception& e) {
         DICE_LOG_ERROR("[lua] reload failed; runtime remains available with no newly loaded mods: {}", e.what());
@@ -2803,6 +2827,8 @@ bool LuaPluginManager::runTask(const std::string& name, std::string* error) {
         return false;
     }
     ScriptFaultScope fault(suspendedMods_, it->second.modName);
+    const auto taskSource = loggingSource(it->second.modName, it->second.functionName);
+    ProcessingScope logScope(taskSource, "Lua 定时任务「" + name + "」");
     const int base = lua_gettop(state_);
     const std::string previousDir = loadingModDir_;
     loadingModDir_ = it->second.modDir;
@@ -2832,6 +2858,7 @@ bool LuaPluginManager::runTask(const std::string& name, std::string* error) {
         return false;
     }
     lua_settop(state_, base);
+    logProcessingResult(taskSource, "定时任务执行完成", activeProcessingContext.trigger);
     return true;
 }
 
@@ -3198,6 +3225,9 @@ void LuaPluginManager::resumeCoroutine(int threadRef) {
     auto it = pendingCoroutines_.find(threadRef);
     if (!state_ || it == pendingCoroutines_.end()) return;
     PendingCoroutine& pending = it->second;
+    auto context = pending.logContext;
+    context.trigger += " → sleepTime 延时续跑";
+    ProcessingScope logScope(std::move(context));
     if (pending.generation != runtimeGeneration_) {
         pendingCoroutines_.erase(it);
         return;
@@ -3245,6 +3275,9 @@ void LuaPluginManager::resumeCoroutine(int threadRef) {
         return;
     }
     if (!reply.empty() && sender) {
+        auto complete = activeProcessingContext;
+        complete.result = "延时处理完成，生成 1 条回复";
+        ProcessingScope completedScope(std::move(complete));
         try { sender(platform, gid, uid, reply); }
         catch (const std::exception& e) { DICE_LOG_ERROR("[lua] async reply host callback failed: {}", e.what()); }
         catch (...) { DICE_LOG_ERROR("[lua] async reply host callback failed"); }
@@ -3382,8 +3415,12 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
             return (now - last) < cd;
         };
         if (cooled(rule.cdUser, "u:" + uid) || (!gid.empty() && cooled(rule.cdGrp, "g:" + gid))) {
+            DICE_LOG_DEBUG("插件「{}」回复「{}」命中冷却，本次不执行、不回复。", rule.modName, rule.name);
             res.matched = true; return res;
         }
+        const auto source = loggingSource(rule.modName, rule.name);
+        ProcessingScope logScope(source, text);
+        res.sources = {source};
 
         if (!rule.staticEcho.empty()) {
             res.matched = true;
@@ -3455,6 +3492,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
                 loadingModDir_.clear();
                 res.matched = true;
                 res.reply = "Lua 插件等待中的任务过多，请稍后重试。";
+                res.failed = true;
                 return res;
             }
             usedCoroutine = true;
@@ -3477,6 +3515,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
                 pending.ruleName = rule.name; pending.modName = rule.modName; pending.modDir = rule.modDir;
                 pending.platform = platform; pending.gid = gid; pending.uid = uid;
                 pending.vars = base;
+                pending.logContext = activeProcessingContext;
                 pendingCoroutines_[threadRef] = std::move(pending);
                 const double delay = yieldedDelaySeconds(coroutine, resultCount);
                 scheduleCoroutineResume(threadRef, delay);
@@ -3486,6 +3525,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
                 loadingModDir_.clear();
                 lua_settop(state_, sbase);
                 res.matched = true;
+                res.pending = true;
                 if (rule.cdUser > 0) confSet("cd:" + rule.name, "u:" + uid, std::to_string(now));
                 if (rule.cdGrp > 0 && !gid.empty()) confSet("cd:" + rule.name, "g:" + gid, std::to_string(now));
                 return res;
@@ -3510,6 +3550,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         activePlatform_ = previousPlatform;
         loadingModDir_.clear();
         if (!callOk) {
+            res.failed = true;
             if (callError.empty()) callError = dnx_normalizeLuaText(argStr(state_, -1));
             DICE_LOG_ERROR("[lua] reply '{}' echo error: {}", rule.name, callError);
             lua_settop(state_, sbase); res.matched = true; return res;
@@ -3535,11 +3576,19 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
 
         res.matched = true;
         res.reply = dnx_normalizeLuaText(formatTemplate(tmpl, vars));
+        if (!res.failed && !res.pending && res.reply.empty())
+            logProcessingResult(source, "处理完成，没有返回文本回复", activeProcessingContext.trigger);
         if (rule.cdUser > 0) confSet("cd:" + rule.name, "u:" + uid, std::to_string(now));
         if (rule.cdGrp > 0 && !gid.empty()) confSet("cd:" + rule.name, "g:" + gid, std::to_string(now));
         return res;
     }
     return res;
+}
+
+ProcessingSource LuaPluginManager::loggingSource(const std::string& name, const std::string& entry) const {
+    for (const auto& mod : mods_) if (mod.name == name)
+        return {"Lua 插件", mod.title.empty() ? name : mod.title, mod.dir, entry};
+    return {"Lua 插件", name.empty() ? "未识别插件" : name, "", entry};
 }
 
 }  // namespace dice

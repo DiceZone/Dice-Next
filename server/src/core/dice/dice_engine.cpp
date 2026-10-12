@@ -30,11 +30,11 @@ DiceEngine::DiceEngine(ConfigManager& configMgr)
 
     // Register hot-reload callback
     configMgr_.onConfigChanged([this]() {
-        DICE_LOG_INFO("DiceEngine: config changed, reloading dice rules");
+        DICE_LOG_INFO("配置已变更，重新读取检定规则。");
         reloadRules();
     });
 
-    DICE_LOG_INFO("DiceEngine: initialized (coc critical={}, fumble>={})",
+    DICE_LOG_INFO("检定引擎已初始化：COC 大成功上限 {}，大失败下限 {}。",
         rules_.cocCriticalRange, rules_.cocFumbleRange);
 }
 
@@ -43,7 +43,7 @@ DiceEngine::DiceEngine(ConfigManager& configMgr)
 // ═══════════════════════════════════════════════════════════════
 
 DiceResult DiceEngine::roll(const std::string& expression) {
-    DICE_LOG_DEBUG("DiceEngine: rolling '{}'", expression);
+    DICE_LOG_DEBUG("正在计算掷骰表达式「{}」。", expression);
 
     DiceResult result = expression_.evaluate(expression);
 
@@ -51,7 +51,7 @@ DiceResult DiceEngine::roll(const std::string& expression) {
         // DEBUG, not WARN: the caller routinely retries via the OneDice fallback
         // engine (kh/kl, 骰池, bare "d", etc.), so a first-try miss is expected,
         // not an error. The real user-facing failure is reported by the caller.
-        DICE_LOG_DEBUG("DiceEngine: roll failed (will try OneDice fallback): {}", result.error);
+        DICE_LOG_DEBUG("当前引擎未能解析表达式，将尝试 OneDice 回退：{}", result.error);
         return result;
     }
 
@@ -240,7 +240,7 @@ DiceResult DiceEngine::rollL5R(int roll, int keep) {
 
 void DiceEngine::setRules(const DiceRules& rules) {
     rules_ = rules;
-    DICE_LOG_INFO("DiceEngine: rules updated (coc critical={}, fumble>={})",
+    DICE_LOG_INFO("检定规则已更新：COC 大成功上限 {}，大失败下限 {}。",
         rules_.cocCriticalRange, rules_.cocFumbleRange);
 }
 
@@ -255,9 +255,9 @@ void DiceEngine::reloadRules() {
             rules_.fromJSON(rulesJson["dice"]);
         }
 
-        DICE_LOG_INFO("DiceEngine: rules reloaded from config");
+        DICE_LOG_INFO("已从配置重新读取检定规则。");
     } catch (const std::exception& e) {
-        DICE_LOG_WARN("DiceEngine: failed to reload rules: {}, using previous", e.what());
+        DICE_LOG_WARN("检定规则重载失败，继续使用旧规则：{}", e.what());
     }
 }
 

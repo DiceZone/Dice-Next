@@ -3,6 +3,39 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-12: Six-level logs and correlated message processing
+
+- The final local Windows amd64 Release backend and both test executables built.
+  CTest passed all 595 core cases / 5747 assertions and 22 Lua cases / 209
+  assertions. Optional external Lua corpora were not supplied. All 31 Release
+  automation tests passed; WebUI type checking and production build passed,
+  with 209 tests passing and two optional checks skipped. The documentation site
+  also built. Existing bundle-size/compiler warnings were not hidden.
+- Logger cases verify TRACE/DEBUG/INFO/SUCCESS/WARN/ERROR ordering, independent
+  SUCCESS, default INFO, legacy aliases, four human-readable fields, separate
+  source/thread diagnostics, bounded recent records, secret/inline-media
+  redaction and malformed UTF-8 replacement. Output plans, actual bodies,
+  segments and failures retain the same internal msgID and processing source.
+- JS/Lua checks cover named self-reported levels, delayed/timer/sleep origins,
+  cross-plugin await continuations and preserved reply text. Rejected JS command,
+  initialization and timer Promises report errors rather than completed work.
+  Protocol helpers distinguish outgoing events from read-only polling and do
+  not copy base64 file bodies into human logs. Final async/event amendments were
+  covered by these local compilation and unit checks.
+- An isolated real-core smoke with a local fake OneBot peer passed standard roll,
+  JS/Lua/timer replies, actual/proposed contents, failure correlation, level API
+  validation, heartbeat suppression and API-key redaction. No real account,
+  external service or production data was connected. Early fixture connection
+  timing failures were repaired in the harness, not by relaxing core behavior.
+- The three Windows smoke attempts used copied executables with HTTP/OneBot
+  listeners and triggered firewall prompts. Their processes and temporary
+  directories were verified cleaned up. The driver now refuses Windows startup
+  without explicit `--allow-windows-listener` consent; that refusal was tested
+  without opening listeners. No firewall settings were changed, and no further
+  Windows listening smoke was run.
+- These are local checks, not acceptance of live QQ/Milky/KOOK/Discord delivery,
+  tray behavior, other architectures or a completed GitHub Release.
+
 ## 2026-10-12: Windows Release macro compatibility
 
 - Release run 38178243240 failed both Windows package builds at

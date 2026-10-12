@@ -359,7 +359,7 @@ static int realMain(int argc, char* argv[]) {
     // ── 1. Initialize logger ─────────────────────────────────
     dice::crashdiag::setPhase("logger");
     dice::initLogger("info");
-    DICE_LOG_INFO("Dice!Next starting...");
+    DICE_LOG_INFO_M("系统", "正在启动 Dice!Next。");
     // A restore uploaded from the WebUI is only applied during startup, before
     // config/database/plugin files are opened.  This is the safe point to
     // replace an entire data directory.
@@ -446,14 +446,20 @@ static int realMain(int argc, char* argv[]) {
     // 缺省/INT_MIN = 跟随系统本地时区）。所有面向用户的展示/上传时间都走它。
     dice::utils::setTimezoneOffset(configMgr.get<int>(
         "server/timezone_minutes", (std::numeric_limits<int>::min)()));
+    {
+        const int offset = dice::utils::effectiveTimezoneOffsetMinutes();
+        DICE_LOG_INFO_M("日志", "日志会话使用服务器时区 UTC{}{:02d}:{:02d}；最低记录级别为 {}。",
+            offset < 0 ? "-" : "+", std::abs(offset) / 60, std::abs(offset) % 60,
+            dice::logLevelName(dice::logRecordingLevel()));
+    }
     bool adaptersNeedExport = !configLoaded || configMgr.createdOnLoad();
     const std::string databasePathForRecovery = configLoaded
         ? configMgr.get<std::string>("server/db_path", "./data/dice.db")
         : configMgr.recoveryDatabasePath("./data/dice.db");
     if (!configLoaded)
-        DICE_LOG_ERROR("Configuration files are invalid; database snapshot recovery will be attempted after opening the database");
+        DICE_LOG_ERROR_M("配置", "配置文件无效；数据库打开后将尝试从有效快照恢复配置。");
     else
-        DICE_LOG_INFO("Configuration loaded from '{}'", configPath);
+        DICE_LOG_SUCCESS_M("配置", "已读取配置目录「{}」。", configPath);
 
     // ── 3.4. 单实例守卫（同一套数据只允许一个进程）────────────
     {
@@ -487,7 +493,7 @@ static int realMain(int argc, char* argv[]) {
     const std::string dbPath = databasePathForRecovery;
     dice::Database db;
     if (!db.open(dbPath)) {
-        DICE_LOG_ERROR("Failed to open database at '{}'", dbPath);
+        DICE_LOG_ERROR_M("数据库", "主数据库「{}」打开失败，本次启动中止。", dbPath);
         return 1;
     }
     if (auto* configStorage = db.getStorage()) {
@@ -535,9 +541,9 @@ static int realMain(int argc, char* argv[]) {
     std::string defaultLocaleCode = configMgr.get<std::string>("i18n/default_locale", "zh-Hans");
     dice::I18n i18n(i18nDir, dice::localeFromString(defaultLocaleCode));
     if (!i18n.load()) {
-        DICE_LOG_WARN("i18n: no translation bundles loaded — replies may show raw keys");
+        DICE_LOG_WARN_M("回复翻译", "没有加载到翻译资源，回复可能显示未解析的词条名称。");
     } else {
-        DICE_LOG_INFO("i18n: ready (default locale '{}', {} bundle(s) loaded)",
+        DICE_LOG_SUCCESS_M("回复翻译", "回复翻译已就绪：默认语言「{}」，共 {} 种语言。",
             defaultLocaleCode, i18n.availableLocales().size());
     }
     // Persona system initialized later (after DB open + migration)
@@ -546,7 +552,7 @@ static int realMain(int argc, char* argv[]) {
     dice::crashdiag::setPhase("migration");
     dice::Migration migration(db);
     if (!migration.migrate()) {
-        DICE_LOG_ERROR("Database migration failed");
+        DICE_LOG_ERROR_M("数据库", "数据库结构升级失败，本次启动中止。");
         return 1;
     }
 
@@ -572,19 +578,19 @@ static int realMain(int argc, char* argv[]) {
     std::string legacyPath = configMgr.get<std::string>("migration/legacy_path",
         "./data/legacy");
     if (migration.needsLegacyImport(legacyPath)) {
-        DICE_LOG_INFO("Legacy data detected at '{}'", legacyPath);
+        DICE_LOG_INFO_M("数据导入", "在「{}」检测到旧版数据，开始导入。", legacyPath);
         dice::LegacyImporter legacyImporter(db, legacyPath);
         auto report = legacyImporter.import(legacyPath);
-        DICE_LOG_INFO("Legacy import: {} imported, {} errors, {} warnings, {} skipped",
+        DICE_LOG_INFO_M("数据导入", "旧版数据导入结果：已导入 {} 项、失败 {} 项、警告 {} 项、跳过 {} 项。",
             report.totalImported, report.errors,
             report.warnings.size(), report.skippedItems.size());
 
         // Log warnings if any
         for (const auto& warn : report.warnings) {
-            DICE_LOG_WARN("Legacy import warning: {}", warn);
+            DICE_LOG_WARN_M("数据导入", "旧版数据导入提醒：{}", warn);
         }
     } else {
-        DICE_LOG_INFO("No legacy data detected at '{}', skipping import", legacyPath);
+        DICE_LOG_DEBUG_M("数据导入", "目录「{}」没有检测到旧版数据，本次跳过导入。", legacyPath);
     }
 
     // ── 7. Start hot reload monitor ──────────────────────────
@@ -601,7 +607,7 @@ static int realMain(int argc, char* argv[]) {
                 "server/timezone_minutes", (std::numeric_limits<int>::min)()));
         });
 
-        DICE_LOG_INFO("Hot reload monitor started (debounce: {}ms, watching . recursively)", hotReloadDebounce);
+        DICE_LOG_DEBUG_M("配置", "配置热重载已开启，文件变更等待 {} 毫秒稳定后处理。", hotReloadDebounce);
     }
 
     // ── 8. Print banner and startup information ──────────────
@@ -621,7 +627,7 @@ static int realMain(int argc, char* argv[]) {
         packN += dice::CommandRouter::loadRulePacks("data/rules");
         int bundleN = dice::CommandRouter::loadRulePackBundles();   // data/rulepacks/<包>/
         int aliasN = dice::CommandRouter::loadModelTemplates();     // 规则 mod 的 model/*.xml 属性别名 → .st/.ra
-        DICE_LOG_INFO("规则包：加载 {} 个规则 + {} 个规则包(bundle) + {} 个属性模板别名", packN, bundleN, aliasN);
+        DICE_LOG_SUCCESS_M("规则包", "加载完成：{} 条规则、{} 个规则包、{} 个属性模板别名。", packN, bundleN, aliasN);
     }
     dice::CommandRouter::loadHelpFiles();   // 加载 data/help/*.md 帮助文档
     dice::CommandRouter::loadHelpDocs();    // 加载 data/helpdoc/**/*.json 结构化帮助文档（海豹兼容+随包速查）
@@ -635,7 +641,7 @@ static int realMain(int argc, char* argv[]) {
     // decks override bundled ones). All persistent user data lives under data/.
     int deckCount = cardDeck.loadDir("decks");
     deckCount += cardDeck.loadDir("data/decks");
-    DICE_LOG_INFO("CardDeck: {} total decks ({} loaded from decks/ + data/decks/)",
+    DICE_LOG_SUCCESS_M("牌堆", "共 {} 个可用牌堆；本次从用户牌堆目录读取 {} 个。",
         cardDeck.deckCount(), deckCount);
     dice::CommandRouter cmdRouter(db, configMgr, engine, i18n, localeResolver,
         cardStore, cardDeck, adapterMgr);
@@ -1059,7 +1065,8 @@ static int realMain(int argc, char* argv[]) {
     // 此前四处各手抄一份且互有出入（eventMsg 与测试台漏掉了因果规则引擎，
     // eventMsg 还漏了 JS 非指令钩子），统一后不再漂移。
     auto replyFallback = [&cmdRouter, &replyManager, &jsMod, &luaMod, &causalMgr](
-            const dice::Message& m, std::string& replySrc) -> std::string {
+            const dice::Message& m, std::string& replySrc, std::vector<dice::ProcessingSource>* sources = nullptr,
+            bool* partial = nullptr) -> std::string {
         if (cmdRouter.lastShortcutHandled()) return {}; // Includes intentionally silent shortcut targets.
         std::string reply;
         const bool pv = m.type == dice::MessageType::kPrivate;
@@ -1073,13 +1080,15 @@ static int realMain(int argc, char* argv[]) {
         if (pluginsOn && jsMod.ready()) {
             if (auto body = cmdRouter.commandBody(m.content); body && !body->empty()) {
                 auto jr = jsMod.handle(m, *body, cmdRouter.jsPrivilegeLevel(m));
-                if (jr.matched && !jr.reply.empty()) { reply = jr.reply; replySrc = "plugin_command"; }
+                if (partial && (jr.failed || jr.pending)) *partial = true;
+                if (jr.matched && !jr.reply.empty()) { reply = jr.reply; replySrc = "plugin_command"; if (sources) *sources = jr.sources; }
             }
         }
         // Lua 模块的因果回复。
         if (reply.empty() && pluginsOn && luaMod.ready()) {
             int trust = cmdRouter.jsPrivilegeLevel(m) >= 70 ? 4 : 0;   // master/信任≥4 → trust4
             auto lr = luaMod.dispatch(m.content, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform, m.adapterId);
+            if (partial && (lr.failed || lr.pending)) *partial = true;
             // Legacy Lua modules often hard-code `.command` in msg_order or
             // reply prefixes. Retry only an otherwise-unmatched command using
             // that legacy spelling after CommandRouter has validated an
@@ -1089,7 +1098,7 @@ static int realMain(int argc, char* argv[]) {
                 if (legacy != m.content)
                     lr = luaMod.dispatch(legacy, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform, m.adapterId);
             }
-            if (lr.matched && !lr.reply.empty()) { reply = lr.reply; replySrc = "plugin_command"; }
+            if (lr.matched && !lr.reply.empty()) { reply = lr.reply; replySrc = "plugin_command"; if (sources) *sources = lr.sources; }
         }
         // C++ 因果规则（优先于普通自定义回复）。
         if (reply.empty() && repliesOn) {
@@ -1102,6 +1111,7 @@ static int realMain(int argc, char* argv[]) {
                 reply = cmdRouter.renderReply(m, cr.reply, "", dice::MatchType::kKeyword);
                 cmdRouter.clearCounterContext();
                 replySrc = "reply";
+                if (sources) *sources = {{"因果规则", cr.ruleName, "", std::to_string(cr.ruleId)}};
             }
         }
         // 普通自定义回复（完整触发管线：匹配→范围→冷却→日限→概率）。
@@ -1111,17 +1121,20 @@ static int realMain(int argc, char* argv[]) {
             if (pk.rule) {
                 reply = cmdRouter.renderReply(m, replyManager.pickResult(*pk.rule),
                                               pk.rule->matchContent, pk.rule->matchType, pk.rule->legacyReferences);
-                if (!reply.empty()) replySrc = "reply";
+                if (!reply.empty()) {
+                    replySrc = "reply";
+                    if (sources) *sources = {{"高级回复", "规则 #" + std::to_string(pk.rule->id), "", pk.rule->matchContent}};
+                }
             } else if (!pk.notice.empty()) {
                 // 冷却/日限提示语（原版 cd@echo / 限额回复）。
                 reply = cmdRouter.renderReply(m, pk.notice, "", dice::MatchType::kKeyword, pk.noticeLegacyReferences);
-                if (!reply.empty()) replySrc = "reply";
+                if (!reply.empty()) { replySrc = "reply"; if (sources) *sources = {{"高级回复", "冷却或限额提示", "", ""}}; }
             }
         }
         // 仍无回复 → JS 插件的非指令消息钩子（自动回复 / 随机抓话等）。
         if (reply.empty() && pluginsOn && jsMod.ready()) {
             auto nc = jsMod.handleNonCommand(m, cmdRouter.jsPrivilegeLevel(m));
-            if (nc.matched && !nc.reply.empty()) { reply = nc.reply; replySrc = "plugin"; }
+            if (nc.matched && !nc.reply.empty()) { reply = nc.reply; replySrc = "plugin"; if (sources) *sources = nc.sources; }
         }
         return reply;
     };
@@ -1156,12 +1169,16 @@ static int realMain(int argc, char* argv[]) {
         pm.targetId = pv ? uid : gid;
         if (!pv && (cmdRouter.isGroupDisabled(pm) || !cmdRouter.groupFeatureEnabled(pm, "plugin"))) return;
         std::string reply = cmdRouter.handleMessage(pm);
+        auto sources = cmdRouter.lastProcessingSources();
+        if (!reply.empty() && sources.empty()) sources = {{"内置指令", text.substr(0, text.find_first_of(" \t")), "", ""}};
         if (reply.empty() && !cmdRouter.isGroupDisabled(pm)) {
             std::string src;
-            reply = replyFallback(pm, src);
+            reply = replyFallback(pm, src, &sources);
         }
         if (reply.empty()) return;
         reply = cmdRouter.applySelf(pm, reply);
+        dice::ProcessingScope virtualSource(dice::ProcessingContext{sources,
+            dice::activeProcessingContext.label() + "调用 eventMsg：" + text, "虚拟指令处理完成"});
         for (auto& a : adapterMgr.allAdapters()) {
             if (!a->isConnected()) continue;
             if (!platform.empty() && a->platform() != platform) continue;
@@ -1210,7 +1227,7 @@ static int realMain(int argc, char* argv[]) {
             return std::nullopt;
         if (jsMod.ready() && jsMod.hasCommand(message, word)) {
             auto result = jsMod.handle(message, body, cmdRouter.jsPrivilegeLevel(message));
-            if (result.matched) return result.reply;
+            if (result.matched) { cmdRouter.rememberProcessingSources(result.sources, result.failed || result.pending); return result.reply; }
         }
         if (!luaMod.ready()) return std::nullopt;
         const bool pv = message.type == dice::MessageType::kPrivate;
@@ -1224,6 +1241,7 @@ static int realMain(int argc, char* argv[]) {
         auto result = luaMod.dispatch(message.content, message.senderId, group, nick, card, pv, trust, message.platform, message.adapterId);
         if (!result.matched && message.content != "." + body)
             result = luaMod.dispatch("." + body, message.senderId, group, nick, card, pv, trust, message.platform, message.adapterId);
+        if (result.matched) cmdRouter.rememberProcessingSources(result.sources, result.failed || result.pending);
         return result.matched ? std::optional<std::string>(result.reply) : std::nullopt;
     });
     // WebUI 定时任务的「执行插件指令」：构造一个最低权限的虚拟消息，
@@ -1269,11 +1287,14 @@ static int realMain(int argc, char* argv[]) {
             }
             bool matched = false;
             std::string reply;
+            std::vector<dice::ProcessingSource> sources;
+            dice::ProcessingScope scheduleScope(dice::ProcessingContext{{}, "定时任务调用插件指令：" + command, "正在执行"});
             if (jsMod.ready()) {
                 if (auto body = cmdRouter.commandBody(command); body && !body->empty()) {
                     auto result = jsMod.handle(message, *body, 0);
                     matched = result.matched;
                     reply = result.reply;
+                    sources = result.sources;
                 }
             }
             if (!matched && luaMod.ready()) {
@@ -1290,6 +1311,7 @@ static int realMain(int argc, char* argv[]) {
                 }
                 matched = result.matched;
                 reply = result.reply;
+                sources = result.sources;
             }
             if (!matched) {
                 if (error) *error = "no enabled JS/Lua plugin matched the command";
@@ -1297,6 +1319,8 @@ static int realMain(int argc, char* argv[]) {
             }
             if (!reply.empty()) {
                 reply = cmdRouter.applySelf(message, reply);
+                dice::ProcessingScope completedScope(dice::ProcessingContext{sources,
+                    "定时任务调用插件指令：" + command, "插件指令处理完成，生成 1 条回复"});
                 if (targetType == "private") adapter->sendPrivateMessage(targetId, reply);
                 else adapter->sendGroupMessageCQ(targetId, reply);
             }
@@ -1428,7 +1452,7 @@ static int realMain(int argc, char* argv[]) {
         {
             std::string act = cmdRouter.applyGroupAutoModeration(msg);
             if (!act.empty()) {
-                DICE_LOG_INFO("event: 群 {} 自动{} 用户 {}（命中关键字）", msg.targetId,
+                DICE_LOG_INFO_M("群管理", "事件： 群 {} 自动{} 用户 {}（命中关键字）", msg.targetId,
                               act == "kick" ? "踢出" : "禁言", msg.senderId);
                 return;
             }
@@ -1452,7 +1476,15 @@ static int realMain(int argc, char* argv[]) {
         }
         if (forcePlainText) preferredReplyFormat = dice::ContentFormat::kPlainText;
         dice::I18n::beginOutboundCapture(preferredReplyFormat, replyStyle);
-        auto reply = cmdRouter.handleMessage(msg);
+        std::string reply;
+        {
+            dice::ProcessingScope builtinScope(dice::ProcessingSource{"内置指令", msg.content.substr(0, msg.content.find_first_of(" \t")), "", ""});
+            reply = cmdRouter.handleMessage(msg);
+        }
+        auto replySources = cmdRouter.lastProcessingSources();
+        bool processingPartial = cmdRouter.lastProcessingPartial() || receivedHook.failed || receivedHook.pending;
+        if (!reply.empty() && replySources.empty())
+            replySources = {{cmdRouter.lastReplyCategory() == "plugin" ? "规则包指令" : "内置指令", msg.content.substr(0, msg.content.find_first_of(" \t")), "", ""}};
         const auto officialCard = cmdRouter.lastOfficialCard();
         dice::ContentFormat replyFormat = dice::I18n::endOutboundCapture();
         bool didCommand = !reply.empty();
@@ -1470,12 +1502,13 @@ static int realMain(int argc, char* argv[]) {
         // 自控：操作者用骰娘账号手打的消息走**完整管线**（内置/插件/自定义回复）；
         // 骰娘自己的回复回声已在适配器层被自回声去重丢弃，不会到这里，故无需在此限制。
         if (reply.empty() && (!disabled || forcedByAt)) {
-            reply = replyFallback(msg, replySrc);
+            reply = replyFallback(msg, replySrc, &replySources, &processingPartial);
             replyFormat = dice::ContentFormat::kPlainText;
         }
         // onMessageReceived is observational: it must not suppress a built-in or
         // extension command. Preserve both replies in SealDice hook-before-command order.
         if (!receivedHook.reply.empty()) {
+            for (const auto& source : receivedHook.sources) dice::addProcessingSource(replySources, source);
             if (reply.empty()) {
                 reply = receivedHook.reply; replySrc = "plugin";
                 replyFormat = dice::ContentFormat::kPlainText;
@@ -1485,6 +1518,7 @@ static int realMain(int argc, char* argv[]) {
             }
         }
         if (!commandHook.reply.empty()) {
+            for (const auto& source : commandHook.sources) dice::addProcessingSource(replySources, source);
             if (reply.empty()) {
                 reply = commandHook.reply; replySrc = "plugin";
                 replyFormat = dice::ContentFormat::kPlainText;
@@ -1493,6 +1527,7 @@ static int realMain(int argc, char* argv[]) {
                 reply = std::move(joined.text); replyFormat = joined.format;
             }
         }
+        processingPartial = processingPartial || commandHook.failed || commandHook.pending;
         if (!reply.empty() && replySrc == "plugin_command") didCommand = true;
         // ── 先在消息线程消费本条消息的一次性路由状态 ─────────────
         // 回复投递可能转入 AI 后台线程，这些状态晚取会被下一条消息拿走/污染。
@@ -1534,11 +1569,19 @@ static int realMain(int argc, char* argv[]) {
         // 上，一次超时全部指令失效 30 秒。需要 AI 后处理的回复把这一整段投给
         // aiwork::Worker 后台执行；不需要 AI 时原地执行，行为与旧版完全一致。
         auto finishReply = [&adapterMgr, &cmdRouter, &configMgr, &db, &jsMod, officialCard,
-                            forcePlainText, preferredReplyFormat, replyStyle](
+                            forcePlainText, preferredReplyFormat, replyStyle, replySources, processingPartial,
+                            processingTrigger = dice::activeProcessingContext.trigger](
             const dice::Message& msg, std::string reply, std::string broadcast,
             const std::string& aiCat, const std::string& quoteId,
             std::vector<std::string> fwdNodes, bool linkReplyOk,
             dice::ContentFormat replyFormat) {
+            dice::ProcessingContext processing{replySources, processingTrigger,
+                processingPartial ? "已生成回复；处理链存在失败或尚未完成的异步任务，具体结果见相邻记录"
+                                  : "处理完成，生成 1 条回复"};
+            if (processing.sources.empty()) processing.sources = {{"AI 对话", "", "", ""}};
+            dice::ProcessingScope processingScope(processing);
+            const auto target = (msg.type == dice::MessageType::kPrivate ? "私聊 " : "群 ") + msg.targetId;
+            const auto replyPlan = reply.empty() ? nullptr : std::make_shared<dice::PreparedOutput>(target, reply, processing);
             const bool officialCardMatched = officialCard && reply == officialCard->original;
             std::vector<dice::presentation::Action> replyActions;
             // Resolve self tokens ({self}/{strSelfName}/{strSelfCall}) in the final
@@ -1627,6 +1670,7 @@ static int realMain(int argc, char* argv[]) {
             // recurse into this path, preventing an accidental message loop.
             auto notifySent = [&](const auto& adapter, const std::string& text, bool privateOut) {
                 if (!jsMod.ready() || text.empty()) return;
+                dice::OutboundScope newHookOutput(nullptr);
                 dice::Message sent;
                 sent.platform = adapter->platform(); sent.adapterId = adapter->id();
                 sent.selfId = adapter->getLoginId(); sent.senderId = adapter->getLoginId();
@@ -1639,14 +1683,8 @@ static int realMain(int argc, char* argv[]) {
             };
 
             if (!reply.empty()) {
-                // Log the bot's OUTGOING reply too, so the dashboard log shows 收 + 发.
-                std::string where = (msg.type == dice::MessageType::kGroup && !msg.targetId.empty())
-                    ? "\xe7\xbe\xa4 " + msg.targetId : std::string("\xe7\xa7\x81\xe8\x81\x8a");  // 群 / 私聊
-                // Flatten CR/LF: a reply may echo user-supplied text ({$1}/.text), so keep
-                // it on one physical log line to prevent fake-log-entry injection.
-                std::string replyFlat; replyFlat.reserve(reply.size());
-                for (char ch : reply) { if (ch == '\n') replyFlat += "\xe2\x8f\x8e"; else if (ch != '\r') replyFlat += ch; }
-                DICE_LOG_INFO("\xe5\x8f\x91\xe2\x86\xaa [{}] \xe9\xaa\xb0\xe5\xa8\x98: {}", where, replyFlat);  // 发↪ 骰娘
+                // Actual outgoing content is logged by the transport after all
+                // platform formatting; logging here used to claim a send before it happened.
                 // A handler may ask to quote a DIFFERENT message (e.g. .log on quotes
                 // the previous .log off). Override the quoted id on a copy of msg.
                 dice::Message replyMsg = msg;
@@ -1689,11 +1727,13 @@ static int realMain(int argc, char* argv[]) {
                 // 普通消息「顺序」发，保证 A→B 阅读顺序一致。
                 bool quoteFirst = quote && segs.size() == 1;
                 auto sendSegs = [&](const auto& a) {
+                    dice::OutboundScope outputScope(replyPlan);
                     if (wantForward && !fwdNodes.empty() && a->sendGroupForwardMsgFormatted(msg.targetId, fwdNodes, replyFormat)) {
                         notifySent(a, reply, false);
                         return;
                     }
                     for (size_t k = 0; k < segs.size(); ++k) {
+                        dice::OutboundScope partScope(replyPlan, k + 1, segs.size());
                         // 分段之间留几毫秒，避免同一适配器并发发消息导致客户端乱序。
                         if (k > 0) std::this_thread::sleep_for(std::chrono::milliseconds(30));
                         if (forcePlainText || a->platform() == "qq_official"
@@ -1715,17 +1755,22 @@ static int realMain(int argc, char* argv[]) {
                     }
                 };
                 // 只通过消息来源的那个适配器回复，避免多账号/多适配器时串台。
+                bool foundSender = false;
                 if (auto a = adapterMgr.getAdapter(msg.adapterId)) {
-                    if (a->isConnected()) sendSegs(a);
+                    if (a->isConnected()) { foundSender = true; sendSegs(a); }
                 } else {
                     for (auto& ad : adapterMgr.allAdapters())   // 回退：来源不明时发首个已连接
-                        if (ad->isConnected()) { sendSegs(ad); break; }
+                        if (ad->isConnected()) { foundSender = true; sendSegs(ad); break; }
                 }
+                if (!foundSender && replyPlan)
+                    dice::OutboundAttempt{{replyPlan}, msg.adapterId, target, reply}.failed("没有可用的来源适配器，没有提交发送");
             }
             // Send the broadcast as its own plain message to the triggering group,
             // via the originating adapter (after the command reply).
             if (!broadcast.empty()) {
-                DICE_LOG_INFO("[\xe7\xbe\xa4 {}] \xf0\x9f\x93\xa2 \xe5\xb9\xbf\xe6\x92\xad: {}", msg.targetId, broadcast);  // 群 ... 📢 广播
+                const auto plan = std::make_shared<dice::PreparedOutput>("群 " + msg.targetId, broadcast,
+                    dice::ProcessingContext{{{"广播", "触发式公告", "", ""}}, processingTrigger, "生成独立公告"});
+                dice::OutboundScope broadcastScope(plan);
                 if (auto a = adapterMgr.getAdapter(msg.adapterId)) {
                     a->sendGroupMessage(msg.targetId, "\xF0\x9F\x93\xA2 " + broadcast);  // 📢
                     notifySent(a, "\xF0\x9F\x93\xA2 " + broadcast, false);
@@ -1927,6 +1972,10 @@ static int realMain(int argc, char* argv[]) {
     // Non-message events: 入群欢迎词、被加好友欢迎、加好友/加群条件自动同意。
     adapterMgr.onEvent([&adapterMgr, &configMgr, &i18n, &localeResolver, &cmdRouter, &jsMod, &db, &replyManager, replyFallback](const dice::BotEvent& e) {
         using ET = dice::EventType;
+        const auto eventName = e.type == ET::kGroupIncrease ? "入群欢迎" : e.type == ET::kFriendAdd ? "好友欢迎"
+            : e.type == ET::kFriendRequest ? "好友申请" : e.type == ET::kGroupRequest ? "入群申请"
+            : e.type == ET::kPoke ? "戳一戳" : e.type == ET::kGroupRecall ? "消息撤回" : "群事件";
+        dice::ProcessingScope eventScope(dice::ProcessingSource{"系统事件", eventName, "", ""}, "平台事件");
         nlohmann::json cfgAll = configMgr.getAll();
         auto a = adapterMgr.getAdapter(e.adapterId);
         if (!a) return;
@@ -2012,7 +2061,7 @@ static int realMain(int argc, char* argv[]) {
                     cst->insert(r);
                 } catch (...) {}
             }
-            DICE_LOG_INFO("event: 群 {} 文件上传 {} by {}", e.groupId, f.value("name", std::string()), e.userId);
+            DICE_LOG_INFO_M("群管理", "事件： 群 {} 文件上传 {} by {}", e.groupId, f.value("name", std::string()), e.userId);
             return;
         }
         if (e.type == ET::kGroupRecall) {
@@ -2044,7 +2093,7 @@ static int realMain(int argc, char* argv[]) {
                     logRemoved += removed;
                 }
             } catch (...) {}
-            DICE_LOG_INFO("event: 群 {} 消息 {} 已撤回：聊天记录标注，游戏日志移除 {} 条", e.groupId, mid, logRemoved);
+            DICE_LOG_INFO_M("群管理", "事件： 群 {} 消息 {} 已撤回：聊天记录标注，游戏日志移除 {} 条", e.groupId, mid, logRemoved);
             return;
         }
         if (e.type == ET::kGroupHistory) {
@@ -2103,7 +2152,7 @@ static int realMain(int argc, char* argv[]) {
                     ++added;
                 }
             } catch (...) {}
-            DICE_LOG_INFO("event: 群 {} 历史消息入库 {} 条", e.groupId, added);
+            DICE_LOG_INFO_M("群管理", "事件： 群 {} 历史消息入库 {} 条", e.groupId, added);
             return;
         }
 
@@ -2113,7 +2162,7 @@ static int realMain(int argc, char* argv[]) {
                 if (cmdRouter.isGroupBanned(e.groupId)) {
                     a->sendGroupMessage(e.groupId, cmdRouter.applySelf(lm, i18n.tr(loc, "event.blacklist_group")));
                     a->leaveGroup(e.groupId);
-                    DICE_LOG_INFO("event: leaving blacklisted group {} on join", e.groupId);
+                    DICE_LOG_INFO_M("群管理", "事件： leaving blacklisted group {} on join", e.groupId);
                     cmdRouter.notifyMasters(dice::notice::kImportant,
                         "\xe8\xa2\xab\xe6\x8b\x89\xe5\x85\xa5\xe9\xbb\x91\xe5\x90\x8d\xe5\x8d\x95\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "blacklist_leave", e.adapterId);
                     return;
@@ -2135,7 +2184,7 @@ static int realMain(int argc, char* argv[]) {
                             a->sendGroupMessage(e.groupId,
                                 cmdRouter.applySelf(lm, i18n.tr(loc, "event.nonfriend_group_leave")));
                             a->leaveGroup(e.groupId);
-                            DICE_LOG_INFO("event: 非好友 {} 强拉入群 {} → 自动退群", puller, e.groupId);
+                            DICE_LOG_INFO_M("群管理", "事件： 非好友 {} 强拉入群 {} → 自动退群", puller, e.groupId);
                             cmdRouter.notifyMasters(dice::notice::kImportant,
                                 "\xe8\xa2\xab\xe9\x9d\x9e\xe5\xa5\xbd\xe5\x8f\x8b " + userLabel(puller) + " \xe6\x8b\x89\xe5\x85\xa5\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "nonfriend_leave", e.adapterId);
                             return;
@@ -2147,7 +2196,7 @@ static int realMain(int argc, char* argv[]) {
                 if (cmdRouter.groupSettingValue(e.platform, e.groupId, "__removed", e.adapterId) == "1") {
                     cmdRouter.setGroupSettingFor(e.platform, e.groupId, "__removed", "0", e.adapterId);
                     cmdRouter.setGroupSettingFor(e.platform, e.groupId, "enabled", "1", e.adapterId);
-                    DICE_LOG_INFO("event: 群 {} 重新加入，已清除移除标记（记录可重建）", e.groupId);
+                    DICE_LOG_INFO_M("群管理", "事件： 群 {} 重新加入，已清除移除标记（记录可重建）", e.groupId);
                 }
                 // 曾指令退群的群重新加回来 → 清「已退群/退群中」状态。
                 if (cmdRouter.groupSettingValue(e.platform, e.groupId, "left", e.adapterId) == "1" ||
@@ -2190,7 +2239,7 @@ static int realMain(int argc, char* argv[]) {
                             ad->sendGroupMessage(gid, cmdRouter.applySelf(lm2,
                                 i18n.tr(loc, "event.keyword_group_leave")));
                             ad->leaveGroup(gid);
-                            DICE_LOG_INFO("event: 群 {}({}) 名称含关键词「{}」→ 自动退群", gname, gid, hitKw);
+                            DICE_LOG_INFO_M("群管理", "事件： 群 {}({}) 名称含关键词「{}」→ 自动退群", gname, gid, hitKw);
                             cmdRouter.notifyMasters(dice::notice::kImportant,
                                 "\xe7\xbe\xa4\xe5\x90\x8d\xe3\x80\x8c" + gname + "\xe3\x80\x8d(" + gid
                                     + ") \xe5\x90\xab\xe5\x85\xb3\xe9\x94\xae\xe8\xaf\x8d\xe3\x80\x8c" + hitKw
@@ -2232,7 +2281,7 @@ static int realMain(int argc, char* argv[]) {
                 cmdRouter.blacklistQuitLevel(e.platform, e.groupId, e.adapterId) == "member") {
                 a->sendGroupMessage(e.groupId, i18n.tr(loc, "event.blacklist_quit"));
                 a->leaveGroup(e.groupId);
-                DICE_LOG_INFO("event: leaving group {} — blacklisted user {} joined", e.groupId, e.userId);
+                DICE_LOG_INFO_M("群管理", "事件： leaving group {} — blacklisted user {} joined", e.groupId, e.userId);
                 cmdRouter.notifyMasters(dice::notice::kImportant,
                     "\xe9\xbb\x91\xe5\x90\x8d\xe5\x8d\x95\xe7\x94\xa8\xe6\x88\xb7 " + userLabel(e.userId) + " \xe5\x8a\xa0\xe5\x85\xa5\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "blacklist_leave", e.adapterId);
                 return;
@@ -2268,7 +2317,7 @@ static int realMain(int argc, char* argv[]) {
                         for (const auto& id : gm) if (um.count(id)) return;   // 有交集 → 合规
                         if (!leaveText.empty()) ad->sendGroupMessage(gid2, leaveText);
                         ad->leaveGroup(gid2);
-                        DICE_LOG_INFO("event: 群 {} 无成员在用户群 {} → 自动退群", gid2, ug2);
+                        DICE_LOG_INFO_M("群管理", "事件： 群 {} 无成员在用户群 {} → 自动退群", gid2, ug2);
                     });
                 }
             }
@@ -2421,7 +2470,7 @@ static int realMain(int argc, char* argv[]) {
             if (expanded.usedMarkdown) format = dice::ContentFormat::kMarkdown;
             pm.presentationActions = std::move(expanded.actions);
             a->sendReplyFormatted(pm, reply, format);
-            DICE_LOG_INFO("event: poked by {} in group {}", e.operatorId, e.groupId);
+            DICE_LOG_INFO_M("群管理", "事件： poked by {} in group {}", e.operatorId, e.groupId);
         } else if (e.type == ET::kFriendAdd) {
             a->refreshGroupList();   // 同步刷新好友列表缓存（非好友邀请判定依赖它）
             if (!diceFlag("listen_friend_add", true)) return;       // 新好友事件开关
@@ -2453,7 +2502,7 @@ static int realMain(int argc, char* argv[]) {
                             }
                         } catch (...) {}
                         if (!inviteText.empty()) ad->sendPrivateMessage(uid2, inviteText);
-                        DICE_LOG_INFO("event: 新好友 {} 不在用户群 {} → 已私聊邀请", uid2, ug2);
+                        DICE_LOG_INFO_M("群管理", "事件： 新好友 {} 不在用户群 {} → 已私聊邀请", uid2, ug2);
                     });
                 }
             }
@@ -2478,14 +2527,14 @@ static int realMain(int argc, char* argv[]) {
             if (decision == dice::FriendRequestDecision::kApprove) {
                 a->setFriendRequest(e.flag, true);
                 if (pol == "group_used")
-                    DICE_LOG_INFO("event: 好友申请因存在群聊指令记录自动通过 from {}", e.userId);
+                    DICE_LOG_INFO_M("群管理", "事件： 好友申请因存在群聊指令记录自动通过 from {}", e.userId);
                 else if (pol == "keyword")
-                    DICE_LOG_INFO("event: 好友申请含关键词自动通过 from {}", e.userId);
+                    DICE_LOG_INFO_M("群管理", "事件： 好友申请含关键词自动通过 from {}", e.userId);
                 else
-                    DICE_LOG_INFO("event: 好友申请自动通过(任意) from {}", e.userId);
+                    DICE_LOG_INFO_M("群管理", "事件： 好友申请自动通过(任意) from {}", e.userId);
             } else if (decision == dice::FriendRequestDecision::kReject) {
                 a->setFriendRequest(e.flag, false);
-                DICE_LOG_INFO("event: 好友申请自动拒绝(禁止添加) from {}", e.userId);
+                DICE_LOG_INFO_M("群管理", "事件： 好友申请自动拒绝(禁止添加) from {}", e.userId);
             }   // manual / 条件不满足 → 留人工，不处理
         } else if (e.type == ET::kGroupRequest) {
             if (!diceFlag("listen_group_request", true)) return;     // 群请求事件开关
@@ -2503,7 +2552,7 @@ static int realMain(int argc, char* argv[]) {
                 // 叠加拒绝：黑名单群邀请永远先拒。
                 if (ev.value("group_invite_reject_blacklist", true) && cmdRouter.isGroupBanned(e.groupId)) {
                     a->setGroupRequest(e.flag, e.subType, false, "blacklisted group");
-                    DICE_LOG_INFO("event: 黑名单群邀请自动拒绝 group {}", e.groupId);
+                    DICE_LOG_INFO_M("群管理", "事件： 黑名单群邀请自动拒绝 group {}", e.groupId);
                     return;
                 }
                 // 叠加拒绝：非好友邀请（广告号常批量拉群成员进其他群）。Master/白名单豁免；
@@ -2516,7 +2565,7 @@ static int realMain(int argc, char* argv[]) {
                     for (const auto& f : fl) if (f == e.userId) { isFriend = true; break; }
                     if (!isFriend) {
                         a->setGroupRequest(e.flag, e.subType, false, "");
-                        DICE_LOG_INFO("event: 非好友 {} 的群邀请自动拒绝 group {}", e.userId, e.groupId);
+                        DICE_LOG_INFO_M("群管理", "事件： 非好友 {} 的群邀请自动拒绝 group {}", e.userId, e.groupId);
                         cmdRouter.notifyMasters(dice::notice::kImportant,
                             "\xe9\x9d\x9e\xe5\xa5\xbd\xe5\x8f\x8b " + userLabel(e.userId) + " \xe9\x82\x80\xe8\xaf\xb7\xe5\x8a\xa0\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe6\x8b\x92\xe7\xbb\x9d", "nonfriend_leave", e.adapterId);
                         return;
@@ -2526,15 +2575,15 @@ static int realMain(int argc, char* argv[]) {
                 if (pol.empty()) pol = ev.value("auto_approve_group", false) ? "all" : "manual";
                 if (pol == "all") {
                     a->setGroupRequest(e.flag, e.subType, true);
-                    DICE_LOG_INFO("event: 群邀请自动通过(任意) group {}", e.groupId);
+                    DICE_LOG_INFO_M("群管理", "事件： 群邀请自动通过(任意) group {}", e.groupId);
                 } else if (pol == "whitelist") {
                     if (cmdRouter.isMasterUser(e.platform, e.userId) || cmdRouter.isUserWhitelisted(e.userId)) {
                         a->setGroupRequest(e.flag, e.subType, true);
-                        DICE_LOG_INFO("event: 白名单/Master 群邀请自动通过 group {} by {}", e.groupId, e.userId);
+                        DICE_LOG_INFO_M("群管理", "事件： 白名单/Master 群邀请自动通过 group {} by {}", e.groupId, e.userId);
                     }   // 非白名单 → 留人工
                 } else if (pol == "reject") {
                     a->setGroupRequest(e.flag, e.subType, false, "");
-                    DICE_LOG_INFO("event: 群邀请自动拒绝 group {}", e.groupId);
+                    DICE_LOG_INFO_M("群管理", "事件： 群邀请自动拒绝 group {}", e.groupId);
                 }   // ignore / manual → 不处理（忽视所有邀请）
             } else {
                 // sub_type=add：有人申请加入机器人作为管理员的群。
@@ -2543,7 +2592,7 @@ static int realMain(int argc, char* argv[]) {
                 if (!ap.empty()) {
                     if (ap == "all" || (!e.comment.empty() && e.comment.find(ap) != std::string::npos)) {
                         a->setGroupRequest(e.flag, e.subType, true);
-                        DICE_LOG_INFO("event: 群 {} 加群申请自动通过(auto pass) from {}", e.groupId, e.userId);
+                        DICE_LOG_INFO_M("群管理", "事件： 群 {} 加群申请自动通过(auto pass) from {}", e.groupId, e.userId);
                     }   // 不含关键字 → 留人工
                     return;   // 本群已配 autoPass，以它为准，不再走旧全局行为
                 }
@@ -2552,7 +2601,7 @@ static int realMain(int argc, char* argv[]) {
                 std::string kw = ev.value("group_keyword", std::string());
                 if (!kw.empty() && e.comment.find(kw) == std::string::npos) return;
                 a->setGroupRequest(e.flag, e.subType, true);
-                DICE_LOG_INFO("event: auto-approved group join request for group {}", e.groupId);
+                DICE_LOG_INFO_M("群管理", "事件： auto-approved group join request for group {}", e.groupId);
             }
         }
     });
@@ -2711,7 +2760,7 @@ static int realMain(int argc, char* argv[]) {
         }
     }
 
-    DICE_LOG_INFO("Adapter framework initialized");
+    DICE_LOG_SUCCESS_M("适配器", "适配器管理已初始化，准备连接已启用的账号。");
 
     // 运行报错推送：挂接 spdlog 错误 sink，
     // ERROR 级日志推送给订阅了「错误」级别的骰主通知窗口（60s 节流 + 防递归）。
@@ -2735,7 +2784,7 @@ static int realMain(int argc, char* argv[]) {
     int port = configMgr.get<int>("server/port", 18088);
     std::string host = configMgr.get<std::string>("server/host", "0.0.0.0");
 
-    DICE_LOG_INFO("Starting drogon HTTP server on {}:{}", host, port);
+    DICE_LOG_INFO_M("管理面板", "正在启动管理面板，监听地址 {}，端口 {}。", host, port);
 
     auto& app = drogon::app();
     app.setLogLevel(trantor::Logger::kWarn);
@@ -3005,9 +3054,9 @@ static int realMain(int argc, char* argv[]) {
     if (fs::exists(webRoot)) {
         app.setDocumentRoot(webRoot);
         app.setStaticFilesCacheTime(0);
-        DICE_LOG_INFO("Serving static frontend from '{}'", webRoot);
+        DICE_LOG_DEBUG_M("管理面板", "前端资源目录为「{}」。", webRoot);
     } else {
-        DICE_LOG_WARN("Frontend not found at '{}'", webRoot);
+        DICE_LOG_WARN_M("管理面板", "前端资源目录「{}」不存在，请检查安装包是否完整。", webRoot);
     }
 
     // (Removed dead SPA-fallback route table: the frontend uses hash routing,
@@ -3096,7 +3145,7 @@ static int realMain(int argc, char* argv[]) {
     dice::utils::setStartupEpoch();
     dice::api::registerApiRoutes(db, configMgr, adapterMgr, engine, cardDeck, replyManager, i18n, jsMod, luaMod,
                                  causalMgr, cooldownMgr, counterStore, personaMgr, updateService, cmdRouter);
-    DICE_LOG_INFO("REST API routes registered");
+    DICE_LOG_DEBUG_M("管理面板", "管理 API 路由已注册。");
 
     // ── Playground test harness ──────────────────────────────
     // The chat UI lives in the React app (sidebar → 测试台). This is the
@@ -3121,7 +3170,7 @@ static int realMain(int argc, char* argv[]) {
                     bool condMet = tk->targetId == "*"
                         || cmdRouter.evalScheduledCondition(tk->condition, tk->platform, tk->targetType, tk->targetId);
                     int count = cmdRouter.execScheduledAction(*tk, /*force=*/true);
-                    DICE_LOG_INFO("scheduled task '{}' 手动执行：count={} conditionMet={}", tk->name, count, condMet);
+                    DICE_LOG_INFO_M("定时任务", "定时任务 '{}' 手动执行：count={} conditionMet={}", tk->name, count, condMet);
                     out = {{"code", 0}, {"data", {{"executed", count > 0}, {"count", count}, {"conditionMet", condMet}}}};
                 }
             } catch (const std::exception& e) { out = {{"code", 1}, {"message", e.what()}}; }
@@ -4153,7 +4202,7 @@ static int realMain(int argc, char* argv[]) {
         cb(resp);
     }, {drogon::Get, drogon::Put});
 
-    DICE_LOG_INFO("Test API ready → web admin \344\276\247\350\276\271\346\240\217\343\200\214\346\265\213\350\257\225\345\217\260\343\200\215");
+    DICE_LOG_DEBUG_M("管理面板", "指令测试接口已就绪，可从 WebUI 的测试台发送模拟指令。");
 
     // Start adapters after the event loop is running (WebSocket needs an active
     // loop). Adapters were already registered above; start each exactly ONCE here
@@ -4370,7 +4419,7 @@ static int realMain(int argc, char* argv[]) {
                 // 执行（含 targetId="*" 全群展开，条件逐群评估；leave 内部已通知骰主）。
                 int done = cmdRouter.execScheduledAction(tk, /*force=*/false);
                 if (done <= 0) return;
-                DICE_LOG_INFO("scheduled task fired: {} -> {}:{} ({} target(s))",
+                DICE_LOG_INFO_M("定时任务", "定时任务 fired: {} -> {}:{} ({} target(s))",
                               tk.name, tk.platform.empty() ? "any" : tk.platform, tk.targetId, done);
                 if (tk.action != "leave") {
                     // B：定时任务触发通知骰主。
@@ -4400,7 +4449,7 @@ static int realMain(int argc, char* argv[]) {
                     if (tk.onceDate != curYMD) {
                         if (!tk.onceDate.empty() && tk.onceDate < curYMD) {   // 停机跨过了整天
                             tk.lastRun = curYMD + " " + curHM; tk.enabled = 0; st->update(tk);
-                            DICE_LOG_INFO("scheduled once task '{}' 已过期（{}），标记完成并停用", tk.name, tk.onceDate);
+                            DICE_LOG_INFO_M("定时任务", "单次定时任务 '{}' 已过期（{}），标记完成并停用", tk.name, tk.onceDate);
                         }
                         continue;
                     }
@@ -4408,7 +4457,7 @@ static int realMain(int argc, char* argv[]) {
                     if (dueMin < 0 || nowMin < dueMin) continue;
                     tk.lastRun = curYMD + " " + curHM; tk.enabled = 0; st->update(tk);   // 单次：跑完即停用
                     if (nowMin - dueMin > 60) {
-                        DICE_LOG_INFO("scheduled once task '{}' 超过补发窗口（迟 {} 分钟），跳过并停用", tk.name, nowMin - dueMin);
+                        DICE_LOG_INFO_M("定时任务", "单次定时任务 '{}' 超过补发窗口（迟 {} 分钟），跳过并停用", tk.name, nowMin - dueMin);
                         continue;
                     }
                     fire(tk);
@@ -4426,7 +4475,7 @@ static int realMain(int argc, char* argv[]) {
                 }
                 tk.lastRun = curYMD; st->update(tk);   // 当天已评估（防 30s 重复触发），无论条件是否满足
                 if (nowMin - dueMin > 60) {
-                    DICE_LOG_INFO("scheduled task '{}' 超过补发窗口（迟 {} 分钟），今日跳过", tk.name, nowMin - dueMin);
+                    DICE_LOG_INFO_M("定时任务", "定时任务 '{}' 超过补发窗口（迟 {} 分钟），今日跳过", tk.name, nowMin - dueMin);
                     continue;
                 }
                 fire(tk);
@@ -4462,13 +4511,13 @@ static int realMain(int argc, char* argv[]) {
                 configMgr.get<dice::json>("backup/auto_selection", dice::json::object()));
             std::filesystem::path archive; std::string error;
             if (!dice::backup::createArchive(db, configMgr.configPath(), archive, error, selection, true)) {
-                DICE_LOG_ERROR("automatic backup failed: {}", error); return;
+                DICE_LOG_ERROR_M("备份", "自动备份未完成：{}", error); return;
             }
             configMgr.set<long long>("backup/auto_last_at", static_cast<long long>(now));
             configMgr.save();
             dice::backup::cleanupArchives(configMgr.get<int>("backup/auto_keep_days", 7));
-            DICE_LOG_INFO("automatic backup created: {}", archive.string());
-        } catch (const std::exception& e) { DICE_LOG_ERROR("automatic backup failed: {}", e.what()); }
+            DICE_LOG_SUCCESS_M("备份", "自动备份创建完成：{}。", archive.string());
+        } catch (const std::exception& e) { DICE_LOG_ERROR_M("备份", "自动备份未完成：{}", e.what()); }
     };
     app.getLoop()->runAfter(20.0, autoBackupTick);
     app.getLoop()->runEvery(60.0, autoBackupTick);
@@ -4532,12 +4581,12 @@ static int realMain(int argc, char* argv[]) {
         dice::updateSystemTrayText(configMgr.get<std::string>("dice/tray_text", ""));
     });
 
-    DICE_LOG_INFO("Server starting — press Ctrl+C to stop");
+    DICE_LOG_SUCCESS_M("系统", "初始化完成，开始提供服务；控制台按 Ctrl+C 可正常退出。");
     dice::crashdiag::setPhase("running");
     app.run();
 
     // ── 10. Graceful shutdown ────────────────────────────────
-    DICE_LOG_INFO("Shutting down...");
+    DICE_LOG_INFO_M("系统", "收到退出请求，正在保存数据并停止后台任务、断开平台连接。");
 
     // 正常退出时同步报一次 offline（max-time 5s，服务端据此结算在线时长）。
     dice::heart::HeartService::instance().shutdownReport();
@@ -4554,7 +4603,7 @@ static int realMain(int argc, char* argv[]) {
     luaCallbacks->stop();
     adapterMgr.stopAll();
     db.close();
-    DICE_LOG_INFO("Dice!Next stopped. Goodbye!");
+    DICE_LOG_SUCCESS_M("系统", "数据保存与服务关闭完成，程序正常退出。");
 
     return 0;
 }

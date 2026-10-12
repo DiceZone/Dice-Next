@@ -1,4 +1,5 @@
 #pragma once
+#include "outbound_logging.h"
 
 // QQ Bot 2.0 official OpenAPI adapter.  This implementation deliberately uses
 // Gateway WebSocket only; no webhook listener is registered.
@@ -751,10 +752,7 @@ private:
             if(first==std::string::npos)m.content.clear();
             else { const auto last=m.content.find_last_not_of(" \t\r\n"); m.content=m.content.substr(first,last-first+1); }
             m.rawContent=m.content;m.displayContent=m.content;
-            DICE_LOG_INFO("QQOfficial '{}': inbound {} group={} sender={} atSelf={} textBytes={}", name_, t, m.targetId, m.senderId, !m.atList.empty(), m.content.size());
-            DICE_LOG_INFO("收↩ [官方群 OpenID({})] {}({}): {}", m.targetId,
-                          m.senderName.empty() ? std::string("—") : m.senderName,
-                          m.senderId, m.content.empty() ? std::string("[富媒体或空消息]") : m.content);
+            // Receipt logging happens after public-ID/nickname normalization.
         }
         else if(t=="AT_MESSAGE_CREATE"){m.type=MessageType::kChannel;m.senderId=author.value("id",std::string());m.senderName=author.value("username",m.senderId);m.targetId=d.value("channel_id",std::string());}
         else { dispatchEvent(t,d,eventId); return; }
@@ -1009,15 +1007,18 @@ private:
 
     /// 富媒体消息发送：拿到 file_info 后 POST /messages (msg_type=7)。
     void sendFileInfoTo(const Message& m, const std::string& target, const std::string& fileInfo) {
+        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
+        auto outgoing = OutboundAttempt::prepare("QQ 官方「" + name_ + "」", (m.type == MessageType::kPrivate ? "私聊 " : "群 ") + m.targetId,
+            m.logMediaSummary.empty() ? "[富媒体消息]" : m.logMediaSummary);
         if (fileInfo.empty()) { DICE_LOG_WARN("QQOfficial '{}': 富媒体上传未返回 file_info，跳过发送", name_); return; }
-        if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
+        if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; outgoing.failed(lastError_); return; }
         const bool priv = m.type == MessageType::kPrivate;
         const std::string msgPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/messages";
         // 官方要求 msg_type=7 时 content 需非空（文档注明的占位空格）。
         json body = {{"content", " "}, {"msg_type", 7}, {"media", {{"file_info", fileInfo}}}};
         if (!m.id.empty()) { body["msg_id"] = m.id; const int seq = nextReplySeq(m.id); if (seq > 0) body["msg_seq"] = seq; }
         else { const auto ev = takePassiveEvent(m.type, target); if (!ev.empty()) body["event_id"] = ev; }
-        auto c2 = httpsClient("api.bot.qq.com"); if (!c2) return;
+        auto c2 = httpsClient("api.bot.qq.com"); if (!c2) { outgoing.failed("无法解析 api.bot.qq.com，没有提交发送"); return; }
         auto r2 = drogon::HttpRequest::newHttpRequest();
         r2->setMethod(drogon::Post); r2->setPath(msgPath);
         r2->setContentTypeCode(drogon::CT_APPLICATION_JSON);
@@ -1025,21 +1026,26 @@ private:
         r2->addHeader("Authorization", "QQBot " + accessToken_);
         r2->setBody(body.dump());
         auto self = shared_from_this();
-        c2->sendRequest(r2, [self, msgPath](drogon::ReqResult rr2, const drogon::HttpResponsePtr& resp2) {
+        outgoing.submitted();
+        c2->sendRequest(r2, [self, msgPath, outgoing](drogon::ReqResult rr2, const drogon::HttpResponsePtr& resp2) {
             self->safeMediaStep("发送富媒体消息回调", [&] {
                 if (rr2 != drogon::ReqResult::Ok || !resp2 || resp2->statusCode() >= 300) {
                     self->lastError_ = "QQ 官方富媒体消息发送失败";
-                    DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, msgPath,
+                    outgoing.failed(fmt::format("平台请求未成功：HTTP {}；{}", resp2 ? static_cast<int>(resp2->statusCode()) : 0,
+                        resp2 ? std::string(resp2->body()) : drogon::to_string(rr2)));
+                    DICE_LOG_DEBUG("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, msgPath,
                                   resp2 ? static_cast<int>(resp2->statusCode()) : 0, resp2 ? std::string(resp2->body()) : std::string("网络请求未完成"));
                     return;
                 }
-                DICE_LOG_INFO("QQOfficial '{}': 富媒体消息已发送: {}", self->name_, msgPath);
+                const auto response = json::parse(resp2->body(), nullptr, false);
+                outgoing.accepted(response.is_object() ? logJsonId(response, "id") : "");
             });
         });
     }
 
     /// 公网 URL 直传：POST /files 换 file_info → 发消息。
     void uploadRemoteTo(const Message& m, const std::string& target, const MediaItem& item, const std::string& url) {
+        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
         const bool priv = m.type == MessageType::kPrivate;
         const int ftype = fileTypeFor(item.kind, item.name.empty() ? url : item.name);
@@ -1054,6 +1060,7 @@ private:
         r->setBody(json{{"file_type", ftype}, {"url", url}, {"srv_send_msg", false}}.dump());
         auto self = shared_from_this();
         c->sendRequest(r, [self, m, target, filesPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
+            OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
             self->safeMediaStep("URL 直传回调", [&] {
                 if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
                     self->lastError_ = "QQ 官方富媒体上传失败";
@@ -1074,6 +1081,7 @@ private:
 
     /// 本地文件官方分片上传：prepare → 顺序 PUT 分片 → part_finish → /files 合并。
     void uploadLocalTo(const Message& m, const std::string& target, const MediaItem& item, const std::string& localPath) {
+        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         safeMediaStep("uploadLocalTo 入口", [&] {
             if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
             const std::string data = readLocalFile(localPath);
@@ -1108,6 +1116,7 @@ private:
             DICE_LOG_INFO("QQOfficial '{}': 发起 upload_prepare {} file_type={} file_name={}", name_, prepPath, ftype, fname);
             auto self = shared_from_this();
             c->sendRequest(r, [self, m, target, priv, data, fname, ftype, prepPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
+                OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
                 self->safeMediaStep("upload_prepare 回调", [&] {
                     if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
                         self->lastError_ = "QQ 官方分片上传准备失败";
@@ -1148,6 +1157,7 @@ private:
     void uploadPartLoop(const Message& m, const std::string& target, bool priv, const std::string& data,
                         const std::string& uploadId, const std::string& fname, int ftype,
                         std::vector<UploadPart> parts, size_t idx) {
+        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         if (idx >= parts.size()) { finalizeUpload(m, target, priv, uploadId, fname, ftype); return; }
         DICE_LOG_INFO("QQOfficial '{}': 开始上传分片 {}/{} (index={})", name_, idx + 1, parts.size(), parts[idx].index);
         safeMediaStep("uploadPartLoop 入口", [&] {
@@ -1166,6 +1176,7 @@ private:
             r->setBody(chunk);
             auto self = shared_from_this();
             c->sendRequest(r, [self, m, target, priv, data, uploadId, fname, ftype, parts, idx, p](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
+                OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
                 self->safeMediaStep("PUT 分片回调", [&] {
                     if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
                         self->lastError_ = "QQ 官方分片上传失败";
@@ -1187,6 +1198,7 @@ private:
                     r2->setBody(json{{"upload_id", uploadId}, {"part_index", p.index},
                                      {"block_size", std::to_string(p.size)}, {"md5", partMd5}}.dump());
                     c2->sendRequest(r2, [self, m, target, priv, data, uploadId, fname, ftype, parts, idx, p, finishPath](drogon::ReqResult rr2, const drogon::HttpResponsePtr& resp2) {
+                        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
                         self->safeMediaStep("upload_part_finish 回调", [&] {
                             if (rr2 != drogon::ReqResult::Ok || !resp2 || resp2->statusCode() >= 300) {
                                 self->lastError_ = "QQ 官方分片确认失败";
@@ -1206,6 +1218,7 @@ private:
     /// 全部分片就绪后合并：POST /files 换 file_info → 发消息。
     void finalizeUpload(const Message& m, const std::string& target, bool priv, const std::string& uploadId,
                         const std::string& fname, int ftype) {
+        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         const std::string filesPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/files";
         auto c = httpsClient("api.bot.qq.com");
         if (!c) { lastError_ = "无法解析 api.bot.qq.com"; return; }
@@ -1217,6 +1230,7 @@ private:
         r->setBody(json{{"file_type", ftype}, {"file_name", fname}, {"upload_id", uploadId}, {"srv_send_msg", false}}.dump());
         auto self = shared_from_this();
         c->sendRequest(r, [self, m, target, filesPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
+            OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
             self->safeMediaStep("分片合并回调", [&] {
                 if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
                     self->lastError_ = "QQ 官方分片合并失败";
@@ -1234,7 +1248,11 @@ private:
     }
 
     /// 富媒体入口：远程 URL 直传，本地文件走分片上传。
-    void sendMediaTo(const Message& m, const MediaItem& item) {
+    void sendMediaTo(const Message& message, const MediaItem& item) {
+        Message m = message;
+        m.logMediaSummary = "[" + std::string(item.kind == 1 ? "图片" : item.kind == 2 ? "视频" : item.kind == 3 ? "语音" : "文件")
+            + "：" + (item.name.empty() ? item.ref : item.name) + "]";
+        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         try {
             if (m.type == MessageType::kChannel) { DICE_LOG_WARN("QQOfficial '{}': 频道富媒体暂未接入，跳过", name_); return; }
             if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
@@ -1256,7 +1274,15 @@ private:
     }
 
     /// 出站入口：拆出媒体标记走富媒体（限 3 条防刷频），剩余文本走文字消息。
-    void sendTo(const Message& m, const std::string& text, ContentFormat format) {
+    void sendTo(const Message& message, const std::string& text, ContentFormat format) {
+        Message m = message;
+        if (!m.logOutput) {
+            m.logOutput = activeOutboundContext.output;
+            m.logPart = activeOutboundContext.part; m.logParts = activeOutboundContext.parts;
+        }
+        if (!m.logOutput) m.logOutput = std::make_shared<PreparedOutput>(
+            (m.type == MessageType::kPrivate ? "私聊 " : "群 ") + m.targetId, text);
+        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         // Structured replies contain literal card names/attributes, not media directives.
         // Preserve their exact original text for safe fallback and payload matching.
         if (m.platform == "qq_official" && format == ContentFormat::kPlainText
@@ -1289,7 +1315,12 @@ private:
     /// 下优先以 Markdown 发送；收到明确 HTTP 拒绝后自动用传统文本重试一次。
     void sendTextTo(const Message& m, const std::string& text, ContentFormat format,
                     int fallbackLevel = 0) {
-        if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
+        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
+        const std::string destination = (m.type == MessageType::kPrivate ? "私聊 " : m.type == MessageType::kChannel ? "频道 " : "群 ") + m.targetId;
+        if (accessToken_.empty()) {
+            lastError_ = "QQ 官方机器人尚未取得 AccessToken";
+            OutboundAttempt::prepare("QQ 官方「" + name_ + "」", destination, text).failed(lastError_); return;
+        }
         std::string target;
         if (m.extra.is_object()) target = m.extra.value("__identity_native_target", std::string());
         if (target.empty() && m.type != MessageType::kChannel && db_)
@@ -1303,11 +1334,13 @@ private:
         else path = "/channels/" + target + "/messages";
 
         auto client = httpsClient("api.bot.qq.com");
-        if (!client) { lastError_ = "无法解析 api.bot.qq.com"; return; }
+        if (!client) { lastError_ = "无法解析 api.bot.qq.com"; OutboundAttempt::prepare("QQ 官方「" + name_ + "」", destination, text).failed(lastError_); return; }
         // Only explicit Markdown is rich text. Card mode can place literal text
         // in a Markdown container, but escapes it first so punctuation survives.
         json body = textPayload(m, text, format, fallbackLevel);
         const bool useMarkdown = body.contains("markdown");
+        const auto actual = useMarkdown ? body["markdown"].value("content", body["markdown"].dump()) : body.value("content", std::string());
+        auto outgoing = OutboundAttempt::prepare("QQ 官方「" + name_ + "」", destination, actual);
 
         auto request = drogon::HttpRequest::newHttpRequest();
         request->setMethod(drogon::Post); request->setPath(path);
@@ -1323,7 +1356,8 @@ private:
             if (!eventId.empty()) body["event_id"] = eventId;
         }
         request->setBody(dumpJsonUtf8Safe(body));
-        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, format, useMarkdown, fallbackLevel](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
+        outgoing.submitted();
+        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, format, useMarkdown, fallbackLevel, outgoing](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
             const bool httpRejected = response && response->statusCode() >= 300;
             if (useMarkdown && !httpRejected && result == drogon::ReqResult::Ok && response)
                 self->markdownRejectStreak_.store(0);
@@ -1333,6 +1367,7 @@ private:
                 || response->statusCode() == 403 || response->statusCode() == 422);
             if (useMarkdown && rejectedFormat) {
                 if (fallbackLevel == 0 && message.qqRichReply && self->richStyle_ != "off") {
+                    DICE_LOG_WARN_M("消息", "QQ 官方「{}」富文本请求被拒绝，移除公式与交互后重试。{}", self->name_, outgoing.suffix());
                     self->sendTextTo(message, text, format, 1); // Drop TeX/interaction first, preserve the card.
                     return;
                 }
@@ -1341,10 +1376,9 @@ private:
                     self->markdownDisabledUntil_.store(
                         static_cast<int64_t>(std::time(nullptr)) + kMarkdownCooldownSeconds);
                     self->markdownRejectStreak_.store(0);
-                    DICE_LOG_WARN("QQOfficial '{}': Markdown/card rejected {} times; using pre-rendered traditional text for 10 minutes",
-                                  self->name_, streak);
+                    DICE_LOG_WARN_M("消息", "QQ 官方「{}」连续 {} 次拒绝 Markdown／卡片，未来 10 分钟使用预渲染纯文本。{}", self->name_, streak, outgoing.suffix());
                 } else {
-                    DICE_LOG_WARN("QQOfficial '{}': Markdown/card message rejected by {}, retrying traditional text", self->name_, path);
+                    DICE_LOG_WARN_M("消息", "QQ 官方「{}」拒绝 Markdown／卡片，本次改用纯文本重试。{}", self->name_, outgoing.suffix());
                 }
                 self->sendTextTo(message, text, format, 2);
                 return;
@@ -1353,8 +1387,10 @@ private:
                 std::string detail = "网络请求未完成";
                 if (response) { const auto responseBody = response->body(); detail.assign(responseBody.data(), responseBody.size()); }
                 self->lastError_ = "QQ 官方消息发送失败";
-                if (response) DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, path, static_cast<int>(response->statusCode()), detail);
-                else DICE_LOG_WARN("QQOfficial '{}': POST {} failed: {} {}", self->name_, path, drogon::to_string(result), detail);
+                outgoing.failed(fmt::format("平台请求未成功：{}；{}", response ? std::to_string(static_cast<int>(response->statusCode())) : drogon::to_string(result), detail));
+            } else {
+                const auto resultBody = json::parse(response->body(), nullptr, false);
+                outgoing.accepted(resultBody.is_object() ? logJsonId(resultBody, "id") : "");
             }
         });
     }

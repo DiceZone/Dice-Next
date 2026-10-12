@@ -26,6 +26,29 @@ std::shared_ptr<spdlog::logger> getLogger();
 std::string sanitizeLogText(std::string_view text);
 void setLogSecrets(std::vector<std::string> secrets);
 void configureLogger(const nlohmann::json& config);
+// SUCCESS is deliberately independent from INFO. The spdlog transport is an
+// implementation detail; UI/file filtering uses this six-level ordering.
+enum class LogLevel { Trace, Debug, Info, Success, Warn, Error, Off };
+LogLevel parseLogLevel(std::string_view text);
+std::string_view logLevelName(LogLevel level);
+bool validLogLevel(std::string_view text);
+LogLevel logRecordingLevel();
+bool shouldRecordLog(LogLevel level);
+std::string_view defaultLogModule(spdlog::source_loc source);
+void writeLog(spdlog::source_loc source, LogLevel level, std::string_view module, std::string_view text);
+void writeLog(spdlog::source_loc source, LogLevel level, std::string_view module,
+              std::string_view text, const nlohmann::json& details);
+// Bounded in-memory records for the current process; no daily-file rescan on
+// dashboard polling. Structured diagnostics are also saved beside the text log.
+nlohmann::json recentLogRecords(size_t limit = 100);
+std::string newLogCorrelationId();
+
+template<class... Args>
+void logFormatted(spdlog::source_loc source, LogLevel level, std::string_view module,
+                  spdlog::format_string_t<Args...> format, Args&&... args) {
+    if (shouldRecordLog(level))
+        writeLog(source, level, module, fmt::format(format, std::forward<Args>(args)...));
+}
 std::string describeException(std::exception_ptr error);
 void logCurrentException(spdlog::source_loc source, std::string_view context,
                          spdlog::level::level_enum level = spdlog::level::err) noexcept;
@@ -41,24 +64,34 @@ public:
     void phase(std::string_view name);
     void detail(std::string text) { detail_ = std::move(text); }
     void fail(std::string reason) { failed_ = true; detail_ = std::move(reason); }
+    void partial(std::string reason) { partial_ = true; detail_ = std::move(reason); }
 private:
     spdlog::source_loc source_;
     std::string component_, operation_, detail_;
     uint64_t id_;
     int exceptions_;
     bool failed_ = false;
+    bool partial_ = false;
     std::chrono::steady_clock::time_point start_;
 };
 
 // ─── Convenience Macros ──────────────────────────────────────
 
 #define DICE_LOG_SOURCE spdlog::source_loc{__FILE__, __LINE__, SPDLOG_FUNCTION}
-#define DICE_LOG_TRACE(...)    dice::getLogger()->log(DICE_LOG_SOURCE, spdlog::level::trace, __VA_ARGS__)
-#define DICE_LOG_DEBUG(...)    dice::getLogger()->log(DICE_LOG_SOURCE, spdlog::level::debug, __VA_ARGS__)
-#define DICE_LOG_INFO(...)     dice::getLogger()->log(DICE_LOG_SOURCE, spdlog::level::info, __VA_ARGS__)
-#define DICE_LOG_WARN(...)     dice::getLogger()->log(DICE_LOG_SOURCE, spdlog::level::warn, __VA_ARGS__)
-#define DICE_LOG_ERROR(...)    dice::getLogger()->log(DICE_LOG_SOURCE, spdlog::level::err, __VA_ARGS__)
-#define DICE_LOG_CRITICAL(...) dice::getLogger()->log(DICE_LOG_SOURCE, spdlog::level::critical, __VA_ARGS__)
+#define DICE_LOG_TRACE_M(module, ...)   dice::logFormatted(DICE_LOG_SOURCE, dice::LogLevel::Trace, module, __VA_ARGS__)
+#define DICE_LOG_DEBUG_M(module, ...)   dice::logFormatted(DICE_LOG_SOURCE, dice::LogLevel::Debug, module, __VA_ARGS__)
+#define DICE_LOG_INFO_M(module, ...)    dice::logFormatted(DICE_LOG_SOURCE, dice::LogLevel::Info, module, __VA_ARGS__)
+#define DICE_LOG_SUCCESS_M(module, ...) dice::logFormatted(DICE_LOG_SOURCE, dice::LogLevel::Success, module, __VA_ARGS__)
+#define DICE_LOG_WARN_M(module, ...)    dice::logFormatted(DICE_LOG_SOURCE, dice::LogLevel::Warn, module, __VA_ARGS__)
+#define DICE_LOG_ERROR_M(module, ...)   dice::logFormatted(DICE_LOG_SOURCE, dice::LogLevel::Error, module, __VA_ARGS__)
+#define DICE_LOG_TRACE(...)    DICE_LOG_TRACE_M(dice::defaultLogModule(DICE_LOG_SOURCE), __VA_ARGS__)
+#define DICE_LOG_DEBUG(...)    DICE_LOG_DEBUG_M(dice::defaultLogModule(DICE_LOG_SOURCE), __VA_ARGS__)
+#define DICE_LOG_INFO(...)     DICE_LOG_INFO_M(dice::defaultLogModule(DICE_LOG_SOURCE), __VA_ARGS__)
+#define DICE_LOG_SUCCESS(...)  DICE_LOG_SUCCESS_M(dice::defaultLogModule(DICE_LOG_SOURCE), __VA_ARGS__)
+#define DICE_LOG_WARN(...)     DICE_LOG_WARN_M(dice::defaultLogModule(DICE_LOG_SOURCE), __VA_ARGS__)
+#define DICE_LOG_ERROR(...)    DICE_LOG_ERROR_M(dice::defaultLogModule(DICE_LOG_SOURCE), __VA_ARGS__)
+// Source compatibility for fatal boundaries, without exposing a seventh level.
+#define DICE_LOG_CRITICAL(...) DICE_LOG_ERROR(__VA_ARGS__)
 #define DICE_LOG_EXCEPTION(context) dice::logCurrentException(DICE_LOG_SOURCE, context)
 #define DICE_LOG_WARN_EXCEPTION(context) dice::logCurrentException(DICE_LOG_SOURCE, context, spdlog::level::warn)
 

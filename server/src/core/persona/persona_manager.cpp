@@ -41,13 +41,13 @@ void PersonaManager::loadStartupPersona() {
         auto tmpl = getTemplateById(globalId);
         if (tmpl.id > 0) {
             i18n_.setPersona(globalId);
-            DICE_LOG_INFO("PersonaManager: startup persona '{}' (id={}) loaded", tmpl.name, globalId);
+            DICE_LOG_INFO("启动人格「{}」（#{}）已加载。", tmpl.name, globalId);
         } else {
-            DICE_LOG_WARN("PersonaManager: configured global persona id={} not found, using default", globalId);
+            DICE_LOG_WARN("全局人格 #{} 不存在，使用默认人格。", globalId);
             i18n_.setPersona(0);
         }
     } else {
-        DICE_LOG_INFO("PersonaManager: no global persona configured (default)");
+        DICE_LOG_INFO("未配置全局人格，使用默认人格。");
         i18n_.setPersona(0);
     }
 }
@@ -150,7 +150,7 @@ int PersonaManager::chooseGlobalPersona() const {
 bool PersonaManager::setActivePersona(int personaId, const std::string& groupId,
                                       const std::string& platform) {
     if (personaId < 0 || (personaId > 0 && getTemplateById(personaId).id <= 0)) {
-        DICE_LOG_WARN("PersonaManager: refusing unknown persona id={}", personaId);
+        DICE_LOG_WARN("人格 #{} 不存在，本次切换未执行。", personaId);
         return false;
     }
 
@@ -166,7 +166,7 @@ bool PersonaManager::setActivePersona(int personaId, const std::string& groupId,
             cfg_.set<json>("persona/pool", previousPool);
             return false;
         }
-        DICE_LOG_INFO("PersonaManager: global persona set to {}", personaId);
+        DICE_LOG_INFO("全局人格已设为 #{}。", personaId);
         personaPool_ = json::array();
     } else {
         // Per-group persona — store in group_settings
@@ -191,10 +191,10 @@ bool PersonaManager::setActivePersona(int personaId, const std::string& groupId,
                 row.value = std::to_string(personaId);
                 st->insert(row);
             }
-            DICE_LOG_INFO("PersonaManager: group '{}:{}' persona set to {}",
+            DICE_LOG_INFO("会话「{}:{}」的人格已设为 #{}。",
                           effectivePlatform, groupId, personaId);
         } catch (const std::exception& e) {
-            DICE_LOG_ERROR("PersonaManager: failed to set group persona: {}", e.what());
+            DICE_LOG_ERROR("群人格设置保存失败：{}", e.what());
             return false;
         }
     }
@@ -226,7 +226,7 @@ bool PersonaManager::hasGroupPersonaOverride(const std::string& groupId,
         // Keep this in lockstep with getActivePersona's legacy fallback.
         return effectivePlatform != "onebot_v11" && hasForPlatform("onebot_v11");
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("PersonaManager: failed to inspect group persona override: {}", e.what());
+        DICE_LOG_ERROR("群人格覆盖设置读取失败：{}", e.what());
         return false;
     }
 }
@@ -253,11 +253,11 @@ bool PersonaManager::clearGroupPersona(const std::string& groupId,
             // exact row existed, so removing it cannot reveal an older value.
             removeForPlatform("onebot_v11");
         }
-        DICE_LOG_INFO("PersonaManager: group '{}:{}' persona override cleared",
+        DICE_LOG_INFO("会话「{}:{}」的人格覆盖已清除，恢复继承设置。",
                       effectivePlatform, groupId);
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("PersonaManager: failed to clear group persona override: {}", e.what());
+        DICE_LOG_ERROR("群人格覆盖设置清除失败：{}", e.what());
         return false;
     }
 }
@@ -310,7 +310,7 @@ std::vector<PersonaTemplateRow> PersonaManager::listTemplates() const {
         return st->get_all<PersonaTemplateRow>(
             orm::order_by(&PersonaTemplateRow::id));
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("PersonaManager: listTemplates failed: {}", e.what());
+        DICE_LOG_ERROR("人格模板列表读取失败：{}", e.what());
         return {};
     }
 }
@@ -355,7 +355,7 @@ int PersonaManager::createTemplate(const std::string& name, const std::string& d
         row.updatedAt = nowIso();
         return st->insert(row);
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("PersonaManager: createTemplate failed: {}", e.what());
+        DICE_LOG_ERROR("人格模板创建失败：{}", e.what());
         return -1;
     }
 }
@@ -394,11 +394,11 @@ int PersonaManager::copyTemplate(int srcId, const std::string& newName) {
             st->insert(er);
         }
 
-        DICE_LOG_INFO("PersonaManager: copied persona '{}' (id={}) → '{}' (id={}), {} entries",
+        DICE_LOG_INFO("人格「{}」（#{}）已复制为「{}」（#{}），共 {} 个词条。",
                       src.name, srcId, newName, newId, entries.size());
         return newId;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("PersonaManager: copyTemplate failed: {}", e.what());
+        DICE_LOG_ERROR("人格模板复制失败：{}", e.what());
         return -1;
     }
 }
@@ -438,10 +438,10 @@ bool PersonaManager::deleteTemplate(int id) {
         }
         cfg_.save();
         i18n_.clearPersonaBundles(id);
-        DICE_LOG_INFO("PersonaManager: deleted persona '{}' (id={})", tmpl.name, id);
+        DICE_LOG_INFO("人格「{}」（#{}）已删除。", tmpl.name, id);
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("PersonaManager: deleteTemplate failed: {}", e.what());
+        DICE_LOG_ERROR("人格模板删除失败：{}", e.what());
         return false;
     }
 }
@@ -466,7 +466,7 @@ bool PersonaManager::updateTemplateMeta(int id, const std::string& name, const s
         st->update(tmpl);
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("PersonaManager: updateTemplateMeta failed: {}", e.what());
+        DICE_LOG_ERROR("人格模板信息保存失败：{}", e.what());
         return false;
     }
 }
@@ -518,7 +518,7 @@ bool PersonaManager::setEntry(int personaId, const std::string& locale,
         }
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("PersonaManager: setEntry failed: {}", e.what());
+        DICE_LOG_ERROR("人格回复词条保存失败：{}", e.what());
         return false;
     }
 }
@@ -584,7 +584,7 @@ void PersonaManager::loadIntoI18n(int personaId) {
         i18n_.setPersonaBundles(personaId, loc, bundle, formatsByLocale[loc]);
     }
 
-    DICE_LOG_INFO("PersonaManager: loaded {} entries ({} locales) into I18n for persona {}",
+    DICE_LOG_DEBUG("已为人格准备 {} 个词条、{} 种语言；人格 #{}。",
                   entries.size(), bundlesByLocale.size(), personaId);
 }
 
@@ -645,7 +645,7 @@ int PersonaManager::importTemplate(const json& data) {
         }
     }
 
-    DICE_LOG_INFO("PersonaManager: imported persona '{}' (id={})", name, newId);
+    DICE_LOG_INFO("已导入人格「{}」（#{}）。", name, newId);
     return newId;
 }
 

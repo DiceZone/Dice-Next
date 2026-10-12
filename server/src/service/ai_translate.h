@@ -110,7 +110,7 @@ inline std::string translate(ConfigManager& cfg, const std::string& targetLang, 
     }
     ai::Model m;
     if (!pickModel(cfg, m)) return text;
-    DICE_LOG_INFO("[AI translate] start model={} lang={} text_len={}", m.id, targetLang, text.size());
+    DICE_LOG_DEBUG("开始翻译：模型「{}」，目标语言 {}，待翻译 {} 字节。", m.id, targetLang, text.size());
 
     // 系统提示词优先用配置里的 prompt（前端可编辑，{lang} 占位）；留空则用内置默认。
     std::string tpl = conf(cfg).value("prompt", std::string());
@@ -121,7 +121,7 @@ inline std::string translate(ConfigManager& cfg, const std::string& targetLang, 
     int maxTok = (int)(text.size()) + 256;
     if (maxTok > 2048) maxTok = 2048;
     ai::Result r = ai::chat(cfg, m, sys, text, maxTok, 20, /*tempOverride=*/0.3);
-    if (!r.ok || r.reply.empty()) { if (!r.ok) DICE_LOG_WARN("[AI translate] failed model={} lang={} error={}", m.id, targetLang, r.error); return text; }
+    if (!r.ok || r.reply.empty()) { if (!r.ok) DICE_LOG_WARN("模型「{}」翻译至 {} 失败：{}；使用原回复。", m.id, targetLang, r.error); return text; }
 
     std::string out = r.reply;
     auto b = out.find_first_not_of(" \t\r\n");
@@ -129,15 +129,15 @@ inline std::string translate(ConfigManager& cfg, const std::string& targetLang, 
     if (b == std::string::npos) return text;
     out = out.substr(b, e - b + 1);
     // 译文若丢失/改动了原文数字（骰点结果）→ 判为翻译不可靠，发原文。
-    if (!ai::preservesNumbers(text, out)) { DICE_LOG_WARN("[AI translate] numbers changed, falling back to original lang={}", targetLang); return text; }
-    if (!ai::preservesActionCommands(text, out)) { DICE_LOG_WARN("[AI translate] action command changed, falling back to original lang={}", targetLang); return text; }
+    if (!ai::preservesNumbers(text, out)) { DICE_LOG_WARN("翻译至 {} 的结果改变了数字，使用原回复。", targetLang); return text; }
+    if (!ai::preservesActionCommands(text, out)) { DICE_LOG_WARN("翻译至 {} 的结果改变了操作指令，使用原回复。", targetLang); return text; }
     if (format == ContentFormat::kMarkdown && !markdown::preservesStructure(text, out)) {
-        DICE_LOG_WARN("[AI translate] Markdown structure changed, falling back to original lang={}", targetLang); return text;
+        DICE_LOG_WARN("翻译至 {} 的结果破坏了 Markdown 结构，使用原回复。", targetLang); return text;
     }
     {
         std::lock_guard<std::mutex> lk(cacheMutex());
         if (cache().size() > 1000) cache().clear();
-    DICE_LOG_INFO("[AI translate] ok model={} lang={} tokens={} latency={}ms in_len={} out_len={}", m.id, targetLang, r.totalTokens, r.latencyMs, text.size(), out.size());
+    DICE_LOG_DEBUG("模型「{}」已翻译至 {}：使用 {} Token，耗时 {} 毫秒；输入 {} 字节、输出 {} 字节。", m.id, targetLang, r.totalTokens, r.latencyMs, text.size(), out.size());
         cache()[key] = out;
     }
     return out;

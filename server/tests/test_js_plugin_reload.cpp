@@ -11,6 +11,137 @@
 using namespace dice;
 namespace fs = std::filesystem;
 
+TEST(JsPluginManager, ConsoleLevelsAndCommandTimerOriginsArePreserved) {
+    const auto nonce = newLogCorrelationId();
+    const auto root = fs::temp_directory_path() / ("dice_js_logs_" + nonce);
+    fs::create_directories(root);
+    std::ofstream file(root / "origin.js", std::ios::binary);
+    file << R"JS(
+// ==UserScript==
+// @name 日报来源测试
+// ==/UserScript==
+const ext = seal.ext.new('origin', 'test', '1.0');
+const cmd = seal.ext.newCmdItemInfo();
+cmd.solve = (ctx, msg) => {
+  console.info('own-info-marker'); console.warn('own-warn-marker');
+  console.error('own-error-marker'); console.debug('own-debug-marker'); console.trace('own-trace-marker');
+  seal.replyToSender(ctx, msg, 'immediate-reply');
+  setTimeout(() => { console.info('timer-log-marker'); seal.replyToSender(ctx, msg, 'timer-reply'); }, 1);
+  return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap.origin = cmd; seal.ext.register(ext);
+)JS";
+    file.close();
+    auto previous = std::string(logLevelName(logRecordingLevel()));
+    configureLogger(nlohmann::json{{"server", {{"log_level", "trace"}}}});
+    std::vector<std::function<void()>> callbacks;
+    std::string timerSource;
+    {
+        JsPluginManager manager;
+        manager.setScheduler([&](double, std::function<void()> cb) { callbacks.push_back(std::move(cb)); });
+        manager.setSender([&](const auto&, bool, const auto&, const auto&, const auto& text) {
+            if (text == "timer-reply") timerSource = activeProcessingContext.sources[0].file;
+        });
+        ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir(root.string()), 1);
+        Message message; message.platform = "onebot_v11"; message.senderId = "user"; message.targetId = "group"; message.content = ".origin";
+        auto result = manager.handle(message, "origin");
+        ASSERT_EQ(result.reply, std::string("immediate-reply"));
+        ASSERT_EQ(result.sources.size(), size_t(1)); ASSERT_EQ(result.sources[0].file, std::string("origin.js"));
+        ASSERT_EQ(callbacks.size(), size_t(1));
+        auto callback = std::move(callbacks[0]); callbacks.clear(); callback();
+    }
+    bool info = false, warning = false, error = false, debug = false, trace = false, timer = false;
+    for (const auto& record : recentLogRecords(1000)) {
+        const auto content = record["message"].get<std::string>();
+        if (content.find("own-info-marker") != std::string::npos) info = record["level"] == "info";
+        if (content.find("own-warn-marker") != std::string::npos) warning = record["level"] == "warn";
+        if (content.find("own-error-marker") != std::string::npos) error = record["level"] == "error";
+        if (content.find("own-debug-marker") != std::string::npos) debug = record["level"] == "debug";
+        if (content.find("own-trace-marker") != std::string::npos) trace = record["level"] == "trace";
+        if (content.find("timer-log-marker") != std::string::npos) timer = record["details"]["processing"]["sources"][0]["file"] == "origin.js";
+    }
+    configureLogger(nlohmann::json{{"server", {{"log_level", previous}}}});
+    std::error_code ec; fs::remove_all(root, ec);
+    ASSERT_TRUE(info && warning && error && debug && trace && timer);
+    ASSERT_EQ(timerSource, std::string("origin.js"));
+}
+
+TEST(JsPluginManager, RejectedPromisesNeverReportCompletedProcessing) {
+    const auto root = fs::temp_directory_path() / ("dice_js_rejected_log_" + newLogCorrelationId());
+    fs::create_directories(root);
+    { std::ofstream file(root / "reject-logs.js", std::ios::binary); file << R"JS(
+const ext = seal.ext.new('reject-logs', 'test', '1.0');
+ext.onLoad = async () => { await Promise.resolve(); throw new Error('init-rejection-marker'); };
+const cmd = seal.ext.newCmdItemInfo();
+cmd.solve = async (ctx, msg) => {
+  seal.replyToSender(ctx, msg, 'reply-before-rejection');
+  setTimeout(async () => { await Promise.resolve(); throw new Error('timer-rejection-marker'); }, 1);
+  await Promise.resolve(); throw new Error('command-rejection-marker');
+};
+ext.cmdMap.rejectlogs = cmd; seal.ext.register(ext);
+)JS"; }
+    std::vector<std::function<void()>> callbacks;
+    {
+        JsPluginManager manager;
+        manager.setScheduler([&](double, std::function<void()> cb) { callbacks.push_back(std::move(cb)); });
+        ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir(root.string()), 1);
+        Message message; message.content = ".rejectlogs"; message.platform = "onebot_v11";
+        auto result = manager.handle(message, "rejectlogs");
+        ASSERT_TRUE(result.failed); ASSERT_FALSE(result.pending);
+        ASSERT_EQ(result.reply, std::string("reply-before-rejection"));
+        ASSERT_EQ(callbacks.size(), size_t(1));
+        auto callback = std::move(callbacks[0]); callbacks.clear(); callback();
+    }
+    bool init = false, command = false, timer = false, falseCompletion = false;
+    for (const auto& record : recentLogRecords(1000)) {
+        const auto text = record["message"].get<std::string>();
+        if (text.find("init-rejection-marker") != std::string::npos) init = record["level"] == "error";
+        if (text.find("command-rejection-marker") != std::string::npos) command = record["level"] == "error";
+        if (text.find("timer-rejection-marker") != std::string::npos) timer = record["level"] == "error";
+        if (text.find("reject-logs") != std::string::npos && text.find("定时回调执行完成") != std::string::npos) falseCompletion = true;
+    }
+    std::error_code ec; fs::remove_all(root, ec);
+    ASSERT_TRUE(init && command && timer); ASSERT_FALSE(falseCompletion);
+}
+
+TEST(JsPluginManager, AwaitContinuationUsesItsOwnPluginNotTheResolvingTimersOwner) {
+    const auto root = fs::temp_directory_path() / ("dice_js_async_origin_" + newLogCorrelationId());
+    fs::create_directories(root);
+    { std::ofstream file(root / "owner-a.js", std::ios::binary); file << R"JS(
+globalThis.originPromise = new Promise(resolve => setTimeout(() => resolve('ready'), 1));
+)JS"; }
+    { std::ofstream file(root / "owner-b.js", std::ios::binary); file << R"JS(
+const ext = seal.ext.new('owner-b', 'test', '1.0');
+const cmd = seal.ext.newCmdItemInfo();
+cmd.solve = async (ctx, msg) => {
+  await globalThis.originPromise;
+  console.info('cross-owner-async-marker');
+  seal.replyToSender(ctx, msg, 'owned-by-b');
+  return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap.originb = cmd; seal.ext.register(ext);
+)JS"; }
+    std::vector<std::function<void()>> callbacks;
+    std::string sendOwner;
+    {
+        JsPluginManager manager;
+        manager.setScheduler([&](double, std::function<void()> cb) { callbacks.push_back(std::move(cb)); });
+        manager.setSender([&](const auto&, bool, const auto&, const auto&, const auto& text) {
+            if (text == "owned-by-b") sendOwner = activeProcessingContext.sources[0].file;
+        });
+        ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir(root.string()), 2);
+        Message message; message.platform = "onebot_v11"; message.senderId = "u"; message.targetId = "g"; message.content = ".originb";
+        ASSERT_TRUE(manager.handle(message, "originb").reply.empty());
+        ASSERT_EQ(callbacks.size(), size_t(1)); callbacks[0]();
+    }
+    bool correct = false;
+    for (const auto& record : recentLogRecords(1000))
+        if (record["message"].get<std::string>().find("cross-owner-async-marker") != std::string::npos)
+            correct = record["details"]["processing"]["sources"][0]["file"] == "owner-b.js";
+    std::error_code ec; fs::remove_all(root, ec);
+    ASSERT_TRUE(correct); ASSERT_EQ(sendOwner, std::string("owner-b.js"));
+}
+
 TEST(JsPluginManager, ExecutionTimeoutMemoryLimitAndRecovery) {
     TestWatchdog watchdog;
     JsPluginManager manager(std::chrono::milliseconds(100), 8 * 1024 * 1024);

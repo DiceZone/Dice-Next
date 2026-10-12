@@ -65,6 +65,13 @@ static std::string jsErrorDetails(JSContext* ctx, JSValueConst error) {
     JS_FreeValue(ctx, stack);
     return trace.empty() ? message : message + "\n" + trace;
 }
+static bool logRejectedPromise(JSContext* ctx, JSValueConst value, std::string_view step) {
+    if (JS_PromiseState(ctx, value) != JS_PROMISE_REJECTED) return false;
+    JSValue error = JS_PromiseResult(ctx, value);
+    DICE_LOG_ERROR("{}的异步执行失败：{}", step, jsErrorDetails(ctx, error));
+    JS_FreeValue(ctx, error);
+    return true;
+}
 
 // Wrap @p value in an already-resolved Promise (takes ownership of value).
 // Used by fetch()/Response.json()/.text(): the HTTP call is synchronous, so we
@@ -164,10 +171,12 @@ static JSValue jsFetch(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
 static JSValue jsStorageSet(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
 static JSValue jsStorageGet(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
 
-static JSValue jsConsoleLog(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+static JSValue jsConsoleLog(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv, int level) {
+    auto* manager = mgrOf(ctx);
+    ProcessingScope logScope(manager ? manager->loggingContextForCall() : activeProcessingContext);
     std::string line;
     for (int i = 0; i < argc; ++i) { if (i) line += ' '; line += toStr(ctx, argv[i]); }
-    DICE_LOG_INFO("[js] {}", line);
+    logPluginText(static_cast<LogLevel>(level), line);
     return JS_UNDEFINED;
 }
 // Extract the reply target (platform / private / group / user) from ctx(argv0)+msg(argv1).
@@ -193,6 +202,7 @@ static void replyTarget(JSContext* ctx, JSValueConst msg, JSValueConst cctx,
 static JSValue jsReplyCommon(JSContext* ctx, int argc, JSValueConst* argv) {
     auto* m = mgrOf(ctx);
     if (!m || argc < 3) return JS_UNDEFINED;
+    ProcessingScope logScope(m->loggingContextForCall());
     std::string text = toStr(ctx, argv[2]);
     if (m->capturing()) { m->appendReply(text); return JS_UNDEFINED; }
     std::string platform, gid, uid; bool isPriv = false;
@@ -325,7 +335,7 @@ static JSValue jsRegisterTask(JSContext* ctx, JSValueConst, int argc, JSValueCon
     double delay = difftime(target, now);
     if (delay <= 0) delay += 86400.0;   // already passed today → tomorrow
     m->addTimer(JS_DupValue(ctx, argv[3]), delay, 86400.0);   // re-arm every 24h
-    DICE_LOG_INFO("[js] registerTask scheduled daily at {:02d}:{:02d}", hh, mm);
+    DICE_LOG_INFO("已注册每日 {:02d}:{:02d} 执行的插件任务（服务器时区）。", hh, mm);
     return JS_UNDEFINED;
 }
 static JSValue jsExtNew(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -503,6 +513,7 @@ static JSValue jsReplyGroup(JSContext* ctx, JSValueConst t, int argc, JSValueCon
 static JSValue jsReplyPerson(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     auto* m = mgrOf(ctx);
     if (!m || argc < 3) return JS_UNDEFINED;
+    ProcessingScope logScope(m->loggingContextForCall());
     std::string platform, gid, uid; bool ignoredPrivate = false;
     replyTarget(ctx, argv[1], argv[0], platform, ignoredPrivate, gid, uid);
     std::string text = toStr(ctx, argv[2]);
@@ -1044,6 +1055,7 @@ void JsPluginManager::wsConnect(JSContext* ctx, JSValue obj, const std::string& 
     if (!ctx_) return;
     const int64_t id = ++wsSeq_;
     wsObjs_[id] = JS_DupValue(ctx, obj);
+    wsContexts_[id] = loggingContextForCall();
     JS_SetPropertyStr(ctx, obj, "__wsId", JS_NewInt64(ctx, id));
     JS_SetPropertyStr(ctx, obj, "readyState", JS_NewInt32(ctx, 0));
     if (!scheduler_) return;
@@ -1076,6 +1088,9 @@ void JsPluginManager::wsFire(int64_t id, const char* evt, const std::string& dat
     if (!ctx_) return;
     auto it = wsObjs_.find(id);
     if (it == wsObjs_.end()) return;
+    auto context = wsContexts_[id];
+    context.trigger = "插件 WebSocket 回调：" + std::string(evt);
+    ProcessingScope logScope(std::move(context));
     JS_UpdateStackTop(rt_);
     JSValue obj = it->second;
     const std::string ev = evt;
@@ -1091,6 +1106,8 @@ void JsPluginManager::wsFire(int64_t id, const char* evt, const std::string& dat
         if (!JS_IsUndefined(arg)) JS_FreeValue(ctx_, arg);
     }
     JS_FreeValue(ctx_, cb);
+    drainJobs();
+    if (ev == "close") wsContexts_.erase(id);
     if (ev == "close") { JS_FreeValue(ctx_, it->second); wsObjs_.erase(it); { std::lock_guard<std::mutex> lk2(sWsMutex); sWsConns.erase(id); } }
 }
 
@@ -1120,6 +1137,7 @@ void JsPluginManager::wsCleanup() {
 void JsPluginManager::wsCleanupLocked() {
     for (auto& [id, obj] : wsObjs_) if (ctx_) JS_FreeValue(ctx_, obj);
     wsObjs_.clear();
+    wsContexts_.clear();
     { std::lock_guard<std::mutex> lk2(sWsMutex); for (auto& [id, c] : sWsConns) if (c) c->stop(); sWsConns.clear(); }
 }
 
@@ -1324,10 +1342,11 @@ void JsPluginManager::installGlobals() {
     JSValue g = JS_GetGlobalObject(ctx_);
 
     JSValue console = JS_NewObject(ctx_);
-    JSValue logFn = JS_NewCFunction(ctx_, jsConsoleLog, "log", 1);
-    for (const char* m : {"log", "info", "warn", "error"})
-        JS_SetPropertyStr(ctx_, console, m, JS_DupValue(ctx_, logFn));
-    JS_FreeValue(ctx_, logFn);
+    for (const auto& [method, level] : std::vector<std::pair<const char*, LogLevel>>{
+        {"log", LogLevel::Info}, {"info", LogLevel::Info}, {"debug", LogLevel::Debug},
+        {"trace", LogLevel::Trace}, {"warn", LogLevel::Warn}, {"error", LogLevel::Error}})
+        JS_SetPropertyStr(ctx_, console, method, JS_NewCFunctionMagic(ctx_, jsConsoleLog,
+            method, 1, JS_CFUNC_generic_magic, static_cast<int>(level)));
     JS_SetPropertyStr(ctx_, g, "console", console);
 
     JS_SetPropertyStr(ctx_, g, "setTimeout",    JS_NewCFunction(ctx_, jsSetTimeout, "setTimeout", 2));
@@ -1448,7 +1467,7 @@ void JsPluginManager::registerExt(JSValueConst ext) {
     std::string extName = getStrProp(ctx_, ext, "name");
     // 实时派发：仅保存 ext 引用，派发时再读 cmdMap（与注册顺序无关）。
     exts_.push_back({ JS_DupValue(ctx_, ext), loadingFile_ });
-    DICE_LOG_INFO("[js] registered ext '{}' from {}", extName, loadingFile_);
+    DICE_LOG_DEBUG("已注册扩展「{}」，来源脚本「{}」。", extName, loadingFile_);
 }
 
 int JsPluginManager::loadDir(const std::string& dir) {
@@ -1458,6 +1477,7 @@ int JsPluginManager::loadDir(const std::string& dir) {
 }
 
 int JsPluginManager::loadDirLocked(const std::string& dir) {
+    lastLoadErrors_ = 0;
     JS_UpdateStackTop(rt_);   // (re)load may run on a worker thread; re-baseline first
     dir_ = dir;   // remember for WebUI management (upload/toggle/delete + reload)
     // 规则类插件目录 data/mod（主目录的祖父目录 / mod），与主目录一并扫描。
@@ -1522,13 +1542,14 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
     // Pass 3: register the winners; record all (superseded ones are listed but not run).
     for (auto& e : entries) {
         plugins_.push_back(e.meta);
-        if (e.tooLarge) continue;
+        if (e.tooLarge) { ++lastLoadErrors_; continue; }
         if (e.meta.superseded) {
             DICE_LOG_INFO("[js] '{}' ({}) superseded by v{} — not activated",
                           e.meta.file, e.meta.version, e.meta.supersededBy);
             continue;
         }
         loadingFile_ = e.meta.file;
+        ProcessingScope logScope(loggingSource(e.meta.file, "加载"), "插件加载");
         ScriptFaultScope fault(suspendedFiles_, e.meta.file);
         LogOperation operation(DICE_LOG_SOURCE, "js", "load_plugin", "file=" + e.meta.file);
         // 每个插件包进独立函数作用域，避免多文件顶层 let/const（如 ext）互相冲突；
@@ -1538,11 +1559,13 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
         JSValue r = JS_Eval(ctx_, wrapped.c_str(), wrapped.size(), e.meta.file.c_str(), JS_EVAL_TYPE_GLOBAL);
         if (JS_IsException(r)) {
             JSValue exc = JS_GetException(ctx_);
-            DICE_LOG_ERROR("[js] plugin '{}' load error: {}", e.meta.file, jsErrorDetails(ctx_, exc));
+            ++lastLoadErrors_;
+            DICE_LOG_ERROR("脚本「{}」加载失败：{}", e.meta.file, jsErrorDetails(ctx_, exc));
             operation.fail("file=" + e.meta.file + " script evaluation failed");
             JS_FreeValue(ctx_, exc);
         } else { ++n; }
         JS_FreeValue(ctx_, r);
+        if (!drainJobs()) { ++lastLoadErrors_; operation.partial("脚本加载后的异步任务未正常完成"); }
         loadingFile_.clear();
     }
 
@@ -1554,19 +1577,26 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
         JS_SetPropertyStr(ctx_, e.first, "isLoaded", JS_NewBool(ctx_, 1));
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, "onLoad");
         if (JS_IsFunction(ctx_, fn)) {
+            ProcessingScope logScope(loggingSource(e.second, "onLoad"), "插件初始化");
             LogOperation operation(DICE_LOG_SOURCE, "js", "on_load", "file=" + e.second);
             JSValue r = JS_Call(ctx_, fn, e.first, 0, nullptr);
             if (JS_IsException(r)) {
+                pendingFailed_ = true;
                 JSValue exc = JS_GetException(ctx_);
-                DICE_LOG_ERROR("[js] plugin '{}' onLoad error: {}", e.second, jsErrorDetails(ctx_, exc));
+                ++lastLoadErrors_;
+                DICE_LOG_ERROR("插件「{}」初始化回调失败：{}", e.second, jsErrorDetails(ctx_, exc));
                 operation.fail("file=" + e.second + " onLoad callback failed");
                 JS_FreeValue(ctx_, exc);
+            }
+            if (!drainJobs()) { ++lastLoadErrors_; operation.partial("初始化回调的异步任务未正常完成"); }
+            if (logRejectedPromise(ctx_, r, "插件初始化回调")) {
+                ++lastLoadErrors_; operation.fail("初始化回调返回了拒绝的 Promise");
             }
             JS_FreeValue(ctx_, r);
         }
         JS_FreeValue(ctx_, fn);
     }
-    drainJobs();
+    if (!drainJobs()) ++lastLoadErrors_;
 
     // eval 后 rulePluginFiles_ 已填好 → 标记规则类，并把仍在主目录的规则类插件
     // 迁移到 data/mod（已加载在内存，移动文件不影响本次运行；下次 reload 从 mod 加载）。
@@ -1583,7 +1613,8 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
             if (!mec) { p.inMod = true; DICE_LOG_INFO("[js] rule plugin '{}' migrated to {}", p.file, modDir_); }
         }
     }
-    DICE_LOG_INFO("[js] loaded {} plugin file(s) from {} (+{})", n, dir, modDir_);
+    if (lastLoadErrors_ > 0) DICE_LOG_WARN("插件扫描结束：已读取 {} 个脚本；{} 项加载或初始化失败。主目录「{}」，规则目录「{}」。", n, lastLoadErrors_, dir, modDir_);
+    else DICE_LOG_SUCCESS("插件加载完成：{} 个脚本；主目录「{}」，规则目录「{}」。", n, dir, modDir_);
     return n;
 }
 
@@ -1593,7 +1624,7 @@ int64_t JsPluginManager::addTimer(JSValue cb, double delaySec, double intervalSe
     if (intervalSec > 0 && intervalSec < 0.2) intervalSec = 0.2;   // min 200ms
     if (delaySec < 0) delaySec = 0;
     int64_t id = ++timerSeq_;
-    timers_[id] = Timer{cb, intervalSec};
+    timers_[id] = Timer{cb, intervalSec, loggingContextForCall()};
     scheduler_(delaySec, [this, id] { fireTimer(id); });
     return id;
 }
@@ -1610,12 +1641,20 @@ void JsPluginManager::fireTimer(int64_t id) {
     JS_UpdateStackTop(rt_);
     JSValue cb = JS_DupValue(ctx_, it->second.cb); // clearInterval may free its own timer
     double interval = it->second.intervalSec;
+    auto context = it->second.context;
+    context.trigger = "JS 定时器 #" + std::to_string(id);
+    ProcessingScope logScope(std::move(context));
     bool prev = capturing_; capturing_ = false;   // timer runs outside a message turn → replies route
     JSValue r = JS_Call(ctx_, cb, JS_UNDEFINED, 0, nullptr);
     const bool failed = JS_IsException(r);
-    if (failed) { JSValue e = JS_GetException(ctx_); DICE_LOG_ERROR("[js] timer error: {}", jsErrorDetails(ctx_, e)); JS_FreeValue(ctx_, e); }
+    if (failed) { JSValue e = JS_GetException(ctx_); DICE_LOG_ERROR("定时回调执行失败：{}", jsErrorDetails(ctx_, e)); JS_FreeValue(ctx_, e); }
+    const bool jobsFinished = drainJobs();
+    const bool rejected = logRejectedPromise(ctx_, r, "定时回调");
+    const bool pending = JS_PromiseState(ctx_, r) == JS_PROMISE_PENDING;
+    if (!failed && !rejected && jobsFinished && !ScriptExecution::expired())
+        for (const auto& source : activeProcessingContext.sources) logProcessingResult(source,
+            pending ? "定时回调已进入异步等待，尚未执行完成" : "定时回调执行完成", activeProcessingContext.trigger);
     JS_FreeValue(ctx_, r);
-    drainJobs();
     JS_FreeValue(ctx_, cb);
     capturing_ = prev;
     it = timers_.find(id);                          // callback may have cleared itself
@@ -1626,7 +1665,41 @@ void JsPluginManager::fireTimer(int64_t id) {
 
 void JsPluginManager::routeReply(const std::string& platform, bool isPrivate,
                                  const std::string& groupId, const std::string& userId, const std::string& text) {
+    OutboundScope newOutput(nullptr);
     if (sender_) sender_(platform, isPrivate, groupId, userId, text);
+}
+
+ProcessingSource JsPluginManager::loggingSource(const std::string& file, const std::string& entry) const {
+    const PluginMeta* matched = nullptr;
+    for (const auto& plugin : plugins_) if (plugin.file == file && !plugin.superseded) {
+        if (matched && matched->name != plugin.name)
+            return {"JS 插件", "来源文件重名，无法可靠区分", file, entry};
+        matched = &plugin;
+    }
+    if (matched) return {"JS 插件", matched->name.empty() ? file : matched->name, file, entry};
+    return {"JS 插件", file.empty() ? "未识别插件" : file, file, entry};
+}
+
+ProcessingContext JsPluginManager::loggingContextForCall() const {
+    // Inspect the actual executing JS bytecode's filename, not the most recently
+    // invoked plugin. This also distinguishes await continuations resumed by a
+    // different plugin's timer and direct cross-plugin calls.
+    for (int frame = 0; ctx_ && frame < 8; ++frame) {
+        const JSAtom atom = JS_GetScriptOrModuleName(ctx_, frame);
+        if (atom == JS_ATOM_NULL) continue;
+        const char* name = JS_AtomToCString(ctx_, atom);
+        const std::string file = name ? name : "";
+        if (name) JS_FreeCString(ctx_, name);
+        JS_FreeAtom(ctx_, atom);
+        for (const auto& plugin : plugins_) if (plugin.file == file) {
+            auto context = activeProcessingContext;
+            const std::string entry = !context.sources.empty() && context.sources[0].file == file
+                ? context.sources[0].entry : "异步或跨插件调用";
+            context.sources = {loggingSource(file, entry)};
+            return context;
+        }
+    }
+    return activeProcessingContext;
 }
 
 JSValue JsPluginManager::findExt(const std::string& name) const {
@@ -1711,6 +1784,7 @@ int JsPluginManager::reload(const std::string& dir) {
     try {
         const int count = loadDirLocked(dir);
         operation.detail("loaded=" + std::to_string(count));
+        if (lastLoadErrors_) operation.partial(std::to_string(lastLoadErrors_) + " 项插件加载或初始化失败，其余已载入");
         return count;
     } catch (const std::exception& e) {
         DICE_LOG_ERROR("[js] reload failed; runtime remains available with no newly loaded plugins: {}", e.what());
@@ -1725,6 +1799,7 @@ int JsPluginManager::reload(const std::string& dir) {
 std::optional<std::string> JsPluginManager::evalString(const std::string& script) {
     std::lock_guard<ScriptMutex> lk(mutex_);
     if (!ctx_) return std::nullopt;
+    ProcessingScope logScope(ProcessingSource{"JS 脚本", "临时执行", "<card-template>", "求值"});
     JS_UpdateStackTop(rt_);
     JSValue r = JS_Eval(ctx_, script.c_str(), script.size(), "<card-template>", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(r)) {
@@ -1754,26 +1829,30 @@ std::vector<JsPluginManager::ConfigItem> JsPluginManager::configs() const {
     return configs_;
 }
 
-void JsPluginManager::drainJobs() {
-    if (!rt_ || jobsSuspended_) return;
+bool JsPluginManager::drainJobs() {
+    if (!rt_ || jobsSuspended_) return !jobsSuspended_;
     JSContext* cctx = nullptr;
     // Bounded loop: run queued promise jobs until none remain (or error).
     for (int i = 0; i < 100000; ++i) {
         if (ScriptExecution::expired()) {
             jobsSuspended_ = true;
-            DICE_LOG_ERROR("[js] Promise queue suspended after execution timeout; reload to recover");
-            break;
+            if (capturing_) pendingFailed_ = true;
+            DICE_LOG_ERROR("JS 异步任务队列因执行超时已暂停，请重载插件恢复。");
+            return false;
         }
         int err = JS_ExecutePendingJob(rt_, &cctx);
-        if (err == 0) break;            // no more jobs
+        if (err == 0) return true;      // no more jobs
         if (err < 0) {                  // a job threw — surface and stop
+            if (capturing_) pendingFailed_ = true;
+            ProcessingScope unknown(ProcessingSource{"JS 异步任务", "归属以脚本堆栈为准", "", "Promise"});
             if (ScriptExecution::expired()) jobsSuspended_ = true;
             JSValue exc = JS_GetException(cctx ? cctx : ctx_);
-            DICE_LOG_ERROR("[js] async job error: {}", jsErrorDetails(cctx ? cctx : ctx_, exc));
+            DICE_LOG_ERROR("JS 异步任务执行失败：{}", jsErrorDetails(cctx ? cctx : ctx_, exc));
             JS_FreeValue(cctx ? cctx : ctx_, exc);
-            break;
+            return false;
         }
     }
+    return false;
 }
 
 std::vector<JsPluginManager::PluginMeta> JsPluginManager::listAll() const {
@@ -2253,13 +2332,16 @@ void JsPluginManager::dispatchCommandHookLocked(const Message& message, JSValueC
             && !groupGate_(message.platform, groupId, "js:" + e.second, message.adapterId)) continue;
         JSValue hook = JS_GetPropertyStr(ctx_, e.first, "onCommandReceived");
         if (JS_IsFunction(ctx_, hook)) {
+            ProcessingScope logScope(loggingSource(e.second, "onCommandReceived"), message.content);
             JSValue result = JS_Call(ctx_, hook, e.first, 3, args);
             if (JS_IsException(result)) {
+                pendingFailed_ = true;
                 JSValue exc = JS_GetException(ctx_);
                 DICE_LOG_ERROR("[js] onCommandReceived plugin='{}' error: {}", e.second, jsErrorDetails(ctx_, exc));
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, result);
+            drainJobs();
         }
         JS_FreeValue(ctx_, hook);
     }
@@ -2286,7 +2368,7 @@ JsPluginManager::Result JsPluginManager::dispatchMessageHook(
     JS_UpdateStackTop(rt_);
     JSValue jctx, jmsg;
     buildCtxMsg(message, privilege, jctx, jmsg);
-    pendingReply_.clear();
+    pendingReply_.clear(); pendingSources_.clear(); pendingFailed_ = false;
     sideEffectReply_ = false;
     capturing_ = true;
     JSValueConst args[2] = { jctx, jmsg };
@@ -2298,20 +2380,23 @@ JsPluginManager::Result JsPluginManager::dispatchMessageHook(
             && !groupGate_(message.platform, groupId, "js:" + e.second, message.adapterId)) continue;
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, hook);
         if (JS_IsFunction(ctx_, fn)) {
+            ProcessingScope logScope(loggingSource(e.second, hook), message.content);
             JSValue r = JS_Call(ctx_, fn, e.first, 2, args);
             if (JS_IsException(r)) {
+                pendingFailed_ = true;
                 JSValue exc = JS_GetException(ctx_);
                 DICE_LOG_ERROR("[js] plugin '{}' hook={} adapter={} platform={} error: {}", e.second, hook,
                     message.adapterId, message.platform, jsErrorDetails(ctx_, exc));
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, r);
+            drainJobs();
         }
         JS_FreeValue(ctx_, fn);
     }
     drainJobs();
     capturing_ = false;
-    res.reply = pendingReply_;
+    res.reply = pendingReply_; res.sources = pendingSources_; res.failed = pendingFailed_;
     res.matched = !pendingReply_.empty() || sideEffectReply_;
     JS_FreeValue(ctx_, jctx); JS_FreeValue(ctx_, jmsg);
     return res;
@@ -2341,7 +2426,7 @@ void JsPluginManager::handleMessageSend(const Message& contextMessage,
     JSValue jflag = JS_NewString(ctx_, flag.c_str());
     JSValueConst args[3] = {jctx, jmsg, jflag};
 
-    pendingReply_.clear();
+    pendingReply_.clear(); pendingSources_.clear(); pendingFailed_ = false;
     sideEffectReply_ = false;
     const bool previousCapture = capturing_;
     // onMessageSend is observational and runs after delivery. Replies made by
@@ -2356,6 +2441,7 @@ void JsPluginManager::handleMessageSend(const Message& contextMessage,
             && !groupGate_(sentMessage.platform, groupId, "js:" + e.second, sentMessage.adapterId)) continue;
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, "onMessageSend");
         if (JS_IsFunction(ctx_, fn)) {
+            ProcessingScope logScope(loggingSource(e.second, "onMessageSend"), "发送消息钩子");
             JSValue rv = JS_Call(ctx_, fn, e.first, 3, args);
             if (JS_IsException(rv)) {
                 JSValue exc = JS_GetException(ctx_);
@@ -2363,6 +2449,7 @@ void JsPluginManager::handleMessageSend(const Message& contextMessage,
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, rv);
+            drainJobs();
         }
         JS_FreeValue(ctx_, fn);
     }
@@ -2386,13 +2473,13 @@ JsPluginManager::Result JsPluginManager::handleCommandReceived(
     JSValue jctx, jmsg;
     buildCtxMsg(message, privilege, jctx, jmsg);
     JSValue jargs = buildCmdArgs(message, cmdLine, command, rest);
-    pendingReply_.clear();
+    pendingReply_.clear(); pendingSources_.clear(); pendingFailed_ = false;
     sideEffectReply_ = false;
     capturing_ = true;
     dispatchCommandHookLocked(message, jctx, jmsg, jargs);
     drainJobs();
     capturing_ = false;
-    res.reply = pendingReply_;
+    res.reply = pendingReply_; res.sources = pendingSources_; res.failed = pendingFailed_;
     res.matched = !pendingReply_.empty() || sideEffectReply_;
     JS_FreeValue(ctx_, jctx);
     JS_FreeValue(ctx_, jmsg);
@@ -2489,6 +2576,7 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
             && !groupGate_(event.platform, event.groupId, "js:" + e.second, event.adapterId)) continue;
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, hook);
         if (JS_IsFunction(ctx_, fn)) {
+            ProcessingScope logScope(loggingSource(e.second, hook), "平台事件：" + std::string(hook));
             JSValue rv = JS_Call(ctx_, fn, e.first, 2, args);
             if (JS_IsException(rv)) {
                 JSValue exc = JS_GetException(ctx_);
@@ -2496,6 +2584,7 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, rv);
+            drainJobs();
         }
         JS_FreeValue(ctx_, fn);
     }
@@ -2571,13 +2660,13 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
         JSValue jctx, jmsg;
         buildCtxMsg(message, privilege, jctx, jmsg);
         JSValue jargs = buildCmdArgs(message, cmdLine, matchedWord, rest);
-        pendingReply_.clear();
+        pendingReply_.clear(); pendingSources_.clear(); pendingFailed_ = false;
         sideEffectReply_ = false;
         capturing_ = true;
         dispatchCommandHookLocked(message, jctx, jmsg, jargs);
         drainJobs();
         capturing_ = false;
-        res.reply = pendingReply_;
+        res.reply = pendingReply_; res.sources = pendingSources_; res.failed = pendingFailed_;
         res.matched = !pendingReply_.empty() || sideEffectReply_;
         JS_FreeValue(ctx_, jctx);
         JS_FreeValue(ctx_, jmsg);
@@ -2586,13 +2675,15 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
     }
 
     ScriptFaultScope commandFault(suspendedFiles_, commandFile);
+    const auto commandSource = loggingSource(commandFile, word);
+    ProcessingScope commandLogScope(commandSource, message.content);
     JSValue solve = JS_GetPropertyStr(ctx_, cmd, "solve");
 
     JSValue jctx, jmsg;
     buildCtxMsg(message, privilege, jctx, jmsg);
 
     JSValue jargs = buildCmdArgs(message, cmdLine, matchedWord, rest);
-    pendingReply_.clear();
+    pendingReply_.clear(); pendingSources_.clear(); pendingFailed_ = false;
     sideEffectReply_ = false;
     JSValueConst callArgs[3] = { jctx, jmsg, jargs };
     capturing_ = true;   // solve and post-command hook replies belong to this turn
@@ -2600,6 +2691,7 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
     if (JS_IsFunction(ctx_, solve)) {
         rv = JS_Call(ctx_, solve, cmd, 3, callArgs);
         if (JS_IsException(rv)) {
+            pendingFailed_ = true;
             JSValue exc = JS_GetException(ctx_);
             DICE_LOG_ERROR("[js] command='{}' adapter={} platform={} error: {}", word,
                 message.adapterId, message.platform, jsErrorDetails(ctx_, exc));
@@ -2621,7 +2713,13 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
     capturing_ = false;
 
     res.matched = true;
-    res.reply = pendingReply_;
+    if (logRejectedPromise(ctx_, rv, "插件指令")) pendingFailed_ = true;
+    res.pending = JS_PromiseState(ctx_, rv) == JS_PROMISE_PENDING;
+    res.reply = pendingReply_; res.sources = pendingSources_; res.failed = pendingFailed_;
+    if (!JS_IsException(rv) && !res.failed && !ScriptExecution::expired() && res.reply.empty())
+        logProcessingResult(commandSource, JS_PromiseState(ctx_, rv) == JS_PROMISE_PENDING
+            ? "已进入异步等待，当前尚未返回文本回复" : sideEffectReply_
+            ? "指令执行完成，已发起独立发送，没有附加文本回复" : "指令执行完成，没有返回文本回复", message.content);
 
     JS_FreeValue(ctx_, rv);
     JS_FreeValue(ctx_, jctx); JS_FreeValue(ctx_, jmsg); JS_FreeValue(ctx_, jargs);

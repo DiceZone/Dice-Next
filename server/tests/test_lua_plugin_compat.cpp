@@ -71,6 +71,43 @@ private:
 
 }  // namespace
 
+TEST(LuaPluginCompat, PluginLogPrintSeverityAndDelayedOriginsReachStructuredLogs) {
+    TempWorkspace workspace("dice_lua_logs_");
+    writeText("data/plugin/LogOrigin.lua", R"LUA(
+msg_order = { [".logorigin"] = "run" }
+function run(msg)
+  log('lua-own-info'); print('lua-print-marker', 42)
+  logWarn('lua-own-warn'); logError('lua-own-error'); logDebug('lua-own-debug')
+  sleepTime(1)
+  print('lua-delayed-marker')
+  return 'delayed reply'
+end
+)LUA");
+    const auto previous = std::string(logLevelName(logRecordingLevel()));
+    configureLogger(nlohmann::json{{"server", {{"log_level", "debug"}}}});
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    std::vector<std::function<void()>> callbacks;
+    manager.setScheduler([&](double, std::function<void()> cb) { callbacks.push_back(std::move(cb)); });
+    std::string returned, source;
+    manager.setAsyncReply([&](const auto&, const auto&, const auto&, const auto& text) { returned = text; source = activeProcessingContext.sources[0].name; });
+    manager.loadDir("data/mod");
+    auto result = manager.dispatch(".logorigin", "42", "1001", "用户", "", false, 0, "onebot_v11");
+    ASSERT_TRUE(result.matched); ASSERT_EQ(result.sources.size(), size_t(1));
+    ASSERT_EQ(callbacks.size(), size_t(1)); auto callback = std::move(callbacks[0]); callbacks.clear(); callback();
+    bool printed = false, warning = false, error = false, debug = false, delayed = false;
+    for (const auto& record : recentLogRecords(1000)) {
+        const auto text = record["message"].get<std::string>();
+        if (text.find("lua-print-marker") != std::string::npos) printed = text.find("42") != std::string::npos;
+        if (text.find("lua-own-warn") != std::string::npos) warning = record["level"] == "warn";
+        if (text.find("lua-own-error") != std::string::npos) error = record["level"] == "error";
+        if (text.find("lua-own-debug") != std::string::npos) debug = record["level"] == "debug";
+        if (text.find("lua-delayed-marker") != std::string::npos) delayed = record["details"]["processing"]["sources"][0]["name"] == "LogOrigin";
+    }
+    configureLogger(nlohmann::json{{"server", {{"log_level", previous}}}});
+    ASSERT_TRUE(printed && warning && error && debug && delayed);
+    ASSERT_EQ(returned, std::string("delayed reply")); ASSERT_EQ(source, std::string("LogOrigin"));
+}
+
 TEST(LuaPluginCompat, ExecutionTimeoutCannotBeCaughtOrRemovedAndRuntimeRecovers) {
     TestWatchdog watchdog;
     TempWorkspace workspace("dice_next_lua_deadline_");

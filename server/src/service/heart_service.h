@@ -635,6 +635,11 @@ private:
         std::lock_guard<std::mutex> lock(mu_);
         auto& state = states_[adapterId];
         if (httpStatus == 200) {
+            const bool first = state.lastReportAt == 0;
+            const bool recovered = !state.lastError.empty();
+            if (first || recovered)
+                DICE_LOG_SUCCESS("BDC「{}」心跳{}：服务端已接受本次 {} 状态上报。", adapterName, first ? "首次上报成功" : "恢复成功", reported);
+            else DICE_LOG_DEBUG("BDC「{}」例行心跳上报完成，服务端接受 {} 状态。", adapterName, reported);
             if (state.lastStatus != reported) state.lastSwitchAt = now;
             state.lastStatus = reported;
             state.lastReportAt = now;

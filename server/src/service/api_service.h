@@ -692,17 +692,31 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 
-    // Console log display mode (human-readable vs raw OneBot JSON).
+    // Recording threshold is independent from each browser's display filter.
     app.registerHandler("/api/system/log-mode", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
                 auto j = J::parse(req->body());
-                bool raw = j.value("raw", false);
-                OneBotV11Adapter::s_rawEventLog = raw;
-                cfg.set<bool>("log/raw_events", raw);
-                cfg.save();
+                if (!j.is_object()) { jsonReply(fail("log settings must be an object"), std::move(cb)); return; }
+                if (j.contains("raw") && !j["raw"].is_boolean()) { jsonReply(fail("raw must be a boolean"), std::move(cb)); return; }
+                if (j.contains("level")) {
+                    if (!j["level"].is_string() || !validLogLevel(j["level"].get<std::string>())) {
+                        jsonReply(fail("日志级别必须是 trace、debug、info、success、warn 或 error"), std::move(cb)); return;
+                    }
+                    cfg.set<std::string>("server/log_level", j["level"].get<std::string>());
+                }
+                if (j.contains("raw")) {
+                    if (!j["raw"].is_boolean()) { jsonReply(fail("raw must be a boolean"), std::move(cb)); return; }
+                    const bool raw = j["raw"].get<bool>();
+                    OneBotV11Adapter::s_rawEventLog = raw;
+                    cfg.set<bool>("log/raw_events", raw);
+                }
+                if (!cfg.save()) { jsonReply(fail("日志设置保存失败"), std::move(cb)); return; }
+                configureLogger(cfg.getAll());
             }
-            jsonReply(ok(J{{"raw", OneBotV11Adapter::s_rawEventLog.load()}}), std::move(cb));
+            std::string level(logLevelName(logRecordingLevel()));
+            std::transform(level.begin(), level.end(), level.begin(), [](unsigned char c) { return std::tolower(c); });
+            jsonReply(ok(J{{"raw", OneBotV11Adapter::s_rawEventLog.load()}, {"level", level}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
@@ -2321,6 +2335,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             // Read last 20 lines from log file for dashboard display
             J logs = J::array();
             auto readRecentLogs = []() -> J {
+                // New records have independent module/level/diagnostic fields.
+                // Legacy installations keep the bounded text-file fallback.
+                auto current = recentLogRecords(500);
+                if (!current.empty()) return current;
                 J arr = J::array();
                 // 运行日志已迁到 data/logs/app/dice-<启动时间戳>_<日期>.log，且每次启动+每日
                 // 切割成新文件（#31）。首页要读「最新的那个」，否则会卡在旧文件/旧路径。
@@ -2380,7 +2398,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (start < 0) start = 0;
                 for (int i = start; i < (int)lines.size(); ++i) {
                     // Parse "[2026-06-14 13:52:54.340] [info] [dice] message"
-                    std::string ts, lvl, msg = lines[i];
+                    std::string ts, lvl, module, msg = lines[i];
                     if (msg.size() > 26 && msg[0] == '[') {
                         ts = msg.substr(1, 23);  // 2026-06-14 13:52:54.340
                         auto lvlEnd = msg.find(']', 25);
@@ -2388,15 +2406,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                             lvl = msg.substr(27, lvlEnd - 27); // info/warn/error
                             auto diceEnd = msg.find(']', lvlEnd + 1);
                             if (diceEnd != std::string::npos) {
+                                module = msg.substr(lvlEnd + 3, diceEnd - lvlEnd - 3);
                                 msg = msg.substr(diceEnd + 2);
                             }
                         }
                     }
+                    lvl = std::string(logLevelName(parseLogLevel(lvl)));
+                    std::transform(lvl.begin(), lvl.end(), lvl.begin(), [](unsigned char c) { return std::tolower(c); });
                     arr.push_back({
                         {"id", std::to_string(i)},
                         {"timestamp", ts},
                         {"level", lvl.empty() ? "info" : lvl},
-                        {"message", msg}
+                        {"module", module.empty() ? "系统" : module}, {"message", msg}
                     });
                 }
                 return arr;

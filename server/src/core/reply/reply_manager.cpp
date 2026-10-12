@@ -187,11 +187,11 @@ ReplyManager::ReplyManager(Database& db, ConfigManager& configMgr)
 
     // Register hot-reload callback
     configMgr_.onConfigChanged([this]() {
-        DICE_LOG_INFO("ReplyManager: config changed, reloading rules");
+        DICE_LOG_INFO("配置已变更，重新读取高级回复规则。");
         loadRules();
     });
 
-    DICE_LOG_INFO("ReplyManager: initialized with {} rules", snapshot()->size());
+    DICE_LOG_INFO("高级回复已初始化，共 {} 条规则。", snapshot()->size());
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -201,7 +201,7 @@ ReplyManager::ReplyManager(Database& db, ConfigManager& configMgr)
 void ReplyManager::loadRules() {
     auto* storage = db_.getStorage();
     if (!storage) {
-        DICE_LOG_WARN("ReplyManager: database not open, cannot load rules");
+        DICE_LOG_WARN("数据库未打开，无法读取高级回复规则。");
         return;
     }
 
@@ -235,11 +235,11 @@ void ReplyManager::loadRules() {
                     }
                     return true;
                 });
-                DICE_LOG_WARN("ReplyManager: removed {} duplicate rules", duplicateIds.size());
+                DICE_LOG_WARN("已清理 {} 条完全重复的高级回复规则。", duplicateIds.size());
             } catch (const std::exception& e) {
                 // Runtime matching still uses the de-duplicated snapshot. Retry
                 // persistent cleanup on the next reload rather than failing all rules.
-                DICE_LOG_WARN("ReplyManager: failed to remove duplicate rows: {}", e.what());
+                DICE_LOG_WARN("重复回复规则清理未完成：{}", e.what());
             }
         }
 
@@ -270,11 +270,11 @@ void ReplyManager::loadRules() {
                 return a.id < b.id;
             });
 
-        DICE_LOG_INFO("ReplyManager: loaded {} rules", next->size());
+        DICE_LOG_DEBUG("已读取 {} 条高级回复规则。", next->size());
         std::lock_guard<std::mutex> lock(rulesMutex_);
         rules_ = std::move(next);
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("ReplyManager: failed to load rules: {}", e.what());
+        DICE_LOG_ERROR("高级回复规则读取失败：{}", e.what());
     }
 }
 
@@ -283,7 +283,7 @@ int ReplyManager::addRule(const ReplyRule& rule, bool* deduplicated) {
     if (!reply_channel_scope::validate(rule.channelScope, rule.channelTarget).empty()) return -1;
     auto* storage = db_.getStorage();
     if (!storage) {
-        DICE_LOG_ERROR("ReplyManager: database not open");
+        DICE_LOG_ERROR("数据库未打开，本次回复规则操作未执行。");
         return -1;
     }
 
@@ -292,7 +292,7 @@ int ReplyManager::addRule(const ReplyRule& rule, bool* deduplicated) {
         for (const auto& existing : *snapshot()) {
             if (semanticFingerprint(existing) != fingerprint) continue;
             if (deduplicated) *deduplicated = true;
-            DICE_LOG_INFO("ReplyManager: identical rule already exists as id={}", existing.id);
+            DICE_LOG_INFO("相同回复规则已存在，沿用规则 #{}，没有重复新增。", existing.id);
             return existing.id;
         }
 
@@ -320,10 +320,10 @@ int ReplyManager::addRule(const ReplyRule& rule, bool* deduplicated) {
         // Reload to keep cache consistent
         loadRules();
 
-        DICE_LOG_INFO("ReplyManager: added rule id={}", newId);
+        DICE_LOG_INFO("已新增高级回复规则 #{}。", newId);
         return newId;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("ReplyManager: failed to add rule: {}", e.what());
+        DICE_LOG_ERROR("新增高级回复规则失败：{}", e.what());
         return -1;
     }
 }
@@ -333,7 +333,7 @@ bool ReplyManager::updateRule(int id, const ReplyRule& rule, bool* deduplicated)
     if (!reply_channel_scope::validate(rule.channelScope, rule.channelTarget).empty()) return false;
     auto* storage = db_.getStorage();
     if (!storage) {
-        DICE_LOG_ERROR("ReplyManager: database not open");
+        DICE_LOG_ERROR("数据库未打开，本次回复规则操作未执行。");
         return false;
     }
 
@@ -343,7 +343,7 @@ bool ReplyManager::updateRule(int id, const ReplyRule& rule, bool* deduplicated)
         );
 
         if (rows.empty()) {
-            DICE_LOG_WARN("ReplyManager: rule id={} not found for update", id);
+            DICE_LOG_WARN("待修改的高级回复规则 #{} 不存在，没有保存修改。", id);
             return false;
         }
 
@@ -383,16 +383,16 @@ bool ReplyManager::updateRule(int id, const ReplyRule& rule, bool* deduplicated)
         });
         if (!duplicateIds.empty()) {
             if (deduplicated) *deduplicated = true;
-            DICE_LOG_INFO("ReplyManager: merged {} duplicate rules into id={}", duplicateIds.size(), id);
+            DICE_LOG_INFO("已将 {} 条重复回复合并至规则 #{}。", duplicateIds.size(), id);
         }
 
         // Reload to keep cache consistent
         loadRules();
 
-        DICE_LOG_INFO("ReplyManager: updated rule id={}", id);
+        DICE_LOG_INFO("已更新高级回复规则 #{}。", id);
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("ReplyManager: failed to update rule id={}: {}", id, e.what());
+        DICE_LOG_ERROR("高级回复规则 #{} 修改失败：{}", id, e.what());
         return false;
     }
 }
@@ -400,7 +400,7 @@ bool ReplyManager::updateRule(int id, const ReplyRule& rule, bool* deduplicated)
 bool ReplyManager::deleteRule(int id) {
     auto* storage = db_.getStorage();
     if (!storage) {
-        DICE_LOG_ERROR("ReplyManager: database not open");
+        DICE_LOG_ERROR("数据库未打开，本次回复规则操作未执行。");
         return false;
     }
 
@@ -412,10 +412,10 @@ bool ReplyManager::deleteRule(int id) {
         // Reload to keep cache consistent
         loadRules();
 
-        DICE_LOG_INFO("ReplyManager: deleted rule id={}", id);
+        DICE_LOG_INFO("已删除高级回复规则 #{}。", id);
         return true;
     } catch (const std::exception& e) {
-        DICE_LOG_ERROR("ReplyManager: failed to delete rule id={}: {}", id, e.what());
+        DICE_LOG_ERROR("高级回复规则 #{} 删除失败：{}", id, e.what());
         return false;
     }
 }
@@ -568,7 +568,7 @@ std::vector<ReplyRule> ReplyManager::matchMessage(const std::string& msg) const 
     }
 
     // Already sorted by loadRules (priority desc, id asc)
-    DICE_LOG_DEBUG("ReplyManager: matched {}/{} rules for message (len={})",
+    DICE_LOG_DEBUG("本次消息命中 {} / {} 条候选回复规则；输入长度 {} 字节。",
         matched.size(), snap->size(), msg.size());
 
     return matched;

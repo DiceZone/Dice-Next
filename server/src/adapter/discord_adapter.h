@@ -1,4 +1,5 @@
 #pragma once
+#include "outbound_logging.h"
 #include "../common/outbound_payload.h"
 
 // Discord Bot adapter — Gateway WebSocket (v10) + REST。
@@ -143,6 +144,9 @@ public:
     }
 private:
     void sendPrivateWire(const std::string& native, const std::string& wire) {
+        auto plan = activeOutboundContext.output;
+        if (!plan) plan = std::make_shared<PreparedOutput>("私聊 " + native, wire);
+        OutboundScope outputScope(plan, activeOutboundContext.part, activeOutboundContext.parts);
         // 需要先建 DM 频道（有缓存则直发）。
         {
             std::lock_guard lock(dmMutex_);
@@ -175,9 +179,21 @@ private:
     /// Token 经 curl -K 配置文件传递，不进命令行（进程列表不可见）。
     void restRequest(const std::string& method, const std::string& path, const json& body,
                      std::function<void(const json&)> onOk) {
+        std::optional<OutboundAttempt> outgoing;
+        if (method == "POST" && path.size() >= 9 && path.substr(path.size() - 9) == "/messages") {
+            std::string actual = body.value("content", std::string());
+            if (body.contains("embeds")) for (const auto& embed : body["embeds"])
+                actual += embed.value("description", std::string());
+            outgoing = OutboundAttempt::prepare("Discord「" + name_ + "」", path, actual);
+        }
+        else outgoing = prepareRestEventLog("Discord「" + name_ + "」", method, path, body);
         auto self = shared_from_this();
         const std::string bodyStr = body.is_null() ? std::string() : body.dump();
-        std::thread([self, method, path, bodyStr, onOk = std::move(onOk)] {
+        auto context = activeProcessingContext;
+        auto outbound = activeOutboundContext;
+        std::thread([self, method, path, bodyStr, outgoing, context, outbound, onOk = std::move(onOk)] {
+            ProcessingScope processingScope(context);
+            OutboundScope outputScope(outbound.output, outbound.part, outbound.parts);
             namespace fs = std::filesystem;
             auto esc = [](const std::string& s) {
                 std::string o; o.reserve(s.size() + 8);
@@ -207,6 +223,7 @@ private:
                         cf << "data-binary = \"@" << esc(bodyF.string()) << "\"\n";
                     }
                 }
+                if (outgoing) outgoing->submitted();
                 out = dice::proc::curlConfig(cfgF, 2 * 1024 * 1024).output;
             } catch (...) {}
             fs::remove(cfgF, ec); fs::remove(bodyF, ec);
@@ -217,13 +234,15 @@ private:
             if (status < 200 || status >= 300) {
                 self->lastError_ = "Discord 请求失败: " + path;
                 self->connecting_ = false;
-                DICE_LOG_WARN("Discord '{}': {} failed: HTTP {} {}", self->name_, path, status,
+                if (outgoing) outgoing->failed(fmt::format("平台请求未成功：HTTP {}；{}", status,
+                    out.empty() ? std::string("未取得响应，请检查网络与 curl") : out.substr(0, 300)));
+                else DICE_LOG_WARN("Discord '{}': {} failed: HTTP {} {}", self->name_, path, status,
                               out.empty() ? std::string("(无响应，请检查网络与 curl)") : out.substr(0, 300));
                 return;
             }
-            if (!onOk) return;
             auto j = json::parse(out, nullptr, false);
-            if (!j.is_discarded()) onOk(j);
+            if (outgoing) outgoing->accepted(j.is_object() ? logJsonId(j, "id") : "");
+            if (!j.is_discarded() && onOk) onOk(j);
         }).detach();
     }
 
@@ -296,14 +315,14 @@ private:
                     loginId_ = user.value("id", std::string());
                     loginName_ = user.value("username", std::string());
                     connected_ = true; connecting_ = false;
-                    DICE_LOG_INFO("Discord '{}': READY as {}({})", name_, loginName_, loginId_);
+                    DICE_LOG_SUCCESS("Discord「{}」连接就绪：账号「{}」（{}）。", name_, loginName_, loginId_);
                 } else if (t == "RESUMED") {
                     connected_ = true; connecting_ = false;
                 } else if (t == "MESSAGE_CREATE") {
                     dispatchMessage(d);
                 }
             }
-        } catch (const std::exception& e) { DICE_LOG_WARN("Discord parse: {}", e.what()); }
+        } catch (const std::exception& e) { DICE_LOG_WARN("Discord 平台事件解析失败：{}", e.what()); }
     }
 
     void identify() {

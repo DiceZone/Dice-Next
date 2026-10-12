@@ -244,15 +244,15 @@ inline Result chat(ConfigManager& cfg, const Model& m,
     if (p.contains("presence_penalty"))  body["presence_penalty"]  = p.value("presence_penalty", 0.0);
 
     DICE_LOG_DEBUG("[AI] >>> request model={} max_tokens={} temp={}", m.model, mt, temp);
-    DICE_LOG_DEBUG("[AI] >>> system: {}", systemPrompt.size() > 500 ? systemPrompt.substr(0, 500) + "..." : systemPrompt);
-    DICE_LOG_DEBUG("[AI] >>> user: {}", userPrompt.size() > 500 ? userPrompt.substr(0, 500) + "..." : userPrompt);
+    DICE_LOG_DEBUG("AI 请求上下文已准备：系统提示 {} 字节、用户输入 {} 字节；正文不写入日志。", systemPrompt.size(), userPrompt.size());
     auto t0 = std::chrono::steady_clock::now();
     int status = 0;
     std::string resp = httpPostJson(endpoint(m.baseUrl), m.apiKey, body.dump(), timeoutSec, status);
     r.latencyMs = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
     DICE_LOG_DEBUG("[AI] <<< HTTP {} latency={}ms body_size={}", status, r.latencyMs, resp.size());
-    if (!resp.empty()) DICE_LOG_DEBUG("[AI] <<< response: {}", resp.size() > 1000 ? resp.substr(0, 1000) + "..." : resp);
+    // Response bodies may contain private conversation/card data; sizes and
+    // parsed error information are sufficient even at TRACE/DEBUG.
 
     if (status < 200 || status >= 300) {
         r.error = "HTTP " + std::to_string(status);
@@ -277,7 +277,7 @@ inline Result chat(ConfigManager& cfg, const Model& m,
             r.completionTokens = j["usage"].value("completion_tokens", (long long)0);
             r.totalTokens = j["usage"].value("total_tokens", r.promptTokens + r.completionTokens);
         }
-    } catch (...) { r.error = "invalid response: " + resp.substr(0, 200); DICE_LOG_WARN("[AI] invalid response: model={} resp={}", m.model, resp.substr(0, 200)); return r; }
+    } catch (...) { r.error = "AI 服务响应格式无效"; DICE_LOG_WARN("模型「{}」返回的响应格式无效，本次未取得可用回复。", m.model); return r; }
 
     if (r.reply.empty()) { r.error = "empty reply"; DICE_LOG_WARN("[AI] empty reply: model={}", m.model); return r; }
     r.cost = (r.promptTokens / 1.0e6) * m.priceIn + (r.completionTokens / 1.0e6) * m.priceOut;
