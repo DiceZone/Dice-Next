@@ -4,6 +4,7 @@
 #include "storage/group_account_settings.h"
 #include "common/weighted_reply.h"
 #include "core/reply/poke_reply.h"
+#include "core/causal/causal_rule_manager.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -468,6 +469,63 @@ TEST(SampleTemplate, CustomReplyRetainsShorthandAndSelectedVariables) {
     ASSERT_EQ(f.router.renderReply(f.msg, "{sample:{$1}}", "^(.+)$", MatchType::kRegex), "");
     f.msg.content = "{sample:不执行|不执行}";
     ASSERT_EQ(f.router.renderReply(f.msg, "{sample:{$1}}", "^(.+)$", MatchType::kRegex), f.msg.content);
+}
+
+TEST(ReplyRegex, DispatchAndRenderedCapturesShareWholeMatchAndActualCondition) {
+    LegacyFixture f;
+    ReplyManager replies{f.db, f.cfg};
+    auto rule = reply_definition::replyRuleFromJson({
+        {"conditions", {{{"type", "keyword"}, {"content", "never"}},
+                        {{"type", "regex"}, {"content", "(a)|(ab)"}}}},
+        {"logic", "or"}, {"results", {"{$0}|{$1}|{$2}"}}
+    });
+    ASSERT_TRUE(replies.addRule(rule) > 0);
+    const ReplyCtx ctx{f.msg.platform, f.msg.targetId, f.msg.senderId, f.msg.adapterId};
+    f.msg.content = "ab";
+    const auto picked = replies.pickReply(f.msg.content, ctx, false);
+    ASSERT_TRUE(picked.rule.has_value());
+    ASSERT_TRUE(picked.rule->matchType == MatchType::kRegex);
+    ASSERT_EQ(f.router.renderReply(f.msg, replies.pickResult(*picked.rule),
+        picked.rule->matchContent, picked.rule->matchType), "ab||ab");
+    f.msg.content = "abc";
+    ASSERT_FALSE(replies.pickReply(f.msg.content, ctx, false).rule.has_value());
+    ASSERT_EQ(f.router.renderReply(f.msg, "{$0}|{$1}|{$2}", "(a)|(ab)", MatchType::kRegex), "||");
+    f.msg.content = "aaaa";
+    ASSERT_EQ(f.router.renderReply(f.msg, "{$0}|{$1}|{$2}", "(a+?)(a*)", MatchType::kRegex), "aaaa|a|aaa");
+    f.msg.content = " a ";
+    ASSERT_EQ(f.router.renderReply(f.msg, "{$0}|{$1}", "( a )", MatchType::kRegex), " a | a ");
+}
+
+TEST(ReplyRegex, CausalLiveAndDraftRenderTheSameCapturesWithoutReparsingUserText) {
+    LegacyFixture f;
+    CooldownManager cooldown;
+    CounterStore counters{f.db};
+    CausalRuleManager causal{f.db, f.cfg, cooldown, counters};
+    auto rule = CausalRule::fromJSON({
+        {"name", "regex capture"}, {"scope", "global"}, {"logic", "or"},
+        {"conditions", {{{"type", "keyword"}, {"content", "never"}},
+                        {{"type", "regex"}, {"content", "^点歌 (.+)$"}}}},
+        {"actions", {{{"type", "reply"}, {"replies", {"已点播《{$1}》/{$0}"}}}}}
+    });
+    ASSERT_TRUE(causal.addRule(rule) > 0);
+    f.msg.content = "点歌 测试";
+    const auto render = [&](const CausalMatchResult& result) {
+        return f.router.renderReplyWithGroups(f.msg, result.reply, result.captures);
+    };
+    const auto live = causal.matchAndExecute(f.msg.content, f.msg.senderId, f.msg.targetId, f.msg.senderName);
+    const auto draft = causal.testDraft(rule, f.msg.content, f.msg.senderId, f.msg.targetId, f.msg.senderName);
+    ASSERT_TRUE(live.matched);
+    ASSERT_TRUE(draft.matched);
+    ASSERT_EQ(render(live), "已点播《测试》/点歌 测试");
+    ASSERT_EQ(render(live), render(draft));
+    f.msg.content = "点歌 {sample:甲|乙}{roll:1d1}{$2}";
+    const auto literal = causal.testDraft(rule, f.msg.content, "u", "g", "N");
+    ASSERT_TRUE(literal.matched);
+    ASSERT_EQ(render(literal), "已点播《{sample:甲|乙}{roll:1d1}{$2}》/" + f.msg.content);
+    rule.conditions = {{CausalCondType::Prefix, "点歌 "}};
+    const auto prefix = causal.testDraft(rule, f.msg.content, "u", "g", "N");
+    ASSERT_TRUE(prefix.matched);
+    ASSERT_EQ(render(prefix), render(literal));
 }
 
 TEST(LegacyReply, WeightedAnswersStripTheMarkerAfterDatabaseReload) {

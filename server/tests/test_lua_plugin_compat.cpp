@@ -588,6 +588,30 @@ msg_reply.game = {
     ASSERT_EQ(run("gameflag").reply, std::string("bool-ok"));
 }
 
+TEST(LuaPluginCompat, WholeRegexBacktracksForAlternativesLazyQuantifiersAndChineseLimits) {
+    TempWorkspace workspace("dice_lua_regex_full_");
+    const fs::path mod = workspace.root() / "data" / "mod" / "regex";
+    fs::create_directories(mod / "reply");
+    writeText(mod / "reply" / "rules.lua", R"LUA(
+msg_reply.alt = { keyword = { Regex = [[(a|ab)]] }, echo = "alt:{suffix}" }
+msg_reply.lazy = { keyword = { Regex = [[(z+?)]] }, echo = "lazy:{suffix}" }
+msg_reply.chinese = { keyword = { Regex = [[^白(丽|麗).{0,6}]] }, echo = "chinese-ok" }
+msg_reply.spaces = { keyword = { Regex = [[( a )]] }, echo = "spaces:{suffix}" }
+)LUA");
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
+    auto run = [&](const std::string& text) { return manager.dispatch(text, "u", "g", "Tester", "", false); };
+    ASSERT_EQ(run("ab").reply, "alt:ab");
+    ASSERT_FALSE(run("abc").matched);
+    ASSERT_EQ(run("zzzz").reply, "lazy:zzzz");
+    ASSERT_FALSE(run("zzzz!").matched);
+    ASSERT_EQ(run("白丽").reply, "chinese-ok");
+    ASSERT_EQ(run("白麗一二三四五六").reply, "chinese-ok");
+    ASSERT_FALSE(run("白麗一二三四五六七").matched);
+    ASSERT_EQ(run(" a ").reply, "spaces: a ");
+}
+
 TEST(LuaPluginCompat, TomlVariableConditionsFailClosedWhenUnsupported) {
     TempWorkspace workspace("dice_next_lua_toml_limits_");
     const auto mod = workspace.root() / "data" / "mod" / "limits";

@@ -10,6 +10,7 @@ set(TEST_SOURCES
     test_logger.cpp
     test_network_info.cpp
     test_runtime_reliability.cpp
+    test_bounded_regex.cpp
     test_script_execution_windows_macros.cpp
     test_startup_guard.cpp
     test_tray_settings.cpp

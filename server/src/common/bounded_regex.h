@@ -27,17 +27,35 @@ public:
         constexpr const char* source = R"JS((() => {
             const cache = new Map();
             return (pattern, text, mode, validate) => {
-                let re = cache.get(pattern);
-                if (!re) {
-                    re = new RegExp(pattern, 'i');
+                let entry = cache.get(pattern);
+                if (!entry) {
+                    // Validate the original before wrapping it: malformed
+                    // parentheses/escapes must not become valid accidentally.
+                    entry = { raw: new RegExp(pattern, 'i') };
                     if (cache.size >= 256) cache.clear();
-                    cache.set(pattern, re);
+                    cache.set(pattern, entry);
+                }
+                let re = entry.raw;
+                if (mode === 2) {
+                    // Full matching must participate in backtracking. Taking
+                    // the first exec() result and checking its length loses
+                    // later alternatives and lazy-quantifier expansions.
+                    // Noncapturing wrapping preserves group numbers; the
+                    // final assertion requires the actual end of the input.
+                    if (!entry.full)
+                        entry.full = new RegExp('^(?:' + pattern + ')(?![\\s\\S])', 'i');
+                    re = entry.full;
                 }
                 if (validate) return true;
                 const match = re.exec(text);
                 if (!match || (mode > 0 && match.index !== 0) ||
                     (mode === 2 && match[0].length !== text.length)) return null;
-                return match;
+                // Non-'u' patterns can capture half of a surrogate pair.
+                // Export those code units as replacement characters, not
+                // invalid UTF-8 that would break reply JSON or platform APIs.
+                // Preserve normal captures, including embedded NUL, unchanged.
+                return match.map(group => group === undefined || group.isWellFormed()
+                    ? group : group.toWellFormed());
             };
         })())JS";
         function_ = JS_Eval(context_, source, std::strlen(source), "<bounded-regex>", JS_EVAL_TYPE_GLOBAL);
@@ -87,8 +105,9 @@ public:
             JS_FreeValue(context_, length);
             for (uint32_t i = 0; i < count && i < 1024; ++i) {
                 JSValue group = JS_GetPropertyUint32(context_, value, i);
-                const char* textValue = JS_IsUndefined(group) ? nullptr : JS_ToCString(context_, group);
-                result.groups.emplace_back(textValue ? textValue : "");
+                size_t groupBytes = 0;
+                const char* textValue = JS_IsUndefined(group) ? nullptr : JS_ToCStringLen(context_, &groupBytes, group);
+                result.groups.emplace_back(textValue ? std::string(textValue, groupBytes) : std::string());
                 if (textValue) JS_FreeCString(context_, textValue);
                 JS_FreeValue(context_, group);
             }

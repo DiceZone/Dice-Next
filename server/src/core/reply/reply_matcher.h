@@ -8,6 +8,7 @@
 #include "../../common/types.h"
 
 namespace dice {
+struct RegexResult;
 
 /**
  * @brief Reply rule matching engine.
@@ -17,7 +18,7 @@ namespace dice {
  *                （整条消息与关键词完全相等，对齐原版 Match 模式；
  *                「出现在消息里即可」请用 search）
  *   2. prefix  — input starts with pattern (case-insensitive)
- *   3. regex   — time-bounded ECMAScript regex, anchored at message start
+ *   3. regex   — time-bounded ECMAScript regex, matching the whole message
  *   4. search  — case-insensitive containment (anywhere)
  *
  * All matching functions return true if the input matches
@@ -27,7 +28,7 @@ class ReplyMatcher {
 public:
     ReplyMatcher() = default;
 
-    /// 正则长度上限（对齐原版 400 字；执行时另设时限防 ReDoS）。
+    /// 正则长度上限：400 UTF-8 字节；执行时另设时限防 ReDoS。
     static constexpr size_t kMaxRegexLen = 400;
 
     /**
@@ -36,6 +37,9 @@ public:
      * @param err  非空时写入失败原因。
      */
     static bool validateRegex(const std::string& pattern, std::string* err = nullptr);
+
+    /// Shared whole-message matching and captures for dispatch and rendering.
+    static RegexResult regexMatch(const std::string& input, const std::string& pattern);
 
     /**
      * @brief Unified entry point: dispatch to the correct

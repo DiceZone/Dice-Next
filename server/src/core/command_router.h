@@ -9514,9 +9514,8 @@ public:
         std::vector<std::string> groups;
         if (type == MatchType::kRegex) {
             try {
-                // Anchored at start, mirroring ReplyMatcher::matchRegex, so the
-                // captured groups line up with what actually triggered the rule.
-                groups = boundedRegex(matchContent, msg.content, RegexMode::Prefix).groups;
+                // Use the same whole-message engine and limits as dispatch.
+                groups = ReplyMatcher::regexMatch(msg.content, matchContent).groups;
             } catch (...) {}
         } else if (type == MatchType::kPrefix) {
             // Prefix match exposes everything after the prefix as the 1st (and only)
@@ -9527,6 +9526,13 @@ public:
             else
                 groups.push_back("");
         }
+        return renderReplyWithGroups(msg, tmpl, groups, legacyReferences);
+    }
+
+    /// Render using the exact captures already obtained during condition evaluation.
+    /// Captured text is appended as data, never reparsed as a template.
+    std::string renderReplyWithGroups(const Message& msg, const std::string& tmpl,
+                                     const std::vector<std::string>& groups, bool legacyReferences = false) {
         // Pre-process legacy variable aliases ({pc}→{nick}, {char}→{nick}, etc.)
         // so that original-Dice! flavor texts work with DiceNext's variable system.
         std::string processed = applyLegacyVarAliases(sample_template::expand(tmpl));

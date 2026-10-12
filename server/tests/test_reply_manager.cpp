@@ -57,6 +57,33 @@ ReplyRule sampleRule() {
 
 } // namespace
 
+TEST(ReplyRegex, DatabaseRoundTripAndDryRunUseWholeMessageConditions) {
+    ReplyFixture fixture;
+    ReplyManager replies{fixture.db, fixture.config};
+    auto rule = reply_definition::replyRuleFromJson({
+        {"conditions", {{{"type", "prefix"}, {"content", "白"}},
+                        {{"type", "regex"}, {"content", "^白(丽|麗).{0,6}"}}}},
+        {"logic", "and"}, {"results", {"matched"}}, {"cooldownSec", 10}
+    });
+    const int id = replies.addRule(rule);
+    ASSERT_TRUE(id > 0);
+    replies.loadRules();
+    const ReplyCtx ctx{"onebot_v11", "100", "200"};
+    for (int repeat = 0; repeat < 3; ++repeat) {
+        ASSERT_EQ(replies.matchMessage("白丽123456", ctx).size(), size_t(1));
+        ASSERT_TRUE(replies.matchMessage("白丽1234567", ctx).empty());
+        const auto allowed = replies.pickReply("白麗一二三四五六", ctx, false);
+        ASSERT_TRUE(allowed.rule.has_value());
+        ASSERT_EQ(allowed.rule->id, id);
+        ASSERT_FALSE(replies.pickReply("白麗一二三四五六七", ctx, false).rule.has_value());
+    }
+    // Preview did not consume cooldown; real dispatch uses the same match.
+    const auto first = replies.pickReply("白丽", ctx, true);
+    ASSERT_TRUE(first.rule.has_value());
+    ASSERT_EQ(first.rule->id, id);
+    ASSERT_FALSE(replies.pickReply("白丽", ctx, true).rule.has_value());
+}
+
 TEST(ReplyChannelScope, PersistsSeparatelyAndUsesSpecificRulesAtEqualPriority) {
     ReplyFixture fixture;
     ReplyManager replies{fixture.db, fixture.config};

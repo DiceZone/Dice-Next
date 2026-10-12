@@ -467,7 +467,8 @@ CausalMatchResult CausalRuleManager::matchAndExecute(const std::string& msg,
         if (!rule.enabled) continue;
         if (!checkScope(rule, userId, groupId)) continue;
 
-        if (!evalConditions(rule, msg, userId, groupId, dryRun)) continue;
+        std::vector<std::string> captures;
+        if (!evalConditions(rule, msg, userId, groupId, dryRun, captures)) continue;
 
         // Conditions met — check cooldown
         std::string cdKey = buildCooldownKey(rule, userId, groupId);
@@ -483,6 +484,7 @@ CausalMatchResult CausalRuleManager::matchAndExecute(const std::string& msg,
         result.matched = true;
         result.ruleId = rule.id;
         result.ruleName = rule.name;
+        result.captures = std::move(captures);
         result.reply = executeActions(rule, msg, userId, groupId, nick,
                                        result.counterChanges, dryRun);
         return result;  // First match wins
@@ -494,11 +496,13 @@ CausalMatchResult CausalRuleManager::testDraft(const CausalRule& rule,
         const std::string& msg, const std::string& userId,
         const std::string& groupId, const std::string& nick) {
     CausalMatchResult result;
+    std::vector<std::string> captures;
     if (!rule.enabled || !checkScope(rule, userId, groupId)
-        || !evalConditions(rule, msg, userId, groupId, true)) return result;
+        || !evalConditions(rule, msg, userId, groupId, true, captures)) return result;
     result.matched = true;
     result.ruleId = rule.id;
     result.ruleName = rule.name;
+    result.captures = std::move(captures);
     result.reply = executeActions(rule, msg, userId, groupId, nick, result.counterChanges, true);
     return result;
 }
@@ -526,15 +530,30 @@ bool CausalRuleManager::evalConditions(const CausalRule& rule,
                                         const std::string& msg,
                                         const std::string& userId,
                                         const std::string& groupId,
-                                        bool dryRun) const {
+                                        bool dryRun,
+                                        std::vector<std::string>& captures) const {
+    captures.clear();
     if (rule.conditions.empty()) return true;  // no conditions = always match
 
     bool isAnd = (rule.logic == "and");
+    bool hasHit = false;
+    CausalCondType hitType = CausalCondType::Keyword;
+    std::vector<std::string> selected;
     for (auto& cond : rule.conditions) {
-        bool met = evalCondition(cond, msg, userId, groupId, rule.id, dryRun);
+        std::vector<std::string> groups;
+        bool met = evalCondition(cond, msg, userId, groupId, rule.id, dryRun, groups);
         if (isAnd && !met) return false;
-        if (!isAnd && met) return true;
+        if (!isAnd && met) {
+            captures = std::move(groups);
+            return true;
+        }
+        if (met && (!hasHit || (cond.type == CausalCondType::Regex && hitType != CausalCondType::Regex))) {
+            selected = std::move(groups);
+            hitType = cond.type;
+            hasHit = true;
+        }
     }
+    if (isAnd) captures = std::move(selected);
     return isAnd;  // AND: all met → true; OR: none met → false
 }
 
@@ -543,11 +562,21 @@ bool CausalRuleManager::evalCondition(const CausalCondition& cond,
                                        const std::string& userId,
                                        const std::string& groupId,
                                        int ruleId,
-                                       bool dryRun) const {
+                                       bool dryRun,
+                                       std::vector<std::string>& captures) const {
+    captures.clear();
     switch (cond.type) {
-        case CausalCondType::Keyword:
+        case CausalCondType::Regex: {
+            if (cond.content.empty()) return false;
+            auto result = boundedRegex(cond.content, msg, RegexMode::Full);
+            captures = std::move(result.groups);
+            return result.matched;
+        }
         case CausalCondType::Prefix:
-        case CausalCondType::Regex:
+            if (!matchText(msg, cond.content, cond.type)) return false;
+            captures = {msg, msg.substr(cond.content.size())};
+            return true;
+        case CausalCondType::Keyword:
         case CausalCondType::Search:
             return matchText(msg, cond.content, cond.type);
 
@@ -607,7 +636,7 @@ bool CausalRuleManager::matchText(const std::string& msg, const std::string& pat
         case CausalCondType::Search:
             return msgLower.find(patLower) != std::string::npos;
         case CausalCondType::Regex:
-            return boundedRegex(pattern, msg).matched;
+            return boundedRegex(pattern, msg, RegexMode::Full).matched;
         default:
             return false;
     }

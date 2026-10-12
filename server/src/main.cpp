@@ -1111,7 +1111,7 @@ static int realMain(int argc, char* argv[]) {
                 std::map<std::string, std::string> counterCtx;
                 for (auto& cc : cr.counterChanges) counterCtx[cc.name] = std::to_string(cc.newValue);
                 cmdRouter.setCounterContext(counterCtx);
-                reply = cmdRouter.renderReply(m, cr.reply, "", dice::MatchType::kKeyword);
+                reply = cmdRouter.renderReplyWithGroups(m, cr.reply, cr.captures);
                 cmdRouter.clearCounterContext();
                 replySrc = "reply";
                 if (sources) *sources = {{"因果规则", cr.ruleName, "", std::to_string(cr.ruleId)}};

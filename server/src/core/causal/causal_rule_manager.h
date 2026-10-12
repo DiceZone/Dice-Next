@@ -95,6 +95,9 @@ struct CausalMatchResult {
     int ruleId = 0;
     std::string ruleName;
     std::vector<CounterChange> counterChanges;
+    // Captures from the condition that fired (AND prefers the first regex).
+    // Keep them separate from the template so captured text cannot execute macros.
+    std::vector<std::string> captures;
 };
 
 // ─── Manager ─────────────────────────────────────────────────
@@ -169,14 +172,16 @@ private:
                        const std::string& userId,
                        const std::string& groupId,
                        int ruleId,
-                       bool dryRun) const;
+                       bool dryRun,
+                       std::vector<std::string>& captures) const;
 
     /// Evaluate all conditions with AND/OR logic. Returns true if the rule fires.
     bool evalConditions(const CausalRule& rule,
                         const std::string& msg,
                         const std::string& userId,
                         const std::string& groupId,
-                        bool dryRun) const;
+                        bool dryRun,
+                        std::vector<std::string>& captures) const;
 
     /// Build the cooldown key for a rule + user/group context.
     std::string buildCooldownKey(const CausalRule& rule,

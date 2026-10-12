@@ -88,15 +88,20 @@ bool ReplyMatcher::validateRegex(const std::string& pattern, std::string* err) {
         if (err) *err = "pattern too long (max " + std::to_string(kMaxRegexLen) + " bytes)";
         return false;
     }
-    const auto result = boundedRegex(pattern, "", RegexMode::Prefix, true);
+    const auto result = boundedRegex(pattern, "", RegexMode::Full, true);
     if (err) *err = result.error;
     return result.error.empty();
 }
 
 bool ReplyMatcher::matchRegex(const std::string& input,
                                const std::string& pattern) const {
-    if (pattern.size() > kMaxRegexLen) return false;   // 对齐原版 400 字上限（防 ReDoS）
-    return boundedRegex(pattern, input, RegexMode::Prefix).matched;
+    return regexMatch(input, pattern).matched;
+}
+
+RegexResult ReplyMatcher::regexMatch(const std::string& input, const std::string& pattern) {
+    if (pattern.size() > kMaxRegexLen)
+        return {false, {}, "pattern too long (max " + std::to_string(kMaxRegexLen) + " bytes)"};
+    return boundedRegex(pattern, input, RegexMode::Full);
 }
 
 bool ReplyMatcher::matchSearch(const std::string& input,

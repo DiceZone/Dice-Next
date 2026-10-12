@@ -6230,7 +6230,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Post});
 
     // Test a causal rule match (dry-run, no cooldown/counter side effects)
-    app.registerHandler("/api/causal/rules/test", [&causalMgr](Req req, CB&& cb) {
+    app.registerHandler("/api/causal/rules/test", [&causalMgr, &cmdRouter](Req req, CB&& cb) {
         try {
             auto j = J::parse(req->body());
             std::string msg = j.value("msg", "");
@@ -6242,7 +6242,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 : causalMgr.matchAndExecute(msg, userId, groupId, nick, true);
             J data;
             data["matched"] = result.matched;
-            data["reply"] = result.reply;
+            Message preview;
+            preview.content = msg;
+            preview.senderId = userId;
+            preview.senderName = nick;
+            preview.targetId = groupId.empty() ? userId : groupId;
+            preview.type = groupId.empty() ? MessageType::kPrivate : MessageType::kGroup;
+            data["reply"] = result.matched
+                ? cmdRouter.renderReplyWithGroups(preview, result.reply, result.captures) : "";
             data["ruleId"] = result.ruleId;
             data["ruleName"] = result.ruleName;
             data["draftTested"] = j.contains("rule");

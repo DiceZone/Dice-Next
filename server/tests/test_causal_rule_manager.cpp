@@ -252,9 +252,109 @@ TEST(CausalMatch, RegexMatch) {
     rule.actions.push_back(action);
     mgr.addRule(rule);
 
-    auto result = mgr.matchAndExecute("hello 123 world", "user1", "group1", "Nick", true);
+    ASSERT_FALSE(mgr.matchAndExecute("hello 123 world", "user1", "group1", "Nick", true).matched);
+    auto result = mgr.matchAndExecute("123", "user1", "group1", "Nick", true);
     ASSERT_TRUE(result.matched);
     ASSERT_EQ(result.reply, "number found!");
+    ASSERT_EQ(result.captures.size(), size_t(1));
+    ASSERT_EQ(result.captures[0], "123");
+    rule.conditions[0].content = ".*\\d+.*";
+    ASSERT_TRUE(mgr.testDraft(rule, "hello 123 world", "user1", "group1", "Nick").matched);
+}
+
+TEST(CausalMatch, RegexChineseBoundaryAndDraftWhitespaceMatchLiveSemantics) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    CooldownManager cdMgr;
+    CounterStore ctrStore(*db);
+    CausalRuleManager mgr(*db, *cfg, cdMgr, ctrStore);
+    auto rule = makeKeywordRule("", "{$0}|{$1}");
+    rule.conditions[0].type = CausalCondType::Regex;
+    rule.conditions[0].content = "^白(丽|麗).{0,6}";
+    ASSERT_TRUE(mgr.addRule(rule) > 0);
+    mgr.loadRules();
+    for (const auto* text : {"白丽一二三四五六", "白麗abcdef"}) {
+        const auto live = mgr.matchAndExecute(text, "u", "g", "N", true);
+        const auto draft = mgr.testDraft(rule, text, "u", "g", "N");
+        ASSERT_TRUE(live.matched);
+        ASSERT_TRUE(draft.matched);
+        ASSERT_EQ(live.captures[0], text);
+        ASSERT_TRUE(live.captures == draft.captures);
+    }
+    for (const auto* text : {"白丽一二三四五六七", "白麗abcdefg", "白丽\n"}) {
+        ASSERT_FALSE(mgr.matchAndExecute(text, "u", "g", "N", true).matched);
+        ASSERT_FALSE(mgr.testDraft(rule, text, "u", "g", "N").matched);
+    }
+    rule.conditions[0].content = "( a )";
+    ASSERT_EQ(mgr.testDraft(rule, " a ", "u", "g", "N").captures[1], " a ");
+    ASSERT_FALSE(mgr.testDraft(rule, "a", "u", "g", "N").matched);
+    rule.conditions[0].content = "[\\s\\S]*";
+    ASSERT_TRUE(mgr.testDraft(rule, "a\nb", "u", "g", "N").matched);
+}
+
+TEST(CausalMatch, RegexCapturesFollowTheActualOrConditionAndFirstAndRegex) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    CooldownManager cdMgr;
+    CounterStore ctrStore(*db);
+    CausalRuleManager mgr(*db, *cfg, cdMgr, ctrStore);
+    auto rule = makeKeywordRule("never", "{$0}|{$1}|{$2}");
+    CausalCondition regex;
+    regex.type = CausalCondType::Regex;
+    regex.content = "(a)|(ab)";
+    rule.conditions.push_back(regex);
+    const auto alternatives = mgr.testDraft(rule, "ab", "u", "g", "N");
+    ASSERT_TRUE(alternatives.matched);
+    ASSERT_EQ(alternatives.captures.size(), size_t(3));
+    ASSERT_EQ(alternatives.captures[0], "ab");
+    ASSERT_EQ(alternatives.captures[1], "");
+    ASSERT_EQ(alternatives.captures[2], "ab");
+    ASSERT_TRUE(mgr.testDraft(rule, "never", "u", "g", "N").captures.empty());
+
+    rule.logic = "and";
+    rule.conditions[0].type = CausalCondType::Prefix;
+    rule.conditions[0].content = "a";
+    rule.conditions[1].content = "(a)(b)";
+    regex.content = "(ab)";
+    rule.conditions.push_back(regex);
+    const auto both = mgr.testDraft(rule, "ab", "u", "g", "N");
+    ASSERT_TRUE(both.matched);
+    ASSERT_EQ(both.captures.size(), size_t(3));
+    ASSERT_EQ(both.captures[1], "a");
+    ASSERT_EQ(both.captures[2], "b");
+    const auto failed = mgr.testDraft(rule, "abc", "u", "g", "N");
+    ASSERT_FALSE(failed.matched);
+    ASSERT_TRUE(failed.captures.empty());
+
+    rule.conditions = {regex};
+    rule.conditions[0].content = "(a+?)(a*)";
+    const auto lazy = mgr.testDraft(rule, "aaaa", "u", "g", "N");
+    ASSERT_TRUE(lazy.matched);
+    ASSERT_EQ(lazy.captures[1], "a");
+    ASSERT_EQ(lazy.captures[2], "aaa");
+}
+
+TEST(CausalMatch, RegexCapturesDoNotLeakFromCoolingRules) {
+    auto db = makeDb();
+    auto cfg = makeCfg();
+    CooldownManager cdMgr;
+    CounterStore ctrStore(*db);
+    CausalRuleManager mgr(*db, *cfg, cdMgr, ctrStore);
+    auto rule = makeKeywordRule("(ab)", "{$1}");
+    rule.conditions[0].type = CausalCondType::Regex;
+    rule.priority = 200;
+    rule.cooldownMs = 60000;
+    ASSERT_TRUE(mgr.addRule(rule) > 0);
+    ASSERT_EQ(mgr.matchAndExecute("ab", "u", "g", "N").captures[1], "ab");
+    const auto cooling = mgr.matchAndExecute("ab", "u", "g", "N");
+    ASSERT_FALSE(cooling.matched);
+    ASSERT_TRUE(cooling.captures.empty());
+    const int fallbackId = mgr.addRule(makeKeywordRule("ab", "fallback"));
+    ASSERT_TRUE(fallbackId > 0);
+    const auto fallback = mgr.matchAndExecute("ab", "u", "g", "N");
+    ASSERT_TRUE(fallback.matched);
+    ASSERT_EQ(fallback.ruleId, fallbackId);
+    ASSERT_TRUE(fallback.captures.empty());
 }
 
 TEST(CausalMatch, RegexInvalidPatternNoCrash) {
