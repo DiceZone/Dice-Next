@@ -90,6 +90,7 @@ set(SOURCES
     src/common/subprocess.cpp
     src/service/update_service.cpp
     src/service/update_archive.cpp
+    src/service/network_info_service.cpp
     src/service/cloud_card_service.cpp
     src/service/identity_email_service.cpp
     src/config/config_manager.cpp
@@ -216,6 +217,7 @@ if(WIN32)
     target_link_libraries(dice-next-server PRIVATE
         ws2_32
         crypt32
+        iphlpapi
     )
     # Application icon resource. Edition selects the logo: stable | dev.
     # Override with: cmake -DDICE_EDITION=dev ...  (default stable)

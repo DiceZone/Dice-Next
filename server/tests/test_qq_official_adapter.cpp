@@ -6,6 +6,60 @@
 
 using namespace dice;
 
+TEST(QQOfficialAdapter, IncomingFacesKeepImageReferencesAndReadableContent) {
+    QQOfficialAdapter adapter("face-test");
+    Message received;
+    int calls = 0;
+    adapter.onMessage([&](const Message& msg) { received = msg; ++calls; });
+    const std::string builtIn = "<faceType=1,faceId=\"424\",ext=\"eyJ0ZXh0Ijoi57ut5qCH6K+GIn0=\">";
+    const std::string custom = "<faceType=6,faceId=\"0\",ext=\"eyJ0ZXh0IjoiIn0=\">";
+    adapter.dispatchForTest("GROUP_MESSAGE_CREATE", {
+        {"id", "message-1"}, {"group_openid", "group-1"},
+        {"author", {{"member_openid", "user-1"}}},
+        {"content", "前" + builtIn + "中" + custom + "后"},
+        {"attachments", json::array({{{"url", "//example.test/emoji.gif?x=1&y=2"},
+                                      {"content_type", "image/gif"}}})}
+    });
+    ASSERT_EQ(calls, 1);
+    ASSERT_EQ(received.content, "前中后");
+    ASSERT_EQ(received.displayContent, "前[表情]中[图片]后");
+    ASSERT_EQ(received.rawContent, "前[CQ:face,id=424]中[CQ:image,file=https://example.test/emoji.gif?x=1&amp;y=2]后");
+    ASSERT_EQ(received.extra["attachments"].size(), size_t(1));
+}
+
+TEST(QQOfficialAdapter, MultipleCustomFacesAndOrdinaryImagesAreNotDuplicated) {
+    const std::string custom = "<faceType=6,faceId=\"0\",ext=\"eyJ0ZXh0IjoiIn0=\">";
+    const auto result = qqmsg::normalizeIncoming("前" + custom + "中" + custom + "后",
+        json::array({{{"url", "example.test/first.gif"}, {"content_type", "image/gif"}},
+                     {{"url", "https://example.test/second.png"}, {"content_type", "image/png"}},
+                     {{"url", "https://example.test/photo.jpg"}, {"content_type", "image/jpeg"}},
+                     {{"url", "https://example.test/readme.txt"}, {"content_type", "text/plain"}}}));
+    ASSERT_EQ(result.command, "前中后");
+    ASSERT_EQ(result.display, "前[图片]中[图片]后\n[图片]");
+    ASSERT_EQ(result.raw, "前[CQ:image,file=https://example.test/first.gif]中[CQ:image,file=https://example.test/second.png]后\n[CQ:image,file=https://example.test/photo.jpg]");
+    const auto imageOnly = qqmsg::normalizeIncoming("", json::array({{{"url", "https://example.test/only.png"}}}));
+    ASSERT_EQ(imageOnly.display, "[图片]");
+    ASSERT_EQ(imageOnly.raw, "[CQ:image,file=https://example.test/only.png]");
+    ASSERT_TRUE(imageOnly.command.empty());
+}
+
+TEST(QQOfficialAdapter, FaceExtUrlsAreValidatedWithoutGuessingFromIds) {
+    const std::string url = "https://example.test/emoji.gif?x=1,2&y=[3]";
+    const auto ext = drogon::utils::base64Encode(json{{"url", url}}.dump());
+    const auto result = qqmsg::normalizeIncoming("<faceType=6,faceId=\"0\",ext=\"" + ext + "\">", json::array({{{"url", url}}}));
+    ASSERT_EQ(result.raw, "[CQ:image,file=https://example.test/emoji.gif?x=1&#44;2&amp;y=&#91;3&#93;]");
+    ASSERT_EQ(result.display, "[图片]");
+    for (const auto& invalid : {"file://C:/private.png", "javascript:alert(1)", "data:image/png;base64,private", "https://example.test/x\nheader"}) {
+        const auto bad = drogon::utils::base64Encode(json{{"url", invalid}}.dump());
+        ASSERT_EQ(qqmsg::normalizeIncoming("<faceType=6,faceId=\"0\",ext=\"" + bad + "\">", json::array()).raw, "[图片]");
+    }
+    ASSERT_EQ(qqmsg::normalizeIncoming("<faceType=6,faceId=\"0\",ext=\"bad\">", json::array()).raw, "[图片]");
+    for (const auto& literal : {"<调查员>", "<@123>", "<faceType=6oops,faceId=\"0\">", "<faceType=6,faceId=\"0\"", "<faceType=7,faceId=\"1\">"}) {
+        ASSERT_EQ(qqmsg::normalizeIncoming(literal, json::array()).raw, std::string(literal));
+        ASSERT_EQ(qqmsg::normalizeLogFaces(literal), std::string(literal));
+    }
+}
+
 TEST(QQOfficialAdapter, BuildsQueryStringForGetEndpoints) {
     // 官方 GET 接口（分页游标等）只读查询串，不读请求体。
     const std::string query = QQOfficialAdapter::queryStringForTest(

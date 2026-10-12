@@ -7,7 +7,6 @@
 #include <fstream>
 #include <filesystem>
 #include <sstream>
-#include <thread>
 #include <algorithm>
 #include <cctype>
 #include <set>
@@ -130,6 +129,12 @@ static fs::path configDirectory(const std::string& configPath) {
 }
 
 static bool writeJsonFile(const fs::path& path, const json& value, std::string& error) {
+    // Avoid generating a whole directory of notifications for unchanged
+    // sections (startup migrations / periodic state saves are common).
+    try {
+        std::ifstream existing(path, std::ios::binary);
+        if (existing && json::parse(existing) == value) return true;
+    } catch (...) {}  // An explicit save can repair an invalid file.
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
     if (ec) { error = ec.message(); return false; }
@@ -219,7 +224,7 @@ static bool readSplitConfig(const std::string& configPath, json& value, std::str
         if (ec) { error = ec.message(); return false; }
         if (!entry.is_regular_file(ec) || entry.path().extension() != ".json") continue;
         const std::string name = entry.path().stem().string();
-        if (!isSafeSectionName(name) || name == "webui_sessions" || name == "default_config") continue;
+        if (!ConfigManager::isConfigurationFile(entry.path().filename().string())) continue;
         bool required = false;
         for (const char* section : kRequiredSections) if (name == section) { required = true; break; }
         if (required) continue;
@@ -259,6 +264,18 @@ ConfigManager::ConfigManager(const std::string& configPath)
 
 bool ConfigManager::load() {
     std::lock_guard<std::mutex> lock(mutex_);
+    return loadLocked();
+}
+
+bool ConfigManager::isConfigurationFile(const std::string& relativePath) {
+    if (relativePath.find_first_of("/\\") != std::string::npos) return false;
+    const fs::path path(relativePath);
+    const std::string name = path.stem().string();
+    return path.extension() == ".json" && isSafeSectionName(name)
+        && name != "webui_sessions" && name != "default_config";
+}
+
+bool ConfigManager::loadLocked() {
     createdOnLoad_ = false;
     discardedObsoleteDefaultConfig_ = false;
     try {
@@ -295,8 +312,11 @@ bool ConfigManager::load() {
             return false;
         }
         if (loaded["server"].value("api_key", std::string()).empty()) {
-            loaded["server"]["api_key"] = utils::generateUuidV4();
-            DICE_LOG_INFO("首次运行已生成管理 API 密钥；密钥内容不写入日志。");
+            const std::string currentKey = config_.value("server", json::object()).value("api_key", std::string());
+            // A still-empty file must not generate a different effective
+            // configuration on every read. Startup/save will persist the key.
+            loaded["server"]["api_key"] = currentKey.empty() ? utils::generateUuidV4() : currentKey;
+            if (currentKey.empty()) DICE_LOG_INFO("首次运行已生成管理 API 密钥；密钥内容不写入日志。");
         }
         config_ = std::move(loaded);
         splitLayout_ = true;
@@ -309,20 +329,24 @@ bool ConfigManager::load() {
 
 bool ConfigManager::reload() {
     if (writing_->load() > 0) { DICE_LOG_DEBUG("配置正在由本程序写入，跳过重复重载。"); return true; }
-    DICE_LOG_INFO("正在重新读取配置目录「{}」。" , configPath_);
-
-    bool ok = load();
+    bool ok;
+    json snapshot;
+    std::function<void(const json&)> snapshotWriter;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const json previous = config_;
+        ok = loadLocked();
+        if (ok && config_ == previous) {
+            DICE_LOG_DEBUG("配置文件内容未变化，跳过重复重载通知。");
+            return true;
+        }
+        if (ok) { snapshot = config_; snapshotWriter = snapshotWriter_; }
+    }
     if (ok) {
+        DICE_LOG_INFO("配置目录「{}」内容已变更，正在应用新配置。", configPath_);
         // The files on disk are already the source of this reload. Persist only
         // the validated snapshot; writing the same split files here would make
         // the file watcher observe our own write and enter a reload/save loop.
-        json snapshot;
-        std::function<void(const json&)> snapshotWriter;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            snapshot = config_;
-            snapshotWriter = snapshotWriter_;
-        }
         if (snapshotWriter) {
             try {
                 snapshotWriter(snapshot);
@@ -340,6 +364,10 @@ bool ConfigManager::reload() {
 
 bool ConfigManager::save() {
     ++(*writing_);  // suppress self-triggered hot reload
+    struct WritingScope {
+        std::atomic<int>& count;
+        ~WritingScope() { --count; }
+    } writingScope{*writing_};
     bool ok = false;
     json snapshot;
     std::function<void(const json&)> snapshotWriter;
@@ -367,9 +395,8 @@ bool ConfigManager::save() {
         try { snapshotWriter(snapshot); }
         catch (const std::exception& e) { DICE_LOG_ERROR("配置数据库快照保存失败：{}", e.what()); }
     }
-    // Delay decrement to cover the file-watcher debounce window
-    auto writing = writing_;
-    std::thread([writing] { std::this_thread::sleep_for(std::chrono::milliseconds(1500)); --(*writing); }).detach();
+    // After a save, semantic equality rejects queued self-notifications.
+    // Do not suppress an unrelated external edit for an arbitrary 1.5 seconds.
     return ok;
 }
 

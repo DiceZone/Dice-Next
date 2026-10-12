@@ -16,6 +16,7 @@
 #include "core/command_router.h"
 #include "service/log_service.h"
 #include "storage/group_account_settings.h"
+#include "adapter/qq_official_adapter.h"
 
 #include <chrono>
 #include <filesystem>
@@ -145,4 +146,44 @@ TEST(LogNickname, TheUploadedPayloadCarriesTheCleanName) {
         if (nickname == "希亚") foundPlayer = true;
     }
     ASSERT_TRUE(foundPlayer);
+}
+
+TEST(LogFaces, OfficialImagesReachStorageAndEveryPortableExport) {
+    NickFixture f;
+    f.msg.platform = "qq_official";
+    ASSERT_EQ(f.run(".log new 表情记录"), "log.new");
+    QQOfficialAdapter adapter("test");
+    adapter.onMessage([&](const Message& received) {
+        f.msg.content = received.content;
+        f.msg.rawContent = received.rawContent;
+        f.msg.displayContent = received.displayContent;
+        f.router.recordIncoming(f.msg);
+    });
+    adapter.dispatchForTest("GROUP_MESSAGE_CREATE", {
+        {"content", "前<faceType=1,faceId=\"424\",ext=\"eyJ0ZXh0Ijoi57ut5qCH6K+GIn0=\">中<faceType=6,faceId=\"0\",ext=\"eyJ0ZXh0IjoiIn0=\">后"},
+        {"attachments", json::array({{{"url", "https://example.test/emoji.gif?x=1&y=2"}, {"content_type", "image/gif"}}})}
+    });
+    const auto rows = f.messages();
+    ASSERT_EQ(rows.size(), size_t(1));
+    ASSERT_EQ(rows[0].content, "前[表情]中[图片]后");
+    ASSERT_EQ(json::parse(rows[0].images)[0].get<std::string>(), "https://example.test/emoji.gif?x=1&y=2");
+    const std::string expected = "前[表情]中[CQ:image,file=https://example.test/emoji.gif?x=1&amp;y=2]后";
+    ASSERT_TRUE(logsvc::renderSealdice(f.db, f.logId(), &f.cfg).find(expected) != std::string::npos);
+    ASSERT_TRUE(logsvc::renderSealdice(f.db, f.logId()).find(expected) != std::string::npos);
+    ASSERT_EQ(logsvc::renderSealItems(f.db, f.logId(), &f.cfg, "")[0]["message"].get<std::string>(), expected);
+    ASSERT_EQ(logsvc::renderLogRows(f.db, f.logId(), &f.cfg, "")[0].message, expected);
+    ASSERT_TRUE(logsvc::renderHtml(f.db, f.logId()).find("https://example.test/emoji.gif") != std::string::npos);
+}
+
+TEST(LogFaces, HistoricalOfficialFaceMarkersAreConvertedAtExport) {
+    GameLogMessageRow message;
+    message.content = "前<faceType=1,faceId=\"424\",ext=\"eyJ0ZXh0Ijoi57ut5qCH6K+GIn0=\">中<faceType=6,faceId=\"0\",ext=\"eyJ0ZXh0IjoiIn0=\">后";
+    message.images = json::array({"https://example.test/old.gif"}).dump();
+    ConfigManager cfg("unused");
+    ASSERT_EQ(logsvc::transcriptContent(message, &cfg), "前[表情]中[CQ:image,file=https://example.test/old.gif]后");
+    message.images.clear();
+    ASSERT_EQ(logsvc::transcriptContent(message, nullptr), "前[表情]中[图片]后");
+    // CQ codes already stored by OneBot / Milky are not stripped or rewritten.
+    message.content = "旧内容[CQ:face,id=424][CQ:image,file=https://example.test/a.png]";
+    ASSERT_EQ(logsvc::transcriptContent(message, nullptr), message.content);
 }

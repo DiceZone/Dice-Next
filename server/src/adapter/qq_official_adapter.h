@@ -5,6 +5,7 @@
 // Gateway WebSocket only; no webhook listener is registered.
 
 #include "adapter_interface.h"
+#include "../message/qq_official_message.h"
 #include "qq_gateway_socket.h"
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
@@ -441,6 +442,7 @@ public:
     // 纯函数测试入口：这几段没有网络依赖，但错了会静默走偏（查询串丢参数、
     // 文件名没后缀、媒体码切错），值得单独钉住。
     static std::string queryStringForTest(const json& params) { return queryString(params); }
+    void dispatchForTest(const std::string& eventType, const json& payload) { dispatch(eventType, payload, "test"); }
     static std::string urlEncodeForTest(const std::string& value) { return urlEncode(value); }
     static int fileTypeForTest(int kind, const std::string& name) { return fileTypeFor(kind, name); }
     static std::string mediaFileNameForTest(const std::string& name, int kind, const std::string& localPath) {
@@ -756,7 +758,13 @@ private:
         }
         else if(t=="AT_MESSAGE_CREATE"){m.type=MessageType::kChannel;m.senderId=author.value("id",std::string());m.senderName=author.value("username",m.senderId);m.targetId=d.value("channel_id",std::string());}
         else { dispatchEvent(t,d,eventId); return; }
-        if(d.contains("attachments"))m.extra["attachments"]=d["attachments"]; if(d.contains("msg_elements"))m.extra["msg_elements"]=d["msg_elements"]; if(messageCb_)messageCb_(m);
+        if(d.contains("attachments"))m.extra["attachments"]=d["attachments"];
+        if(d.contains("msg_elements"))m.extra["msg_elements"]=d["msg_elements"];
+        const auto normalized = qqmsg::normalizeIncoming(m.content, d.value("attachments", json::array()));
+        m.content = normalized.command;
+        m.rawContent = normalized.raw;
+        m.displayContent = normalized.display;
+        if(messageCb_)messageCb_(m);
     }
     void dispatchEvent(const std::string& type,const json& data,const std::string& eventId){
         BotEvent ev; ev.platform=platform(); ev.adapterId=id_; ev.selfId=loginId_; ev.timestamp=data.value("timestamp",static_cast<int64_t>(std::time(nullptr))); ev.extra={{"event_id",eventId},{"event_type",type},{"data",data}};

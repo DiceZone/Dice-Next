@@ -8,6 +8,7 @@ set(TEST_SOURCES
     # Test framework + test cases
     test_main.cpp
     test_logger.cpp
+    test_network_info.cpp
     test_runtime_reliability.cpp
     test_script_execution_windows_macros.cpp
     test_startup_guard.cpp
@@ -64,10 +65,12 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/storage/database.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/config/config_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/logger.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/hot_reload.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/version.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/subprocess.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_archive.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/network_info_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/cloud_card_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/identity_email_service.cpp
     ${VERSION_BUILD_SOURCE}
@@ -121,6 +124,10 @@ target_link_libraries(dice-next-tests PRIVATE
     ZLIB::ZLIB
     ${DICE_ZSTD_TARGET}
 )
+
+if(WIN32)
+    target_link_libraries(dice-next-tests PRIVATE iphlpapi)
+endif()
 
 # Keep the real Lua runtime tests in a separate executable: test_import_v2.cpp
 # deliberately defines a lightweight LuaPluginManager stub for importer-only tests.

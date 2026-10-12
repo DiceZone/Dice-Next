@@ -491,6 +491,9 @@ static int realMain(int argc, char* argv[]) {
     // ── 4. Open database ─────────────────────────────────────
     dice::crashdiag::setPhase("database");
     const std::string dbPath = databasePathForRecovery;
+    // Prepare advisory addresses in the background during startup, not on dialog open.
+    dice::NetworkInfoService networkInfo;
+    networkInfo.start();
     dice::Database db;
     if (!db.open(dbPath)) {
         DICE_LOG_ERROR_M("数据库", "主数据库「{}」打开失败，本次启动中止。", dbPath);
@@ -601,11 +604,11 @@ static int realMain(int argc, char* argv[]) {
     if (hotReloadEnabled) {
         hotReload = new dice::HotReloadMonitor();
         // Only watch config directory, NOT data/ (DB writes trigger unnecessary reloads)
-        hotReload->start("config", hotReloadDebounce, [&configMgr](const std::string&) {
+        hotReload->start(configMgr.configPath(), hotReloadDebounce, [&configMgr](const std::string&) {
             configMgr.reload();  // writing_ guard inside will skip self-saves
             dice::utils::setTimezoneOffset(configMgr.get<int>(
                 "server/timezone_minutes", (std::numeric_limits<int>::min)()));
-        });
+        }, dice::ConfigManager::isConfigurationFile);
 
         DICE_LOG_DEBUG_M("配置", "配置热重载已开启，文件变更等待 {} 毫秒稳定后处理。", hotReloadDebounce);
     }
@@ -3143,6 +3146,7 @@ static int realMain(int argc, char* argv[]) {
             cb(response);
         }, {drogon::Post});
     dice::utils::setStartupEpoch();
+    dice::api::registerNetworkInfoRoutes(networkInfo);
     dice::api::registerApiRoutes(db, configMgr, adapterMgr, engine, cardDeck, replyManager, i18n, jsMod, luaMod,
                                  causalMgr, cooldownMgr, counterStore, personaMgr, updateService, cmdRouter);
     DICE_LOG_DEBUG_M("管理面板", "管理 API 路由已注册。");

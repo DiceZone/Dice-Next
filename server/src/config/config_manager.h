@@ -110,6 +110,10 @@ public:
 
     const std::string& configPath() const noexcept { return configPath_; }
 
+    /// Only top-level functional JSON files are configuration. Sessions,
+    /// editor/atomic-write temporary files and subdirectories are not.
+    static bool isConfigurationFile(const std::string& relativePath);
+
     /// True after the configuration has been loaded from the split directory.
     bool usingSplitLayout() const noexcept { return splitLayout_; }
 
@@ -132,9 +136,10 @@ private:
     bool createdOnLoad_ = false;
     bool discardedObsoleteDefaultConfig_ = false;
 
-    // Delayed debounce workers can outlive ConfigManager. Keep their counter in
-    // shared storage so destruction never leaves a detached thread with a dangling reference.
+    // Only active writes suppress concurrent watcher callbacks. Queued events
+    // after a write are rejected by semantic comparison, not a timed guard.
     std::shared_ptr<std::atomic<int>> writing_ = std::make_shared<std::atomic<int>>(0);
+    bool loadLocked();
     // ─── Internal helpers ────────────────────────────────────
 
     json* navigateTo(const std::string& key, bool createMissing = false);

@@ -3,6 +3,64 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-12: QQ official faces and repeated configuration reloads
+
+- Local Windows amd64 Release server and test executables built successfully.
+  Final CTest passed 612 core cases / 5993 assertions and 22 Lua cases / 209
+  assertions. The documentation site built. No listening server, live QQ
+  account, commit, push or Release was started for these checks. The preceding
+  uncommitted reverse-WebSocket address-cache work remains intact.
+- Incoming QQ built-in faces become readable `[表情]`; custom faces take their
+  actual image URL from an attachment or explicit URL metadata, never from
+  `faceId=0`. Adapter-boundary and actual log-storage tests cover mixed text,
+  multiple faces, ordinary/image-only attachments, no duplicated attachment,
+  scheme-less URLs, invalid ext data, CQ parameter escaping and non-image
+  attachments. Existing raw CQ and other-platform text remain unchanged.
+- TXT (including the no-config renderer), CSV's shared content conversion,
+  Seal JSON and Parquet rows use standard CQ image references. Historical
+  official face markers normalize at export; a missing historical URL remains
+  `[图片]`, since the marker alone cannot recover it. CSV routing was checked
+  in source and compiled; no live authenticated HTTP export was invoked.
+- Six configuration cases cover 100 unchanged reloads without callbacks or
+  snapshot writes, whitespace-only edits and no-op saves, valid edits applied
+  once, invalid edits preserving the old state, immediate external edits after
+  an own save, stable auto-generated API keys and temporary/session/nested file
+  exclusion. The native Windows watcher receives a burst of 300 unrelated
+  writes, then applies one real JSON edit without a reload loop. Windows keeps
+  one pending directory read and waits for cancellation before releasing its
+  buffer/handle; the Linux implementation was updated in source only, not built
+  or run on Linux here.
+- Dice-Next-log-renderer was fetched from origin. Each branch was updated
+  independently: master at 1f6fbe5, pr-for-main at 3c78a84, legacy at 5cfb59a.
+  Separate worktrees preserve their distinct code/history; no branch was merged
+  into another. Each passed seven tests and its own vue-tsc/Vite production
+  build. Checks cover raw and HTML-escaped face filtering, filtering disabled,
+  malformed/literal text, existing CQ/mirai/image filters, editor token matching,
+  CQ image query parameters and escaped parameters during rkey refresh.
+
+## 2026-10-12: Cached reverse-WebSocket connection addresses
+
+- Final local Windows amd64 Release core and test executables built. CTest passed
+  601 core cases / 5799 assertions and 22 Lua cases / 209 assertions. WebUI type
+  checking and production build passed; 220 tests passed with two optional checks
+  skipped. The documentation site built. No commit, push or Release was made for
+  this feature during these checks.
+- Six service cases verify startup prefetch, independently published LAN data
+  while WAN is delayed, cached reads without redetection, coalesced refreshes,
+  explicit failed/stale states and recovery, browser-independent periodic
+  refresh, cancellation on shutdown and native interface enumeration. Network
+  state never claims an active check before its worker starts.
+- Eleven frontend cases exercise the actual hook with deterministic effects and
+  timers, the actual API helper with mocked fetch, address/port validation,
+  separate LAN/WAN values, interface selection, coalescing, completion/failure
+  polling cleanup, old-core errors, unmount safety, onboarding write suppression,
+  all four languages and the shared styled dialog. Opening reads the server
+  cache; only an explicit refresh posts a detection request.
+- Native Windows interface enumeration was read-only. Public detectors were
+  mocked; no external address-service availability, inbound NAT/firewall
+  reachability, live OneBot connection or other-platform build was claimed.
+  No server/listening smoke was started and no firewall setting was changed.
+
 ## 2026-10-12: Six-level logs and correlated message processing
 
 - The final local Windows amd64 Release backend and both test executables built.

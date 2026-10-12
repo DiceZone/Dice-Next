@@ -8,6 +8,7 @@
 
 #include "../storage/database.h"
 #include "../common/subprocess.h"
+#include "network_info_service.h"
 #include "../storage/group_account_settings.h"
 #include "../config/config_manager.h"
 #include "../config/scoped_settings.h"
@@ -410,6 +411,16 @@ static J sysInfoJson() {
 // Public: register all API routes on the Drogon app
 // ═══════════════════════════════════════════════════════════════
 
+inline void registerNetworkInfoRoutes(NetworkInfoService& networkInfo) {
+    drogon::app().registerHandler("/api/system/network-info", [&networkInfo](Req, CB&& cb) {
+        jsonReply(ok(networkInfo.snapshot().json()), std::move(cb));
+    }, {drogon::Get});
+    drogon::app().registerHandler("/api/system/network-info/refresh", [&networkInfo](Req, CB&& cb) {
+        const bool accepted = networkInfo.refresh();
+        auto result = networkInfo.snapshot().json(); result["accepted"] = accepted;
+        jsonReply(ok(result), std::move(cb));
+    }, {drogon::Post});
+}
 inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& adapterMgr,
                               DiceEngine& engine, CardDeck& cardDeck, ReplyManager& replyMgr, I18n& i18n,
                               JsPluginManager& jsMod, LuaPluginManager& luaMod,
@@ -4501,7 +4512,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 };
                 body = "\xEF\xBB\xBF";   // UTF-8 BOM so Excel reads Chinese
                 body += "time,sender,content\r\n";
-                for (auto& m : msgs) body += esc(m.createdAt) + "," + esc(m.sender) + "," + esc(m.content) + "\r\n";
+                for (auto& m : msgs) body += esc(m.createdAt) + "," + esc(m.sender) + "," + esc(logsvc::transcriptContent(m, &cfg)) + "\r\n";
                 mime = "text/csv"; ext = "csv";
             } else if (fmt == "html") {
                 // 自包含网页（带图）。渲染在 logsvc::renderHtml（与 .log type html

@@ -15,6 +15,7 @@
 #include "../config/config_manager.h"
 #include "../config/scoped_settings.h"
 #include "../common/subprocess.h"
+#include "../message/qq_official_message.h"
 #include <nlohmann/json.hpp>
 #include <string>
 #include <optional>
@@ -108,7 +109,7 @@ inline std::optional<std::string> uploadGeneric(ConfigManager& cfg, const std::s
 
 // 把日志内容里的图片标记（[图片] / [CQ:image,..]）按顺序替换为稳定 URL 的 CQ 码，
 // 供 log 站渲染。解析不出对外 URL 的保留 [图片]。**只产出 URL，绝不 base64。**
-inline std::string substituteImages(const std::string& content, const std::string& imagesJson, ConfigManager& cfg) {
+inline std::string substituteImages(const std::string& content, const std::string& imagesJson, ConfigManager* cfg) {
     if (imagesJson.empty()) return content;
     json imgs;
     try { imgs = json::parse(imagesJson); } catch (...) { return content; }
@@ -116,10 +117,13 @@ inline std::string substituteImages(const std::string& content, const std::strin
     const std::string IMG = "[\xe5\x9b\xbe\xe7\x89\x87]";   // [图片]（8 字节）
     std::string out; size_t i = 0, idx = 0;
     auto emit = [&]() {
-        std::string url = (idx < imgs.size() && imgs[idx].is_string())
-            ? resolveRef(cfg, imgs[idx].get<std::string>()) : "";
+        std::string url;
+        if (idx < imgs.size() && imgs[idx].is_string()) {
+            const auto ref = imgs[idx].get<std::string>();
+            url = cfg ? resolveRef(*cfg, ref) : qqmsg::imageUrl(ref);
+        }
         ++idx;
-        out += url.empty() ? IMG : ("[CQ:image,url=" + url + "]");
+        out += url.empty() ? IMG : qqmsg::imageCode(url);
     };
     while (i < content.size()) {
         if (content.compare(i, IMG.size(), IMG) == 0) { emit(); i += IMG.size(); continue; }
@@ -131,6 +135,10 @@ inline std::string substituteImages(const std::string& content, const std::strin
         out += content[i++];
     }
     return out;
+}
+
+inline std::string substituteImages(const std::string& content, const std::string& imagesJson, ConfigManager& cfg) {
+    return substituteImages(content, imagesJson, &cfg);
 }
 
 }  // namespace dice::imghost

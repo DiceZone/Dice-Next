@@ -5,12 +5,14 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <unordered_map>
 
 namespace dice {
 
 // ─── Change Callback Type ────────────────────────────────────
 
 using ChangeCallback = std::function<void(const std::string& path)>;
+using ChangeFilter = std::function<bool(const std::string& relativePath)>;
 
 // ─── HotReloadMonitor ────────────────────────────────────────
 // Cross-platform directory watcher.
@@ -29,9 +31,11 @@ public:
     /// Start watching the given directory path. A change detected
     /// in any file within this path (or its subdirectories) will
     /// trigger `callback` after `debounceMs` milliseconds of
-    /// inactivity.
+    /// inactivity. An optional filter selects relevant relative paths before
+    /// they enter the debounce batch (unrelated writes do not delay it).
     /// Returns true on success.
-    bool start(const std::string& path, int debounceMs, ChangeCallback callback);
+    bool start(const std::string& path, int debounceMs, ChangeCallback callback,
+               ChangeFilter filter = {});
 
     /// Stop the monitor and join the watcher thread.
     void stop();
@@ -45,6 +49,7 @@ private:
     std::string watchPath_;
     int debounceMs_{500};
     ChangeCallback callback_;
+    ChangeFilter filter_;
 
     // ─── Platform-specific implementations ───────────────────
 
@@ -56,6 +61,7 @@ private:
     void cleanupLinuxWatcher();
     int inotifyFd_{-1};
     int inotifyWd_{-1};
+    std::unordered_map<int, std::string> linuxPaths_;
 #endif
 
 #ifdef _WIN32

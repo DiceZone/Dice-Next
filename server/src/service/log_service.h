@@ -56,8 +56,12 @@ inline std::string slashTime(const std::string& iso) {
     return utils::formatTimeInTimezone(epoch, "%Y/%m/%d %H:%M:%S");
 }
 
+inline std::string transcriptContent(const GameLogMessageRow& message, ConfigManager* cfg) {
+    return imghost::substituteImages(qqmsg::normalizeLogFaces(message.content), message.images, cfg);
+}
+
 /// Render a log transcript in the portable .txt format. @p cfg lets us swap临时图片
-/// 链接为稳定图床 URL；传 nullptr 则按原 content 输出（不替换）。
+/// 链接为稳定图床 URL；传 nullptr 仍回填已有远端 URL，不发布本地图片。
 inline std::string renderSealdice(Database& db, int logId, ConfigManager* cfg = nullptr) {
     auto* st = db.getLogStorage();
     if (!st) return "";
@@ -72,8 +76,7 @@ inline std::string renderSealdice(Database& db, int logId, ConfigManager* cfg = 
             // 导出格式以 <骰娘名> 标记骰娘发言；普通玩家保持原格式。
             std::string sender = (!selfId.empty() && uid == selfId) ? "<" + m.sender + ">" : m.sender;
             out += sender + "(" + uid + ") " + slashTime(m.createdAt) + "\n";
-            std::string content = (cfg && !m.images.empty())
-                ? imghost::substituteImages(m.content, m.images, *cfg) : m.content;
+            std::string content = transcriptContent(m, cfg);
             out += content + "\n\n";
         }
     } catch (...) {}
@@ -199,8 +202,7 @@ inline json renderSealItems(Database& db, int logId, ConfigManager* cfg, const s
         long long i = 0;
         for (auto& m : msgs) {
             std::string uid = m.userId.empty() ? std::string("0") : m.userId;
-            std::string content = (cfg && !m.images.empty())
-                ? imghost::substituteImages(m.content, m.images, *cfg) : m.content;
+            std::string content = transcriptContent(m, cfg);
             items.push_back(json{
                 {"id", ++i},
                 {"nickname", m.sender},
@@ -287,8 +289,7 @@ inline std::vector<parquetw::LogRow> renderLogRows(Database& db, int logId, Conf
         long long i = 0;
         for (auto& m : msgs) {
             std::string uid = m.userId.empty() ? std::string("0") : m.userId;
-            std::string content = (cfg && !m.images.empty())
-                ? imghost::substituteImages(m.content, m.images, *cfg) : m.content;
+            std::string content = transcriptContent(m, cfg);
             parquetw::LogRow r;
             r.id = (uint64_t)(++i);
             r.nickname = m.sender;

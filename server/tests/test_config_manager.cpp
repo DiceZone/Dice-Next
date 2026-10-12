@@ -2,10 +2,14 @@
 #include "../src/config/config_manager.h"
 #include "../src/config/scoped_settings.h"
 #include "../src/service/web_auth.h"
+#include "../src/common/hot_reload.h"
+#include "test_watchdog.h"
 
 #include <filesystem>
 #include <fstream>
 #include <chrono>
+#include <atomic>
+#include <thread>
 
 using namespace dice;
 namespace fs = std::filesystem;
@@ -15,6 +19,135 @@ fs::path temporaryConfigRoot(const char* name) {
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     return fs::temp_directory_path() / (std::string("dice_next_") + name + "_" + std::to_string(nonce));
 }
+
+struct ReloadFixture {
+    fs::path root = temporaryConfigRoot("reload");
+    ConfigManager cfg{(root / "config").string()};
+    ReloadFixture() {
+        if (!cfg.load()) throw std::runtime_error("cannot create configuration");
+        cfg.set<std::string>("server/api_key", "fixed-test-api-key");
+        if (!cfg.save()) throw std::runtime_error("cannot persist configuration");
+    }
+    ~ReloadFixture() { std::error_code ec; fs::remove_all(root, ec); }
+};
+}
+
+TEST(ConfigManager, IgnoresTemporarySessionAndNestedFiles) {
+    for (const auto& file : {"server.json", "dice.json", "custom_rule.json", "rules-1.json"})
+        ASSERT_TRUE(ConfigManager::isConfigurationFile(file));
+    for (const auto& file : {"webui_sessions.json", "default_config.json", "dice.json.tmp", ".dice.json",
+                            "runtime.log", "data/dice.json", "nested\\server.json", "dice.json~", "server"})
+        ASSERT_FALSE(ConfigManager::isConfigurationFile(file));
+}
+
+TEST(ConfigManager, RepeatedIdenticalReloadsDoNotEmitCallbacksOrSnapshots) {
+    ReloadFixture f;
+    ConfigManager observer(f.cfg.configPath());
+    ASSERT_TRUE(observer.load());
+    int callbacks = 0, snapshots = 0;
+    observer.onConfigChanged([&] { ++callbacks; });
+    observer.setSnapshotWriter([&](const json&) { ++snapshots; });
+    for (int i = 0; i < 100; ++i) ASSERT_TRUE(observer.reload());
+    ASSERT_EQ(callbacks, 0);
+    ASSERT_EQ(snapshots, 0);
+    // Whitespace / key-order-only edits are not functional changes either.
+    const auto original = observer.getAll();
+    { std::ofstream out(f.root / "config" / "dice.json"); out << original["dice"].dump(4); }
+    ASSERT_TRUE(observer.reload());
+    ASSERT_EQ(callbacks, 0);
+    const auto timestamp = fs::last_write_time(f.root / "config" / "dice.json");
+    ASSERT_TRUE(observer.save());
+    ASSERT_TRUE(fs::last_write_time(f.root / "config" / "dice.json") == timestamp);
+}
+
+TEST(ConfigManager, ChangedValidContentReloadsOnceAndInvalidEditPreservesOldState) {
+    ReloadFixture f;
+    ConfigManager observer(f.cfg.configPath());
+    ASSERT_TRUE(observer.load());
+    int callbacks = 0;
+    observer.onConfigChanged([&] { ++callbacks; });
+    auto changed = observer.getAll()["dice"];
+    changed["rules"]["default_dice_sides"] = 20;
+    { std::ofstream out(f.root / "config" / "dice.json"); out << changed; }
+    ASSERT_TRUE(observer.reload());
+    ASSERT_EQ(callbacks, 1);
+    ASSERT_EQ(observer.get<int>("dice/rules/default_dice_sides"), 20);
+    ASSERT_TRUE(observer.reload());
+    ASSERT_EQ(callbacks, 1);
+    { std::ofstream out(f.root / "config" / "dice.json"); out << "{invalid"; }
+    ASSERT_FALSE(observer.reload());
+    ASSERT_EQ(callbacks, 1);
+    ASSERT_EQ(observer.get<int>("dice/rules/default_dice_sides"), 20);
+}
+
+TEST(ConfigManager, ExternalEditImmediatelyAfterOwnSaveIsNotLost) {
+    ReloadFixture f;
+    int callbacks = 0;
+    f.cfg.onConfigChanged([&] { ++callbacks; });
+    ASSERT_TRUE(f.cfg.save());
+    auto changed = f.cfg.getAll()["dice"];
+    changed["rules"]["default_dice_sides"] = 8;
+    { std::ofstream out(f.root / "config" / "dice.json"); out << changed; }
+    ASSERT_TRUE(f.cfg.reload());
+    ASSERT_EQ(f.cfg.get<int>("dice/rules/default_dice_sides"), 8);
+    ASSERT_EQ(callbacks, 1);
+}
+
+TEST(ConfigManager, MissingApiKeyDoesNotChangeOnEveryRead) {
+    ReloadFixture f;
+    auto server = f.cfg.getAll()["server"];
+    server["api_key"] = "";
+    { std::ofstream out(f.root / "config" / "server.json"); out << server; }
+    ConfigManager observer(f.cfg.configPath());
+    ASSERT_TRUE(observer.load());
+    const auto key = observer.get<std::string>("server/api_key");
+    ASSERT_FALSE(key.empty());
+    int callbacks = 0;
+    observer.onConfigChanged([&] { ++callbacks; });
+    for (int i = 0; i < 10; ++i) ASSERT_TRUE(observer.reload());
+    ASSERT_EQ(callbacks, 0);
+    ASSERT_EQ(observer.get<std::string>("server/api_key"), key);
+}
+
+TEST(ConfigManager, NativeWatcherCoalescesConfigChangesAndIgnoresRuntimeWrites) {
+#if defined(_WIN32) || defined(__linux__)
+    TestWatchdog watchdog;
+    ReloadFixture f;
+    ConfigManager observer(f.cfg.configPath());
+    ASSERT_TRUE(observer.load());
+    std::atomic<int> reloads{0}, notifications{0};
+    std::atomic<bool> failed{false};
+    observer.onConfigChanged([&] { ++reloads; });
+    HotReloadMonitor watcher;
+    ASSERT_TRUE(watcher.start(observer.configPath(), 100, [&](const std::string&) {
+        ++notifications;
+        if (!observer.reload()) failed = true;
+    }, ConfigManager::isConfigurationFile));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    for (int i = 0; i < 100; ++i) {
+        std::ofstream(f.root / "config" / "runtime.log") << i;
+        std::ofstream(f.root / "config" / "webui_sessions.json") << "{}";
+        std::ofstream(f.root / "config" / "dice.json.tmp") << "{}";
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    ASSERT_EQ(reloads.load(), 0);
+    // An overflow may prompt a content check, but must not apply any config.
+    const auto beforeEdit = notifications.load();
+    auto changed = observer.getAll()["dice"];
+    changed["rules"]["default_dice_sides"] = 12;
+    { std::ofstream out(f.root / "config" / "dice.json"); out << changed; }
+    // More changes in the same quiet period must not hide the real JSON edit.
+    std::ofstream(f.root / "config" / "webui_sessions.json") << "{}";
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!reloads.load() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    watcher.stop();
+    ASSERT_FALSE(failed.load());
+    ASSERT_EQ(reloads.load(), 1);
+    ASSERT_EQ(notifications.load(), beforeEdit + 1);
+    ASSERT_EQ(observer.get<int>("dice/rules/default_dice_sides"), 12);
+#endif
 }
 
 TEST(ConfigManager, SplitConfigRoundTripAndSnapshotRecovery) {
