@@ -5,6 +5,7 @@
 // This avoids overwriting live SQLite files or loaded plugins in place.
 
 #include "../storage/database.h"
+#include "../storage/legacy_import_resources.h"
 #include "../common/utils.h"
 #include "../common/subprocess.h"
 #include <nlohmann/json.hpp>
@@ -169,11 +170,15 @@ inline bool copyTree(const fs::path& from, const fs::path& to, std::string& erro
                      bool skipBackups = false) {
     std::error_code ec;
     if (!fs::exists(from, ec)) return true;
+    if (migration_resources::isLink(from) || migration_resources::isLink(to)) {
+        error = "备份/恢复目录不能是符号链接或重解析点"; return false;
+    }
     fs::create_directories(to, ec);
     if (ec) { error = "无法创建备份目录 " + to.string() + ": " + ec.message(); return false; }
     fs::recursive_directory_iterator it(from, ec), end;
     for (; it != end; it.increment(ec)) {
         if (ec) { error = "遍历 " + from.string() + " 失败: " + ec.message(); return false; }
+        if (migration_resources::isLink(it->path())) { error = "备份/恢复不跟随符号链接或重解析点"; return false; }
         if (skipBackups && it->is_directory(ec) && it->path().filename() == "backups") {
             it.disable_recursion_pending();
             continue;
@@ -266,13 +271,15 @@ inline ArchiveCommand archiveListCommand(const fs::path& archive) {
 
 inline ArchiveCommand archiveCreateCommand(const fs::path& stage, const fs::path& archive) {
 #ifdef _WIN32
-    return {dice::proc::systemTool("tar.exe"),
+    ArchiveCommand command{dice::proc::systemTool("tar.exe"),
             {"-a", "-cf", archive, "-C", stage, "manifest.json", "config", "data"}, {}};
 #else
     // Starting the child in the stage directory replaces the old "cd ... && zip",
     // the one command here that genuinely needed a shell.
-    return {"zip", {"-qr", fs::absolute(archive), "manifest.json", "config", "data"}, stage};
+    ArchiveCommand command{"zip", {"-qr", fs::absolute(archive), "manifest.json", "config", "data"}, stage};
 #endif
+    if (fs::is_directory(stage / "image")) command.args.push_back("image");
+    return command;
 }
 
 inline ArchiveCommand archiveExtractCommand(const fs::path& archive, const fs::path& destination) {
@@ -354,19 +361,26 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
                 if (!copy(item)) { fs::remove_all(stage, ec); return false; }
         }
         if (selection.uploadedAssets && !copy("data/assets")) { fs::remove_all(stage, ec); return false; }
-        if (selection.resourceImages && !copy("data/images")) { fs::remove_all(stage, ec); return false; }
+        if (selection.resourceImages && (!copy("data/images") || !copy("data/legacy_assets"))) { fs::remove_all(stage, ec); return false; }
         if (selection.gameLogImages && !copy("data/logs/images")) { fs::remove_all(stage, ec); return false; }
         if (selection.chatMedia && (!copy("data/chat/images") || !copy("data/chat_images"))) {
             fs::remove_all(stage, ec); return false;
         }
+    }
+    if (selection.resourceImages) {
+        if (!copyTree("image", stage / "image", error)) { fs::remove_all(stage, ec); return false; }
+        fs::create_directories(stage / "image", ec);
+        if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
     }
     if (selection.config && fs::exists(configPath, ec)) {
         const fs::path configDir = fs::is_directory(configPath, ec)
             ? configPath : (configPath.parent_path().empty() ? fs::path("config") : configPath.parent_path());
         if (!copyTree(configDir, stage / "config", error)) { fs::remove_all(stage, ec); return false; }
     }
-    json manifest{{"format", "dice-next-backup"}, {"version", 3}, {"created_at", stamp()}, {"automatic", automatic},
+    json manifest{{"format", "dice-next-backup"}, {"version", 4}, {"created_at", stamp()}, {"automatic", automatic},
+                  {"rootMediaIncluded", selection.resourceImages},
                   {"selection", selection.toJson()}, {"includes", json::array({"data", "config"})}};
+    if (selection.resourceImages) manifest["includes"].push_back("image");
     { std::ofstream f(stage / "manifest.json", std::ios::binary); f << manifest.dump(2); }
     fs::path backupDir = archiveDirectory(automatic); fs::create_directories(backupDir, ec);
     if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
@@ -448,7 +462,8 @@ inline void cleanupArchives(int keepDays) {
 inline bool allowedArchivePath(const std::string& name) {
     if (name.empty() || name.front() == '/' || name.find("..") != std::string::npos || name.find('\\') != std::string::npos) return false;
     return name == "manifest.json" || name == "config/" || name.rfind("config/", 0) == 0
-        || name == "data/" || name.rfind("data/", 0) == 0;
+        || name == "data/" || name.rfind("data/", 0) == 0
+        || name == "image/" || name.rfind("image/", 0) == 0;
 }
 
 inline bool stageRestoreArchive(const fs::path& archive, std::string& error) {
@@ -459,6 +474,9 @@ inline bool stageRestoreArchive(const fs::path& archive, std::string& error) {
     std::istringstream lines(listed.output); std::string line; bool manifestSeen = false;
     while (std::getline(lines, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
+        // Compress-Archive on Windows writes backslash-separated ZIP names.
+        // Normalize before checking traversal; never bypass the path allowlist.
+        std::replace(line.begin(), line.end(), '\\', '/');
         if (!allowedArchivePath(line)) { error = "备份包含不允许的文件路径"; return false; }
         if (line == "manifest.json") manifestSeen = true;
     }
@@ -475,6 +493,9 @@ inline bool stageRestoreArchive(const fs::path& archive, std::string& error) {
         if (ec2) { error = "无法解析暂存目录"; fs::remove_all(stage, ec); return false; }
         for (auto& entry : fs::recursive_directory_iterator(stage, ec2)) {
             if (ec2) { error = "读取解压内容失败"; fs::remove_all(stage, ec); return false; }
+            if (migration_resources::isLink(entry.path())) {
+                error = "备份包含符号链接或重解析点"; fs::remove_all(stage, ec); return false;
+            }
             if (!entry.is_regular_file(ec2)) continue;
             const fs::path real = fs::canonical(entry.path(), ec2);
             const fs::path relative = ec2 ? fs::path() : real.lexically_relative(stageReal);
@@ -492,8 +513,10 @@ inline bool stageRestoreArchive(const fs::path& archive, std::string& error) {
     try {
         std::ifstream f(stage / "manifest.json"); json manifest; f >> manifest;
         const int version = manifest.value("version", 0);
-        if (manifest.value("format", std::string()) != "dice-next-backup" || (version != 1 && version != 2 && version != 3))
+        if (manifest.value("format", std::string()) != "dice-next-backup" || (version < 1 || version > 4))
             throw std::runtime_error("format");
+        if (fs::exists(stage / "image") && (version < 4 || !manifest.value("rootMediaIncluded", false)))
+            throw std::runtime_error("unexpected root media");
     } catch (...) { error = "备份清单格式不受支持"; fs::remove_all(stage, ec); return false; }
     return true;
 }
@@ -516,6 +539,13 @@ inline bool stageStoredRestore(const std::string& name, bool automatic, std::str
 
 inline bool clearForFullRestore(const fs::path& root, bool preserveActiveLogs, std::string& error) {
     std::error_code ec;
+    const auto absolute = fs::absolute(root, ec).lexically_normal();
+    const auto workspace = fs::weakly_canonical(fs::current_path(), ec);
+    const auto name = absolute.filename().string();
+    if (ec || absolute.parent_path() != workspace || (name != "data" && name != "config" && name != "image")
+        || !migration_resources::safePath(workspace, absolute)) {
+        error = "拒绝清理工作目录之外或不安全的恢复路径"; return false;
+    }
     if (!fs::is_directory(root, ec)) return true;
     for (const auto& entry : fs::directory_iterator(root, ec)) {
         if (ec) { error = ec.message(); return false; }
@@ -549,6 +579,7 @@ inline bool applyPendingRestore(std::string& notice) {
         { std::ifstream f(stage / "manifest.json"); f >> manifest; }
         const bool partial = manifest.value("version", 1) >= 2 &&
             !Selection::fromJson(manifest.value("selection", json::object())).complete();
+        const bool rootMedia = manifest.value("version", 1) >= 4 && manifest.value("rootMediaIncluded", false);
         if (partial) {
             // A partial archive overlays only its selected paths.  Keep a full
             // rollback copy so individual plugins/resources can be restored
@@ -556,8 +587,10 @@ inline bool applyPendingRestore(std::string& notice) {
             std::string copyError;
             if (!copyTree("data", rollback / "data", copyError)) throw std::runtime_error(copyError);
             if (fs::exists("config")) copyTree("config", rollback / "config", copyError);
+            if (rootMedia && !copyTree("image", rollback / "image", copyError)) throw std::runtime_error(copyError);
             if (fs::exists(stage / "data") && !copyTree(stage / "data", "data", copyError)) throw std::runtime_error(copyError);
             if (fs::exists(stage / "config") && !copyTree(stage / "config", "config", copyError)) throw std::runtime_error(copyError);
+            if (rootMedia && !copyTree(stage / "image", "image", copyError)) throw std::runtime_error(copyError);
             fs::remove_all(stage, ec);
             notice = "已应用局部待恢复备份；恢复前的数据保存在 " + rollback.string();
             return true;
@@ -571,14 +604,17 @@ inline bool applyPendingRestore(std::string& notice) {
             throw std::runtime_error(copyError);
         if (fs::exists("config") && !copyTree("config", rollback / "config", copyError))
             throw std::runtime_error(copyError);
+        if (rootMedia && !copyTree("image", rollback / "image", copyError)) throw std::runtime_error(copyError);
         if (!clearForFullRestore("data", true, copyError)) throw std::runtime_error(copyError);
         if (!clearForFullRestore("config", false, copyError)) throw std::runtime_error(copyError);
+        if (rootMedia && !clearForFullRestore("image", false, copyError)) throw std::runtime_error(copyError);
         fs::create_directories("data", ec);
         fs::create_directories("config", ec);
         if (fs::exists(stage / "data") && !copyTree(stage / "data", "data", copyError))
             throw std::runtime_error(copyError);
         if (fs::exists(stage / "config") && !copyTree(stage / "config", "config", copyError))
             throw std::runtime_error(copyError);
+        if (rootMedia && !copyTree(stage / "image", "image", copyError)) throw std::runtime_error(copyError);
         fs::remove_all(stage, ec);
         notice = "已应用待恢复备份；恢复前的数据保存在 " + rollback.string();
         return true;
@@ -588,6 +624,7 @@ inline bool applyPendingRestore(std::string& notice) {
             std::string ignored;
             if (fs::exists(rollback / "data")) copyTree(rollback / "data", "data", ignored);
             if (fs::exists(rollback / "config")) copyTree(rollback / "config", "config", ignored);
+            if (fs::exists(rollback / "image")) copyTree(rollback / "image", "image", ignored);
         } catch (...) {}
         notice = "恢复失败：" + std::string(e.what()); return false;
     }

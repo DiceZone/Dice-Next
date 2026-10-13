@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <sstream>
+#include <limits>
 
 namespace dice {
 
@@ -130,6 +131,28 @@ int CharacterCardStore::loadRulePackAliases(const std::string& dir) {
 // ─── Internal helpers ────────────────────────────────────────
 
 namespace {
+bool sameAttribute(const std::string& key, const std::string& name) {
+    return key == name || CharacterCardStore::canonical(key) == CharacterCardStore::canonical(name);
+}
+json::const_iterator findAttribute(const json& values, const std::string& name) {
+    if (!values.is_object()) return values.end();
+    auto it = values.find(name);
+    if (it != values.end()) return it;
+    it = values.find(CharacterCardStore::canonical(name));
+    if (it != values.end()) return it;
+    for (it = values.begin(); it != values.end(); ++it)
+        if (sameAttribute(it.key(), name)) return it;
+    return values.end();
+}
+bool eraseAttribute(json& values, const std::string& name) {
+    if (!values.is_object()) return false;
+    bool erased = false;
+    for (auto it = values.begin(); it != values.end();) {
+        if (sameAttribute(it.key(), name)) { it = values.erase(it); erased = true; }
+        else ++it;
+    }
+    return erased;
+}
 std::string nowIso() {
     std::time_t t = std::time(nullptr);
     char buf[32];
@@ -159,7 +182,8 @@ std::map<std::string, int> CharacterCardStore::attrsOf(
         if (!rows.empty() && !rows.front().attrs.empty()) {
             json j = json::parse(rows.front().attrs);
             for (auto it = j.begin(); it != j.end(); ++it)
-                if (it.value().is_number_integer())
+                if (it.value().is_number_integer() && it.value() >= (std::numeric_limits<int>::min)()
+                    && it.value() <= (std::numeric_limits<int>::max)())
                     result[it.key()] = it.value().get<int>();
         }
     } catch (const std::exception& e) {
@@ -185,7 +209,7 @@ void CharacterCardStore::saveAttrsOf(const std::string& user, const std::string&
                 json old = json::parse(rows.front().attrs);
                 if (old.is_object())
                     for (auto it = old.begin(); it != old.end(); ++it)
-                        if (!it.value().is_number_integer()) j[it.key()] = it.value();
+                        if (!it.value().is_number_integer() && !attrs.count(it.key())) j[it.key()] = it.value();
             } catch (...) {}
         }
         if (rows.empty()) {
@@ -325,6 +349,120 @@ void CharacterCardStore::setTextByName(const std::string& user, const std::strin
 
 // ─── Binding (which card is active in a scope) ───────────────
 
+std::map<std::string, std::string> CharacterCardStore::getExpressionsByName(
+        const std::string& user, const std::string& card) const {
+    std::map<std::string, std::string> out;
+    auto j = rawCardJson(user, card);
+    if (!j.contains("__meta") || !j["__meta"].is_object()) return out;
+    // Read previously imported cards too; new edits use the native key.
+    for (const auto* name : {"legacyExpressions", "expressions"}) {
+        const auto& meta = j["__meta"];
+        if (!meta.contains(name) || !meta[name].is_object()) continue;
+        for (const auto& [key, value] : meta[name].items())
+            if (value.is_string()) out[canonical(key)] = value.get<std::string>();
+    }
+    return out;
+}
+
+json CharacterCardStore::getValuesByName(const std::string& user, const std::string& card) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto raw = rawCardJson(user, card);
+    json values = json::object();
+    for (const auto& [key, value] : raw.items())
+        if (!key.empty() && key.rfind("__", 0) != 0) values[key] = value;
+    const auto meta = raw.value("__meta", json::object());
+    if (meta.is_object() && meta.contains("texts") && meta["texts"].is_object())
+        for (const auto& [key, value] : meta["texts"].items())
+            if (key.rfind("__", 0) != 0) values[key] = value;
+    for (const auto* field : {"legacyExpressions", "expressions"})
+        if (meta.is_object() && meta.contains(field) && meta[field].is_object())
+            for (const auto& [key, value] : meta[field].items())
+                if (!key.empty() && key.rfind("__", 0) != 0 && value.is_string()) values["&" + key] = value;
+    return values;
+}
+
+void CharacterCardStore::replaceValuesByName(const std::string& user, const std::string& card,
+        const json& values) {
+    if (!values.is_object()) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto previous = rawCardJson(user, card);
+    auto meta = previous.value("__meta", json::object());
+    if (!meta.is_object()) meta = json::object();
+    meta.erase("texts"); meta.erase("expressions"); meta.erase("legacyExpressions");
+    json data = json::object();
+    for (const auto& [key, value] : values.items()) {
+        if (key.empty() || key.rfind("__", 0) == 0) continue;
+        if (key.front() == '&') {
+            if (key.size() > 1 && value.is_string()) meta["expressions"][key.substr(1)] = value;
+        } else if (value.is_string()) meta["texts"][key] = value;
+        else data[key] = value;
+    }
+    if (!meta.empty()) data["__meta"] = std::move(meta);
+    saveRawCardJson(user, card, data);
+}
+
+std::string CharacterCardStore::displayName(const std::string& user, const std::string& card) const {
+    if (!card.empty()) return card;
+    auto value = getValueByName(user, card, "__Name");
+    return value && value->is_string() ? value->get<std::string>() : card;
+}
+
+std::optional<json> CharacterCardStore::getValueByName(
+        const std::string& user, const std::string& card, const std::string& key) const {
+    auto j = rawCardJson(user, card);
+    if (!j.is_object()) return std::nullopt;
+    const json meta = j.value("__meta", json::object());
+    if (key == "__Name") {
+        if (card.empty() && meta.is_object() && meta.contains("displayName") && meta["displayName"].is_string())
+            return std::optional<json>(std::in_place, meta["displayName"]);
+        return std::optional<json>(std::in_place, card);
+    }
+    if (key == "__Type" && meta.is_object()) {
+        for (const auto* field : {"type", "legacyType"})
+            if (meta.contains(field) && meta[field].is_string() && !meta[field].get<std::string>().empty())
+                return std::optional<json>(std::in_place, meta[field]);
+    }
+    const bool expressionOnly = !key.empty() && key.front() == '&';
+    const auto canonicalKey = canonical(expressionOnly ? key.substr(1) : key);
+    if (!expressionOnly) {
+        if (auto it = findAttribute(j, key); it != j.end()) return std::optional<json>(std::in_place, *it);
+        if (meta.is_object() && meta.contains("texts") && meta["texts"].is_object()) {
+            const auto& texts = meta["texts"];
+            if (auto it = findAttribute(texts, key); it != texts.end()) return std::optional<json>(std::in_place, *it);
+        }
+    }
+    const auto expressions = getExpressionsByName(user, card);
+    if (auto it = expressions.find(canonicalKey); it != expressions.end()) return it->second;
+    return std::nullopt;
+}
+
+void CharacterCardStore::setValueByName(const std::string& user, const std::string& card,
+        const std::string& key, const json& value) {
+    if (key.empty() || key == "__meta" || canonical(key) == "__meta") return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto j = rawCardJson(user, card);
+    if (!j["__meta"].is_object()) j["__meta"] = json::object();
+    auto& meta = j["__meta"];
+    if (key == "__Type" || key == "__Name") {
+        const char* metaKey = key == "__Type" ? "type" : "displayName";
+        if (value.is_null()) meta.erase(metaKey);
+        else if (value.is_string()) meta[metaKey] = value;
+    } else if (key.front() == '&') {
+        const auto name = canonical(key.substr(1));
+        if (!meta["expressions"].is_object()) meta["expressions"] = json::object();
+        // Remove obsolete raw-copy fallback when deleting or editing.
+        if (meta.contains("legacyExpressions")) eraseAttribute(meta["legacyExpressions"], name);
+        eraseAttribute(meta["expressions"], name);
+        if (value.is_string()) meta["expressions"][name] = value;
+    } else {
+        const auto name = canonical(key);
+        eraseAttribute(j, name);
+        if (meta.contains("texts")) eraseAttribute(meta["texts"], name);
+        if (!value.is_null()) j[name] = value;
+    }
+    saveRawCardJson(user, card, j);
+}
+
 std::string CharacterCardStore::boundCard(const std::string& user,
                                           const std::string& scope) const {
     auto* st = db_.getStorage();
@@ -335,6 +473,12 @@ std::string CharacterCardStore::boundCard(const std::string& user,
                        and orm::c(&UserSettingRow::groupId) == scope
                        and orm::c(&UserSettingRow::key) == std::string("cardBind")));
         if (!rows.empty()) return rows.front().value;
+        if (!scope.empty()) {
+            rows = st->get_all<UserSettingRow>(orm::where(orm::c(&UserSettingRow::userId) == user
+                and orm::c(&UserSettingRow::groupId) == std::string()
+                and orm::c(&UserSettingRow::key) == std::string("cardBind")));
+            if (!rows.empty()) return rows.front().value;
+        }
     } catch (...) {}
     return "";
 }
@@ -366,7 +510,15 @@ void CharacterCardStore::bindCard(const std::string& user, const std::string& sc
 std::map<std::string, int> CharacterCardStore::getAttrs(
         const std::string& user, const std::string& scope) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return attrsOf(user, boundCard(user, scope));
+    const auto attrs = attrsOf(user, boundCard(user, scope));
+    std::map<std::string, int> values;
+    // Explicit canonical fields win a collision; raw JSON remains intact for
+    // audit/typed export. Old alias-only cards work without destructive rewrites.
+    for (const auto& [name, value] : attrs)
+        if (name.rfind("__", 0) != 0 && canonical(name) == name) values[name] = value;
+    for (const auto& [name, value] : attrs)
+        if (name.rfind("__", 0) != 0) values.try_emplace(canonical(name), value);
+    return values;
 }
 
 std::optional<int> CharacterCardStore::getAttr(
@@ -377,8 +529,10 @@ std::optional<int> CharacterCardStore::getAttrByName(
         const std::string& user, const std::string& cardName, const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto attrs = attrsOf(user, cardName);
+    if (auto exact = attrs.find(name); exact != attrs.end()) return exact->second;
     auto it = attrs.find(canonical(name));
     if (it != attrs.end()) return it->second;
+    for (const auto& [key, value] : attrs) if (sameAttribute(key, name)) return value;
     return std::nullopt;
 }
 
@@ -388,18 +542,21 @@ void CharacterCardStore::setAttr(const std::string& user, const std::string& sco
 }
 void CharacterCardStore::setAttrByName(const std::string& user, const std::string& card,
                                        const std::string& name, int value) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto attrs = attrsOf(user, card);
-    attrs[canonical(name)] = value;
-    saveAttrsOf(user, card, attrs);
+    setValueByName(user, card, name, value);
 }
 
 bool CharacterCardStore::clear(const std::string& user, const std::string& scope) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string card = boundCard(user, scope);
-    auto attrs = attrsOf(user, card);
-    if (attrs.empty()) return false;
-    saveAttrsOf(user, card, {});
+    auto raw = rawCardJson(user, card);
+    json empty = json::object();
+    if (raw.contains("__meta") && raw["__meta"].is_object()) {
+        auto meta = raw["__meta"];
+        meta.erase("texts"); meta.erase("expressions"); meta.erase("legacyExpressions");
+        if (!meta.empty()) empty["__meta"] = std::move(meta);
+    }
+    if (raw == empty) return false;
+    saveRawCardJson(user, card, empty);
     return true;
 }
 
@@ -410,11 +567,19 @@ bool CharacterCardStore::eraseAttr(const std::string& user, const std::string& s
 bool CharacterCardStore::eraseAttrByName(const std::string& user, const std::string& card,
                                          const std::string& name) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto attrs = attrsOf(user, card);
-    auto it = attrs.find(canonical(name));
-    if (it == attrs.end()) return false;
-    attrs.erase(it);
-    saveAttrsOf(user, card, attrs);
+    if (name.empty() || canonical(name) == "__meta" || name == "__Name" || name == "__Type") return false;
+    auto raw = rawCardJson(user, card);
+    const bool expressionOnly = name.front() == '&';
+    const auto key = expressionOnly ? name.substr(1) : name;
+    bool removed = !expressionOnly && eraseAttribute(raw, key);
+    if (raw.contains("__meta") && raw["__meta"].is_object()) {
+        auto& meta = raw["__meta"];
+        if (!expressionOnly && meta.contains("texts")) removed = eraseAttribute(meta["texts"], key) || removed;
+        for (const auto* field : {"expressions", "legacyExpressions"})
+            if (meta.contains(field)) removed = eraseAttribute(meta[field], key) || removed;
+    }
+    if (!removed) return false;
+    saveRawCardJson(user, card, raw);
     return true;
 }
 

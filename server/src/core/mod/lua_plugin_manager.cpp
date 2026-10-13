@@ -3,6 +3,7 @@
 #include "common/utils.h"
 #include "common/subprocess.h"
 #include "common/bounded_regex.h"
+#include "common/legacy_conf_value.h"
 
 #include <nlohmann/json.hpp>
 #include <yaml-cpp/yaml.h>
@@ -469,7 +470,54 @@ static std::string resolvedKey(LuaPluginManager* m, lua_State* L, int i) {
     return key;
 }
 // 把字符串值压栈：能转成数字就压数字（好感等算术），否则压字符串。
-static void pushConfValue(lua_State* L, const std::string& v) {
+static void jsonToLua(lua_State* L, const json& j, const std::string& scope = {},
+                      const std::string& key = {}, const std::string& path = {}, const json& card = json());
+static json luaToJson(lua_State* L, int idx, int depth = 0);
+static int saveLegacySet(lua_State* L) {
+    auto* manager = mgrOf(L); if (!manager) return 0;
+    const auto scope = argStr(L, lua_upvalueindex(1)), key = argStr(L, lua_upvalueindex(2));
+    const auto path = argStr(L, lua_upvalueindex(3));
+    const auto card = json::parse(argStr(L, lua_upvalueindex(4)), nullptr, false);
+    json root;
+    try {
+        if (card.is_object()) {
+            if (manager->hasPlayerCardBridge()) {
+                if (!manager->playerCardRead(card["uid"], card["scope"], card["byName"], card["field"], root)) return 0;
+            } else {
+                const auto data = json::parse(manager->cardLoad(card["uid"], card["scope"]), nullptr, false);
+                if (!data.is_object() || !data.contains(card["field"].get<std::string>())) return 0;
+                root = data[card["field"].get<std::string>()];
+            }
+        } else if (!legacy_conf::decode(manager->confGet(scope, key), root)) return 0;
+        const json::json_pointer pointer(path);
+        if (!root.contains(pointer) || !legacy_conf::isSet(root.at(pointer))) return 0;
+        auto values = luaToJson(L, 1);
+        if (values.empty()) values = json::array();
+        if (!values.is_array()) return 0;
+        root[pointer] = legacy_conf::setValue(values);
+        if (card.is_object()) {
+            if (manager->hasPlayerCardBridge())
+                manager->playerCardWrite(card["uid"], card["scope"], card["byName"], card["field"], root);
+            else {
+                auto data = json::parse(manager->cardLoad(card["uid"], card["scope"]), nullptr, false);
+                if (!data.is_object()) return 0;
+                data[card["field"].get<std::string>()] = root;
+                manager->cardSave(card["uid"], card["scope"], data.dump());
+            }
+        } else manager->confSet(scope, key, legacy_conf::encode(root));
+    } catch (...) { return 0; }
+    return 0;
+}
+static std::string legacyJsonPath(const std::string& path, const std::string& key) {
+    std::string escaped;
+    for (const char ch : key) {
+        if (ch == '~') escaped += "~0"; else if (ch == '/') escaped += "~1"; else escaped += ch;
+    }
+    return path + "/" + escaped;
+}
+static void pushConfValue(lua_State* L, const std::string& v, const std::string& scope = {}, const std::string& key = {}) {
+    json typed;
+    if (legacy_conf::decode(v, typed)) { jsonToLua(L, typed, scope, key); return; }
     if (v == "true") { lua_pushboolean(L, 1); return; }
     if (v == "false") { lua_pushboolean(L, 0); return; }
     if (!v.empty()) {
@@ -487,7 +535,25 @@ static std::string todayStr() {
 }
 
 // ── Lua ↔ JSON（人物卡可存嵌套结构：数组/对象）──────────────────
-static void jsonToLua(lua_State* L, const json& j) {
+static void jsonToLua(lua_State* L, const json& j, const std::string& scope,
+                      const std::string& key, const std::string& path, const json& card) {
+    if (legacy_conf::isFunction(j)) { lua_pushnil(L); return; } // never execute legacy bytecode
+    if (legacy_conf::isSet(j)) {
+        lua_getglobal(L, "Set");
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); lua_pushnil(L); return; }
+        lua_getfield(L, -1, "new");
+        if (!lua_isfunction(L, -1)) { lua_pop(L, 2); lua_pushnil(L); return; }
+        jsonToLua(L, j["values"]);
+        if ((!scope.empty() && !key.empty()) || card.is_object()) {
+            lua_pushlstring(L, scope.data(), scope.size()); lua_pushlstring(L, key.data(), key.size());
+            lua_pushlstring(L, path.data(), path.size());
+            const auto binding = card.dump(); lua_pushlstring(L, binding.data(), binding.size());
+            lua_pushcclosure(L, saveLegacySet, 4);
+        } else lua_pushnil(L);
+        if (dnx_pcall(L, 2, 1) == LUA_OK) lua_remove(L, -2);
+        else { lua_pop(L, 2); lua_pushnil(L); }
+        return;
+    }
     switch (j.type()) {
         case json::value_t::null: lua_pushnil(L); break;
         case json::value_t::boolean: lua_pushboolean(L, j.get<bool>()); break;
@@ -497,13 +563,16 @@ static void jsonToLua(lua_State* L, const json& j) {
         case json::value_t::string: { auto s = j.get<std::string>(); lua_pushlstring(L, s.data(), s.size()); break; }
         case json::value_t::array: {
             lua_newtable(L); int i = 1;
-            for (auto& e : j) { jsonToLua(L, e); lua_rawseti(L, -2, i++); }
+            for (auto& e : j) {
+                jsonToLua(L, e, scope, key, legacyJsonPath(path, std::to_string(i - 1)), card);
+                lua_rawseti(L, -2, i++);
+            }
             break;
         }
         case json::value_t::object: {
             lua_newtable(L);
             for (auto it = j.begin(); it != j.end(); ++it) {
-                jsonToLua(L, it.value());
+                jsonToLua(L, it.value(), scope, key, legacyJsonPath(path, it.key()), card);
                 lua_setfield(L, -2, it.key().c_str());
             }
             break;
@@ -511,7 +580,7 @@ static void jsonToLua(lua_State* L, const json& j) {
         default: lua_pushnil(L); break;
     }
 }
-static json luaToJson(lua_State* L, int idx, int depth = 0) {
+static json luaToJson(lua_State* L, int idx, int depth) {
     if (depth > 32) return nullptr;
     idx = lua_absindex(L, idx);
     switch (lua_type(L, idx)) {
@@ -522,6 +591,22 @@ static json luaToJson(lua_State* L, int idx, int depth = 0) {
             return lua_tonumber(L, idx);
         case LUA_TSTRING: { size_t n = 0; const char* s = lua_tolstring(L, idx, &n); return std::string(s, n); }
         case LUA_TTABLE: {
+            bool isSet = false;
+            if (lua_getmetatable(L, idx)) {
+                lua_getfield(L, -1, "__dnx_legacy_set"); isSet = lua_toboolean(L, -1) != 0; lua_pop(L, 2);
+            }
+            if (isSet) {
+                json values = json::array();
+                lua_pushliteral(L, "__d"); lua_rawget(L, idx);
+                if (lua_istable(L, -1)) {
+                    lua_pushnil(L);
+                    while (lua_next(L, -2)) {
+                        values.push_back(luaToJson(L, -2, depth + 1)); lua_pop(L, 1);
+                    }
+                }
+                lua_pop(L, 1);
+                return legacy_conf::setValue(values);
+            }
             // 判定数组（连续 1..n 整数键）还是对象。
             lua_Integer len = (lua_Integer)lua_rawlen(L, idx);
             bool isArray = len > 0;
@@ -556,7 +641,8 @@ static json luaToJson(lua_State* L, int idx, int depth = 0) {
 // lua_tolstring 不接受 boolean；旧实现会把 true/false 误写成空串（等价于删除）。
 static std::string confValueString(lua_State* L, int idx) {
     if (lua_isboolean(L, idx)) return lua_toboolean(L, idx) ? "true" : "false";
-    if (lua_istable(L, idx)) return luaToJson(L, idx).dump();
+    if (lua_istable(L, idx)) return legacy_conf::encode(luaToJson(L, idx));
+    if (lua_type(L, idx) == LUA_TSTRING) return legacy_conf::encode(argStr(L, idx));
     return argStr(L, idx);
 }
 
@@ -575,12 +661,15 @@ static int card_index(lua_State* L) {
     if (!m) { lua_pushnil(L); return 1; }
     if (m->hasPlayerCardBridge()) {
         json value;
-        if (m->playerCardRead(uid, scope, byName, key, value)) jsonToLua(L, value);
+        if (m->playerCardRead(uid, scope, byName, key, value))
+            jsonToLua(L, value, {}, {}, {}, json{{"uid", uid}, {"scope", scope}, {"byName", byName}, {"field", key}});
         else lua_pushnil(L);
         return 1;
     }
     json j = json::parse(m->cardLoad(uid, scope), nullptr, false);
-    if (j.is_object() && j.contains(key)) jsonToLua(L, j[key]); else lua_pushnil(L);
+    if (j.is_object() && j.contains(key))
+        jsonToLua(L, j[key], {}, {}, {}, json{{"uid", uid}, {"scope", scope}, {"byName", byName}, {"field", key}});
+    else lua_pushnil(L);
     return 1;
 }
 // 代理 __newindex：写字段 → luaToJson 后持久化。
@@ -635,14 +724,22 @@ static int l_getPlayerCardAttr(lua_State* L) {
     const bool byName = playerCardByNameArg(L, 2, 5);
     if (m->hasPlayerCardBridge()) {
         json value;
-        if (m->playerCardRead(uid, scope, byName, attr, value)) { jsonToLua(L, value); return 1; }
-        if (m->playerCardRead(uid, scope, byName, "&" + attr, value)) { jsonToLua(L, value); return 1; }  // &key 兜底（DiceLua.cpp 973）
+        if (m->playerCardRead(uid, scope, byName, attr, value)) {
+            jsonToLua(L, value, {}, {}, {}, json{{"uid", uid}, {"scope", scope}, {"byName", byName}, {"field", attr}}); return 1;
+        }
+        if (m->playerCardRead(uid, scope, byName, "&" + attr, value)) {
+            jsonToLua(L, value, {}, {}, {}, json{{"uid", uid}, {"scope", scope}, {"byName", byName}, {"field", "&" + attr}}); return 1;
+        }
         if (lua_gettop(L) >= 4 && !lua_isnoneornil(L, 4)) { lua_pushvalue(L, 4); return 1; }
         lua_pushnil(L); return 1;
     }
     json j = json::parse(m->cardLoad(uid, scope), nullptr, false);
-    if (j.is_object() && j.contains(attr)) { jsonToLua(L, j[attr]); return 1; }
-    if (j.is_object() && j.contains("&" + attr)) { jsonToLua(L, j["&" + attr]); return 1; }   // &key 兜底
+    if (j.is_object() && j.contains(attr)) {
+        jsonToLua(L, j[attr], {}, {}, {}, json{{"uid", uid}, {"scope", scope}, {"byName", byName}, {"field", attr}}); return 1;
+    }
+    if (j.is_object() && j.contains("&" + attr)) {
+        jsonToLua(L, j["&" + attr], {}, {}, {}, json{{"uid", uid}, {"scope", scope}, {"byName", byName}, {"field", "&" + attr}}); return 1;
+    }
     if (lua_gettop(L) >= 4 && !lua_isnoneornil(L, 4)) { lua_pushvalue(L, 4); return 1; }   // 默认值
     lua_pushnil(L); return 1;
 }
@@ -756,7 +853,7 @@ static int l_getUserConf(lua_State* L) {
     if (lua_isnil(L, 1)) {   // getUserConf(nil, field) → {uid → val}（rank_user）
         if (key.empty()) { lua_pushnil(L); return 1; }
         lua_newtable(L);
-        for (auto& [id, val] : m->confAllUsers(key)) { pushConfValue(L, val); lua_setfield(L, -2, id.c_str()); }
+        for (auto& [id, val] : m->confAllUsers(key)) { pushConfValue(L, val, "u:" + id, key); lua_setfield(L, -2, id.c_str()); }
         return 1;
     }
     std::string uid = argStr(L, 1);
@@ -766,7 +863,7 @@ static int l_getUserConf(lua_State* L) {
         if (lua_gettop(L) >= 3 && !lua_isnoneornil(L, 3)) { lua_pushvalue(L, 3); return 1; }
         lua_pushnil(L); return 1;
     }
-    pushConfValue(L, v); return 1;
+    pushConfValue(L, v, "u:" + uid, key); return 1;
 }
 static int l_setUserConf(lua_State* L) {
     auto* m = mgrOf(L); if (!m) return 0;
@@ -784,7 +881,7 @@ static int l_getGroupConf(lua_State* L) {
         if (lua_gettop(L) >= 3 && !lua_isnoneornil(L, 3)) { lua_pushvalue(L, 3); return 1; }
         lua_pushnil(L); return 1;
     }
-    pushConfValue(L, v); return 1;
+    pushConfValue(L, v, "g:" + gid, key); return 1;
 }
 static int l_setGroupConf(lua_State* L) {
     auto* m = mgrOf(L); if (!m) return 0;
@@ -803,7 +900,7 @@ static int l_getUserToday(lua_State* L) {
         if (lua_gettop(L) >= 3 && !lua_isnoneornil(L, 3)) { lua_pushvalue(L, 3); return 1; }
         lua_pushinteger(L, 0); return 1;   // 原版未命中返回 0（DiceLua.cpp 948，计数场景免 nil 算术崩）
     }
-    pushConfValue(L, v); return 1;
+    pushConfValue(L, v, scope, key); return 1;
 }
 static int l_setUserToday(lua_State* L) {
     auto* m = mgrOf(L); if (!m) return 0;
@@ -834,8 +931,11 @@ static int l_getDiceQQ(lua_State* L) {
 static std::filesystem::path selfDataPath(const std::string& name) {
     std::string base = name;
     if (auto p = base.find_last_of("/\\"); p != std::string::npos) base = base.substr(p + 1);
-    if (base.size() < 5 || base.substr(base.size() - 5) != ".json") base += ".json";
-    return std::filesystem::path("data/self_data") / base;
+    std::string suffix = base.size() >= 5 ? base.substr(base.size() - 5) : std::string();
+    std::transform(suffix.begin(), suffix.end(), suffix.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (suffix == ".json") base.replace(base.size() - 5, 5, ".json");
+    else base += ".json";
+    return std::filesystem::path("data/self_data") / std::filesystem::path(std::u8string(base.begin(), base.end()));
 }
 static int l_sdLoad(lua_State* L) {           // __dnx_sd_load(name) → json 串
     std::string name = argStr(L, 1);
@@ -915,7 +1015,7 @@ static int l_confRaw(lua_State* L) {
     }
     std::string v = m->confGet(scope, key);
     if (v.empty() && !m->confHas(scope, key)) return 0;
-    pushConfValue(L, v);
+    pushConfValue(L, v, scope, key);
     return 1;
 }
 static int l_mkDirs(lua_State* L) {
@@ -1409,6 +1509,7 @@ do
   SetMethods['in']   = function(s, v) return rawget(s,'__d')[v] ~= nil end
   SetMethods.totable = function(s) local t = {}; for k in pairs(rawget(s,'__d')) do t[#t+1] = k end; return t end
   local SetM = {
+    __dnx_legacy_set = true,
     __index = function(s, k)
       if SetMethods[k] then return SetMethods[k] end
       if rawget(s,'__d')[k] ~= nil then return true end

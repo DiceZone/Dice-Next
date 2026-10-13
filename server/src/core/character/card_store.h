@@ -73,6 +73,19 @@ public:
                                                        const std::string& cardName) const;
     void setTextByName(const std::string& user, const std::string& cardName,
                        const std::string& name, const std::string& value);
+    /// Typed legacy/Lua attributes share the same card row, never a side store.
+    std::optional<nlohmann::json> getValueByName(const std::string& user,
+        const std::string& cardName, const std::string& key) const;
+    void setValueByName(const std::string& user, const std::string& cardName,
+        const std::string& key, const nlohmann::json& value);
+    std::map<std::string, std::string> getExpressionsByName(const std::string& user,
+        const std::string& cardName) const;
+    /// Editable typed fields, including expressions prefixed with '&'.
+    nlohmann::json getValuesByName(const std::string& user, const std::string& cardName) const;
+    /// Replace editable fields atomically, preserving names/type/locks metadata.
+    void replaceValuesByName(const std::string& user, const std::string& cardName,
+        const nlohmann::json& values);
+    std::string displayName(const std::string& user, const std::string& cardName) const;
     bool cardLockedByName(const std::string& user, const std::string& cardName,
                           const std::string& key) const;
     bool lockCardByName(const std::string& user, const std::string& cardName,

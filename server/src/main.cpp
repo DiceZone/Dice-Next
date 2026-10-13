@@ -918,10 +918,7 @@ static int realMain(int argc, char* argv[]) {
                                  const std::string& key, nlohmann::json& out) {
             if (uid.empty() || key.empty()) return false;
             const std::string card = byName ? selector : cardStore.boundCard(uid, selector);
-            if (key == "__Name") { out = card; return true; }
-            if (auto value = cardStore.getAttrByName(uid, card, key)) { out = *value; return true; }
-            auto texts = cardStore.getTextsByName(uid, card);
-            if (auto it = texts.find(key); it != texts.end()) { out = it->second; return true; }
+            if (auto value = cardStore.getValueByName(uid, card, key)) { out = *value; return true; }
             // .st 的关联/表达式属性按群作用域保存；旧 Lua 读取普通属性失败后也会
             // 回退对应的 &属性 字段，因此活动卡场景返回原始表达式。
             if (!byName) {
@@ -941,19 +938,7 @@ static int realMain(int argc, char* argv[]) {
                 if (!cardStore.cardExists(uid, card) && !cardStore.createCard(uid, card)) return false;
                 return cardStore.renameCard(uid, card, newName);
             }
-            if (value.is_null()) {
-                cardStore.eraseAttrByName(uid, card, key);
-                cardStore.setTextByName(uid, card, key, "");
-                return true;
-            }
-            if (value.is_number()) {
-                cardStore.setAttrByName(uid, card, key, static_cast<int>(value.get<double>()));
-                cardStore.setTextByName(uid, card, key, "");
-                return true;
-            }
-            cardStore.eraseAttrByName(uid, card, key);
-            cardStore.setTextByName(uid, card, key,
-                                    value.is_string() ? value.get<std::string>() : value.dump());
+            cardStore.setValueByName(uid, card, key, value);
             return true;
         },
         [&cardStore](const std::string& uid, const std::string& selector, bool byName,

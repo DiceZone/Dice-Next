@@ -40,6 +40,10 @@ find_package(spdlog REQUIRED)
 
 # yaml-cpp — YAML parsing (legacy format support)
 find_package(yaml-cpp REQUIRED)
+if(NOT WIN32)
+    # Legacy GBK data must decode identically on Linux/macOS, not only CP936.
+    find_package(Iconv REQUIRED)
+endif()
 
 # zlib — SealDice 兼容日志上传（items JSON 需 zlib 压缩），drogon 依赖里已带
 find_package(ZLIB REQUIRED)
@@ -149,6 +153,9 @@ add_custom_target(prepare_version ALL
 # ─── Executable Target ───────────────────────────────────────
 
 add_executable(dice-next-server ${SOURCES} ${VERSION_BUILD_SOURCE})
+if(NOT WIN32)
+    target_link_libraries(dice-next-server PRIVATE Iconv::Iconv)
+endif()
 dicenext_compile_parallelism(dice-next-server)
 add_dependencies(dice-next-server prepare_version)
 # Keep the build value in a generated .cpp rather than a generated header.

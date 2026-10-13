@@ -1,6 +1,7 @@
 #include "test_framework.h"
 #include "test_watchdog.h"
 #include "../src/core/mod/lua_plugin_manager.h"
+#include "../src/common/legacy_conf_value.h"
 
 #include <chrono>
 #include <clocale>
@@ -70,6 +71,83 @@ private:
 #endif
 
 }  // namespace
+
+TEST(LuaPluginCompat, TypedMigratedConfigKeepsFalseDecimalEmptyTextAndTable) {
+    TempWorkspace workspace("dice_typed_migration_");
+    writeText("data/plugin/typed.lua", R"LUA(
+msg_order = { [".typed"] = "run" }
+function run(msg)
+  local flag = getUserConf(msg.fromQQ, 'flag')
+  local decimal = getUserConf(msg.fromQQ, 'decimal')
+  local digits = getUserConf(msg.fromQQ, 'digits')
+  local empty = getUserConf(msg.fromQQ, 'empty')
+  local obj = getUserConf(msg.fromQQ, 'obj')
+  return type(flag)..':'..tostring(flag)..'|'..tostring(decimal)..'|'..type(digits)..':'..digits..'|'..type(empty)..':'..empty..'|'..tostring(obj.value)
+end
+)LUA");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    manager.confSet("u:10001", "flag", "false"); manager.confSet("u:10001", "decimal", "1.75");
+    manager.confSet("u:10001", "digits", "@dice:legacy-json:\"01\"");
+    manager.confSet("u:10001", "empty", "@dice:legacy-json:\"\"");
+    manager.confSet("u:10001", "obj", "@dice:legacy-json:{\"value\":7}");
+    ASSERT_TRUE(manager.loadDir("data/mod") > 0);
+    const auto result = manager.dispatch(".typed", "10001", "20001", "Tester", "", false, 0, "onebot_v11");
+    ASSERT_TRUE(result.matched); ASSERT_EQ(result.reply, "boolean:false|1.75|string:01|string:|7");
+}
+
+TEST(LuaPluginCompat, UnicodeSelfDataReadsWritesAndUppercaseJsonSuffix) {
+    TempWorkspace workspace("dice_unicode_selfdata_");
+    fs::create_directories("data/self_data");
+    writeText(fs::path("data/self_data") / utf8Path(u8"中文 存档🌙.json"), R"({"value":7})");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); std::string error;
+    ASSERT_TRUE(manager.eval(R"LUA(
+      local data = getSelfData('中文 存档🌙.JSON')
+      assert(data.value == 7)
+      data.value = 9
+      assert(getSelfData('中文 存档🌙.json').value == 9)
+    )LUA", &error));
+    std::ifstream input(fs::path("data/self_data") / utf8Path(u8"中文 存档🌙.json"));
+    nlohmann::json saved; input >> saved; ASSERT_EQ(saved["value"],9);
+}
+
+TEST(LuaPluginCompat, MigratedSetsKeepMethodsTypesAndPersistNestedChanges) {
+    TempWorkspace workspace("dice_typed_set_");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    manager.confSet("u:10001", "flags", legacy_conf::encode(legacy_conf::setValue(nlohmann::json::array({"one",7}))));
+    manager.confSet("g:20001", "object", legacy_conf::encode(nlohmann::json{{"a/b~",legacy_conf::setValue(nlohmann::json::array())},{"other",true}}));
+    std::string error;
+    ASSERT_TRUE(manager.eval(R"LUA(
+      local flags = getUserConf(10001,'flags')
+      assert(flags['in'](flags,'one') and flags[7])
+      assert(flags:add('two') and flags:remove(7))
+      local reread = getUserConf(10001,'flags')
+      assert(reread['in'](reread,'two') and not reread[7])
+      assert(#reread == 2 and #reread:totable() == 2)
+      local nested = getGroupConf(20001,'object')['a/b~']
+      assert(nested:add('new'))
+      assert(getGroupConf(20001,'object')['a/b~']['new'])
+      setUserConf(10001,'new-set',Set.new({'x',5}))
+      assert(getUserConf(10001,'new-set')['in'](getUserConf(10001,'new-set'),'x'))
+    )LUA", &error));
+    nlohmann::json saved; ASSERT_TRUE(legacy_conf::decode(manager.confGet("g:20001","object"),saved));
+    ASSERT_TRUE(saved["other"].get<bool>()); ASSERT_TRUE(legacy_conf::isSet(saved["a/b~"]));
+}
+
+TEST(LuaPluginCompat, CardSetMutationsUseTheTypedCardBridge) {
+    TempWorkspace workspace("dice_card_set_");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    nlohmann::json flags=legacy_conf::setValue(nlohmann::json::array({"one"}));
+    manager.setPlayerCardBridge(
+      [&](const auto&,const auto&,bool,const auto& key,nlohmann::json& out) { if(key!="flags")return false; out=flags; return true; },
+      [&](const auto&,const auto&,bool,const auto& key,const nlohmann::json& value) { if(key!="flags")return false; flags=value; return true; }, {}, {});
+    std::string error;
+    ASSERT_TRUE(manager.eval(R"LUA(
+      local flags = getPlayerCardAttr(10001,20001,'flags')
+      assert(flags:add('two'))
+      assert(getPlayerCardAttr(10001,20001,'flags')['two'])
+    )LUA", &error));
+    ASSERT_TRUE(legacy_conf::isSet(flags)); ASSERT_EQ(flags["values"].size(),size_t(2));
+}
 
 TEST(LuaPluginCompat, PluginLogPrintSeverityAndDelayedOriginsReachStructuredLogs) {
     TempWorkspace workspace("dice_lua_logs_");

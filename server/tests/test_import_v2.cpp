@@ -19,26 +19,7 @@
 // Provide a complete LuaPluginManager definition so that legacy_import_v2.h's
 // runImport() body compiles. CardDeck uses the real project implementation,
 // which is already linked into the test target.
-namespace dice {
-class LuaPluginManager {
-public:
-    void reload() {}
-    void confSet(const std::string& scope, const std::string& key, const std::string& value) { conf_[scope][key] = value; }
-    bool confSetBatch(const std::vector<std::tuple<std::string, std::string, std::string>>& values) {
-        for (const auto& [scope, key, value] : values) {
-            if (value.empty()) conf_[scope].erase(key);
-            else conf_[scope][key] = value;
-        }
-        return true;
-    }
-    std::string confGet(const std::string& scope, const std::string& key) const {
-        auto it = conf_.find(scope); if (it == conf_.end()) return {};
-        auto kv = it->second.find(key); return kv == it->second.end() ? std::string() : kv->second;
-    }
-private:
-    std::map<std::string, std::map<std::string, std::string>> conf_;
-};
-}
+#include "legacy_import_test_support.h"
 
 // Include database.h which defines the row structs
 #include "../src/storage/database.h"

@@ -1,4 +1,5 @@
 #pragma once
+#include "../common/legacy_conf_value.h"
 // ─── Dice!Next v3.0.0 — Command Router ───────────────────────
 // Routes incoming messages to dice engine, reply system, etc.
 // Faithfully implements original Dice! command set (.r .coc .dnd etc.)
@@ -172,7 +173,7 @@ public:
     /// and the effective side count used by a bare `d`.  An unset personal value
     /// is represented as 0, matching SealDice's Player.DiceSideNum semantics.
     std::array<int, 3> pluginDiceSides(const Message& msg) const {
-        const std::string personalRaw = getUserSetting(msg, "defaultDice");
+        const std::string personalRaw = personalDefaultDice(msg);
         const std::string groupRaw = getGroupSetting(msg, "groupDefaultDice");
         const int personal = personalRaw.empty() ? 0 : parseIntOr(personalRaw, 0);
         const int group = groupRaw.empty() ? 100 : parseIntOr(groupRaw, 100);
@@ -1060,10 +1061,18 @@ private:
         // ".st &手枪=1d6" (kept as a string, rolled fresh each time).
         if (expr.empty() && !reason.empty()) {
             std::string wexpr = getUserSetting(msg, "wpn:" + trim(reason));
+            if (wexpr.empty()) {
+                auto expressions = cards_.getExpressionsByName(msg.senderId, cards_.boundCard(msg.senderId, cardScope(msg)));
+                if (auto it = expressions.find(CharacterCardStore::canonical(trim(reason))); it != expressions.end()) wexpr = it->second;
+            }
             if (!wexpr.empty()) expr = wexpr;     // reason stays as the weapon name label
         }
+        if (expr.empty() && reason.empty()) {
+            auto preset = cards_.getValueByName(msg.senderId, cards_.boundCard(msg.senderId, cardScope(msg)), "__DefaultDiceExp");
+            if (preset && preset->is_string()) expr = preset->get<std::string>();
+        }
         if (expr.empty()) {                       // default die (.set override)
-            std::string df = getUserSetting(msg, "defaultDice");
+            std::string df = personalDefaultDice(msg);
             if (df.empty()) df = getGroupSetting(msg, "groupDefaultDice");  // 本群规则默认骰
             expr = "d" + (df.empty() ? std::string("100") : df);
         } else {
@@ -1075,7 +1084,7 @@ private:
             const bool bareMod = (expr[0] == '+' || expr[0] == '-') && expr.size() >= 2
                 && std::isdigit(static_cast<unsigned char>(expr[1]));
             if (dWithMod || bareMod) {
-                std::string df = getUserSetting(msg, "defaultDice");
+                std::string df = personalDefaultDice(msg);
                 if (df.empty()) df = getGroupSetting(msg, "groupDefaultDice");
                 const std::string def = "d" + (df.empty() ? std::string("100") : df);
                 expr = dWithMod ? (def + expr.substr(1)) : (def + expr);
@@ -3148,11 +3157,50 @@ private:
     static bool isFormulaAttr(const std::string& canon) {
         return canon == "\xe4\xbc\xa4\xe5\xae\xb3\xe5\x8a\xa0\xe5\x80\xbc";   // 伤害加值
     }
+    bool clearLegacyExpressionSettings(const Message& msg, const std::string& name) {
+        auto* st = db_.getStorage(); if (!st) return false;
+        bool removed = false;
+        const auto key = CharacterCardStore::canonical(!name.empty() && name[0] == '&' ? name.substr(1) : name);
+        const auto targetCard = cards_.boundCard(msg.senderId, cardScope(msg));
+        namespace orm = sqlite_orm;
+        for (const auto& row : st->get_all<UserSettingRow>(orm::where(
+                orm::c(&UserSettingRow::userId) == msg.senderId))) {
+            if (cards_.boundCard(msg.senderId, row.groupId) != targetCard) continue;
+            for (const auto* prefix : {"sattr:", "attrf:", "wpn:", "attrfauto:"}) {
+                const std::string p = prefix;
+                if (row.key.rfind(p, 0) == 0 && CharacterCardStore::canonical(row.key.substr(p.size())) == key) {
+                    st->remove<UserSettingRow>(row.id); removed = true; break;
+                }
+            }
+        }
+        return removed;
+    }
+    void setCardExpression(const Message& msg, const std::string& name, const std::string& expression) {
+        clearLegacyExpressionSettings(msg, name);
+        cards_.setValueByName(msg.senderId, cards_.boundCard(msg.senderId, cardScope(msg)),
+            "&" + CharacterCardStore::canonical(name), expression);
+        setFormulaAuto(msg, name, false);
+    }
+    bool formulaAuto(const Message& msg, const std::string& name) const {
+        const auto flags = cards_.getValueByName(msg.senderId, cards_.boundCard(msg.senderId, cardScope(msg)), "__NativeFormulaAuto");
+        const auto key = CharacterCardStore::canonical(name);
+        if (flags && flags->is_object() && flags->contains(key) && (*flags)[key].is_boolean()) return (*flags)[key].get<bool>();
+        return getUserSetting(msg, "attrfauto:" + key) == "1";
+    }
+    void setFormulaAuto(const Message& msg, const std::string& name, bool automatic) {
+        const auto card = cards_.boundCard(msg.senderId, cardScope(msg));
+        auto flags = cards_.getValueByName(msg.senderId, card, "__NativeFormulaAuto").value_or(json::object());
+        if (!flags.is_object()) flags = json::object();
+        flags[CharacterCardStore::canonical(name)] = automatic;
+        cards_.setValueByName(msg.senderId, card, "__NativeFormulaAuto", flags);
+    }
     std::string getFormulaAttr(const Message& msg, const std::string& canon) const {
-        return getUserSetting(msg, "attrf:" + canon);
+        auto expressions = cards_.getExpressionsByName(msg.senderId, cards_.boundCard(msg.senderId, cardScope(msg)));
+        const auto it = expressions.find(CharacterCardStore::canonical(canon));
+        return it == expressions.end() ? getUserSetting(msg, "attrf:" + canon) : it->second;
     }
     void setFormulaAttr(const Message& msg, const std::string& canon, const std::string& f) {
-        setUserSetting(msg, "attrf:" + canon, f);
+        setCardExpression(msg, canon, f);
     }
 
     // COC7 伤害加值(DB) —— 按 力量+体型 之和查表，返回投掷公式原文（-2/-1/0/1d4/1d6/2d6…）。
@@ -3179,22 +3227,27 @@ private:
     // 「关联/表达式属性」：值是引用其它属性的算式（如 物防=敏捷+1 / pd='dex+1'），
     // 存原文字符串，读取时按当前属性值求值（联动）。存在 user_settings "sattr:<canon>"。
     std::string getStrAttr(const Message& msg, const std::string& canon) const {
-        return getUserSetting(msg, "sattr:" + canon);
+        auto expressions = cards_.getExpressionsByName(msg.senderId, cards_.boundCard(msg.senderId, cardScope(msg)));
+        const auto it = expressions.find(CharacterCardStore::canonical(canon));
+        return it == expressions.end() ? getUserSetting(msg, "sattr:" + canon) : it->second;
     }
     void setStrAttr(const Message& msg, const std::string& canon, const std::string& expr) {
-        setUserSetting(msg, "sattr:" + canon, expr);
+        setCardExpression(msg, canon, expr);
     }
     // 列出本人本群所有表达式属性（canon → 表达式），供 .st show / .st 列举。
     std::map<std::string, std::string> listStrAttrs(const Message& msg) const {
-        std::map<std::string, std::string> out;
+        std::map<std::string, std::string> out = cards_.getExpressionsByName(msg.senderId,
+            cards_.boundCard(msg.senderId, cardScope(msg)));
         auto* st = db_.getStorage(); if (!st) return out;
         try { namespace orm = sqlite_orm;
             auto rows = st->get_all<UserSettingRow>(
                 orm::where(orm::c(&UserSettingRow::userId) == msg.senderId
                     and orm::c(&UserSettingRow::groupId) == cardScope(msg)));
             for (auto& r : rows)
-                if (r.key.rfind("sattr:", 0) == 0 && !r.value.empty())
-                    out[r.key.substr(6)] = r.value;
+                if (!r.value.empty()) for (const auto* prefix : {"sattr:", "attrf:", "wpn:"}) {
+                    const std::string p = prefix;
+                    if (r.key.rfind(p, 0) == 0) out.try_emplace(CharacterCardStore::canonical(r.key.substr(p.size())), r.value);
+                }
         } catch (...) {}
         return out;
     }
@@ -3569,12 +3622,13 @@ private:
     bool clearCardUserSettings(const Message& msg) {
         auto* st = db_.getStorage(); if (!st) return false;
         bool removed = false;
+        const auto targetCard = cards_.boundCard(msg.senderId, cardScope(msg));
         try {
             namespace orm = sqlite_orm;
             auto rows = st->get_all<UserSettingRow>(orm::where(
-                orm::c(&UserSettingRow::userId) == msg.senderId and
-                orm::c(&UserSettingRow::groupId) == cardScope(msg)));
+                orm::c(&UserSettingRow::userId) == msg.senderId));
             for (auto& r : rows) {
+                if (cards_.boundCard(msg.senderId, r.groupId) != targetCard) continue;
                 if (r.key.rfind("sattr:", 0) == 0 || r.key.rfind("attrf:", 0) == 0
                     || r.key.rfind("attrfauto:", 0) == 0   // DB 自动/手动标记
                     || r.key.rfind("wpn:", 0) == 0 || r.key.rfind("max:", 0) == 0
@@ -3618,6 +3672,11 @@ private:
                     detail += k + "=" + e;
                     if (auto cv = evalComputedFormula(e, msg)) detail += "(=" + std::to_string(*cv) + ")";
                 }
+                for (const auto& [key, value] : cards_.getValuesByName(user, cards_.boundCard(user, group)).items()) {
+                    if (key.front() == '&' || value.is_number_integer()) continue;
+                    if (!detail.empty()) detail += " ";
+                    detail += key + "=" + value.dump();
+                }
                 if (dndModeOn(msg)) for (auto& [k, v] : listDndSkills(msg)) {
                     if (!detail.empty()) detail += " ";
                     detail += "技能." + k + ":" + std::to_string(v);
@@ -3636,21 +3695,33 @@ private:
             // ".st show 力量 敏捷 …" → show several specific attributes.
             if (attr.find(' ') != std::string::npos) {
                 std::map<std::string, int> picked;
+                std::string typedPicked;
                 std::istringstream iss(attr); std::string tk;
                 while (iss >> tk) {
                     std::string canonical = CharacterCardStore::canonical(tk);
                     auto v = cards_.getAttr(user, group, tk);
                     if (!v && dndModeOn(msg) && !isDndCardSpecialInput(tk)) v = dndSkillValue(msg, canonical);
                     if (v) picked[canonical] = *v;
+                    else if (auto value = cards_.getValueByName(user, cards_.boundCard(user, group), tk)) {
+                        if (!typedPicked.empty()) typedPicked += " ";
+                        typedPicked += tk + "=" + (value->is_string() ? value->get<std::string>() : value->dump());
+                    }
                 }
-                if (picked.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
-                return i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail", joinAttrs(picked)}});
+                if (picked.empty() && typedPicked.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
+                const auto numbers = joinAttrs(picked);
+                return i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail", numbers + (!numbers.empty() && !typedPicked.empty() ? " " : "") + typedPicked}});
             }
             std::string canonical = CharacterCardStore::canonical(attr);
             auto v = cards_.getAttr(user, group, attr);
             if (!v && dndModeOn(msg) && !isDndCardSpecialInput(attr)) v = dndSkillValue(msg, canonical);
             if (v) return i18n_.tr(loc, "card.show_one",
                 {{"nick", nick}, {"attr", attr}, {"val", std::to_string(*v)}});
+            if (auto typed = cards_.getValueByName(user, cards_.boundCard(user, group), attr))
+                return i18n_.tr(loc, "card.show_one", {{"nick", nick}, {"attr", attr},
+                    {"val", typed->is_string() ? typed->get<std::string>() : typed->dump()}});
+            const auto legacyExpression = getStrAttr(msg, canonical);
+            if (!legacyExpression.empty()) return i18n_.tr(loc, "card.show_one",
+                {{"nick", nick}, {"attr", attr}, {"val", legacyExpression}});
             return i18n_.tr(loc, "card.attr_missing", {{"attr", attr}});
         }
         if (lrest.rfind("del ", 0) == 0 || lrest == "del") {
@@ -3664,32 +3735,71 @@ private:
                 ok = !getUserSetting(msg, skillKey).empty();
                 clearUserSetting(msg, skillKey);
             }
-            ok = cards_.eraseAttr(user, group, attr) || ok; // also clear pre-split legacy values
+            ok = cards_.eraseAttr(user, group, attr) || ok;
+            ok = clearLegacyExpressionSettings(msg, attr) || ok;
             return i18n_.tr(loc, ok ? "card.attr_deleted" : "card.attr_missing",
                 {{"nick", nick}, {"attr", attr}});
         }
         // ".st export" → dump the card as a re-importable ".st 力量50 敏捷60 …" string.
         if (lrest == "export") {
+            if (cards_.cardLocked(user, group, "r")) return i18n_.tr(loc, "card.locked_r");
             auto attrs = cards_.getAttrs(user, group);
             auto skills = dndModeOn(msg) ? listDndSkills(msg) : std::map<std::string, int>{};
-            if (attrs.empty() && skills.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
+            auto values = cards_.getValuesByName(user, cards_.boundCard(user, group));
+            for (const auto& [key, expression] : listStrAttrs(msg)) {
+                bool represented = false;
+                for (const auto& [raw, value] : values.items())
+                    if (raw.front() == '&' && CharacterCardStore::canonical(raw.substr(1)) == key) represented = true;
+                if (!represented) values["&" + key] = expression;
+            }
+            for (const auto& [key, value] : skills) values[key] = value;
+            if (values.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
             std::string body;
             for (auto& [k, val] : attrs) { if (!body.empty()) body += " "; body += k + std::to_string(val); }
             for (auto& [k, val] : skills) { if (!body.empty()) body += " "; body += k + std::to_string(val); }
+            bool typed = false;
+            for (const auto& [key, value] : values.items())
+                if (!value.is_number_integer() || key != CharacterCardStore::canonical(key)
+                    || key.find_first_of(" =:|\t\r\n") != std::string::npos) typed = true;
+            if (typed) body = "json " + values.dump();
             return i18n_.tr(loc, "card.export", {{"nick", nick}, {"body", body}});
         }
         // ".st fmt" → re-normalize attribute names via the synonym table (转卡).
         if (lrest == "fmt") {
-            auto attrs = cards_.getAttrs(user, group);
-            for (auto& [k, val] : attrs) {
-                std::string canon = CharacterCardStore::canonical(k);
-                if (canon != k) { cards_.setAttr(user, group, canon, val); cards_.eraseAttr(user, group, k); }
+            if (lockedW) return i18n_.tr(loc, "card.locked_w");
+            const auto card = cards_.boundCard(user, group);
+            const auto attrs = cards_.getValuesByName(user, card);
+            for (const auto& [key, value] : attrs.items()) {
+                if (key.front() == '&') continue;
+                const auto canon = CharacterCardStore::canonical(key);
+                bool conflict = false;
+                for (const auto& [other, otherValue] : attrs.items())
+                    if (other.front() != '&' && CharacterCardStore::canonical(other) == canon && otherValue != value) conflict = true;
+                if (canon != key && !conflict) {
+                    cards_.eraseAttrByName(user, card, key);
+                    cards_.setValueByName(user, card, canon, value);
+                }
             }
             return i18n_.tr(loc, "card.fmt_done", {{"nick", nick}});
         }
 
         // 到这里都是「写卡」路径：卡片被锁写（w）则统一拒绝（原版 strPcLockedWrite）。
         if (lockedW) return i18n_.tr(loc, "card.locked_w");
+
+        // Lossless native export/import for expressions, text, floats and
+        // structured attributes. Ordinary original `.st` notation is unchanged.
+        if (lrest.rfind("json ", 0) == 0) {
+            const auto values = json::parse(trim(rest.substr(5)), nullptr, false);
+            if (!values.is_object() || values.size() > 256 || rest.size() > 65536)
+                return i18n_.tr(loc, "card.st.usage");
+            for (const auto& [key, value] : values.items())
+                if (key.empty() || key.rfind("__", 0) == 0 || key.size() > 256
+                    || (key[0] == '&' && (!value.is_string() || key.size() == 1)))
+                    return i18n_.tr(loc, "card.st.usage");
+            clearCardUserSettings(msg);
+            cards_.replaceValuesByName(user, cards_.boundCard(user, group), values);
+            return i18n_.tr(loc, "card.st.done", {{"nick", nick}, {"detail", values.dump()}});
+        }
 
         // COC 武器映射: peel off "&<名>=<伤害式>" tokens — stored as a rollable
         // string (NOT rolled now) so ".r 手枪" rolls the damage each time. The
@@ -3712,7 +3822,7 @@ private:
             if (!weapons.empty()) {
                 std::string detail;
                 for (auto& [wn, we] : weapons) {
-                    setUserSetting(msg, "wpn:" + wn, we);
+                    setCardExpression(msg, wn, we);
                     if (!detail.empty()) detail += " ";
                     detail += wn + "=" + we;
                 }
@@ -3831,8 +3941,8 @@ private:
                     if (!expr.empty()) {
                         std::string scanon = CharacterCardStore::canonical(attr);
                         std::string full = (modifier && sign < 0 ? "-" : "") + expr;
-                        setStrAttr(msg, scanon, full);
                         cards_.eraseAttr(msg.senderId, cardScope(msg), scanon);  // 清掉同名数值，避免歧义
+                        setStrAttr(msg, scanon, full);
                         strChanges[scanon] = full;
                     }
                     continue;
@@ -3867,6 +3977,7 @@ private:
                 std::string formula = (modifier && sign < 0 ? "-" : "") + valTok;   // 去掉前导 +，保留 -
                 setFormulaAttr(msg, fcanon, formula);
                 setUserSetting(msg, "attrfauto:" + fcanon, "0");   // 手动录入 → 关自动，优先保留
+                setFormulaAuto(msg, fcanon, false);
                 formulaChanges[fcanon] = formula;
                 continue;
             }
@@ -3991,7 +4102,7 @@ private:
             std::string cs = CharacterCardStore::canonical("\xe5\x8a\x9b\xe9\x87\x8f");   // 力量
             std::string cz = CharacterCardStore::canonical("\xe4\xbd\x93\xe5\x9e\x8b");   // 体型
             bool touched = changes.count(cs) || changes.count(cz);
-            bool dbManual = !getFormulaAttr(msg, DB).empty() && getUserSetting(msg, "attrfauto:" + DB) != "1";
+            bool dbManual = !getFormulaAttr(msg, DB).empty() && !formulaAuto(msg, DB);
             if (touched && !formulaChanges.count(DB) && !dbManual) {
                 auto sv = cards_.getAttr(user, group, "\xe5\x8a\x9b\xe9\x87\x8f");
                 auto zv = cards_.getAttr(user, group, "\xe4\xbd\x93\xe5\x9e\x8b");
@@ -4000,6 +4111,7 @@ private:
                     std::string dbf = coc7DamageBonus(*sv + *zv);
                     setFormulaAttr(msg, DB, dbf);
                     setUserSetting(msg, "attrfauto:" + DB, "1");
+                    setFormulaAuto(msg, DB, true);
                     if (dbf != oldDb) dbDetail = dbf;   // 只在变化时汇报
                 }
             }
@@ -5373,10 +5485,17 @@ public:
     /// 本群当前激活规则系统（group_settings "ruleSystem"）对应的规则包副本，无则空。
     std::optional<RulePack> activeRulePack(const Message& msg) const {
         std::string name = getGroupSetting(msg, "ruleSystem");
+        if (name.empty()) {
+            auto type = cards_.getValueByName(msg.senderId, cards_.boundCard(msg.senderId, cardScope(msg)), "__Type");
+            if (type && type->is_string()) name = type->get<std::string>();
+        }
         if (name.empty()) return std::nullopt;
         std::shared_lock<std::shared_mutex> lk(rulesLock());
-        for (const auto& rp : rulePacks())
-            if (rp.enabled && rp.name == name) return rp;   // 拷贝
+        for (const auto& rp : rulePacks()) {
+            if (!rp.enabled) continue;
+            if (toLower(rp.name) == toLower(name)) return rp;
+            for (const auto& key : rp.setKeys) if (toLower(key) == toLower(name)) return rp;
+        }
         return std::nullopt;
     }
 
@@ -5648,7 +5767,10 @@ public:
     bool jsCardGetStr(const std::string& /*platform*/, const std::string& userId,
                       const std::string& groupId, const std::string& attr, std::string& out) {
         const std::string scope = groupId.empty() ? std::string() : groupId;
-        std::string v = getUserSettingOf(userId, scope, "sattr:" + CharacterCardStore::canonical(attr));
+        auto expressions = cards_.getExpressionsByName(userId, cards_.boundCard(userId, scope));
+        std::string v;
+        if (auto it = expressions.find(CharacterCardStore::canonical(attr)); it != expressions.end()) v = it->second;
+        else v = getUserSettingOf(userId, scope, "sattr:" + CharacterCardStore::canonical(attr));
         if (v.empty()) return false;
         out = v; return true;
     }
@@ -6859,14 +6981,26 @@ public:
         for (int i = 0; i < (int)wins.size(); ++i)
             if (wins[i].value("platform", std::string()) == plat
                 && wins[i].value("chat_id", std::string()) == chatId
-                && wins[i].value("adapter_id", std::string()) == msg.adapterId) { idx = i; break; }
+                && wins[i].value("is_group", true) == isGroup) {
+                const auto account = wins[i].value("adapter_id", std::string());
+                if (account == msg.adapterId) { idx = i; break; }
+                if (account.empty() && idx < 0) idx = i; // effective legacy/shared window
+            }
         std::istringstream iss(args); std::string act; iss >> act; act = toLower(act);
         if (act.empty() || act == "status") {
             if (idx < 0) return i18n_.tr(loc, "notice.off_status");
             return i18n_.tr(loc, "notice.status", {{"level", std::to_string(wins[idx].value("level_mask", (int)dice::notice::kAll))}});
         }
         if (act == "off" || act == "0") {
-            if (idx >= 0) { wins.erase(wins.begin() + idx); nc["windows"] = wins; cfg_.set<J>("dice/notice", nc); cfg_.save(); }
+            J remaining = J::array();
+            for (const auto& window : wins) {
+                const auto account = window.value("adapter_id", std::string());
+                const bool matches = window.value("platform", std::string()) == plat
+                    && window.value("chat_id", std::string()) == chatId && window.value("is_group", true) == isGroup
+                    && (account.empty() || account == msg.adapterId);
+                if (!matches) remaining.push_back(window);
+            }
+            nc["windows"] = remaining; cfg_.set<J>("dice/notice", nc); cfg_.save();
             return i18n_.tr(loc, "notice.removed");
         }
         int mask = dice::notice::kAll;
@@ -8027,7 +8161,10 @@ private:
         return id.empty() ? gameGroupScope(msg) : gameSessionScope(id);
     }
     std::string gGet(const Message& msg, const std::string& k) const {
-        return gameConf_.get ? gameConf_.get(gameScope(msg), k) : std::string();
+        const auto raw = gameConf_.get ? gameConf_.get(gameScope(msg), k) : std::string();
+        nlohmann::json typed;
+        if (legacy_conf::decode(raw, typed)) return typed.is_string() ? typed.get<std::string>() : typed.dump();
+        return raw;
     }
     void gSet(const Message& msg, const std::string& k, const std::string& v) {
         if (gameConf_.set) gameConf_.set(gameScope(msg), k, v);
@@ -11552,6 +11689,25 @@ private:
 
     // ─── User settings (.nn nickname, .set default dice) ─────
 
+    std::string personalDefaultDice(const Message& msg) const {
+        auto explicitValue = getUserSetting(msg, "defaultDice");
+        if (!explicitValue.empty()) return explicitValue;
+        auto value = cards_.getValueByName(msg.senderId, cards_.boundCard(msg.senderId, cardScope(msg)), "__DefaultDice");
+        if (value && value->is_number_integer()) {
+            const auto face = value->get<long long>();
+            if (face > 0 && face <= 1000000) return std::to_string(face);
+        }
+        auto* st = db_.getStorage();
+        if (st && !cardScope(msg).empty()) {
+            namespace orm = sqlite_orm;
+            auto rows = st->get_all<UserSettingRow>(orm::where(orm::c(&UserSettingRow::userId) == msg.senderId
+                and orm::c(&UserSettingRow::groupId) == std::string()
+                and orm::c(&UserSettingRow::key) == std::string("defaultDice")));
+            if (!rows.empty()) return rows.front().value;
+        }
+        return {};
+    }
+
     std::string getUserSetting(const Message& msg, const std::string& key) const {
         auto* st = db_.getStorage();
         if (!st) return "";
@@ -11562,6 +11718,12 @@ private:
                     and orm::c(&UserSettingRow::groupId) == cardScope(msg)
                     and orm::c(&UserSettingRow::key) == key));
             if (!rows.empty()) return rows.front().value;
+            if (key == "nick" && !cardScope(msg).empty()) {
+                rows = st->get_all<UserSettingRow>(orm::where(orm::c(&UserSettingRow::userId) == msg.senderId
+                    and orm::c(&UserSettingRow::groupId) == std::string()
+                    and orm::c(&UserSettingRow::key) == key));
+                if (!rows.empty()) return rows.front().value;
+            }
         } catch (...) {}
         return "";
     }
@@ -11823,7 +11985,8 @@ private:
     /// 原始显示名（人物卡名 > .nn 昵称 > 群名片/QQ）。用于设名片、先攻名等「存储/比较」场景。
     std::string displayNameRaw(const Message& msg) const {
         std::string card = cards_.boundCard(msg.senderId, cardScope(msg));
-        if (!card.empty()) return card;                 // .pc 绑定的人物卡名（覆盖）
+        const auto cardDisplay = cards_.displayName(msg.senderId, card);
+        if (!cardDisplay.empty()) return cardDisplay;
         std::string nn = getUserSetting(msg, "nick");
         if (!nn.empty()) return nn;                     // .nn 设置的昵称（覆盖）
         return resolveNickDisplay(msg);                 // 群名片 > QQ昵称 > QQ号（用户规范）

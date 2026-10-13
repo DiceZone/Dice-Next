@@ -1970,22 +1970,59 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (dir.empty()) { jsonReply(fail("dir required"), std::move(cb)); return; }
             legacyv2::ImportOptions opts;
             opts.overwrite = j.value("overwrite", false);
+            opts.overwriteData = j.value("overwrite_data", false);
+            if (j.contains("session_mappings")) {
+                const auto& mappings = j["session_mappings"];
+                if (!mappings.is_object() || mappings.size() > 1000) {
+                    jsonReply(fail("团务衔接选择格式无效"), std::move(cb)); return;
+                }
+                for (const auto& [key, value] : mappings.items()) {
+                    if (key.size() != 16 || !std::all_of(key.begin(), key.end(), [](unsigned char c) { return std::isxdigit(c); })
+                        || !value.is_string() || value.get_ref<const std::string&>().size() > 256) {
+                        jsonReply(fail("团务衔接选择格式无效"), std::move(cb)); return;
+                    }
+                    opts.sessionMappings[key] = value.get<std::string>();
+                }
+            }
+            opts.targetAdapterId = j.value("target_adapter_id", std::string());
+            if (!opts.targetAdapterId.empty()) {
+                if (!std::all_of(opts.targetAdapterId.begin(), opts.targetAdapterId.end(), [](unsigned char c){ return c >= '0' && c <= '9'; })) {
+                    jsonReply(fail("无效的迁移目标账号"), std::move(cb)); return;
+                }
+                const auto rows = db.getStorage()->get_all<AdapterRow>(orm::where(
+                    orm::c(&AdapterRow::id) == std::stoi(opts.targetAdapterId)), orm::limit(1));
+                if (rows.empty()) { jsonReply(fail("迁移目标账号不存在"), std::move(cb)); return; }
+                opts.targetPlatform = adapterTypeToString(static_cast<AdapterType>(rows.front().type));
+                if (opts.targetPlatform != "onebot_v11" && opts.targetPlatform != "milky") {
+                    jsonReply(fail("旧 QQ 数字身份只能直接迁入 OneBot 或 Milky"), std::move(cb)); return;
+                }
+            }
+            const auto source = migration_resources::fromUtf8(dir);
+            if (const auto reason = migration_report::validateRoot(source); !reason.empty()) {
+                jsonReply(fail(reason), std::move(cb)); return;
+            }
+            std::filesystem::path beforeImport; std::string backupError;
+            if (!backup::createArchive(db, cfg.configPath(), beforeImport, backupError)) {
+                jsonReply(fail("迁移前备份失败，未开始导入: " + backupError), std::move(cb)); return;
+            }
+            opts.beforeImportBackup = migration_resources::utf8(beforeImport);
             std::vector<std::string> availableHelp;
             for (const auto& entry : cmdRouter.allHelp(Locale::kZhHans)) if (!entry.content.empty()) availableHelp.push_back(entry.key);
             J report = legacyv2::runImport(db, cfg, i18n, replyMgr, dir, &cardDeck, &luaMod, opts, availableHelp);
             if (report.value("ok", false)) {
                 cmdRouter.reloadSensitiveWordRules();
-                if (j.value("remove_marker_on_success", false)) {
+                if (report.value("complete", false) && j.value("remove_marker_on_success", false)) {
                     std::error_code markerError;
-                    const auto marker = std::filesystem::path(dir) / ".bdc-import-pending";
-                    const bool removed = std::filesystem::remove(marker, markerError);
+                    const auto marker = source / ".bdc-import-pending";
+                    const bool removed = migration_resources::safePath(source, marker)
+                        && std::filesystem::is_regular_file(marker, markerError) && std::filesystem::remove(marker, markerError);
                     report["marker_removed"] = removed;
                     if (markerError) report["marker_remove_error"] = markerError.message();
                 }
-                jsonReply(ok(report), std::move(cb));
-            } else {
-                jsonReply(fail(report.value("error", std::string("import failed"))), std::move(cb));
             }
+            // Partial results must remain visible/downloadable, not disappear
+            // behind a generic error. report.ok/complete are authoritative.
+            jsonReply(ok(report), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 

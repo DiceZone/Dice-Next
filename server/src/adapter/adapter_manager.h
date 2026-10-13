@@ -6,6 +6,7 @@
 
 #include "adapter_interface.h"
 #include "../storage/database.h"
+#include "../storage/group_account_settings.h"
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
 #include "../common/utils.h"
@@ -252,7 +253,12 @@ private:
                     GroupAccountSettingRow row; row.adapterId = msg.adapterId;
                     row.platform = msg.platform; row.groupId = msg.targetId;
                     row.endpointId = msg.extra.value("__identity_native_target", msg.targetId);
-                    row.key = "enabled"; row.value = "1"; st->insert(row);
+                    // Receiving a message proves presence, not permission to
+                    // enable the bot. Inherit the imported shared preference.
+                    row.key = "enabled";
+                    row.value = accountGroupSetting(*st, "", msg.platform, msg.targetId, "enabled");
+                    if (row.value.empty()) row.value = "1";
+                    st->insert(row);
                 }
                 auto setPresence = [&](const std::string& key, const std::string& value) {
                     auto found = st->get_all<GroupAccountSettingRow>(orm::where(

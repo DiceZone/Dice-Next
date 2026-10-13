@@ -15,19 +15,27 @@
 //   user/ChatConf.dat       → group_settings (群配置: 停用/房规/欢迎词)
 
 #include "database.h"
+#include "group_account_settings.h"
 #include "legacy_dice2.h"
 #include "legacy_message_keys.h"
 #include "legacy_check_text_upgrade.h"
+#include "legacy_import_resources.h"
+#include "legacy_blacklist_import.h"
+#include "legacy_import_reporting.h"
+#include "../core/deck/deck_file_utils.h"
+#include "../core/character/card_store.h"
 #include "../config/config_manager.h"
 #include "../i18n/i18n.h"
 #include "../core/reply/reply_manager.h"
 #include "../common/utils.h"
 #include "../common/logger.h"
+#include "../common/legacy_conf_value.h"
 #include "../common/legacy_reply_references.h"
 #include "../core/reply/reply_definition.h"
 #include "../service/sensitive_word_filter.h"
 
 #include <nlohmann/json.hpp>
+#include <yaml-cpp/yaml.h>
 #include <sqlite_orm/sqlite_orm.h>
 #include <algorithm>
 #include <cctype>
@@ -63,7 +71,41 @@ using json = nlohmann::json;
 /// Options controlling import behavior.
 struct ImportOptions {
     bool overwrite = false;  ///< true = overwrite existing; false = skip existing
+    bool overwriteData = false; ///< Explicit opt-in for existing Next database/config values.
+    std::string targetPlatform = "onebot_v11";
+    std::string targetAdapterId;
+    std::string beforeImportBackup; // Server-created snapshot; never accepted as a client path.
+    std::map<std::string, std::string> sessionMappings; // Source key -> confirmed existing id or __new__.
 };
+
+/// Preserve account isolation and owner edits. Never infer an Official OpenID
+/// from a legacy numeric QQ id; callers must select a compatible target.
+inline bool upsertImportedGroupSetting(Database& db, const ImportOptions& opts,
+                                      const std::string& gid, const std::string& key,
+                                      const std::string& value) {
+    auto* st = db.getStorage();
+    if (!st) throw std::runtime_error("群设置数据库不可用");
+    if (!opts.targetAdapterId.empty()) {
+        auto rows = st->get_all<GroupAccountSettingRow>(orm::where(
+            orm::c(&GroupAccountSettingRow::adapterId) == opts.targetAdapterId and
+            orm::c(&GroupAccountSettingRow::groupId) == gid and
+            orm::c(&GroupAccountSettingRow::key) == key));
+        if (!rows.empty() && !opts.overwriteData) return rows.front().value == value;
+        setAccountGroupSetting(*st, opts.targetAdapterId, opts.targetPlatform, gid, gid, key, value);
+        return true;
+    }
+    auto rows = st->get_all<GroupSettingRow>(orm::where(
+        orm::c(&GroupSettingRow::platform) == opts.targetPlatform and
+        orm::c(&GroupSettingRow::groupId) == gid and orm::c(&GroupSettingRow::key) == key));
+    if (!rows.empty()) {
+        if (!opts.overwriteData) return rows.front().value == value;
+        auto row = rows.front(); row.value = value; st->update(row);
+    } else {
+        GroupSettingRow row; row.platform = opts.targetPlatform; row.groupId = gid;
+        row.key = key; row.value = value; st->insert(row);
+    }
+    return true;
+}
 
 /// A single file's import outcome.
 struct ImportDetail {
@@ -78,6 +120,7 @@ struct ImportResult {
     int skipped = 0;
     int failed = 0;
     std::vector<ImportDetail> details;
+    json confirmations = json::array();
 
     json toJSON() const {
         json j;
@@ -89,9 +132,24 @@ struct ImportResult {
             arr.push_back(json{{"name", d.name}, {"status", d.status}, {"reason", d.reason}});
         }
         j["details"] = arr;
+        j["confirmations"] = confirmations;
         return j;
     }
 };
+
+inline void legacyResourceDetail(ImportResult& result, std::string name,
+                                 std::string status, std::string reason);
+
+inline void reportUnsupportedValue(const legacy2::AttrVal& value, const std::string& path,
+                                   ImportResult* result) {
+    if (!result) return;
+    if (value.kind == legacy2::AttrVal::Kind::Other) {
+        ++result->skipped;
+        result->details.push_back({path, "preserved", "旧函数不执行；函数原数据保留在源文件中，迁入结构仅记录类型与长度"});
+    }
+    for (const auto& [key, child] : value.table) reportUnsupportedValue(child, path + "/" + key, result);
+    for (size_t i = 0; i < value.set.size(); ++i) reportUnsupportedValue(value.set[i], path + "/" + std::to_string(i), result);
+}
 
 /// Validate a deck JSON file: must be a JSON object where values are arrays.
 inline std::string validateDeckJson(const std::string& content) {
@@ -116,23 +174,29 @@ inline std::string readFile(const fs::path& p) {
 /// Select the same primary/backup order used by the old Dice! loader.  A
 /// migration must not report "0 imported" merely because the primary file is
 /// damaged while its automatic backup is intact.
-inline fs::path legacyDataFile(const fs::path& dir, std::initializer_list<const char*> names) {
+inline fs::path legacyDataFile(const fs::path& dir, std::initializer_list<const char*> names,
+        const std::function<void(const fs::path&)>& validator = {}, ImportResult* diagnostics = nullptr) {
+    std::string errors;
     for (const char* name : names) {
         fs::path candidate = dir / name;
         std::error_code ec;
-        if (fs::is_regular_file(candidate, ec) && !ec) return candidate;
+        if (!fs::is_regular_file(candidate, ec) || ec) continue;
+        try {
+            if (validator) validator(candidate);
+            if (diagnostics && !errors.empty()) diagnostics->details.push_back({migration_resources::utf8(candidate.filename()), "success", "已从有效备份恢复；主文件未通过完整校验"});
+            return candidate;
+        } catch (const std::exception& e) {
+            if (!errors.empty()) errors += "; ";
+            errors += migration_resources::utf8(candidate.filename()) + ": " + e.what();
+            if (diagnostics) diagnostics->details.push_back({migration_resources::utf8(candidate.filename()), "warning", e.what()});
+        }
     }
+    if (!errors.empty()) throw std::runtime_error("旧二进制文件及备份均未通过校验: " + errors);
     return {};
 }
 
 inline std::string legacyScalar(const legacy2::AttrVal& value) {
-    switch (value.kind) {
-        case legacy2::AttrVal::Kind::Bool: return value.b ? "1" : "0";
-        case legacy2::AttrVal::Kind::Int:
-        case legacy2::AttrVal::Kind::Num:  return std::to_string(value.asInt());
-        case legacy2::AttrVal::Kind::Str:  return value.s;
-        default: return {};
-    }
+    return value.kind == legacy2::AttrVal::Kind::Other ? std::string() : legacy_conf::encode(value.toJson());
 }
 
 /// Truncate to at most @p maxBytes WITHOUT splitting a multi-byte UTF-8 char.
@@ -169,50 +233,52 @@ inline std::string sanitizeJsonControls(const std::string& in) {
 
 inline void upsertUserSetting(Database& db, const std::string& uid, const std::string& gid,
                               const std::string& key, const std::string& value) {
-    auto* st = db.getStorage(); if (!st) return;
-    try {
-        auto rows = st->get_all<UserSettingRow>(orm::where(
-            orm::c(&UserSettingRow::userId) == uid
-            and orm::c(&UserSettingRow::groupId) == gid
-            and orm::c(&UserSettingRow::key) == key));
-        if (rows.empty()) { UserSettingRow row; row.userId = uid; row.groupId = gid; row.key = key; row.value = value; st->insert(row); }
-        else { auto row = rows.front(); row.value = value; st->update(row); }
-    } catch (...) {}
+    auto* st = db.getStorage(); if (!st) throw std::runtime_error("用户设置数据库不可用");
+    auto rows = st->get_all<UserSettingRow>(orm::where(
+        orm::c(&UserSettingRow::userId) == uid and orm::c(&UserSettingRow::groupId) == gid
+        and orm::c(&UserSettingRow::key) == key));
+    if (rows.empty()) { UserSettingRow row; row.userId = uid; row.groupId = gid; row.key = key; row.value = value; st->insert(row); }
+    else { auto row = rows.front(); row.value = value; st->update(row); }
 }
 
 // ── PlayerCards.RDconf → cards.db ────────────────────────────
-inline int importCards(Database& db, const fs::path& userDir, int& users) {
+inline int importCards(Database& db, const fs::path& userDir, int& users,
+        const ImportOptions& opts = {}, ImportResult* diagnostics = nullptr) {
     auto* cst = db.getCardStorage();
     if (!cst) return 0;
     auto* mainSt = db.getStorage();
     std::vector<std::tuple<std::string, std::string, std::string>> bindings;
-    fs::path file = legacyDataFile(userDir, {"PlayerCards.RDconf", "PlayerCards.RDconf.bak", "PlayerCards.bak"});
+    std::vector<std::pair<long long, legacy2::LegacyPlayer>> players;
+    fs::path file = legacyDataFile(userDir, {"PlayerCards.RDconf", "PlayerCards.RDconf.bak", "PlayerCards.bak"},
+        [&](const fs::path& candidate) {
+            players = legacy2::readRecords<legacy2::LegacyPlayer>(candidate, legacy2::readPlayer);
+        }, diagnostics);
     if (file.empty()) return 0;
     int imported = 0;
-    try {
-        cst->transaction([&] {
-            legacy2::loadLLMap(file.string(), [&](legacy2::BReader& r, long long uid) {
-        legacy2::LegacyPlayer p = legacy2::readPlayer(r);
-        if (p.cards.empty()) return;
+    cst->transaction([&] {
+      for (const auto& [uid, p] : players) {
+        if (p.cards.empty()) continue;
         ++users;
         std::string user = std::to_string(uid);
         std::map<unsigned short, std::string> cardNames;
-        for (auto& c : p.cards) {
+        for (const auto& c : p.cards) {
             // idx 0 = the default/active card → import as the unnamed default card.
             std::string name = (c.idx == 0) ? std::string() : c.name;
             json attrs = json::object();
             json meta = json::object();
             json texts = json::object(), expressions = json::object();
+            if (!c.name.empty()) meta["displayName"] = c.name;
             for (auto& [k, v] : c.attrs) {
+                reportUnsupportedValue(v, "card:" + user + "/" + name + "/" + k, diagnostics);
                 if (k == "__Name" || k == "__Type") continue;
                 if (k.rfind("&", 0) == 0) {                   // old inline dice expression
                     if (v.kind == legacy2::AttrVal::Kind::Str) expressions[k.substr(1)] = v.s;
                     continue;
                 }
-                if (v.kind == legacy2::AttrVal::Kind::Int || v.kind == legacy2::AttrVal::Kind::Num)
-                    attrs[k] = (int)v.asInt();
-                else if (v.kind == legacy2::AttrVal::Kind::Bool)
-                    attrs[k] = v.b ? 1 : 0;
+                if (v.kind == legacy2::AttrVal::Kind::Int || v.kind == legacy2::AttrVal::Kind::Num
+                    || v.kind == legacy2::AttrVal::Kind::Bool || v.kind == legacy2::AttrVal::Kind::Table
+                    || v.kind == legacy2::AttrVal::Kind::Set || v.kind == legacy2::AttrVal::Kind::Nil)
+                    attrs[k] = v.toJson();
                 else if (v.kind == legacy2::AttrVal::Kind::Str)
                     texts[k] = v.s;
             }
@@ -220,8 +286,8 @@ inline int importCards(Database& db, const fs::path& userDir, int& users) {
             for (auto& [k, v] : c.info) texts[k] = v;
             if (!c.note.empty()) texts["note"] = c.note;
             if (!texts.empty()) meta["texts"] = texts;
-            if (!expressions.empty()) meta["legacyExpressions"] = expressions;
-            if (!c.type.empty()) meta["legacyType"] = c.type;
+            if (!expressions.empty()) { meta["expressions"] = expressions; meta["legacyExpressions"] = expressions; }
+            if (!c.type.empty()) { meta["type"] = c.type; meta["legacyType"] = c.type; }
             if (!c.locks.empty()) {
                 std::string locks;
                 for (auto& lock : c.locks) {
@@ -232,12 +298,24 @@ inline int importCards(Database& db, const fs::path& userDir, int& users) {
                 if (!locks.empty()) meta["locks"] = locks;
             }
             if (!meta.empty()) attrs["__meta"] = meta;
+            if (diagnostics) for (const auto& [key, value] : attrs.items()) {
+                if (key.rfind("__", 0) == 0) continue;
+                const auto canon = CharacterCardStore::canonical(key);
+                if (canon != key && attrs.contains(canon) && attrs[canon] != value) {
+                    ++diagnostics->skipped;
+                    diagnostics->details.push_back({"card:" + user + "/" + name + "/" + key,
+                        "preserved", "同义属性与标准字段「" + canon + "」值冲突；两份原值均保留，请确认"});
+                }
+            }
             if (attrs.empty() && name.empty()) continue;
-            try {
                 auto existing = cst->get_all<CharacterCardRow>(
                     orm::where(orm::c(&CharacterCardRow::userId) == user
                                and orm::c(&CharacterCardRow::name) == name));
                 if (!existing.empty()) {
+                    if (!opts.overwriteData && json::parse(existing.front().attrs, nullptr, false) != attrs) {
+                        if (diagnostics) { ++diagnostics->skipped; diagnostics->details.push_back({"card:" + user + "/" + name, "skipped", "保留现有人物卡；未授权覆盖数据库数据"}); }
+                        continue;
+                    }
                     auto row = existing.front(); row.attrs = attrs.dump(); row.updatedAt = utils::nowIso8601();
                     cst->update(row);
                 } else {
@@ -248,144 +326,153 @@ inline int importCards(Database& db, const fs::path& userDir, int& users) {
                 }
                 cardNames[c.idx] = name;
                 ++imported;
-            } catch (...) {}
         }
         // Old Player stores a gid → card-index map.  Dice!Next stores the same
         // concept as UserSettingRow(cardBind), so this is a direct conversion.
         for (auto& [gid, idx] : p.groupBind) {
             auto it = cardNames.find(idx);
-            if (it != cardNames.end()) bindings.emplace_back(user, std::to_string(gid), it->second);
+            if (it != cardNames.end()) bindings.emplace_back(user, gid == 0 ? std::string() : std::to_string(gid), it->second);
         }
-            });
-            return true;
-        });
-    } catch (const std::exception& e) {
-        DICE_LOG_ERROR("LegacyImport: card transaction failed: {}", e.what());
-    }
+      }
+      return true;
+    });
     if (mainSt && !bindings.empty()) {
-        try {
             mainSt->transaction([&] {
-                for (const auto& [user, group, card] : bindings)
+                for (const auto& [user, group, card] : bindings) {
+                    const auto current = mainSt->get_all<UserSettingRow>(orm::where(
+                        orm::c(&UserSettingRow::userId) == user and orm::c(&UserSettingRow::groupId) == group
+                        and orm::c(&UserSettingRow::key) == std::string("cardBind")));
+                    if (!opts.overwriteData && !current.empty() && current.front().value != card) {
+                        if (diagnostics) { ++diagnostics->skipped; diagnostics->details.push_back({"cardBind:" + user + "/" + group, "skipped", "保留现有选卡绑定"}); }
+                        continue;
+                    }
                     upsertUserSetting(db, user, group, "cardBind", card);
+                }
                 return true;
             });
-        } catch (const std::exception& e) {
-            DICE_LOG_ERROR("LegacyImport: card binding transaction failed: {}", e.what());
-        }
     }
     return imported;
 }
 
 // ── UserConf.dat → player_profiles + Lua-compatible user config ─
-inline int importUsers(Database& db, const fs::path& userDir, LuaPluginManager* luaMod = nullptr) {
+inline int importUsers(Database& db, const fs::path& userDir, LuaPluginManager* luaMod = nullptr,
+        const ImportOptions& opts = {}, ImportResult* diagnostics = nullptr) {
     auto* st = db.getStorage();
     if (!st) return 0;
-    fs::path file = legacyDataFile(userDir, {"UserConf.dat", "UserConf.dat.bak", "UserConf.bak"});
+    std::vector<std::pair<long long, legacy2::LegacyUser>> records;
+    fs::path file = legacyDataFile(userDir, {"UserConf.dat", "UserConf.dat.bak", "UserConf.bak", "UserConf.RDconf"},
+        [&](const fs::path& candidate) {
+            const bool ancient = candidate.filename() == "UserConf.RDconf";
+            records = legacy2::readRecords<legacy2::LegacyUser>(candidate, [&](legacy2::BReader& r) {
+                return ancient ? legacy2::readOldUser(r) : legacy2::readUser(r);
+            });
+        }, diagnostics);
     if (file.empty()) return 0;
     int imported = 0;
     std::vector<std::tuple<std::string, std::string, std::string>> luaValues;
-    try {
-        st->transaction([&] {
-            legacy2::loadLLMap(file.string(), [&](legacy2::BReader& r, long long uid) {
-        legacy2::LegacyUser u = legacy2::readUser(r);
+    st->transaction([&] {
+      for (const auto& [uid, u] : records) {
+        for (const auto& [key, value] : u.conf)
+            reportUnsupportedValue(value, "userConf:" + std::to_string(uid) + "/" + key, diagnostics);
         int trust = 0, favor = 0;
-        if (auto it = u.conf.find("trust"); it != u.conf.end()) trust = (int)it->second.asInt();
-        if (auto it = u.conf.find("favor"); it != u.conf.end()) favor = (int)it->second.asInt();
+        auto nativeInt = [&](const char* key) {
+            const auto it = u.conf.find(key); if (it == u.conf.end()) return 0;
+            const auto value = it->second.asInt();
+            if (value < (std::numeric_limits<int>::min)() || value > (std::numeric_limits<int>::max)())
+                throw std::runtime_error(std::string("旧玩家字段超出整数范围: ") + key);
+            return static_cast<int>(value);
+        };
+        trust = nativeInt("trust"); favor = nativeInt("favor");
         std::string nick;
-        if (!u.nicks.empty()) nick = u.nicks.begin()->second;   // any known nick
+        if (auto it = u.nicks.find(0); it != u.nicks.end()) nick = it->second;
+        else if (!u.nicks.empty()) nick = u.nicks.begin()->second;
         bool hasScalarConfig = std::any_of(u.conf.begin(), u.conf.end(), [](const auto& kv) {
             const auto kind = kv.second.kind;
             return !kv.first.empty() && (kind == legacy2::AttrVal::Kind::Bool
                 || kind == legacy2::AttrVal::Kind::Int || kind == legacy2::AttrVal::Kind::Num
-                || kind == legacy2::AttrVal::Kind::Str);
+                || kind == legacy2::AttrVal::Kind::Str || kind == legacy2::AttrVal::Kind::Table
+                || kind == legacy2::AttrVal::Kind::Set || kind == legacy2::AttrVal::Kind::Nil);
         });
         // A user with only Lua/plugin configuration is still meaningful.  The
         // previous early return silently dropped all such settings.
-        if (trust == 0 && favor == 0 && nick.empty() && !hasScalarConfig) return;
+        if (trust == 0 && favor == 0 && nick.empty() && !hasScalarConfig) continue;
         std::string user = std::to_string(uid);
-        try {
             auto rows = st->get_all<PlayerProfileRow>(
-                orm::where(orm::c(&PlayerProfileRow::platform) == std::string("onebot_v11")
+                orm::where(orm::c(&PlayerProfileRow::platform) == opts.targetPlatform
                            and orm::c(&PlayerProfileRow::userId) == user), orm::limit(1));
             if (rows.empty()) {
                 PlayerProfileRow row;
-                row.platform = "onebot_v11"; row.userId = user; row.nickname = nick;
+                row.platform = opts.targetPlatform; row.userId = user; row.nickname = nick;
                 row.trustLevel = trust; row.favor = favor; row.createdAt = utils::nowIso8601();
                 st->insert(row);
-            } else {
+            } else if (opts.overwriteData) {
                 auto row = rows.front();
                 if (!nick.empty()) row.nickname = nick;
-                if (trust) row.trustLevel = trust;
-                if (favor) row.favor = favor;
+                row.trustLevel = trust;
+                row.favor = favor;
                 st->update(row);
+            } else if (diagnostics && (rows.front().trustLevel != trust || rows.front().favor != favor
+                    || (!nick.empty() && rows.front().nickname != nick))) {
+                ++diagnostics->skipped;
+                diagnostics->details.push_back({"profile:" + user, "skipped", "保留现有玩家档案和权限；未授权覆盖数据"});
             }
             // Keep every scalar old User::AnysTable field in the compatibility
             // store.  Old Lua getUserConf(uid,key) maps to this exact scope.
             // Structured/function values cannot be faithfully represented by
             // the old decoder and are deliberately not fabricated.
-            if (luaMod) for (auto& [key, value] : u.conf) {
+            if (luaMod) for (const auto& [key, value] : u.conf) {
+                // A protected native permission must not be bypassed through
+                // a newly-imported compatibility variable read by a Lua plugin.
+                if (!opts.overwriteData && !rows.empty() &&
+                    ((key == "trust" && rows.front().trustLevel != trust) ||
+                     (key == "favor" && rows.front().favor != favor))) {
+                    if (diagnostics) { ++diagnostics->skipped; diagnostics->details.push_back({"userConf:" + user + "/" + key,
+                        "skipped", "保留新版档案值；不通过兼容变量改变现有权限/好感"}); }
+                    continue;
+                }
                 std::string scalar = legacyScalar(value);
                 if (!key.empty() && (value.kind == legacy2::AttrVal::Kind::Bool
                         || value.kind == legacy2::AttrVal::Kind::Int
                         || value.kind == legacy2::AttrVal::Kind::Num
-                        || value.kind == legacy2::AttrVal::Kind::Str))
-                    luaValues.emplace_back("u:" + user, key, std::move(scalar));
+                        || value.kind == legacy2::AttrVal::Kind::Str || value.kind == legacy2::AttrVal::Kind::Table
+                        || value.kind == legacy2::AttrVal::Kind::Set || value.kind == legacy2::AttrVal::Kind::Nil)) {
+                    const auto current = luaMod->confGet("u:" + user, key);
+                    if (!opts.overwriteData && !current.empty()) {
+                        if (diagnostics && current != scalar) { ++diagnostics->skipped; diagnostics->details.push_back({"userConf:" + user + "/" + key, "skipped", "保留现有插件变量"}); }
+                    } else luaValues.emplace_back("u:" + user, key, std::move(scalar));
+                }
             }
             // Old NN/Nick is per-group.  Preserve it as the current .nn
             // setting rather than collapsing all group cards into one profile.
-            for (auto& [gid, nickForGroup] : u.nicks)
-                if (!nickForGroup.empty()) upsertUserSetting(db, user, std::to_string(gid), "nick", nickForGroup);
+            auto saveSetting = [&](const std::string& group, const std::string& key, const std::string& value) {
+                const auto current = st->get_all<UserSettingRow>(orm::where(orm::c(&UserSettingRow::userId) == user
+                    and orm::c(&UserSettingRow::groupId) == group and orm::c(&UserSettingRow::key) == key));
+                if (!opts.overwriteData && !current.empty() && current.front().value != value) {
+                    if (diagnostics) { ++diagnostics->skipped; diagnostics->details.push_back({"userSetting:" + user + "/" + key, "skipped", "保留现有用户设置"}); }
+                    return;
+                }
+                upsertUserSetting(db, user, group, key, value);
+            };
+            for (const auto& [gid, nickForGroup] : u.nicks)
+                if (!nickForGroup.empty()) saveSetting(gid == 0 ? std::string() : std::to_string(gid), "nick", nickForGroup);
+            if (auto it = u.conf.find("默认骰"); it != u.conf.end()) {
+                const auto face = it->second.asInt();
+                if (face > 0 && face <= 1000000) saveSetting("", "defaultDice", std::to_string(face));
+                else if (diagnostics) { ++diagnostics->skipped; diagnostics->details.push_back({"defaultDice:" + user, "skipped", "旧默认骰面数超出安全范围"}); }
+            }
             ++imported;
-        } catch (...) {}
-            });
-            return true;
-        });
-    } catch (const std::exception& e) {
-        DICE_LOG_ERROR("LegacyImport: user transaction failed: {}", e.what());
-    }
+      }
+      return true;
+    });
     if (luaMod && !luaValues.empty() && !luaMod->confSetBatch(luaValues)) {
-        DICE_LOG_ERROR("LegacyImport: failed to batch-import {} Lua user settings", luaValues.size());
+        throw std::runtime_error("failed to import Lua user configuration");
     }
     return imported;
 }
 
 // ── BlackList.json → banlist (distinct ban/kick offenders) ───
-inline int importBlacklist(Database& db, const fs::path& confDir) {
-    auto* st = db.getStorage();
-    if (!st) return 0;
-    std::string body = readFile(confDir / "BlackList.json");
-    if (body.empty()) return 0;
-    int imported = 0;
-    try {
-        json arr = json::parse(body);
-        if (!arr.is_array()) return 0;
-        std::map<std::string, std::string> offenders;   // uid → note
-        for (auto& e : arr) {
-            std::string type = e.value("type", "");
-            if (type != "ban" && type != "kick") continue;
-            std::string uid;
-            if (e.contains("fromUID")) {
-                if (e["fromUID"].is_number()) uid = std::to_string(e["fromUID"].get<long long>());
-                else if (e["fromUID"].is_string()) uid = e["fromUID"].get<std::string>();
-            }
-            if (uid.empty() || uid == "0") continue;
-            offenders[uid] = e.value("note", std::string("legacy import"));
-        }
-        st->transaction([&] {
-            for (auto& [uid, note] : offenders) {
-            auto cnt = st->count<BanlistRow>(orm::where(
-                orm::c(&BanlistRow::targetType) == 0 and orm::c(&BanlistRow::listType) == 0
-                and orm::c(&BanlistRow::targetId) == uid));
-            if (cnt == 0) {
-                BanlistRow b; b.targetType = 0; b.listType = 0; b.targetId = uid;
-                b.reason = utf8Truncate(note, 200); b.createdAt = utils::nowIso8601();
-                st->insert(b); ++imported;
-            }
-            }
-            return true;
-        });
-    } catch (...) {}
-    return imported;
+inline int importBlacklist(Database& db, const fs::path& confDir, json* diagnostics = nullptr) {
+    return importBlacklistSafe(db, confDir, diagnostics);
 }
 
 // ── CustomMsgReply.json → reply_rules (via ReplyManager) ─────
@@ -398,43 +485,40 @@ inline int importBlacklist(Database& db, const fs::path& confDir) {
 // 全部被丢弃。Lua/JS/Py 代码型回复无法转成文本规则，跳过并留日志。
 inline int importReplies(ReplyManager& reply, const fs::path& confDir,
                          const legacy_reply_references::Catalog& catalog = {},
-                         legacy_reply_references::Report* migrationReport = nullptr) {
+                         legacy_reply_references::Report* migrationReport = nullptr, json* diagnostics = nullptr) {
     legacy_reply_references::Report localReport;
     auto& report = migrationReport ? *migrationReport : localReport;
     // 与旧版源码（DiceMod.cpp custom_reply 段）一致：
     // CustomMsgReply.json 非空才读取；不存在或为空时回退迁移 CustomReply.json
     // （完全匹配）与 CustomRegexReply.json（正则），迁移后旧版会写回
     // CustomMsgReply.json。CustomMsg.json 是独立的全局文案，不参与本判断。
-    std::string body = readFile(confDir / "CustomMsgReply.json");
-    bool hasModernRules = false;
-    try { auto modern = json::parse(sanitizeJsonControls(body)); hasModernRules = modern.is_object() && !modern.empty(); } catch (...) {}
-    if (!hasModernRules) {
-        json legacy = json::object();
+    std::string body = reply_import_safety::readSource(confDir / "CustomMsgReply.json");
+    json obj = json::object();
+    if (!reply_import_safety::trim(body).empty()) {
+        obj = json::parse(sanitizeJsonControls(body));
+        if (!obj.is_object()) throw std::runtime_error("CustomMsgReply.json 必须是对象");
+    }
+    if (obj.empty()) {
         auto addLegacy = [&](const char* filename, const char* matchKey, bool isRegex) {
-            try {
-                json source = json::parse(sanitizeJsonControls(readFile(confDir / filename)));
-                if (!source.is_object()) return;
-                for (auto& [key, answers] : source.items()) {
-                    if (key.empty() || !answers.is_array()) continue;
-                    json rule;
-                    rule[matchKey] = json::array({key});
-                    rule["echo"] = "Deck";
-                    rule["answer"] = answers;
-                    // Keep both legacy files even if a keyword happens to be
-                    // identical; the suffix makes the JSON object key unique.
-                    legacy[key + (isRegex ? "#legacy-regex" : "#legacy")] = std::move(rule);
+            const auto raw = reply_import_safety::readSource(confDir / filename);
+            if (reply_import_safety::trim(raw).empty()) return;
+            const auto source = json::parse(sanitizeJsonControls(raw));
+            if (!source.is_object()) throw std::runtime_error(std::string(filename) + " 必须是对象");
+            for (const auto& [key, answers] : source.items()) {
+                if (key.empty() || !answers.is_array()) {
+                    reply_import_safety::diagnostic(diagnostics, filename, key, "failed", {"invalid legacy answers"}, answers);
+                    continue;
                 }
-            } catch (...) {}
+                obj[key + (isRegex ? "#legacy-regex" : "#legacy")] = json{
+                    {matchKey, json::array({key})}, {"echo", "Deck"}, {"answer", answers}};
+            }
         };
         addLegacy("CustomReply.json", "match", false);
         addLegacy("CustomRegexReply.json", "regex", true);
-        if (legacy.empty()) return 0;
-        body = legacy.dump();
     }
+    if (obj.empty()) return 0;
     int imported = 0, skippedCode = 0;
     try {
-        json obj = json::parse(body);
-        if (!obj.is_object()) return 0;
         // 完整规则级去重（条件集合+回复+触发限制都相同才算重复）：既能幂等重导，
         // 也不会像旧的“只按首条件”那样误杀“同匹配词、不同回复”的规则；
         // 同时剔除历史 Dice 文件里因旧版 bug 产生的完全重复条目。
@@ -473,80 +557,27 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir,
         }
         int skippedDup = 0;
         for (auto& [key, r] : obj.items()) {
-            if (!r.is_object()) continue;
-            // Lua/JS/Py 代码回复导不进文本规则 → 跳过（保留在原文件里，可手工移植为插件）。
-            std::string echo = r.value("echo", std::string("Text"));
-            if (echo == "Lua" || echo == "JS" || echo == "Py") { ++skippedCode; continue; }
-            ReplyRule rule; rule.logic = "or"; rule.priority = 100; rule.enabled = true;
-            auto addWords = [&rule](const json& arr, MatchType t) {
-                if (!arr.is_array()) return;
-                for (auto& m : arr) if (m.is_string() && !m.get<std::string>().empty())
-                    rule.conditions.push_back({t, m.get<std::string>()});
-            };
-            if (r.contains("match"))  addWords(r["match"],  MatchType::kKeyword);
-            if (r.contains("prefix")) addWords(r["prefix"], MatchType::kPrefix);
-            if (r.contains("search")) addWords(r["search"], MatchType::kSearch);
-            if (r.contains("regex"))  addWords(r["regex"],  MatchType::kRegex);
-            // 更老的 mode+keyword 单模式写法（非 Regex 模式的 keyword 按 | 分多个词）。
-            if (rule.conditions.empty() && r.contains("mode")) {
-                std::string mode = r.value("mode", std::string("Match"));
-                MatchType t = mode == "Prefix" ? MatchType::kPrefix
-                            : mode == "Search" ? MatchType::kSearch
-                            : mode == "Regex"  ? MatchType::kRegex : MatchType::kKeyword;
-                std::string kw = r.value("keyword", key);
-                if (t == MatchType::kRegex) { if (!kw.empty()) rule.conditions.push_back({t, kw}); }
-                else {
-                    std::stringstream ss(kw); std::string w;
-                    while (std::getline(ss, w, '|')) if (!w.empty()) rule.conditions.push_back({t, w});
-                }
+            if (!r.is_object()) {
+                reply_import_safety::diagnostic(diagnostics, "CustomMsgReply.json", key, "failed", {"reply is not an object"}, r);
+                continue;
             }
-            if (rule.conditions.empty()) continue;
-            // echo Deck = random-pick among answers (the answers ARE the deck);
-            // echo Text = the answer template. Either way the answer strings become
-            // our results (multi-result = random pick).
-            if (r.contains("answer")) {
-                if (r["answer"].is_array()) for (auto& a : r["answer"]) { if (a.is_string() && !a.get<std::string>().empty()) rule.results.push_back(a.get<std::string>()); }
-                else if (r["answer"].is_string() && !r["answer"].get<std::string>().empty()) rule.results.push_back(r["answer"].get<std::string>());
+            const auto echo = r.value("echo", std::string("Text"));
+            if (echo != "Text" && echo != "Deck") {
+                ++skippedCode;
+                reply_import_safety::diagnostic(diagnostics, "CustomMsgReply.json", key, "preserved",
+                    {"代码或未知回复形式不执行；原稿已保留"}, r);
+                if (diagnostics) diagnostics->back()["requiresReview"] = true;
+                continue;
             }
-            if (rule.results.empty()) continue;
-            // Convert old numeric markers into formal metadata before rewriting text.
-            auto answers = rule.results;
-            reply_definition::decodeResults(json(answers), rule.results, rule.resultWeights);
-            // 触发限制串 → 概率/冷却(+提示语)/每日上限(+提示语)/群范围/用户范围。
-            if (r.contains("limit") && r["limit"].is_string()) {
-                std::stringstream ls(r["limit"].get<std::string>()); std::string seg;
-                // 拆 "15&@echo=提示" 形式：数字子项 → num，@echo= → notice。
-                auto parseCntEcho = [](const std::string& v, int& num, std::string& notice) {
-                    std::stringstream ss(v); std::string sub;
-                    while (std::getline(ss, sub, '&')) {
-                        if (sub.rfind("@echo=", 0) == 0) notice = sub.substr(6);
-                        else { try { num = (std::max)(0, std::stoi(sub)); } catch (...) {} }
-                    }
-                };
-                auto parseIdList = [](const std::string& v, std::string& mode, std::string& ids) {
-                    bool neg = !v.empty() && v[0] == '!';
-                    std::string list = neg ? v.substr(1) : v;
-                    for (auto& ch : list) if (ch == '&') ch = ',';   // 原版 & 分隔 → 逗号
-                    if (!list.empty()) { mode = neg ? "deny" : "allow"; ids = list; }
-                };
-                while (std::getline(ls, seg, ';')) {
-                    size_t colon = seg.find(':');
-                    if (colon == std::string::npos) continue;
-                    std::string k = seg.substr(0, colon), v = seg.substr(colon + 1);
-                    if (k == "prob") {
-                        try { rule.prob = (std::clamp)(std::stoi(v), 0, 100); } catch (...) {}
-                    } else if (k == "cd") {
-                        int n = 0; parseCntEcho(v, n, rule.cooldownNotice);
-                        rule.cooldownSec = n;
-                    } else if (k == "today") {
-                        int n = 0; parseCntEcho(v, n, rule.dayLimitNotice);
-                        rule.dayLimit = n;
-                    } else if (k == "grp_id") {
-                        parseIdList(v, rule.scopeMode, rule.scopeIds);
-                    } else if (k == "user_id") {
-                        parseIdList(v, rule.scopeUsersMode, rule.scopeUsers);
-                    }
-                }
+            std::vector<std::string> reasons;
+            ReplyRule rule = reply_import_safety::convert(key, r, reasons);
+            bool valid = !rule.conditions.empty() && !rule.results.empty();
+            for (const auto& condition : rule.conditions)
+                if (condition.type == MatchType::kRegex && !ReplyMatcher::validateRegex(condition.content)) valid = false;
+            if (!valid) {
+                reply_import_safety::diagnostic(diagnostics, "CustomMsgReply.json", key, "preserved", reasons, r);
+                if (diagnostics) diagnostics->back()["requiresReview"] = true;
+                continue;
             }
             const auto originalFingerprint = fingerprint(rule);
             for (size_t i = 0; i < rule.results.size(); ++i)
@@ -555,6 +586,16 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir,
             rule.cooldownNotice = legacy_reply_references::migrate(rule.cooldownNotice, catalog, report, key, "cooldownNotice", rule.legacyReferences);
             rule.dayLimitNotice = legacy_reply_references::migrate(rule.dayLimitNotice, catalog, report, key, "dayLimitNotice", rule.legacyReferences);
             const auto migratedFingerprint = fingerprint(rule);
+            if (!rule.enabled) {
+                const auto found = existingRules.find(migratedFingerprint);
+                if (found != existingRules.end()) {
+                    const bool disabled = !found->second.enabled;
+                    reply_import_safety::diagnostic(diagnostics, "CustomMsgReply.json", key,
+                        disabled ? "disabled" : "conflict", reasons, r, found->second.id, disabled);
+                    ++skippedDup;
+                    continue; // Existing owner-defined rules cannot be identified as old imports.
+                }
+            }
             // Re-import can identify previously imported bare templates by a full
             // definition match. Preserve owner-enabled/priority settings when upgrading.
             if (auto old = existingRules.find(originalFingerprint); old != existingRules.end()) {
@@ -571,50 +612,47 @@ inline int importReplies(ReplyManager& reply, const fs::path& confDir,
                 if (reply.updateRule(old->second.id, rule)) existing.insert(migratedFingerprint);
                 ++skippedDup; continue;
             }
-            if (reply.addRule(rule) >= 0) { existing.insert(migratedFingerprint); ++imported; }
+            const int id = reply.addRule(rule);
+            if (id < 0) throw std::runtime_error("无法保存已校验的旧回复规则");
+            existing.insert(migratedFingerprint); ++imported;
+            if (!rule.enabled) reply_import_safety::diagnostic(diagnostics, "CustomMsgReply.json", key,
+                "disabled", reasons, r, id, true);
         }
         if (skippedDup > 0)
             DICE_LOG_INFO("importReplies: 跳过 {} 条完全重复的自定义回复（历史重复/重复导入）", skippedDup);
-    } catch (...) {}
+    } catch (const std::exception&) { throw; }
     if (skippedCode > 0)
         DICE_LOG_INFO("importReplies: {} 条 Lua/JS/Py 代码型回复无法转为文本规则，已跳过", skippedCode);
     return imported;
 }
 
 // ── CustomHelp.json → i18n help.topic.* overrides ────────────
-inline int importHelp(Database& db, I18n& i18n, const fs::path& confDir) {
-    auto* st = db.getStorage();
-    if (!st) return 0;
-    std::string body = readFile(confDir / "CustomHelp.json");
+inline int importHelp(Database& db, I18n& i18n, const fs::path& confDir,
+                      const ImportOptions& opts = {}, ImportResult* diagnostics = nullptr) {
+    auto* st = db.getStorage(); if (!st) throw std::runtime_error("帮助数据库不可用");
+    const auto body = readFile(confDir / "CustomHelp.json");
     if (body.empty()) return 0;
+    const auto obj = json::parse(sanitizeJsonControls(body));
+    if (!obj.is_object()) throw std::runtime_error("CustomHelp.json 必须是对象");
     int imported = 0;
-    try {
-        json obj = json::parse(sanitizeJsonControls(body));
-        if (!obj.is_object()) return 0;
-        for (auto& [topic, val] : obj.items()) {
-            if (!val.is_string()) continue;
-            std::string key = "help.topic." + topic;
-            std::string text = val.get<std::string>();
-            // Import to Simplified Chinese only; other locales keep built-in i18n.
-            {
-                const char* loc = "zh-Hans";
-                auto rows = st->get_all<I18nOverrideRow>(
-                    orm::where(orm::c(&I18nOverrideRow::locale) == std::string(loc)
-                               and orm::c(&I18nOverrideRow::key) == key));
-                if (rows.empty()) { I18nOverrideRow ro; ro.locale = loc; ro.key = key; ro.value = text; st->insert(ro); }
-                else { auto ro = rows.front(); ro.value = text; st->update(ro); }
-                i18n.setOverride(localeFromString(loc), key, text);
-            }
-            // 清掉繁中/英文对该 help 键的覆盖，回退到自带 i18n（幂等）。
-            for (const char* other : {"zh-Hant", "en"}) {
-                st->remove_all<I18nOverrideRow>(
-                    orm::where(orm::c(&I18nOverrideRow::locale) == std::string(other)
-                               and orm::c(&I18nOverrideRow::key) == key));
-                i18n.clearOverride(localeFromString(other), key);
-            }
-            ++imported;
+    for (const auto& [topic, value] : obj.items()) {
+        if (!value.is_string()) {
+            if (diagnostics) { ++diagnostics->skipped; diagnostics->details.push_back({topic, "preserved", "非文本帮助词条未接入"}); }
+            continue;
         }
-    } catch (...) {}
+        const auto key = "help.topic." + topic, text = value.get<std::string>();
+        auto rows = st->get_all<I18nOverrideRow>(orm::where(
+            orm::c(&I18nOverrideRow::locale) == std::string("zh-Hans") and orm::c(&I18nOverrideRow::key) == key));
+        if (!rows.empty() && rows.front().value != text && !opts.overwriteData) {
+            if (diagnostics) { ++diagnostics->skipped; diagnostics->details.push_back({key, "skipped", "保留已有帮助；未授权覆盖数据"}); }
+            continue;
+        }
+        if (rows.empty()) { I18nOverrideRow row; row.locale = "zh-Hans"; row.key = key; row.value = text; st->insert(row); }
+        else { auto row = rows.front(); row.value = text; st->update(row); }
+        i18n.setOverride(Locale::kZhHans, key, text);
+        // Other locales may contain owner-authored translations. Never clear them.
+        ++imported;
+    }
     return imported;
 }
 
@@ -727,7 +765,7 @@ inline std::string v2KeyFor(const std::string& ourKey) {
 // Mapped keys → their DiceNext i18n key (zh-Hans+zh-Hant). UNmapped keys are
 // preserved under "legacy.<strXXX>" so the web 「无效文本」 tab can show them for
 // manual porting. The file is UTF-8 (NOT GBK) but has raw CR/LF inside strings.
-inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, int& orphans, json* details = nullptr) {
+inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, int& orphans, json* details = nullptr, const ImportOptions& opts = {}) {
     auto* st = db.getStorage();
     if (!st) return 0;
     std::string raw = readFile(confDir / "CustomMsg.json");
@@ -739,22 +777,16 @@ inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, in
             orm::where(orm::c(&I18nOverrideRow::locale) == std::string(loc)
                        and orm::c(&I18nOverrideRow::key) == key));
         if (rows.empty()) { I18nOverrideRow ro; ro.locale = loc; ro.key = key; ro.value = text; st->insert(ro); }
-        else { auto ro = rows.front(); ro.value = text; st->update(ro); }
-        i18n.setOverride(localeFromString(loc), key, text);
-    };
-    // 仅简体导入：清掉其他语言对该键的覆盖，让繁中/英文回退到自带 i18n
-    // （也修复早期版本误把简体写进 zh-Hant/en 的历史数据，使重复导入幂等）。
-    auto clearOtherLocales = [&](const std::string& key) {
-        for (const char* loc : {"zh-Hant", "en"}) {
-            st->remove_all<I18nOverrideRow>(
-                orm::where(orm::c(&I18nOverrideRow::locale) == std::string(loc)
-                           and orm::c(&I18nOverrideRow::key) == key));
-            i18n.clearOverride(localeFromString(loc), key);
+        else {
+            if (!opts.overwriteData && rows.front().value != text) return false;
+            auto ro = rows.front(); ro.value = text; st->update(ro);
         }
+        i18n.setOverride(localeFromString(loc), key, text);
+        return true;
     };
     try {
         json obj = json::parse(sanitizeJsonControls(raw));   // UTF-8, raw CR/LF in strings
-        if (!obj.is_object()) return 0;
+        if (!obj.is_object()) throw std::runtime_error("CustomMsg.json 必须是对象");
         const auto& M = msgKeyMap();
         for (auto& [origKey, val] : obj.items()) {
             if (!val.is_string() || SKIP.count(origKey)) continue;
@@ -769,16 +801,19 @@ inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, in
                     auto detail = checkTextDetail(origKey, it->second, normalized);
                     const auto existing = st->get_all<I18nOverrideRow>(orm::where(
                         orm::c(&I18nOverrideRow::locale) == std::string("zh-Hans") and orm::c(&I18nOverrideRow::key) == it->second));
-                    if (!existing.empty() && existing.front().value != normalized) detail["status"] = "conflict";
+                    if (!opts.overwriteData && !existing.empty() && existing.front().value != normalized) detail["status"] = "conflict";
                     if (detail["status"] == "active" || detail["status"] == "partial") {
                         writeOv("zh-Hans", it->second, normalized); ++imported;
                     } else ++orphans;
                     if (details) details->push_back(detail);
                     continue;
                 }
-                writeOv("zh-Hans", it->second, normalized);
-                                                                    // 仅导入简体中文，其他语言保留自带 i18n
-                clearOtherLocales(it->second);
+                if (!writeOv("zh-Hans", it->second, normalized)) {
+                    ++orphans;
+                    if (details) details->push_back({{"source", origKey}, {"target", it->second}, {"status", "conflict"},
+                        {"issues", {"保留已有文案；未授权覆盖数据"}}, {"original", text}});
+                    continue;
+                }
                 ++imported;
                 if (details) {
                     const auto program = safe_template::compile(normalized);
@@ -791,7 +826,7 @@ inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, in
                 if (details) details->push_back({{"source", origKey}, {"target", ""}, {"status", "preserved"}, {"issues", {"no audited mapping"}}});
             }
         }
-    } catch (...) {}
+    } catch (const std::exception&) { throw; }
     return imported;
 }
 
@@ -847,19 +882,42 @@ inline std::map<std::string, int> parseConsoleSettings(const std::string& body, 
 }
 
 // ── Console.xml / console.yaml → current formal settings ──────
-inline int importMasters(ConfigManager& cfg, const fs::path& confDir) {
-    std::string body = readFile(confDir / "Console.xml");
-    if (body.empty()) body = readFile(confDir / "console.xml");  // case-sensitive filesystems
-    const bool xml = !body.empty();
-    if (body.empty()) body = readFile(confDir / "console.yaml");
-    if (body.empty()) return 0;
+inline int importMasters(ConfigManager& cfg, const fs::path& confDir,
+                         int* settingsImported = nullptr, const ImportOptions& opts = {}, ImportResult* diagnostics = nullptr) {
+    if (settingsImported) *settingsImported = 0;
+    std::error_code sourceEc;
+    const fs::path yamlPath = confDir / "console.yaml";
+    const bool hasYaml = fs::exists(yamlPath, sourceEc);
+    if (sourceEc) throw std::runtime_error("Cannot inspect legacy console.yaml: " + sourceEc.message());
+    std::string body;
+    bool xml = !hasYaml;
+    if (hasYaml) {
+        if (!migration_resources::safePath(confDir, yamlPath)) throw std::runtime_error("Unsafe legacy console.yaml path");
+        body = readFile(yamlPath);
+        // The original loader gives YAML precedence. Invalid/empty YAML must
+        // be reported, never silently replaced by a stale XML permission list.
+        auto document = YAML::Load(body);
+        if (!document.IsMap()) throw std::runtime_error("Legacy console.yaml must be a YAML mapping");
+        if (document["master"] && !document["master"].IsScalar())
+            throw std::runtime_error("Legacy console.yaml master must be a scalar account ID");
+    } else {
+        auto xmlPath = confDir / "Console.xml";
+        if (!fs::exists(xmlPath)) xmlPath = confDir / "console.xml";
+        if (!fs::exists(xmlPath)) return 0;
+        if (!migration_resources::safePath(confDir, xmlPath)) throw std::runtime_error("Unsafe legacy Console.xml path");
+        body = readFile(xmlPath);
+        if (body.empty() || body.find('<') == std::string::npos)
+            throw std::runtime_error("Legacy Console.xml is empty or invalid");
+    }
     // Extract XML master nodes, or the single `master:` scalar from the YAML
     // format used by later Dice!V2 releases.  We intentionally do not import
     // WebUI/Git credentials, scheduled jobs, or arbitrary runtime flags.
     json arr = cfg.get<json>("dice/masters", json::array());
     if (!arr.is_array()) arr = json::array();
     auto hasMaster = [&](const std::string& id) {
-        for (auto& m : arr) if (m.is_object() && m.value("id", "") == id) return true;
+        for (auto& m : arr) if (m.is_object() && m.value("id", "") == id
+                && m.value("platform", std::string("onebot_v11")) == opts.targetPlatform
+                && m.value("adapter_id", m.value("adapterId", std::string())) == opts.targetAdapterId) return true;
         return false;
     };
     int imported = 0;
@@ -868,9 +926,11 @@ inline int importMasters(ConfigManager& cfg, const fs::path& confDir) {
         while (!id.empty() && (id.front() == ' ' || id.front() == '\t' || id.front() == '\r' || id.front() == '\n')) id.erase(id.begin());
         while (!id.empty() && (id.back() == ' ' || id.back() == '\t' || id.back() == '\r' || id.back() == '\n')) id.pop_back();
         if (id.size() >= 2 && ((id.front() == '"' && id.back() == '"') || (id.front() == '\'' && id.back() == '\''))) id = id.substr(1, id.size() - 2);
-        if (!std::all_of(id.begin(), id.end(), [](unsigned char c){ return std::isdigit(c); })) return;
+        if (id.empty() || id == "0") return;
+        if (!std::all_of(id.begin(), id.end(), [](unsigned char c){ return std::isdigit(c); }))
+            throw std::runtime_error("旧骰主 ID 不是有效的 QQ 数字身份");
         if (!id.empty() && !hasMaster(id)) {
-            arr.push_back(json{{"platform", "onebot_v11"}, {"id", id}});
+            arr.push_back(json{{"platform", opts.targetPlatform}, {"adapter_id", opts.targetAdapterId}, {"id", id}});
             ++imported;
         }
     };
@@ -884,30 +944,42 @@ inline int importMasters(ConfigManager& cfg, const fs::path& confDir) {
             pos = e + close.size();
         }
     } else {
-        std::istringstream lines(body); std::string line;
-        while (std::getline(lines, line)) {
-            auto hash = line.find('#'); if (hash != std::string::npos) line.erase(hash);
-            auto colon = line.find(':'); if (colon == std::string::npos) continue;
-            std::string key = line.substr(0, colon);
-            while (!key.empty() && (key.front() == ' ' || key.front() == '\t')) key.erase(key.begin());
-            while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
-            if (key == "master") { add(line.substr(colon + 1)); break; }
-        }
+        const auto document = YAML::Load(body);
+        if (document["master"]) add(document["master"].as<std::string>());
     }
 
     // Consume original Console settings into active Dice!Next capabilities.
     // Obsolete cloud/private/discussion flags are deliberately ignored rather
     // than kept as inert historical records.
     const auto legacy = parseConsoleSettings(body, xml);
+    if ((!xml && YAML::Load(body)["clock"] && !YAML::Load(body)["clock"].IsNull())
+        || (xml && body.find("<clock") != std::string::npos)) {
+        if (diagnostics) legacyResourceDetail(*diagnostics, "console/clock", "preserved",
+            "旧定时任务未自动执行；请在新版定时任务中确认并重新配置，原任务仍保留在旧配置文件中");
+    }
+    int settings = 0;
+    auto maySet = [&](const char* path) {
+        // A freshly-created Next configuration is safe to initialize. Existing
+        // owner settings require the separate, explicit data-overwrite choice.
+        if (opts.overwriteData || cfg.createdOnLoad() || !fs::exists(cfg.configPath())) return true;
+        return cfg.get<json>(path, json()).is_null();
+    };
     auto get = [&](const char* key) -> std::optional<int> {
         auto it = legacy.find(key); if (it == legacy.end()) return std::nullopt; return it->second;
     };
     auto mapBool = [&](const char* oldKey, const char* newPath) {
-        if (auto value = get(oldKey)) { cfg.set<bool>(newPath, *value != 0); ++imported; }
+        if (auto value = get(oldKey); value) {
+            if (maySet(newPath)) { cfg.set<bool>(newPath, *value != 0); ++settings; }
+            else if (diagnostics && cfg.get<json>(newPath, json()) != json(*value != 0))
+                legacyResourceDetail(*diagnostics, std::string("console/") + oldKey, "skipped", "保留当前运行设置；未授权覆盖");
+        }
     };
     auto mapInt = [&](const char* oldKey, const char* newPath, int minValue, int maxValue) {
-        if (auto value = get(oldKey)) {
-            cfg.set<int>(newPath, (std::clamp)(*value, minValue, maxValue)); ++imported;
+        if (auto value = get(oldKey); value) {
+            const auto next = (std::clamp)(*value, minValue, maxValue);
+            if (maySet(newPath)) { cfg.set<int>(newPath, next); ++settings; }
+            else if (diagnostics && cfg.get<json>(newPath, json()) != json(next))
+                legacyResourceDetail(*diagnostics, std::string("console/") + oldKey, "skipped", "保留当前运行设置；未授权覆盖");
         }
     };
     mapBool("DisabledGlobal", "dice/silent_global");
@@ -918,8 +990,10 @@ inline int importMasters(ConfigManager& cfg, const fs::path& confDir) {
     mapBool("DisabledSend", "dice/disabled_send");
     // The old flag is negative (1 = do not listen while off), whereas the
     // current setting is positive (true = an @ mention may still trigger).
-    if (auto value = get("DisabledListenAt")) {
-        cfg.set<bool>("dice/listen_at_when_off", *value == 0); ++imported;
+    if (auto value = get("DisabledListenAt"); value) {
+        if (maySet("dice/listen_at_when_off")) { cfg.set<bool>("dice/listen_at_when_off", *value == 0); ++settings; }
+        else if (diagnostics && cfg.get<json>("dice/listen_at_when_off", json()) != json(*value == 0))
+            legacyResourceDetail(*diagnostics, "console/DisabledListenAt", "skipped", "保留当前运行设置；未授权覆盖");
     }
     mapBool("ListenGroupRequest", "dice/listen_group_request");
     mapBool("ListenGroupAdd", "dice/listen_group_add");
@@ -930,37 +1004,99 @@ inline int importMasters(ConfigManager& cfg, const fs::path& confDir) {
     mapInt("InactiveUserLine", "dice/friend_clean_days", 0, 3650);
     mapInt("GroupClearLimit", "dice/group_clear_limit", 0, 10000);
     mapInt("GroupInvalidSize", "dice/max_group_size", 0, 1000000);
-    if (auto allow = get("AllowStranger")) {
-        cfg.set<std::string>("events/friend_policy",
-            *allow <= 0 ? "whitelist" : *allow == 1 ? "group_used" : "nonblacklist");
-        ++imported;
+    if (auto allow = get("AllowStranger"); allow) {
+        const std::string policy = *allow <= 0 ? "whitelist" : *allow == 1 ? "group_used" : "nonblacklist";
+        if (maySet("events/friend_policy")) { cfg.set<std::string>("events/friend_policy", policy); ++settings; }
+        else if (diagnostics && cfg.get<json>("events/friend_policy", json()) != json(policy))
+            legacyResourceDetail(*diagnostics, "console/AllowStranger", "skipped", "保留当前好友策略；未授权覆盖");
     }
-    if (imported) { cfg.set<json>("dice/masters", arr); cfg.save(); }
+    if (imported || settings) {
+        cfg.set<json>("dice/masters", arr);
+        if (!cfg.save()) throw std::runtime_error("Cannot persist imported Console settings");
+    }
+    if (settingsImported) *settingsImported = settings;
     return imported;
 }
 // ── <root>/mod/ → data/mod/（Lua 模块目录）──────────────────────────
 // 模块目录包含 descriptor.json、model.xml、rulebook 和 reply.lua 等资源。
 // 或 DiceDir/mod/<名>.json。整棵复制到我们的 data/mod/，启动扫描即自动识别。
 // Enhanced with ImportResult return + ImportOptions (skip/overwrite).
+inline void legacyResourceDetail(ImportResult& result, std::string name,
+                                 std::string status, std::string reason = {}) {
+    if (status == "success") ++result.success;
+    else if (status == "failed") ++result.failed;
+    else ++result.skipped;
+    result.details.push_back({std::move(name), std::move(status), std::move(reason)});
+}
+
+/// Copy one known module/plugin directory without following links. Unlike
+/// filesystem::copy(recursive), this checks every descendant and destination.
+inline bool legacyResourceTree(const fs::path& root, const fs::path& source,
+                               const fs::path& destination, bool overwrite,
+                               ImportResult& result) {
+    using namespace migration_resources;
+    std::error_code ec;
+    if (!safePath(root, source)) {
+        legacyResourceDetail(result, utf8(source.lexically_relative(root)), "failed", "unsafe source link/reparse point"); return false;
+    }
+    bool ok = true;
+    auto visit = [&](const fs::path& file) {
+        const auto target = fs::is_directory(source) ? destination / file.lexically_relative(source) : destination;
+        if (fs::exists(target, ec) && !overwrite) return;
+        const auto error = copyFile(file, target, overwrite);
+        if (!error.empty()) { ok = false; legacyResourceDetail(result, utf8(file.lexically_relative(root)), "failed", error); }
+    };
+    if (fs::is_directory(source, ec)) {
+        walk(root, source, visit, [&](const auto& path, const auto& error) {
+            ok = false; legacyResourceDetail(result, utf8(path.lexically_relative(root)), "failed", error);
+        });
+        if (ok && safePath(fs::current_path(), destination)) {
+            fs::create_directories(destination, ec);
+            if (ec) { ok = false; legacyResourceDetail(result, utf8(destination), "failed", ec.message()); }
+        }
+    } else if (fs::is_regular_file(source, ec)) visit(source);
+    else { ok = false; legacyResourceDetail(result, utf8(source.lexically_relative(root)), "failed", "not a regular resource file/directory"); }
+    return ok;
+}
+
 inline ImportResult importMods(const fs::path& root, const ImportOptions& opts = {}) {
     ImportResult result;
     fs::path src = root / "mod";
     std::error_code ec;
     if (!fs::exists(src, ec) || !fs::is_directory(src, ec)) return result;
     fs::path dst = fs::path("data") / "mod";
+    if (!migration_resources::safePath(root, src) || !migration_resources::safePath(fs::current_path(), dst)) {
+        legacyResourceDetail(result, "mod", "failed", "unsafe source/destination resource path"); return result;
+    }
     fs::create_directories(dst, ec);
     std::set<std::string> importedNames;
+    json order = json::array();
+    std::set<std::string> inactive;
+    const auto modListPath = root / "conf" / "ModList.json";
+    if (fs::exists(modListPath) && migration_resources::safePath(root, modListPath)) {
+        auto list = json::parse(readFile(modListPath), nullptr, false);
+        if (list.is_array()) for (const auto& item : list) {
+            if (!item.is_object() || !item.contains("name") || !item["name"].is_string()) continue;
+            const auto name = item["name"].get<std::string>();
+            if (name.empty() || name.find_first_of("/\\:") != std::string::npos || name == "." || name == "..") continue;
+            order.push_back(name);
+            if (item.contains("active") && item["active"].is_boolean() && !item["active"].get<bool>()) {
+                inactive.insert(name); inactive.insert(name + ".json");
+            }
+        } else legacyResourceDetail(result, "conf/ModList.json", "failed", "invalid module state list");
+    }
     auto fromUtf8 = [](const std::string& value) { return fs::path(std::u8string(value.begin(), value.end())); };
     for (const auto& entry : fs::directory_iterator(src, ec)) {
         const fs::path& p = entry.path();
         const auto name8 = p.filename().u8string();
         std::string name(name8.begin(), name8.end());
-        fs::path target = dst / fromUtf8(name);
+        fs::path target = dst / fromUtf8(name + (inactive.count(name) ? ".disabled" : ""));
         ImportDetail detail;
         detail.name = name;
 
         // Check if target already exists
-        bool exists = fs::exists(target, ec);
+        bool exists = fs::exists(target, ec)
+            || (!opts.overwrite && fs::exists(dst / fromUtf8(name), ec));
         if (exists && !opts.overwrite) {
             detail.status = "skipped";
             detail.reason = "already exists (overwrite=false)";
@@ -969,63 +1105,24 @@ inline ImportResult importMods(const fs::path& root, const ImportOptions& opts =
             continue;
         }
 
-        std::error_code ec2;
-        if (entry.is_directory())
-            fs::copy(p, target, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec2);
-        else
-            fs::copy_file(p, target, fs::copy_options::overwrite_existing, ec2);
-
-        if (!ec2) {
+        if (legacyResourceTree(root, p, target, opts.overwrite, result)) {
             detail.status = "success";
             ++result.success;
             importedNames.insert(name);
         } else {
             detail.status = "failed";
-            detail.reason = ec2.message();
-            ++result.failed;
+            detail.reason = "one or more module files were not migrated; see file details";
+            // The individual errors above already contribute to failed.
         }
         result.details.push_back(detail);
     }
 
-    // 原版全局启停和覆盖顺序保存在 conf/ModList.json。仅对本次真正复制的
-    // 模组应用状态，避免 overwrite=false 时意外改动用户已有的 Next 模组。
-    try {
-        std::ifstream listIn(root / "conf" / "ModList.json", std::ios::binary);
-        if (listIn) {
-            json list; listIn >> list;
-            if (list.is_array()) {
-                json order = json::array();
-                for (const auto& item : list) {
-                    if (!item.is_object() || !item.contains("name") || !item["name"].is_string()) continue;
-                    const std::string modName = item["name"].get<std::string>();
-                    if (modName.empty()) continue;
-                    order.push_back(modName);
-                    if (item.value("active", true)) continue;
-                    // 只处理本次成功复制的顶层文件名，不允许 ModList 路径越界。
-                    if (!importedNames.count(modName) && !importedNames.count(modName + ".json")) continue;
-                    const fs::path base = dst / fromUtf8(modName);
-                    for (const auto& pair : {std::pair<fs::path, fs::path>{base, dst / fromUtf8(modName + ".disabled")},
-                                             std::pair<fs::path, fs::path>{dst / fromUtf8(modName + ".json"),
-                                                                           dst / fromUtf8(modName + ".json.disabled")}}) {
-                        std::error_code stateEc;
-                        const auto filename8 = pair.first.filename().u8string();
-                        if (!importedNames.count(std::string(filename8.begin(), filename8.end()))) continue;
-                        if (!fs::exists(pair.first, stateEc)) continue;
-                        if (fs::exists(pair.second, stateEc) && opts.overwrite) fs::remove_all(pair.second, stateEc);
-                        stateEc.clear();
-                        if (!fs::exists(pair.second, stateEc)) fs::rename(pair.first, pair.second, stateEc);
-                        if (stateEc) DICE_LOG_WARN("legacy mod '{}' inactive-state migration failed: {}", modName, stateEc.message());
-                    }
-                }
-                const fs::path orderPath = dst.parent_path() / "mod_order.json";
-                if (opts.overwrite || !fs::exists(orderPath)) {
-                    std::ofstream orderOut(orderPath, std::ios::binary | std::ios::trunc);
-                    if (orderOut) orderOut << order.dump(2);
-                }
-            }
+    if (!order.empty() && !importedNames.empty()) {
+        const auto orderPath = dst.parent_path() / "mod_order.json";
+        if (opts.overwrite || !fs::exists(orderPath)) {
+            const auto error = migration_resources::writeFile(orderPath, order.dump(2));
+            if (!error.empty()) legacyResourceDetail(result, "mod_order.json", "failed", error);
         }
-    } catch (const std::exception& ex) {
-        DICE_LOG_WARN("legacy ModList.json migration skipped: {}", ex.what());
     }
     return result;
 }
@@ -1048,7 +1145,7 @@ inline std::string legacyGroupId(const json& chat) {
     return {};
 }
 
-inline int importLinks(ConfigManager& cfg, const fs::path& confDir) {
+inline int importLinks(ConfigManager& cfg, const fs::path& confDir, const ImportOptions& opts = {}) {
     json old = json::parse(readFile(confDir / "LinkList.json"), nullptr, false);
     if (!old.is_array()) return 0;
     json links = cfg.get<json>("dice/links", json::array());
@@ -1063,15 +1160,15 @@ inline int importLinks(ConfigManager& cfg, const fs::path& confDir) {
         if (mode != "with" && mode != "to" && mode != "from") continue;
         bool duplicate = false;
         for (const auto& current : links) if (current.is_object()
-                && current.value("platform", std::string("onebot_v11")) == "onebot_v11"
+                && current.value("platform", std::string("onebot_v11")) == opts.targetPlatform
                 && current.value("home", std::string()) == home
                 && current.value("target", std::string()) == target) { duplicate = true; break; }
         if (duplicate) continue;
-        links.push_back(json{{"platform", "onebot_v11"}, {"home", home}, {"target", target},
+        links.push_back(json{{"platform", opts.targetPlatform}, {"home", home}, {"target", target},
                              {"mode", mode}, {"active", item.value("linking", true)}});
         ++imported;
     }
-    if (imported) { cfg.set<json>("dice/links", links); cfg.save(); }
+    if (imported) { cfg.set<json>("dice/links", links); if (!cfg.save()) throw std::runtime_error("无法保存迁入的链接/通知配置"); }
     return imported;
 }
 
@@ -1079,7 +1176,7 @@ inline int importLinks(ConfigManager& cfg, const fs::path& confDir) {
 // Legacy notification windows carry the same QQ user/group target and the
 // same bit-mask based severity subscription.  Newer fine-grained event lists
 // stay empty so the imported window continues to use its original mask.
-inline int importNotices(ConfigManager& cfg, const fs::path& confDir) {
+inline int importNotices(ConfigManager& cfg, const fs::path& confDir, const ImportOptions& opts = {}) {
     json old = json::parse(readFile(confDir / "NoticeList.json"), nullptr, false);
     if (!old.is_array()) return 0;
     json notice = cfg.get<json>("dice/notice", json::object());
@@ -1098,17 +1195,18 @@ inline int importNotices(ConfigManager& cfg, const fs::path& confDir) {
         if (id.empty() || id == "0" || !std::all_of(id.begin(), id.end(), [](unsigned char c) { return std::isdigit(c); })) continue;
         bool duplicate = false;
         for (const auto& current : notice["windows"]) if (current.is_object()
-                && current.value("platform", std::string("onebot_v11")) == "onebot_v11"
+                && current.value("platform", std::string("onebot_v11")) == opts.targetPlatform
                 && current.value("chat_id", std::string()) == id
+                && current.value("adapter_id", std::string()) == opts.targetAdapterId
                 && current.value("is_group", true) == group) { duplicate = true; break; }
         if (duplicate) continue;
         int mask = item.value("type", 15);
         if (mask <= 0) continue;
-        notice["windows"].push_back(json{{"platform", "onebot_v11"}, {"chat_id", id},
+        notice["windows"].push_back(json{{"platform", opts.targetPlatform}, {"adapter_id", opts.targetAdapterId}, {"chat_id", id},
             {"is_group", group}, {"level_mask", mask}, {"events", json::array()}});
         ++imported;
     }
-    if (imported) { cfg.set<json>("dice/notice", notice); cfg.save(); }
+    if (imported) { cfg.set<json>("dice/notice", notice); if (!cfg.save()) throw std::runtime_error("无法保存迁入的链接/通知配置"); }
     return imported;
 }
 
@@ -1146,61 +1244,146 @@ inline int importCensorWords(ConfigManager& cfg, const fs::path& confDir) {
 // ── <root>/PublicDeck/ → data/decks/（外置牌堆）─────────────────────
 // Enhanced with ImportResult return + ImportOptions + JSON format validation.
 // Non-.json files are marked as skipped in the result.
+inline std::string legacyDeckTargetName(const fs::path& root, const fs::path& path) {
+    using namespace migration_resources;
+    std::string filename = utf8(path.filename());
+    if (lowerExtension(path) == ".json") filename = utf8(path.stem()) + ".json";
+    else filename += ".json"; // Old Dice! also scanned valid JSON in .txt files.
+    if (path.parent_path() == root / "PublicDeck" && deck_files::isSafeJsonFilename(filename)) return filename;
+    std::string stem = utf8(path.stem());
+    for (char& c : stem) if (static_cast<unsigned char>(c) < 32 || std::string("/\\:*?\"<>|").find(c) != std::string::npos) c = '_';
+    stem = utf8Truncate(stem, 150);
+    return "legacy-" + hash(sourceIdentity(root, path)) + "-" + stem + ".json";
+}
+
+inline std::string legacyMediaReference(const fs::path& root, const fs::path& deck,
+                                        const std::string& reference, const ImportOptions& opts,
+                                        std::string& problem) {
+    using namespace migration_resources;
+    if (reference.empty() || reference.find("{ ") != std::string::npos) return reference;
+    if (reference.rfind("http://", 0) == 0 || reference.rfind("https://", 0) == 0
+        || reference.rfind("base64://", 0) == 0 || reference.find('{') != std::string::npos) return reference;
+    std::string local = reference;
+    if (local.rfind("file://", 0) == 0) local.erase(0, 7);
+    for (char& c : local) if (c == '\\') c = '/';
+    const auto path = fromUtf8(local);
+    fs::path found;
+    for (const auto& candidate : {deck.parent_path() / path, root / path, root / "image" / path, root / "PublicDeck" / path}) {
+        std::error_code ec;
+        if (safePath(root, candidate) && fs::is_regular_file(candidate, ec) && !ec && mediaFile(candidate)) { found = candidate; break; }
+    }
+    if (found.empty()) { problem = "local media path is missing, unsupported or outside the selected legacy root"; return reference; }
+    std::error_code ec;
+    if (fs::file_size(found, ec) > 128ULL * 1024 * 1024 || ec) { problem = "local media file cannot be read or exceeds 128 MiB"; return reference; }
+    const auto relative = fs::absolute(found).lexically_normal().lexically_relative(fs::absolute(root).lexically_normal());
+    const auto destination = fs::path("data/legacy_assets") / hash(sourceIdentity(root, root)) / relative;
+    if (!fs::exists(destination, ec) || opts.overwrite) {
+        problem = copyFile(found, destination, opts.overwrite);
+        if (!problem.empty()) return reference;
+    } else if (!safePath(fs::current_path(), destination)) {
+        problem = "unsafe existing media destination"; return reference;
+    }
+    return utf8(destination);
+}
+
+inline std::string rewriteLegacyDeckMedia(const fs::path& root, const fs::path& deck,
+                                          const std::string& text, const ImportOptions& opts,
+                                          std::set<std::string>& problems) {
+    std::string out; std::size_t pos = 0;
+    while (pos < text.size()) {
+        const auto open = text.find('[', pos);
+        if (open == std::string::npos) { out += text.substr(pos); break; }
+        out += text.substr(pos, open - pos);
+        const auto close = text.find(']', open);
+        if (close == std::string::npos) { out += text.substr(open); break; }
+        std::string token = text.substr(open, close - open + 1);
+        std::size_t start = std::string::npos, end = token.size() - 1;
+        if (token.rfind("[CQ:image,", 0) == 0 || token.rfind("[CQ:record,", 0) == 0
+            || token.rfind("[CQ:video,", 0) == 0 || token.rfind("[img,", 0) == 0) {
+            const auto file = token.find("file=");
+            if (file != std::string::npos) {
+                start = file + 5;
+                const auto comma = token.find(',', start);
+                if (comma != std::string::npos) end = comma;
+            }
+        } else if (token.rfind("[图片:", 0) == 0) start = std::string("[图片:").size();
+        else if (token.rfind("[图:", 0) == 0) start = std::string("[图:").size();
+        if (start != std::string::npos && end > start) {
+            std::string reference = token.substr(start, end - start), problem;
+            for (const auto& pair : {std::pair<std::string, std::string>{"&#44;", ","}, {"&#91;", "["}, {"&#93;", "]"}, {"&amp;", "&"}}) {
+                std::size_t at = 0;
+                while ((at = reference.find(pair.first, at)) != std::string::npos) { reference.replace(at, pair.first.size(), pair.second); at += pair.second.size(); }
+            }
+            auto rewritten = legacyMediaReference(root, deck, reference, opts, problem);
+            if (!problem.empty()) problems.insert(problem);
+            else if (rewritten != reference) {
+                std::string escaped;
+                for (char c : rewritten) {
+                    if (c == '&') escaped += "&amp;"; else if (c == ',') escaped += "&#44;";
+                    else if (c == '[') escaped += "&#91;"; else if (c == ']') escaped += "&#93;"; else escaped += c;
+                }
+                token.replace(start, end - start, escaped);
+            }
+        }
+        out += token; pos = close + 1;
+    }
+    return out;
+}
+
 inline ImportResult importDecks(const fs::path& root, const ImportOptions& opts = {}) {
     ImportResult result;
     fs::path src = root / "PublicDeck";
     std::error_code ec;
     if (!fs::exists(src, ec) || !fs::is_directory(src, ec)) return result;
     fs::path dst = fs::path("data") / "decks";
+    if (!migration_resources::safePath(fs::current_path(), dst)) {
+        legacyResourceDetail(result, "PublicDeck", "failed", "unsafe destination deck path"); return result;
+    }
     fs::create_directories(dst, ec);
-    for (const auto& entry : fs::recursive_directory_iterator(src, ec)) {
-        if (!entry.is_regular_file()) continue;
-        std::string name = entry.path().filename().string();
+    migration_resources::walk(root, src, [&](const fs::path& path) {
+        std::string name = migration_resources::utf8(path.lexically_relative(src));
         ImportDetail detail;
         detail.name = name;
-
-        // Non-JSON files are skipped (not an error)
-        if (entry.path().extension() != ".json") {
-            detail.status = "skipped";
-            detail.reason = "not a .json file";
-            ++result.skipped;
-            result.details.push_back(detail);
-            continue;
+        if (migration_resources::mediaFile(path)) {
+            legacyResourceDetail(result, name, "ignored", "媒体依赖由后续资源阶段校验并迁入"); return;
         }
-
-        // Validate JSON content and deck structure
-        std::string content = readFile(entry.path());
+        std::string content = readFile(path);
         std::string validationError = validateDeckJson(content);
         if (!validationError.empty()) {
-            detail.status = "failed";
-            detail.reason = validationError;
-            ++result.failed;
-            result.details.push_back(detail);
-            continue;
+            legacyResourceDetail(result, name, migration_resources::lowerExtension(path) == ".json" ? "failed" : "skipped",
+                                 migration_resources::lowerExtension(path) == ".json" ? validationError : "not a legacy JSON deck"); return;
         }
-
-        fs::path target = dst / name;
+        fs::path target = dst / migration_resources::fromUtf8(legacyDeckTargetName(root, path));
         bool exists = fs::exists(target, ec);
         if (exists && !opts.overwrite) {
             detail.status = "skipped";
             detail.reason = "already exists (overwrite=false)";
             ++result.skipped;
             result.details.push_back(detail);
-            continue;
+            return;
         }
-
-        std::error_code ec2;
-        fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing, ec2);
-        if (!ec2) {
+        auto deck = json::parse(content);
+        std::set<std::string> mediaProblems;
+        for (auto& [key, cards] : deck.items()) for (auto& card : cards) if (card.is_string())
+            card = rewriteLegacyDeckMedia(root, path, card.get<std::string>(), opts, mediaProblems);
+        const auto error = migration_resources::writeFile(target, deck.dump(2));
+        if (error.empty()) {
             detail.status = "success";
+            detail.reason = "destination: " + migration_resources::utf8(target);
             ++result.success;
         } else {
             detail.status = "failed";
-            detail.reason = ec2.message();
+            detail.reason = error;
             ++result.failed;
         }
         result.details.push_back(detail);
-    }
+        for (const auto& problem : mediaProblems) {
+            ++result.skipped;
+            result.details.push_back({name, "preserved", problem + "; original reference retained, review before use"});
+        }
+    }, [&](const auto& path, const auto& error) {
+        legacyResourceDetail(result, migration_resources::utf8(path.lexically_relative(src)), "failed", error);
+    });
     return result;
 }
 
@@ -1209,36 +1392,29 @@ inline ImportResult importDecks(const fs::path& root, const ImportOptions& opts 
 // latter are loaded by Dice!Next's Lua compatibility manager from data/plugin.
 inline ImportResult importPlugins(const fs::path& root, const ImportOptions& opts = {}) {
     ImportResult result;
-    fs::path src = root / "plugin", dst = fs::path("data") / "plugin";
-    std::error_code ec;
-    if (!fs::is_directory(src, ec) || ec) return result;
-    fs::create_directories(dst, ec);
-    for (const auto& entry : fs::directory_iterator(src, ec)) {
-        if (ec) break;
-        ImportDetail detail; detail.name = entry.path().filename().string();
-        fs::path target = dst / entry.path().filename();
-        if (fs::exists(target, ec) && !opts.overwrite) {
-            detail.status = "skipped"; detail.reason = "already exists (overwrite=false)";
-            ++result.skipped; result.details.push_back(std::move(detail)); continue;
-        }
-        std::error_code copyEc;
-        if (entry.is_directory()) fs::copy(entry.path(), target, fs::copy_options::recursive | fs::copy_options::overwrite_existing, copyEc);
-        else fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing, copyEc);
-        if (copyEc) { detail.status = "failed"; detail.reason = copyEc.message(); ++result.failed; }
-        else { detail.status = "success"; ++result.success; }
-        result.details.push_back(std::move(detail));
+    const auto source = root / "plugin", target = fs::path("data/plugin");
+    if (!fs::exists(source)) return result;
+    if (!migration_resources::safePath(root, source) || !fs::is_directory(source))
+        throw std::runtime_error("旧插件目录不是安全目录");
+    for (const auto& entry : fs::directory_iterator(source)) {
+        const auto path = target / entry.path().filename();
+        const auto name = migration_resources::utf8(entry.path().filename());
+        if (fs::exists(path) && !opts.overwrite) { legacyResourceDetail(result, name, "skipped", "already exists (overwrite=false)"); continue; }
+        if (legacyResourceTree(root, entry.path(), path, opts.overwrite, result)) legacyResourceDetail(result, name, "success");
     }
     return result;
 }
 
 struct LegacyLogContext {
     std::string groupId;
+    std::vector<std::string> groupIds;
     std::string name;
     std::string gmId;
     std::string gameCode;
     std::string gameName;
     int status = 2;  // completed by default
     std::string createdAt;
+    bool pendingSession = false;
 };
 
 inline std::string legacyIsoFromEpoch(long long epoch) {
@@ -1258,16 +1434,19 @@ inline json legacyIdList(const json& source) {
 
 inline std::vector<std::string> legacySessionAreas(const json& source) {
     std::vector<std::string> areas;
-    auto add = [&](const json& v) {
-        if (v.is_number_integer() || v.is_number_unsigned()) areas.push_back(std::to_string(v.get<long long>()));
-        else if (v.is_string()) areas.push_back(v.get<std::string>());
-        else if (v.is_object() && v.contains("gid")) {
-            const auto& gid = v["gid"];
-            if (gid.is_string()) areas.push_back(gid.get<std::string>());
-            else if (gid.is_number_integer() || gid.is_number_unsigned()) areas.push_back(std::to_string(gid.get<long long>()));
+    auto add = [&](const json& value) {
+        json raw = value;
+        if (raw.is_object()) {
+            if (raw.contains("chid") || !raw.contains("gid")) return;
+            raw = raw["gid"];
         }
+        std::string id;
+        if (raw.is_number_integer()) { const auto n = raw.get<long long>(); if (n > 0) id = std::to_string(n); }
+        else if (raw.is_string()) id = raw.get<std::string>();
+        if (!id.empty() && id != "0" && std::all_of(id.begin(), id.end(), [](unsigned char c){ return c >= '0' && c <= '9'; }))
+            areas.push_back(id);
     };
-    if (source.is_array()) for (const auto& v : source) add(v); else add(source);
+    if (source.is_array()) for (const auto& value : source) add(value); else add(source);
     std::sort(areas.begin(), areas.end()); areas.erase(std::unique(areas.begin(), areas.end()), areas.end());
     return areas;
 }
@@ -1288,65 +1467,143 @@ inline std::string nextLegacyGameCode(const json& index) {
 /// `.game`.  Every old session gets a fresh non-guessable Dice!Next game code;
 /// old session filenames are only retained as metadata, never as credentials.
 inline int importSessions(const fs::path& root, LuaPluginManager* luaMod,
-                          std::map<std::string, LegacyLogContext>& logContexts) {
+                          std::map<std::string, LegacyLogContext>& logContexts,
+                          const ImportOptions& opts = {}, ImportResult* diagnostics = nullptr) {
     if (!luaMod) return 0;
-    const fs::path dir = root / "user" / "session";
-    std::error_code ec;
-    if (!fs::is_directory(dir, ec) || ec) return 0;
-    json index = json::parse(luaMod->confGet("game:index", "sessions"), nullptr, false);
-    if (!index.is_object()) index = json::object();
+    const auto dir = root / "user/session";
+    if (!fs::exists(dir)) return 0;
+    const auto rawIndex = luaMod->confGet("game:index", "sessions");
+    json index = rawIndex.empty() ? json::object() : json::parse(rawIndex);
+    if (!index.is_object()) throw std::runtime_error("已有团务索引损坏；未替换");
     int imported = 0;
-    std::vector<std::tuple<std::string, std::string, std::string>> luaValues;
-    for (const auto& entry : fs::directory_iterator(dir, ec)) {
-        if (ec || !entry.is_regular_file() || entry.path().extension() != ".json") continue;
-        json old = json::parse(readFile(entry.path()), nullptr, false);
-        if (!old.is_object()) { DICE_LOG_WARN("LegacyImport: skipped invalid session {}", entry.path().string()); continue; }
-        auto areas = legacySessionAreas(old.contains("chats") ? old["chats"] : old.value("room", json{}));
-        if (areas.empty()) continue;  // private/non-locatable old rooms have no safe new .game target
-        const std::string stem = entry.path().stem().string();
-        const std::string sessionId = "legacy-" + stem + "-" + std::to_string((long long)std::chrono::high_resolution_clock::now().time_since_epoch().count());
-        const std::string scope = "game:session:" + sessionId;
-        const std::string code = nextLegacyGameCode(index);
-        const std::string name = old.value("name", stem);
-        luaValues.emplace_back(scope, "__name", name);
-        luaValues.emplace_back(scope, "__code", code);
-        luaValues.emplace_back(scope, "__areas", json(areas).dump());
-        if (old.contains("master")) luaValues.emplace_back(scope, "__gms", legacyIdList(old["master"]).dump());
-        if (old.contains("player")) luaValues.emplace_back(scope, "__pls", legacyIdList(old["player"]).dump());
-        if (old.contains("observer")) luaValues.emplace_back(scope, "legacyObservers", legacyIdList(old["observer"]).dump());
-        if (old.contains("roulette") && old["roulette"].is_object()) {
-            json roulette = json::object();
-            for (auto& [face, value] : old["roulette"].items()) if (value.is_object()) {
-                json item{{"copies", value.value("copy", 1)}};
-                if (value.contains("pool") && value["pool"].is_array()) item["left"] = value["pool"];
-                roulette[face] = std::move(item);
+    migration_resources::walk(root, dir, [&](const fs::path& path) {
+        if (migration_resources::lowerExtension(path) != ".json") return;
+        const auto name = migration_resources::utf8(path.filename());
+        const auto old = json::parse(readFile(path));
+        if (!old.is_object()) throw std::runtime_error("旧团务不是对象");
+        const auto areas = legacySessionAreas(old.contains("chats") ? old["chats"] : old.value("room", json{}));
+        if (areas.empty()) {
+            if (diagnostics) legacyResourceDetail(*diagnostics, name, "preserved", "私聊/频道/无可定位群的团务未自动启用");
+            return;
+        }
+        const auto source = migration_resources::sourceIdentity(root, path), key = migration_resources::hash(source);
+        std::string session = luaMod->confGet("game:legacy-index", key);
+        const auto gameName = old.value("name", migration_resources::utf8(path.stem()));
+        if (session.empty()) {
+            json candidates = json::array();
+            std::set<std::string> seen;
+            auto sortedAreas = areas; std::sort(sortedAreas.begin(), sortedAreas.end());
+            for (const auto& [code, value] : index.items()) {
+                if (!value.is_string()) throw std::runtime_error("已有团务索引条目格式错误");
+                const auto id = value.get<std::string>(), candidateScope = "game:session:" + id;
+                if (id.rfind("legacy-", 0) != 0 || !seen.insert(id).second) continue;
+                const auto priorName = luaMod->confGet(candidateScope, "__name");
+                const auto original = luaMod->confGet(candidateScope, "__legacyOriginal");
+                auto priorAreas = json::parse(luaMod->confGet(candidateScope, "__areas"), nullptr, false);
+                if (!priorAreas.is_array()) continue;
+                auto comparableAreas = priorAreas.get<std::vector<std::string>>();
+                std::sort(comparableAreas.begin(), comparableAreas.end());
+                if ((priorName == gameName && comparableAreas == sortedAreas) || original == old.dump())
+                    candidates.push_back({{"id", id}, {"code", code}, {"name", priorName}});
             }
-            if (!roulette.empty()) luaValues.emplace_back(scope, "__rou", roulette.dump());
+            const auto selected = opts.sessionMappings.find(key);
+            if (selected != opts.sessionMappings.end() && selected->second != "__new__") {
+                bool valid = false;
+                for (const auto& candidate : candidates) if (candidate["id"] == selected->second) valid = true;
+                if (!valid) throw std::runtime_error("所确认的旧团务衔接目标不在本次候选中；未修改现有团务");
+                session = selected->second;
+            } else if (!candidates.empty() && selected == opts.sessionMappings.end()) {
+                if (diagnostics) {
+                    diagnostics->confirmations.push_back({{"key", key}, {"file", name}, {"name", gameName}, {"candidates", candidates}});
+                    legacyResourceDetail(*diagnostics, name, "preserved", "发现早期导入记录或相同团务副本；请确认衔接目标，未新建重复团务");
+                } else throw std::runtime_error("旧团务需确认衔接目标；未新建重复团务");
+                if (old.contains("log") && old["log"].is_object()) {
+                    const auto file = old["log"].value("file", std::string());
+                    if (!file.empty()) { LegacyLogContext pending; pending.pendingSession = true; logContexts[file] = pending; }
+                }
+                return;
+            }
         }
-        if (old.contains("data") && old["data"].is_object()) for (auto& [key, value] : old["data"].items()) {
-            if (key.empty()) continue;
-            luaValues.emplace_back(scope, key, value.is_string() ? value.get<std::string>() : value.dump());
+        const bool existing = !session.empty();
+        if (!existing) session = "legacy-" + key;
+        const auto scope = "game:session:" + session;
+        const auto previous = luaMod->confGet(scope, "__legacySource");
+        const auto rawAliases = luaMod->confGet(scope, "__legacyAliases");
+        json aliases = rawAliases.empty() ? json::array() : json::parse(rawAliases);
+        if (!aliases.is_array()) throw std::runtime_error("团务来源别名损坏；未修改");
+        bool knownAlias = false;
+        for (const auto& alias : aliases) if (alias == source) knownAlias = true;
+        if (!previous.empty() && previous != source && !knownAlias && !opts.sessionMappings.count(key))
+            throw std::runtime_error("团务来源标识冲突");
+        auto code = existing ? luaMod->confGet(scope, "__code") : nextLegacyGameCode(index);
+        if (code.empty()) throw std::runtime_error("已有迁移团号缺失；未重新生成团务");
+        std::vector<std::tuple<std::string, std::string, std::string>> values;
+        auto set = [&](const std::string& field, const std::string& value) {
+            const auto current = luaMod->confGet(scope, field);
+            if (!existing || current.empty() || current == value || opts.overwriteData) values.emplace_back(scope, field, value);
+            else if (diagnostics) legacyResourceDetail(*diagnostics, name + "/" + field, "skipped", "保留现有团务变量");
+        };
+        set("__name", gameName); set("__code", code); set("__areas", json(areas).dump());
+        // The original owner/source stays intact when a confirmed copy is
+        // attached. Each new path gets its own alias to the same stable id.
+        if (previous.empty() || previous == source) set("__legacySource", source);
+        else if (!knownAlias) { aliases.push_back(source); values.emplace_back(scope, "__legacyAliases", aliases.dump()); }
+        set("__legacyOriginal", old.dump());
+        values.emplace_back("game:legacy-index", key, session);
+        if (old.contains("master")) set("__gms", legacyIdList(old["master"]).dump());
+        if (old.contains("player")) set("__pls", legacyIdList(old["player"]).dump());
+        for (const auto* field : {"observer", "decks", "tables"}) if (old.contains(field) && !old[field].empty()) {
+            set(std::string("__legacy_") + field, old[field].dump());
+            if (diagnostics) legacyResourceDetail(*diagnostics, name + "/" + field, "preserved", "原状态已保留，未伪装成新版活动状态");
         }
-        for (const auto& groupId : areas) luaValues.emplace_back("game:" + groupId, "__session", sessionId);
-        index[code] = sessionId;
-        LegacyLogContext context;
-        context.groupId = areas.front(); context.name = name; context.gameName = name; context.gameCode = code;
+        if (old.contains("observer")) set("legacyObservers", legacyIdList(old["observer"]).dump());
+        if (old.contains("roulette")) {
+            if (!old["roulette"].is_object()) throw std::runtime_error("旧轮盘格式错误");
+            json roulette = json::object();
+            for (const auto& [face, value] : old["roulette"].items()) {
+                if (!value.is_object() || !value.contains("pool") || !value["pool"].is_array()) throw std::runtime_error("旧轮盘池格式错误");
+                const auto pool = value["pool"];
+                const auto rest = value.value("rest", static_cast<int>(pool.size()));
+                if (rest < 0 || static_cast<size_t>(rest) > pool.size()) throw std::runtime_error("旧轮盘剩余数量无效");
+                json left = json::array(); for (int i = 0; i < rest; ++i) left.push_back(pool[i]);
+                roulette[face] = {{"copies", value.value("copy", 1)}, {"left", left}};
+            }
+            set("__rou", roulette.dump());
+        }
+        json data = old.value("conf", json::object());
+        if (!data.is_object()) throw std::runtime_error("旧团务 conf 不是对象");
+        if (old.contains("data")) {
+            if (!old["data"].is_object()) throw std::runtime_error("旧团务 data 不是对象");
+            for (const auto& [field, value] : old["data"].items()) data[field] = value;
+        }
+        for (const auto& [field, value] : data.items()) {
+            if (field.empty() || field.rfind("__", 0) == 0) {
+                if (diagnostics) legacyResourceDetail(*diagnostics, name + "/" + field, "preserved", "保留旧原稿；不覆盖新版内部状态");
+            } else set(field, legacy_conf::encode(value));
+        }
+        for (const auto& group : areas) {
+            const auto current = luaMod->confGet("game:" + group, "__session");
+            if (current.empty() || current == session || opts.overwriteData) values.emplace_back("game:" + group, "__session", session);
+            else if (diagnostics) legacyResourceDetail(*diagnostics, name + "/" + group, "skipped", "保留本群当前活动团务");
+        }
+        index[code] = session; values.emplace_back("game:index", "sessions", index.dump());
+        if (!luaMod->confSetBatch(values)) throw std::runtime_error("无法保存迁移团务");
+        LegacyLogContext context; context.groupId = areas.front(); context.groupIds = areas;
+        context.name = gameName; context.gameName = gameName; context.gameCode = code;
         context.createdAt = legacyIsoFromEpoch(old.value("create_time", 0LL));
-        if (old.contains("master")) { auto gms = legacyIdList(old["master"]); if (!gms.empty()) context.gmId = gms.front().get<std::string>(); }
+        if (old.contains("master")) { auto masters = legacyIdList(old["master"]); if (!masters.empty()) context.gmId = masters.front().get<std::string>(); }
         if (old.contains("log") && old["log"].is_object()) {
             const auto& log = old["log"];
-            context.name = log.value("name", name);
+            context.name = log.value("name", gameName);
             context.status = log.value("start", 0LL) > 0 ? (log.value("logging", false) ? 0 : 1) : 2;
-            std::string file = log.value("file", std::string());
+            const auto file = log.value("file", std::string());
             if (!file.empty()) logContexts[file] = context;
         }
         ++imported;
-    }
-    luaValues.emplace_back("game:index", "sessions", index.dump());
-    if (!luaMod->confSetBatch(luaValues)) {
-        DICE_LOG_ERROR("LegacyImport: failed to batch-import {} game session settings", luaValues.size());
-        return 0;
-    }
+    }, [&](const auto& path, const auto& reason) {
+        if (diagnostics) legacyResourceDetail(*diagnostics, migration_resources::utf8(path.filename()), "failed", reason);
+        else throw std::runtime_error(reason);
+    });
     return imported;
 }
 
@@ -1354,42 +1611,46 @@ inline int importSessions(const fs::path& root, LuaPluginManager* luaMod,
 // Chat::readb（ManagerSystem.cpp）: 记录体 = [ll 内部ID(丢弃)] + tag 流 + short(-1)。
 // 现代格式把配置都写进 tag 11 的 AnysTable（停用指令/rc房规/入群欢迎/许可使用…）；
 // tag 0/4=群名，1/2/3=旧式 set/map，10=GBK表，21=ChConf(频道子配置，解析丢弃)。
-struct LegacyChat { std::string name; std::map<std::string, legacy2::AttrVal> conf; };
+struct LegacyChat {
+    std::string name;
+    std::map<std::string, legacy2::AttrVal> conf;
+    json channels = json::object();
+};
 inline LegacyChat readChat(legacy2::BReader& r) {
-    LegacyChat c;
-    r.rLL();   // 内部 ID（与外层 key 重复，丢弃）
-    for (int guard = 0; guard < 100000 && r.good(); ++guard) {
-        int16_t tag = r.rShort();
-        if (tag == -1) break;
+    LegacyChat c; r.rLL();
+    auto count = [&] { const auto n = r.rShort(); if (n < 0) throw std::runtime_error("旧群配置包含负数量"); return n; };
+    for (int guard = 0; guard < 100000; ++guard) {
+        const int16_t tag = r.rShort();
+        if (tag == -1) return c;
         switch (tag) {
             case 0: c.name = legacy2::gbkToUtf8(r.rStr()); break;
             case 4: c.name = r.rStr(); break;
-            case 1: { int16_t n = r.rShort(); for (int i = 0; i < n && r.good(); ++i) {
-                          std::string k = legacy2::gbkToUtf8(r.rStr());
-                          legacy2::AttrVal v; v.kind = legacy2::AttrVal::Kind::Bool; v.b = true; c.conf[k] = v;
-                      } } break;
-            case 2: { int16_t n = r.rShort(); for (int i = 0; i < n && r.good(); ++i) {
-                          std::string k = legacy2::gbkToUtf8(r.rStr());
-                          legacy2::AttrVal v; v.kind = legacy2::AttrVal::Kind::Int; v.i = r.rInt(); c.conf[k] = v;
-                      } } break;
-            case 3: { int16_t n = r.rShort(); for (int i = 0; i < n && r.good(); ++i) {
-                          std::string k = legacy2::gbkToUtf8(r.rStr());
-                          legacy2::AttrVal v; v.kind = legacy2::AttrVal::Kind::Str; v.s = legacy2::gbkToUtf8(r.rStr()); c.conf[k] = v;
-                      } } break;
-            case 11: {  // AnysTable::readb —— 现代格式键存为 UTF-8（写入时已转码），不再转
-                auto t = legacy2::readAnysTableImpl(r, false, 0);
-                for (auto& kv : t) c.conf[kv.first] = kv.second;
+            case 1: { const auto n = count(); for (int i = 0; i < n; ++i) {
+                auto key = legacy2::gbkToUtf8(r.rStr()); legacy2::AttrVal value;
+                value.kind = legacy2::AttrVal::Kind::Bool; value.b = true; c.conf[key] = value;
+            } } break;
+            case 2: { const auto n = count(); for (int i = 0; i < n; ++i) {
+                auto key = legacy2::gbkToUtf8(r.rStr()); legacy2::AttrVal value;
+                value.kind = legacy2::AttrVal::Kind::Int; value.i = r.rInt(); c.conf[key] = value;
+            } } break;
+            case 3: { const auto n = count(); for (int i = 0; i < n; ++i) {
+                auto key = legacy2::gbkToUtf8(r.rStr()); legacy2::AttrVal value;
+                value.kind = legacy2::AttrVal::Kind::Str; value.s = legacy2::gbkToUtf8(r.rStr()); c.conf[key] = value;
+            } } break;
+            case 10: case 11: {
+                for (auto& [key, value] : legacy2::readAnysTableImpl(r, tag == 10))
+                    c.conf[key] = value;
             } break;
-            case 10: {  // AnysTable::readgb —— GBK 键
-                auto t = legacy2::readAnysTableImpl(r, true, 0);
-                for (auto& kv : t) c.conf[kv.first] = kv.second;
-            } break;
-            case 21: { int16_t n = r.rShort();   // ChConf: map<ll, AnysTable> — 解析丢弃
-                       for (int i = 0; i < n && r.good(); ++i) { r.rLL(); legacy2::readAnysTableImpl(r, false, 0); } } break;
-            default: return c;   // 未知 tag：无法安全续读，止于此条
+            case 20: case 21: { const auto n = count(); for (int i = 0; i < n; ++i) {
+                const auto channel = std::to_string(r.rLL());
+                json values = json::object();
+                for (const auto& [key, value] : legacy2::readAnysTableImpl(r, tag == 20)) values[key] = value.toJson();
+                c.channels[channel] = values;
+            } } break;
+            default: throw std::runtime_error("不支持的旧群配置标签: " + std::to_string(tag));
         }
     }
-    return c;
+    throw std::runtime_error("旧群配置缺少结束标签");
 }
 
 inline void upsertGroupSetting(Database& db, const std::string& platform, const std::string& gid,
@@ -1431,155 +1692,231 @@ inline std::string legacyLogIso(const std::string& stamp) {
 /// format has no message IDs/media metadata; [图片] is therefore preserved as
 /// text rather than inventing a broken attachment reference.
 inline int importLogs(Database& db, const fs::path& root,
-                      const std::map<std::string, LegacyLogContext>& contexts, int& messages) {
-    auto* st = db.getLogStorage();
-    const fs::path dir = root / "user" / "log";
-    std::error_code ec;
-    if (!st || !fs::is_directory(dir, ec) || ec) return 0;
-    std::set<std::string> importedSources;
-    try {
-        for (auto& row : st->get_all<GameLogRow>()) {
-            auto meta = json::parse(row.customRules, nullptr, false);
-            if (meta.is_object() && meta.contains("legacySource") && meta["legacySource"].is_string())
-                importedSources.insert(meta["legacySource"].get<std::string>());
-        }
-    } catch (...) {}
+                      const std::map<std::string, LegacyLogContext>& contexts, int& messages,
+                      const ImportOptions& opts = {}, ImportResult* diagnostics = nullptr) {
+    auto* st = db.getLogStorage(); if (!st) throw std::runtime_error("日志数据库不可用");
+    const auto dir = root / "user/log"; if (!fs::exists(dir)) return 0;
     int imported = 0;
-    const int messagesBefore = messages;
-    int lastReported = messages;
-    const auto started = std::chrono::steady_clock::now();
-    bool committed = false;
-    try {
-        committed = st->transaction([&] {
-            for (const auto& entry : fs::directory_iterator(dir, ec)) {
-        if (ec || !entry.is_regular_file() || entry.path().extension() != ".txt") continue;
-        const std::string file = entry.path().filename().string();
-        if (importedSources.count(file)) continue;
-        LegacyLogContext ctx;
-        if (auto it = contexts.find(file); it != contexts.end()) ctx = it->second;
-        if (ctx.groupId.empty()) {
-            std::string stem = entry.path().stem().string();
-            std::string prefix = stem.substr(0, stem.find('_'));
-            if (!prefix.empty() && prefix.front() == 'g') prefix.erase(prefix.begin());
-            const bool numeric = !prefix.empty() && std::all_of(prefix.begin(), prefix.end(), [](unsigned char c){ return std::isdigit(c); });
-            ctx.groupId = numeric ? prefix : ("legacy:" + stem);
-            ctx.name = stem;
+    auto rowsHash = [](const std::vector<GameLogMessageRow>& rows, size_t count) {
+        json value = json::array();
+        for (size_t i = 0; i < count; ++i) value.push_back({rows[i].sender, rows[i].userId, rows[i].createdAt, rows[i].content, rows[i].images});
+        return migration_resources::hash(value.dump());
+    };
+    migration_resources::walk(root, dir, [&](const fs::path& path) {
+        if (migration_resources::lowerExtension(path) != ".txt") return;
+        const auto file = migration_resources::utf8(path.filename()), text = readFile(path);
+        const auto source = migration_resources::sourceIdentity(root, path);
+        LegacyLogContext context;
+        if (const auto it = contexts.find(file); it != contexts.end()) context = it->second;
+        if (context.pendingSession) {
+            if (diagnostics) legacyResourceDetail(*diagnostics, file, "preserved", "关联团务需要确认衔接；未创建未关联或状态错误的日志");
+            return;
         }
-        if (ctx.name.empty()) ctx.name = entry.path().stem().string();
-        json meta{{"legacySource", file}};
-        if (!ctx.gameCode.empty()) meta["gameCode"] = ctx.gameCode;
-        if (!ctx.gameName.empty()) meta["gameName"] = ctx.gameName;
-        GameLogRow log;
-        log.groupId = ctx.groupId; log.gmId = ctx.gmId; log.name = ctx.name;
-        log.players = "[]"; log.customRules = meta.dump(); log.status = ctx.status;
-        log.createdAt = ctx.createdAt.empty() ? utils::nowIso8601() : ctx.createdAt;
-        int logId = 0;
-        try { logId = st->insert(log); } catch (...) { continue; }
-        std::istringstream in(readFile(entry.path()));
-        std::string line, sender, uid, stamp, content;
+        if (context.groupId.empty()) {
+            const auto stem = migration_resources::utf8(path.stem());
+            auto prefix = stem.substr(0, stem.find('_')); if (!prefix.empty() && prefix[0] == 'g') prefix.erase(0, 1);
+            const bool numeric = !prefix.empty() && prefix != "0" && std::all_of(prefix.begin(), prefix.end(), [](unsigned char c){ return c >= '0' && c <= '9'; });
+            context.groupId = numeric ? prefix : "legacy:" + stem; context.name = stem;
+        }
+        std::vector<GameLogMessageRow> parsed;
+        std::istringstream input(text); std::string line, sender, user, stamp, content;
         auto flush = [&] {
             if (sender.empty()) return;
-            GameLogMessageRow row;
-            row.logId = logId; row.sender = sender; row.userId = uid;
-            row.content = utils::trim(content); row.createdAt = legacyLogIso(stamp); row.images = "[]";
-            try {
-                st->insert(row);
-                ++messages;
-                if (messages - lastReported >= 25000) {
-                    DICE_LOG_INFO("LegacyImport: imported {} log messages...", messages - messagesBefore);
-                    lastReported = messages;
-                }
-            } catch (...) {}
-            sender.clear(); uid.clear(); stamp.clear(); content.clear();
+            GameLogMessageRow row; row.sender = sender; row.userId = user; row.createdAt = legacyLogIso(stamp);
+            row.content = content; row.images = "[]"; parsed.push_back(row);
+            sender.clear(); user.clear(); stamp.clear(); content.clear();
         };
-        while (std::getline(in, line)) {
-            // Original Windows builds write CRLF. getline removes only LF;
-            // strip the remaining CR before testing the fixed-width header.
+        while (std::getline(input, line)) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
-            std::string nextSender, nextUid, nextStamp;
-            if (legacyLogHeader(line, nextSender, nextUid, nextStamp)) {
-                flush(); sender = std::move(nextSender); uid = std::move(nextUid); stamp = std::move(nextStamp);
-            } else if (!sender.empty()) {
-                if (!content.empty()) content.push_back('\n');
-                content += line;
-            }
+            std::string nextSender, nextUser, nextStamp;
+            if (legacyLogHeader(line, nextSender, nextUser, nextStamp)) {
+                flush(); sender = nextSender; user = nextUser; stamp = nextStamp;
+            } else if (!sender.empty()) { if (!content.empty()) content += '\n'; content += line; }
         }
         flush();
-        if (ctx.status == (int)GameLogStatus::kActive) {
-            upsertGroupSetting(db, "onebot_v11", ctx.groupId, "activeLog", std::to_string(logId));
-            upsertGroupSetting(db, "onebot_v11", ctx.groupId, "activeLogName", ctx.name);
-        }
-        ++imported;
+        if (parsed.empty() && !text.empty()) throw std::runtime_error("旧日志没有可识别的消息头");
+        std::optional<GameLogRow> existing;
+        json meta;
+        for (const auto& row : st->get_all<GameLogRow>()) {
+            const auto value = json::parse(row.customRules, nullptr, false);
+            if (!value.is_object()) continue;
+            if (value.value("legacySourceKey", std::string()) == source) { existing = row; meta = value; break; }
+            if (!value.contains("legacySourceKey") && value.value("legacySource", std::string()) == file) {
+                if (diagnostics) legacyResourceDetail(*diagnostics, file, "preserved", "已有同名旧导入日志缺少来源标识，需人工确认，未重复新增");
+                return;
             }
+        }
+        size_t from = 0;
+        if (existing) {
+            const auto previousBytes = meta.value("legacySourceBytes", size_t(0));
+            from = meta.value("legacyMessageCount", size_t(0));
+            if (text.size() == previousBytes && migration_resources::hash(text) == meta.value("legacyContentHash", std::string())) return;
+            bool append = text.size() >= previousBytes && parsed.size() >= from
+                && migration_resources::hash(text.substr(0, previousBytes)) == meta.value("legacyContentHash", std::string())
+                && rowsHash(parsed, from) == meta.value("legacyImportedRowsHash", std::string());
+            if (append) {
+                const auto current = st->get_all<GameLogMessageRow>(orm::where(orm::c(&GameLogMessageRow::logId) == existing->id),
+                    orm::order_by(&GameLogMessageRow::id).asc(), orm::limit(static_cast<int>(from)));
+                append = current.size() == from && rowsHash(current, from) == meta.value("legacyImportedRowsHash", std::string());
+            }
+            if (!append) {
+                if (diagnostics) legacyResourceDetail(*diagnostics, file, "preserved", "源日志不是整条追加或已有消息被编辑；保留新版，未覆盖");
+                return;
+            }
+        }
+        if (!meta.is_object()) meta = json::object();
+        meta["legacySource"] = file; meta["legacySourceKey"] = source;
+        meta["legacySourceBytes"] = text.size(); meta["legacyContentHash"] = migration_resources::hash(text);
+        meta["legacyMessageCount"] = parsed.size(); meta["legacyImportedRowsHash"] = rowsHash(parsed, parsed.size());
+        meta["legacyGroups"] = context.groupIds;
+        if (!context.gameCode.empty()) meta["gameCode"] = context.gameCode;
+        if (!context.gameName.empty()) meta["gameName"] = context.gameName;
+        int logId = existing ? existing->id : 0;
+        st->transaction([&] {
+            GameLogRow log;
+            if (existing) log = *existing;
+            else {
+                log.groupId = context.groupId; log.gmId = context.gmId; log.name = context.name;
+                log.players = "[]"; log.status = context.status; log.createdAt = context.createdAt.empty() ? utils::nowIso8601() : context.createdAt;
+            }
+            log.customRules = meta.dump();
+            if (existing) st->update(log); else logId = st->insert(log);
+            for (size_t i = from; i < parsed.size(); ++i) { auto row = parsed[i]; row.logId = logId; st->insert(row); }
             return true;
         });
-    } catch (const std::exception& e) {
-        DICE_LOG_ERROR("LegacyImport: log transaction failed: {}", e.what());
-    }
-    if (!committed) {
-        messages = messagesBefore;
-        return 0;
-    }
-    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - started).count();
-    DICE_LOG_INFO("LegacyImport: imported {} logs and {} messages in {} ms", imported, messages - messagesBefore, elapsedMs);
+        messages += static_cast<int>(parsed.size() - from); ++imported;
+        if (!existing && context.status == 0) {
+            auto groups = context.groupIds; if (groups.empty()) groups.push_back(context.groupId);
+            for (const auto& group : groups) {
+                if (upsertImportedGroupSetting(db, opts, group, "activeLog", std::to_string(logId)))
+                    upsertImportedGroupSetting(db, opts, group, "activeLogName", context.name);
+                else if (diagnostics) legacyResourceDetail(*diagnostics, file + "/" + group, "skipped", "保留已有活动日志");
+            }
+        }
+    }, [&](const auto& path, const auto& reason) {
+        if (diagnostics) legacyResourceDetail(*diagnostics, migration_resources::utf8(path.filename()), "failed", reason);
+        else throw std::runtime_error(reason);
+    });
     return imported;
 }
 
-inline int importChatConf(Database& db, const fs::path& userDir, int& groups, LuaPluginManager* luaMod = nullptr) {
-    fs::path file = legacyDataFile(userDir, {"ChatConf.dat", "ChatConf.dat.bak", "ChatConf.bak"});
+inline int importChatConf(Database& db, const fs::path& userDir, int& groups,
+                         LuaPluginManager* luaMod = nullptr, const ImportOptions& opts = {},
+                         ImportResult* diagnostics = nullptr) {
+    std::vector<std::pair<long long, LegacyChat>> records;
+    const auto file = legacyDataFile(userDir, {"ChatConf.dat", "ChatConf.dat.bak", "ChatConf.bak", "ChatConf.RDconf"},
+        [&](const fs::path& candidate) {
+            records = legacy2::readRecords<LegacyChat>(candidate, readChat);
+        }, diagnostics);
     if (file.empty()) return 0;
-    auto* st = db.getStorage();
-    if (!st) return 0;
-    const std::string K_DISABLE = "\xe5\x81\x9c\xe7\x94\xa8\xe6\x8c\x87\xe4\xbb\xa4"; // 停用指令
-    const std::string K_COCRULE = "rc\xe6\x88\xbf\xe8\xa7\x84";                       // rc房规
-    const std::string K_WELCOME = "\xe5\x85\xa5\xe7\xbe\xa4\xe6\xac\xa2\xe8\xbf\x8e"; // 入群欢迎
+    auto* st = db.getStorage(); if (!st) throw std::runtime_error("群设置数据库不可用");
     int settings = 0;
-    std::vector<std::tuple<std::string, std::string, std::string>> luaValues;
-    try {
-        st->transaction([&] {
-            legacy2::loadLLMap(file.string(), [&](legacy2::BReader& r, long long gid) {
-        ++groups;
-        LegacyChat c = readChat(r);
-        const std::string plat = "onebot_v11";
-        const std::string g = std::to_string(gid);
-        // Preserve scalar AnysTable values for old Lua getGroupConf(gid,key).
-        // Core settings are additionally mapped below when Dice!Next has a
-        // first-class equivalent. Nested tables remain intentionally excluded.
-        if (luaMod) for (auto& [key, value] : c.conf) {
-            if (key.empty()) continue;
-            if (value.kind == legacy2::AttrVal::Kind::Bool || value.kind == legacy2::AttrVal::Kind::Int
-                    || value.kind == legacy2::AttrVal::Kind::Num || value.kind == legacy2::AttrVal::Kind::Str)
-                luaValues.emplace_back("g:" + g, key, legacyScalar(value));
+    std::vector<std::tuple<std::string, std::string, std::string>> values;
+    auto detail = [&](const std::string& name, const std::string& reason) {
+        if (diagnostics) { ++diagnostics->skipped; diagnostics->details.push_back({name, "preserved", reason}); }
+    };
+    st->transaction([&] {
+        for (const auto& [id, chat] : records) {
+            for (const auto& [key, value] : chat.conf)
+                reportUnsupportedValue(value, "groupConf:" + std::to_string(id) + "/" + key, diagnostics);
+            const auto group = std::to_string(id), scope = "g:" + group;
+            auto write = [&](const std::string& key, const std::string& value) {
+                if (upsertImportedGroupSetting(db, opts, group, key, value)) ++settings;
+                else detail(group + "/" + key, "保留现有群设置；未授权覆盖数据");
+            };
+            auto on = [&](const std::string& key) {
+                const auto it = chat.conf.find(key);
+                if (it == chat.conf.end()) return false;
+                return it->second.kind == legacy2::AttrVal::Kind::Str
+                    ? (it->second.s == "true" || it->second.s == "1") : it->second.asInt() > 0;
+            };
+            for (const auto& [key, value] : chat.conf) {
+                if (value.kind == legacy2::AttrVal::Kind::Other) { detail(group + "/" + key, "旧函数变量不自动执行"); continue; }
+                if (luaMod) {
+                    const auto converted = legacyScalar(value), current = luaMod->confGet(scope, key);
+                    if (current.empty() || current == converted || opts.overwriteData) values.emplace_back(scope, key, converted);
+                    else detail(group + "/" + key, "保留现有插件群变量");
+                }
+            }
+            if (!chat.name.empty()) write("legacyGroupName", chat.name);
+            if (chat.conf.count("停用指令")) write("enabled", on("停用指令") ? "0" : "1");
+            if (chat.conf.count("忽略")) write("locked", on("忽略") ? "1" : "0");
+            if (chat.conf.count("禁用回复")) write("replyDisabled", on("禁用回复") ? "1" : "0");
+            if (const auto it = chat.conf.find("rc房规"); it != chat.conf.end()) {
+                const auto rule = it->second.asInt();
+                if (rule >= 0 && rule <= 7) write("cocRule", std::to_string(rule));
+                else detail(group + "/rc房规", "房规编号超出 0–7；原值保留，未启用");
+            }
+            if (const auto it = chat.conf.find("入群欢迎"); it != chat.conf.end() && it->second.isStr())
+                write("welcome", it->second.s);
+            std::vector<std::string> disabled;
+            for (const auto* command : {"jrrp", "draw", "me", "help", "ob"})
+                if (on(std::string("禁用") + command)) disabled.push_back(command);
+            if (on("禁用draw")) disabled.push_back("drawh");
+            if (on("禁用jrrp")) { disabled.push_back("mrrp"); disabled.push_back("zrrp"); }
+            const bool hasSwitch = chat.conf.count("禁用jrrp") || chat.conf.count("禁用draw")
+                || chat.conf.count("禁用me") || chat.conf.count("禁用help") || chat.conf.count("禁用ob");
+            if (hasSwitch) {
+                std::string list; for (const auto& command : disabled) { if (!list.empty()) list += ','; list += command; }
+                write("disabledCmds", list);
+            }
+            for (const auto* flag : {"免清", "免黑", "许可使用", "未审核", "协议无效"})
+                if (on(flag)) detail(group + "/" + flag, "旧许可/清理策略没有等价的安全映射；已保留兼容变量，需在新版确认");
+            if (!chat.channels.empty()) {
+                if (luaMod) values.emplace_back(scope, "__legacyChannels", legacy_conf::encode(chat.channels));
+                detail(group + "/channels", "频道子配置已保留，未自动对应新版频道身份");
+            }
         }
-        if (!c.name.empty()) { upsertGroupSetting(db, plat, g, "legacyGroupName", c.name); ++settings; }
-        // 停用指令 → enabled=0（机器人在该群关闭）
-        if (auto it = c.conf.find(K_DISABLE); it != c.conf.end()) {
-            bool off = it->second.kind == legacy2::AttrVal::Kind::Bool ? it->second.b : it->second.asInt() > 0;
-            if (off) { upsertGroupSetting(db, plat, g, "enabled", "0"); ++settings; }
-        }
-        // rc房规 → cocRule（COC 房规 0-7）
-        if (auto it = c.conf.find(K_COCRULE); it != c.conf.end()) {
-            upsertGroupSetting(db, plat, g, "cocRule", std::to_string(it->second.asInt())); ++settings;
-        }
-        // 入群欢迎 → welcome（入群欢迎词）
-        if (auto it = c.conf.find(K_WELCOME); it != c.conf.end()) {
-            std::string w = it->second.asStr();
-            if (!w.empty()) { upsertGroupSetting(db, plat, g, "welcome", w); ++settings; }
-        }
-            });
-            return true;
-        });
-    } catch (const std::exception& e) {
-        DICE_LOG_ERROR("LegacyImport: group config transaction failed: {}", e.what());
-    }
-    if (luaMod && !luaValues.empty() && !luaMod->confSetBatch(luaValues)) {
-        DICE_LOG_ERROR("LegacyImport: failed to batch-import {} Lua group settings", luaValues.size());
-    }
+        return true;
+    });
+    if (luaMod && !values.empty() && !luaMod->confSetBatch(values)) throw std::runtime_error("无法保存兼容群变量");
+    groups += static_cast<int>(records.size());
     return settings;
 }
 
 // ── Orchestrator ─────────────────────────────────────────────
+inline json importAncillaryResources(const fs::path& root, const ImportOptions& opts = {}) {
+    ImportResult files;
+    json preserved = json::array(), unsupported = json::array();
+    const auto sourceKey = migration_resources::hash(migration_resources::sourceIdentity(root, root));
+    for (const auto* name : {"selfdata", "image", "PublicDeck", "CardTemp", "conf/censor"}) {
+        const auto directory = root / name;
+        if (!fs::exists(directory)) continue;
+        migration_resources::walk(root, directory, [&](const fs::path& path) {
+            const auto relative = path.lexically_relative(directory);
+            const auto label = std::string(name) + "/" + migration_resources::utf8(relative);
+            const bool self = std::string(name) == "selfdata";
+            const bool activeSelf = self && migration_resources::lowerExtension(path) == ".json" && relative.parent_path().empty();
+            const bool deckMedia = std::string(name) == "PublicDeck" && migration_resources::mediaFile(path);
+            if (std::string(name) == "PublicDeck" && !deckMedia) return;
+            const bool activeMedia = std::string(name) == "image" && migration_resources::mediaFile(path);
+            fs::path target;
+            bool overwrite = opts.overwrite;
+            if (activeSelf) {
+                const auto value = json::parse(readFile(path));
+                if (!value.is_object() && !value.is_array()) throw std::runtime_error("旧 selfdata 必须是 JSON 对象或数组");
+                target = fs::path("data/self_data") / relative; target.replace_extension(".json");
+                overwrite = opts.overwriteData;
+            } else if (activeMedia) target = fs::path("image") / relative;
+            else if (deckMedia) target = fs::path("data/legacy_assets") / sourceKey / "PublicDeck" / relative;
+            else {
+                target = fs::path("data/legacy-import-preserved") / sourceKey / name / relative;
+                preserved.push_back({{"name", label}, {"reason", "原文件已保留，尚无等价运行时格式"},
+                    {"originalPath", migration_resources::utf8(target)}});
+            }
+            if (fs::exists(target) && !overwrite) {
+                if (readFile(target) == readFile(path)) legacyResourceDetail(files, label, "success", "相同文件已存在");
+                else legacyResourceDetail(files, label, "skipped", "保留已有资源；未授权覆盖");
+                return;
+            }
+            const auto error = migration_resources::copyFile(path, target, overwrite);
+            legacyResourceDetail(files, label, error.empty() ? "success" : "failed", error);
+        }, [&](const auto& path, const auto& error) {
+            legacyResourceDetail(files, migration_resources::utf8(path.lexically_relative(root)), "failed", error);
+        });
+    }
+    return {{"files", files.toJSON()}, {"preservedOnly", preserved}, {"unsupported", unsupported}};
+}
 // Enhanced runImport accepts CardDeck* and LuaPluginManager* for
 // post-import reload, and ImportOptions for skip/overwrite control.
 // The deck/mod results are structured ImportResult objects.
@@ -1587,112 +1924,144 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
                       const std::string& diceDataDir,
                       CardDeck* deck = nullptr, LuaPluginManager* luaMod = nullptr,
                       const ImportOptions& opts = {}, const std::vector<std::string>& availableHelp = {}) {
-    fs::path root(diceDataDir);
-    fs::path userDir = root / "user";
-    fs::path confDir = root / "conf";
-    if (!fs::exists(root)) return json{{"ok", false}, {"error", "目录不存在: " + diceDataDir}};
-
-    const auto importStarted = std::chrono::steady_clock::now();
-    auto timed = [](const char* stage, auto&& fn) {
-        const auto started = std::chrono::steady_clock::now();
-        DICE_LOG_INFO("LegacyImport: starting {}", stage);
-        auto result = fn();
-        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - started).count();
-        DICE_LOG_INFO("LegacyImport: completed {} in {} ms", stage, elapsedMs);
-        return result;
+    std::unique_lock<std::mutex> lock(migration_report::importMutex(), std::try_to_lock);
+    if (!lock.owns_lock()) return {{"ok", false}, {"complete", false}, {"error", "已有迁移正在执行"}};
+    const auto root = migration_resources::fromUtf8(diceDataDir), userDir = root / "user", confDir = root / "conf";
+    if (const auto reason = migration_report::validateRoot(root); !reason.empty())
+        return {{"ok", false}, {"complete", false}, {"error", reason}};
+    if (opts.targetPlatform != "onebot_v11" && opts.targetPlatform != "milky")
+        return {{"ok", false}, {"complete", false}, {"error", "旧 QQ 数字身份只能直接迁入 OneBot 或 Milky；其他平台需要先确认身份映射"}};
+    const auto started = std::chrono::steady_clock::now();
+    json errors = json::array(), stages = json::array(), safety = json::array(), details = json::array();
+    ImportResult cardsDetails, usersDetails, helpDetails, groupDetails, sessionDetails, logDetails, consoleDetails;
+    auto timed = [&](const char* name, auto&& action) {
+        using Result = decltype(action());
+        const auto begin = std::chrono::steady_clock::now();
+        DICE_LOG_INFO("正在迁移旧数据：{}", name);
+        try {
+            auto result = action();
+            stages.push_back({{"name", name}, {"status", "success"}, {"elapsedMs",
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count()}});
+            return result;
+        } catch (const std::exception& error) {
+            errors.push_back({{"stage", name}, {"reason", error.what()}});
+            stages.push_back({{"name", name}, {"status", "failed"}, {"reason", error.what()}});
+            DICE_LOG_ERROR("旧数据迁移阶段失败：{}；详情已加入迁移报告", name);
+            return Result{};
+        }
     };
-
-    int users = 0;
-    int cards = timed("cards", [&] { return importCards(db, userDir, users); });
-    int profiles = timed("users", [&] { return importUsers(db, userDir, luaMod); });
-    int black = timed("blacklist", [&] { return importBlacklist(db, confDir); });
-    int help = timed("help", [&] { return importHelp(db, i18n, confDir); });
-    int orphans = 0;
-    json customTextDetails = json::array();
-    int msgs = timed("custom messages", [&] { return importCustomMsg(db, i18n, confDir, orphans, &customTextDetails); });
-    int masters = timed("masters", [&] { return importMasters(cfg, confDir); });
-    int links = timed("links", [&] { return importLinks(cfg, confDir); });
-    int notices = timed("notices", [&] { return importNotices(cfg, confDir); });
-    int censorWords = timed("censor words", [&] { return importCensorWords(cfg, confDir); });
-
-    // Structured deck/mod/plugin import results.  Old `plugin/` is distinct
-    // from `mod/` and must not be silently ignored.
-    auto deckResult = timed("decks", [&] { return importDecks(root, opts); });
-    // Inventory the destination actually selected by skip/overwrite, not the
-    // source files that might have been rejected or shadowed by existing files.
-    if (deckResult.success > 0 && deck) deck->reload({"decks", "data/decks"});
+    int users = 0, orphans = 0, consoleSettings = 0, groups = 0, logMessages = 0;
+    int cards = timed("人物卡", [&] { return importCards(db, userDir, users, opts, &cardsDetails); });
+    int profiles = timed("用户数据", [&] { return importUsers(db, userDir, luaMod, opts, &usersDetails); });
+    int blacklist = timed("黑名单", [&] { return importBlacklist(db, confDir, &safety); });
+    int help = timed("自定义帮助", [&] {
+        migration_report::validateJsonSource(confDir / "CustomHelp.json", false);
+        return importHelp(db, i18n, confDir, opts, &helpDetails);
+    });
+    json customTexts = json::array();
+    int msgs = timed("自定义文案", [&] {
+        migration_report::validateJsonSource(confDir / "CustomMsg.json", false);
+        return importCustomMsg(db, i18n, confDir, orphans, &customTexts, opts);
+    });
+    int masters = timed("控制台配置", [&] { return importMasters(cfg, confDir, &consoleSettings, opts, &consoleDetails); });
+    int links = timed("跨群链接", [&] {
+        migration_report::validateJsonSource(confDir / "LinkList.json", true);
+        return importLinks(cfg, confDir, opts);
+    });
+    int notices = timed("通知窗口", [&] {
+        migration_report::validateJsonSource(confDir / "NoticeList.json", true);
+        return importNotices(cfg, confDir, opts);
+    });
+    int censor = timed("敏感词", [&] {
+        migration_report::validateJsonSource(confDir / "CustomCensor.json", false);
+        return importCensorWords(cfg, confDir);
+    });
+    auto decks = timed("牌堆", [&] { return importDecks(root, opts); });
+    if (decks.success > 0 && deck) timed("重新读取牌堆", [&] { deck->reload({"decks", "data/decks"}); return 0; });
     legacy_reply_references::Catalog references;
     auto addHelp = [&](const std::string& name) {
         const auto normalized = legacy_reply_references::lower(legacy_reply_references::trim(name));
-        if (normalized.empty()) return;
-        references.help.insert(normalized); references.helpTargets[normalized] = name;
+        if (!normalized.empty()) { references.help.insert(normalized); references.helpTargets[normalized] = name; }
     };
     for (const auto& name : availableHelp) addHelp(name);
     if (deck) for (const auto& name : deck->deckNames()) references.decks.insert(legacy_reply_references::lower(name));
-    fs::path deckDir = "data/decks";
-    if (!fs::exists(deckDir) && fs::exists("../data/decks")) deckDir = "../data/decks";
+    const auto deckDir = fs::path("data/decks");
     if (fs::exists(deckDir)) for (const auto& entry : fs::directory_iterator(deckDir)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".json") continue;
-        try {
-            const auto values = json::parse(readFile(entry.path()));
-            if (!values.is_object()) continue;
-            for (const auto& [name, cards] : values.items())
-                if (cards.is_array() && std::any_of(cards.begin(), cards.end(), [](const auto& card) { return card.is_string(); }))
-                    references.decks.insert(legacy_reply_references::lower(name));
-        } catch (...) {}
+        if (!entry.is_regular_file() || migration_resources::lowerExtension(entry.path()) != ".json") continue;
+        const auto values = json::parse(readFile(entry.path()), nullptr, false);
+        if (values.is_object()) for (const auto& [name, value] : values.items())
+            if (value.is_array()) references.decks.insert(legacy_reply_references::lower(name));
     }
     for (const auto& [key, value] : i18n.flatten(Locale::kZhHans))
         if (key.rfind("help.topic.", 0) == 0 && !value.empty()) addHelp(key.substr(11));
-    if (auto* storage = db.getStorage()) for (const auto& row : storage->get_all<I18nOverrideRow>()) {
+    if (auto* st = db.getStorage()) for (const auto& row : st->get_all<I18nOverrideRow>()) {
         if (row.locale == "zh-Hans" && row.key.rfind("help.topic.", 0) == 0 && !row.value.empty()) addHelp(row.key.substr(11));
         if (row.locale == "zh-Hans" && row.key.rfind("legacy.", 0) == 0) references.texts.insert(row.key.substr(7));
     }
-    for (const auto& [original, mapped] : msgKeyMap())
-        if (i18n.hasOverride(Locale::kZhHans, mapped)) references.texts.insert(original);
+    for (const auto& [original, mapped] : msgKeyMap()) if (i18n.hasOverride(Locale::kZhHans, mapped)) references.texts.insert(original);
     legacy_reply_references::Report referenceReport;
-    int replies = timed("reply rules", [&] { return importReplies(reply, confDir, references, &referenceReport); });
-    auto modResult = timed("Lua mods", [&] { return importMods(root, opts); });
-    auto pluginResult = timed("Lua plugins", [&] { return importPlugins(root, opts); });
-
-    std::map<std::string, LegacyLogContext> logContexts;
-    int sessions = timed("sessions", [&] { return importSessions(root, luaMod, logContexts); });
-    int logMessages = 0;
-    int logs = timed("logs", [&] { return importLogs(db, root, logContexts, logMessages); });
-
-    // Reload engines if import succeeded and pointers are provided
-    if (deckResult.success > 0 && deck) {
-        DICE_LOG_INFO("LegacyImport: reloaded card decks after import");
+    int replies = timed("高级回复", [&] { return importReplies(reply, confDir, references, &referenceReport, &safety); });
+    auto mods = timed("Lua 模组", [&] { return importMods(root, opts); });
+    auto plugins = timed("Lua 插件", [&] { return importPlugins(root, opts); });
+    auto assets = timed("插件存档与资源", [&] { return importAncillaryResources(root, opts); });
+    for (const auto* legacyOnly : {"conf/BlackListEx.json", "com.w4123.dice/BlackMarks.json", "com.w4123.dice/BlackHistory.json"}) {
+        if (!fs::exists(root / legacyOnly)) continue;
+        if (!migration_resources::safePath(root, root / legacyOnly)) {
+            errors.push_back({{"stage", "旧历史数据"}, {"reason", "旧历史数据文件是不安全的链接或越界路径"}});
+        } else safety.push_back({{"source", legacyOnly}, {"name", legacyOnly}, {"status", "preserved"}, {"requiresReview", true},
+            {"reason", "旧历史/外部黑名单尚未自动转为本地处罚；原文件保留，请确认迁移策略"}});
     }
-    if ((modResult.success > 0 || pluginResult.success > 0) && luaMod) {
-        luaMod->reload();
-        DICE_LOG_INFO("LegacyImport: reloaded Lua mods/plugins after import");
-    }
-
-    int chatGroups = 0;
-    int chatSettings = timed("group settings", [&] { return importChatConf(db, userDir, chatGroups, luaMod); });
-    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - importStarted).count();
-
-    DICE_LOG_INFO("LegacyImport: cards={} (users={}) profiles={} black={} replies={} help={} msgs={} orphans={} masters={} links={} notices={} censorWords={} decks(s/f/sk={}/{}/{}) mods(s/f/sk={}/{}/{}) plugins(s/f/sk={}/{}/{}) sessions={} logs={} logMessages={} chatGroups={} chatSettings={}",
-                  cards, users, profiles, black, replies, help, msgs, orphans, masters, links, notices, censorWords,
-                  deckResult.success, deckResult.failed, deckResult.skipped,
-                  modResult.success, modResult.failed, modResult.skipped,
-                  pluginResult.success, pluginResult.failed, pluginResult.skipped,
-                  sessions, logs, logMessages,
-                  chatGroups, chatSettings);
-    DICE_LOG_INFO("LegacyImport: all stages completed in {} ms", elapsedMs);
-    return json{
-        {"ok", true},
-        {"cards", cards}, {"cardUsers", users}, {"profiles", profiles},
-        {"blacklist", black}, {"replies", replies}, {"help", help}, {"msgs", msgs},
-        {"replyReferences", referenceReport.toJSON()},
-        {"orphans", orphans}, {"customTextDetails", customTextDetails}, {"masters", masters}, {"links", links}, {"notices", notices}, {"censorWords", censorWords},
-        {"decks", deckResult.toJSON()}, {"mods", modResult.toJSON()}, {"plugins", pluginResult.toJSON()},
-        {"sessions", sessions}, {"logs", logs}, {"logMessages", logMessages},
-        {"chatGroups", chatGroups}, {"chatSettings", chatSettings},
-        {"elapsedMs", elapsedMs}
+    int settings = timed("群设置", [&] { return importChatConf(db, userDir, groups, luaMod, opts, &groupDetails); });
+    std::map<std::string, LegacyLogContext> contexts;
+    int sessions = timed("团务", [&] { return importSessions(root, luaMod, contexts, opts, &sessionDetails); });
+    int logs = timed("跑团日志", [&] { return importLogs(db, root, contexts, logMessages, opts, &logDetails); });
+    bool review = orphans > 0 || referenceReport.ambiguous > 0 || referenceReport.unresolved > 0;
+    auto addDetails = [&](const char* stage, const ImportResult& result) {
+        for (const auto& item : result.details) {
+            details.push_back({{"stage", stage}, {"name", item.name}, {"status", item.status}, {"reason", item.reason}});
+            if (item.status == "failed") errors.push_back({{"stage", stage}, {"reason", item.reason}});
+            if (item.status == "skipped" || item.status == "preserved") review = true;
+        }
     };
+    addDetails("人物卡", cardsDetails); addDetails("用户数据", usersDetails); addDetails("帮助", helpDetails);
+    addDetails("控制台配置", consoleDetails);
+    addDetails("群设置", groupDetails); addDetails("团务", sessionDetails); addDetails("日志", logDetails);
+    addDetails("牌堆", decks); addDetails("模组", mods); addDetails("插件", plugins);
+    if (assets.is_object()) {
+        for (const auto& item : assets.value("files", json::object()).value("details", json::array())) {
+            auto detail = item; detail["stage"] = "资源"; details.push_back(detail);
+            if (item.value("status", "") == "failed") errors.push_back({{"stage", "资源"}, {"reason", item.value("reason", "")}});
+            if (item.value("status", "") == "skipped") review = true;
+        }
+        if (!assets.value("preservedOnly", json::array()).empty() || !assets.value("unsupported", json::array()).empty()) review = true;
+    }
+    for (const auto& item : safety) {
+        details.push_back(item);
+        if (item.value("status", "") == "failed") errors.push_back({{"stage", "名单/回复"}, {"reason", item.value("reason", "")}});
+        if (item.value("requiresReview", false)) review = true;
+    }
+    for (const auto& item : customTexts) if (item.value("status", "") != "active") review = true;
+    const bool ok = errors.empty();
+    json report = {{"ok", ok}, {"complete", ok && !review}, {"partial", !ok || review},
+        {"cards", cards}, {"cardUsers", users}, {"profiles", profiles}, {"blacklist", blacklist},
+        {"help", help}, {"msgs", msgs}, {"orphans", orphans}, {"masters", masters}, {"consoleSettings", consoleSettings},
+        {"links", links}, {"notices", notices}, {"censorWords", censor}, {"replies", replies},
+        {"decks", decks.toJSON()}, {"mods", mods.toJSON()}, {"plugins", plugins.toJSON()}, {"assets", assets},
+        {"chatGroups", groups}, {"chatSettings", settings}, {"sessions", sessions}, {"logs", logs}, {"logMessages", logMessages},
+        {"sessionConfirmations", sessionDetails.confirmations},
+        {"replyReferences", referenceReport.toJSON()}, {"customTextDetails", customTexts},
+        {"diagnostics", details}, {"errors", errors}, {"stages", stages},
+        {"targetPlatform", opts.targetPlatform}, {"targetAdapterId", opts.targetAdapterId}, {"backupPath", opts.beforeImportBackup},
+        {"elapsedMs", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count()},
+        {"reloadRequired", mods.success > 0 || plugins.success > 0}};
+    try { migration_report::save(report); }
+    catch (const std::exception& error) {
+        report["ok"] = false; report["complete"] = false; report["partial"] = true;
+        report["errors"].push_back({{"stage", "保存报告"}, {"reason", error.what()}});
+    }
+    DICE_LOG_INFO("旧数据迁移结束：人物卡 {}，回复 {}，团务 {}，日志 {}；错误 {}，{}",
+        cards, replies, sessions, logs, report["errors"].size(), report.value("complete", false) ? "完整完成" : "请查看报告中的待确认项");
+    return report;
 }
 
 }  // namespace dice::legacyv2

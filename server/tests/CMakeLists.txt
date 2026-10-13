@@ -25,6 +25,7 @@ set(TEST_SOURCES
     test_sample_template.cpp
     test_presentation_style.cpp
     test_import_v2.cpp
+    test_legacy_import_release.cpp
     test_group_account_scoping.cpp
     test_master_delivery.cpp
     test_backup_service.cpp
@@ -89,6 +90,9 @@ set(TEST_SOURCES
 )
 
 add_executable(dice-next-tests ${TEST_SOURCES})
+if(NOT WIN32)
+    target_link_libraries(dice-next-tests PRIVATE Iconv::Iconv)
+endif()
 target_compile_definitions(dice-next-tests PRIVATE
     DICE_VERSION_STRING="${PROJECT_VERSION}"
     DICE_PRERELEASE=$<BOOL:${DICENEXT_PRERELEASE}>
