@@ -16,6 +16,7 @@
 
 namespace dice {
 
+class Database;
 namespace qq_rich { struct Card; } // Opaque QQ-only presentation; generic adapters never render it.
 struct PreparedOutput;
 
@@ -99,6 +100,16 @@ struct BotEvent {
     int64_t timestamp = 0;
     json extra;               // 平台原始事件
 };
+
+/// Invitation permissions are account/transport scoped, not display-name or
+/// public-identity scoped. Keep the original operator when storing an inviter.
+inline std::string eventInviterId(const BotEvent& event) {
+    if (event.platform == "qq_official" && event.extra.is_object()) {
+        const auto it = event.extra.find("__identity_native_operator");
+        if (it != event.extra.end() && it->is_string() && !it->get_ref<const std::string&>().empty()) return it->get<std::string>();
+    }
+    return event.operatorId;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Abstract Adapter Interface
@@ -233,6 +244,12 @@ public:
     /// Get current login identity
     virtual std::string getLoginId() const = 0;
     virtual std::string getLoginName() const = 0;
+
+    /// Bind persistent adapter caches to the managed database (never a global
+    /// pointer whose lifetime may belong to another instance).
+    virtual void attachDatabase(Database&) {}
+    /// Best known platform nickname; no invented fallback or synchronous I/O.
+    virtual std::string getUserName(const std::string&, const std::string& = {}) const { return {}; }
 
     /// Group management
     virtual std::string getGroupName(const std::string& groupId) const = 0;

@@ -1988,6 +1988,15 @@ static int realMain(int argc, char* argv[]) {
         // 解析昵称：群名片 > QQ昵称 > 记录的昵称 > QQ号（用户规范）。类型安全：user_id
         // 在 OneBot 里可能是数字或字符串，统一转字符串比较，避免 json value 类型不匹配抛异常。
         auto resolveUserNick = [&](const std::string& uid, const std::string& gid) -> std::string {
+            if (e.platform == "qq_official" && a) {
+                const auto field = uid == e.userId ? "user_name" : uid == e.operatorId ? "operator_name" : "";
+                if (*field && e.extra.is_object()) {
+                    const auto it = e.extra.find(field);
+                    if (it != e.extra.end() && it->is_string() && !it->get_ref<const std::string&>().empty()) return it->get<std::string>();
+                }
+                const auto cached = a->getUserName(uid, gid);
+                if (!cached.empty()) return cached;
+            }
             if (!gid.empty() && a) {
                 try {
                     nlohmann::json members = a->getMembers(gid);
@@ -2010,6 +2019,7 @@ static int realMain(int argc, char* argv[]) {
         auto groupLabel = [&](const std::string& gid) -> std::string {
             if (gid.empty()) return gid;
             std::string n = a ? a->getGroupName(gid) : gid;
+            if (n.empty() && e.extra.is_object()) n = e.extra.value("group_name", std::string());
             return (n.empty() || n == gid) ? gid : (n + "(" + gid + ")");
         };
         auto userLabel = [&](const std::string& uid) -> std::string {
@@ -2024,6 +2034,9 @@ static int realMain(int argc, char* argv[]) {
         lm.type = e.groupId.empty() ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
         lm.targetId = e.groupId.empty() ? e.userId : e.groupId;
         lm.senderId = e.userId;
+        lm.senderName = resolveUserNick(e.userId, e.groupId);
+        lm.adapterId = e.adapterId;
+        lm.selfId = e.selfId;
         dice::Locale loc = localeResolver.resolve(lm);
 
         // ── 聊天记录持久化 —— 撤回标注 / 历史消息回流入库 ──
@@ -2196,7 +2209,7 @@ static int realMain(int argc, char* argv[]) {
                 // 已有邀请人记录时不覆盖。
                 if (!e.operatorId.empty() &&
                     cmdRouter.groupSettingValue(e.platform, e.groupId, "inviter", e.adapterId).empty())
-                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "inviter", e.operatorId, e.adapterId);
+                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "inviter", dice::eventInviterId(e), e.adapterId);
                 // 群名关键词自动退群：邀请/入群事件不含群名，入群后靠反查暖缓存，
                 // 延迟数秒按群名判关键词（空白分隔多词，任一命中）→ 提示 + 退群 + 通知骰主。
                 {

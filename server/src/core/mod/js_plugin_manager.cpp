@@ -2542,6 +2542,10 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
         return;
     }
 
+    if (event.platform == "qq_official") {
+        if (message.senderId == event.operatorId) message.senderName = extraId("operator_name");
+        if (message.senderName.empty() && message.senderId == event.userId) message.senderName = extraId("user_name");
+    }
     std::lock_guard<ScriptMutex> lk(mutex_);
     if (!ctx_ || exts_.empty()) return;
     JS_UpdateStackTop(rt_);

@@ -7801,7 +7801,7 @@ private:
                 std::string uid;
                 if (id->is_string()) uid = id->get<std::string>();
                 else if (id->is_number_integer()) uid = id->dump();
-                if (uid.empty() || uid != (native.empty() ? msg.senderId : native)) continue;
+                if (uid.empty() || (uid != msg.senderId && (native.empty() || uid != native))) continue;
                 for (const char* key : {"card", "nickname"}) {
                     auto value = member.find(key);
                     if (value != member.end() && value->is_string() && !value->get_ref<const std::string&>().empty())
@@ -12001,7 +12001,7 @@ private:
         }
         // QQ 昵称
         if (!msg.senderName.empty()) return msg.senderName;
-        // QQ 官方私聊没有用户昵称；不要把内部虚拟号显示给用户。
+        // 官方事件的 username 可能为空；无缓存时不把内部虚拟号当作名字。
         return msg.platform == "qq_official" ? std::string("用户") : msg.senderId;
     }
     /// 回复中使用的显示名：用可配置前后缀包裹（默认 <>，如 <希亚>）。骰主可改

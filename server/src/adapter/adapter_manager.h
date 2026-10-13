@@ -28,6 +28,7 @@ public:
     /// Register a built-in or loaded adapter instance
     void registerAdapter(AdapterPtr adapter) {
         std::lock_guard lock(mutex_);
+        adapter->attachDatabase(db_);
         adapters_[adapter->id()] = adapter;
         adapter->plainTextResolver = [this](const Message& m) {
             auto* st = db_.getStorage();
@@ -126,7 +127,7 @@ public:
         markActive(msg.adapterId);
         Message routed = msg;
         normalizeIdentity(routed);
-        cacheOfficialGroupNickname(routed);
+        cacheOfficialNickname(routed);
         ensureInboundGroup(routed);
         const auto adapter = getAdapter(routed.adapterId);
         const std::string adapterName = adapter ? adapter->name() : routed.adapterId;
@@ -136,7 +137,8 @@ public:
             routed.platform, adapterName, privateMessage ? "私聊 " : "群 ", groupName, routed.targetId,
             routed.senderName.empty() ? routed.senderId : routed.senderName, routed.senderId,
             routed.displayContent.empty() ? routed.content : routed.displayContent),
-            {{"adapter", routed.adapterId}, {"platform", routed.platform}, {"platform_msg_id", routed.id}});
+            {{"adapter", routed.adapterId}, {"platform", routed.platform}, {"platform_msg_id", routed.id},
+             {"sender_name_source", routed.extra.is_object() ? routed.extra.value("__sender_name_source", std::string("platform")) : "platform"}});
         ProcessingScope incoming(ProcessingContext{{}, "用户消息：" + routed.content, "正在处理用户消息"});
         for (auto& handler : messageHandlers_) {
             try { handler(routed); }
@@ -156,13 +158,38 @@ public:
         // QQ 官方事件携带的是 OpenID，而消息路径已把群号映射为公共群号。
         // 这里做同样的归一化，避免事件写出的 left/__removed/inviter 挂在
         // “OpenID 幽灵群记录”上（WebUI 显示已退群、消息也无法重建该记录）。
-        if (routed.platform == "qq_official" && !routed.groupId.empty()) {
+        if (routed.platform == "qq_official") {
             const std::string botId = routed.extra.value("official_bot_id", std::string());
             if (!botId.empty()) {
-                routed.extra["__identity_native_target"] = routed.groupId;
-                const std::string publicId = identity::BindingStore::instance()
-                    .observeOfficial(db_, botId, routed.groupId, identity::Kind::Group);
-                if (!publicId.empty()) routed.groupId = publicId;
+                if (!routed.groupId.empty()) {
+                    routed.extra["__identity_native_target"] = routed.groupId;
+                    const std::string publicId = identity::BindingStore::instance()
+                        .observeOfficial(db_, botId, routed.groupId, identity::Kind::Group);
+                    if (!publicId.empty()) routed.groupId = publicId;
+                }
+                // Friend/member/operator events must use the same public user
+                // IDs as messages, while the transport IDs and opaque request
+                // flags remain available for outgoing API calls.
+                if (!routed.userId.empty() && routed.userId != routed.selfId) {
+                    routed.extra["__identity_native_sender"] = routed.userId;
+                    routed.userId = identity::BindingStore::instance().observeOfficial(db_, botId, routed.userId, identity::Kind::User);
+                }
+                if (!routed.operatorId.empty() && routed.operatorId != routed.selfId) {
+                    routed.extra["__identity_native_operator"] = routed.operatorId;
+                    routed.operatorId = identity::BindingStore::instance().observeOfficial(db_, botId, routed.operatorId, identity::Kind::User);
+                }
+                if (const auto adapter = getAdapter(routed.adapterId)) {
+                    if (!routed.userId.empty() && routed.userId != routed.selfId) {
+                        auto name = routed.extra.value("user_name", std::string());
+                        if (name.empty()) name = adapter->getUserName(routed.userId, routed.groupId);
+                        if (!name.empty()) routed.extra["user_name"] = name;
+                    }
+                    if (!routed.operatorId.empty()) {
+                        auto name = routed.extra.value("operator_name", std::string());
+                        if (name.empty()) name = adapter->getUserName(routed.operatorId, routed.groupId);
+                        if (!name.empty()) routed.extra["operator_name"] = name;
+                    }
+                }
             }
         }
         for (auto& handler : eventHandlers_) {
@@ -202,8 +229,8 @@ private:
     static std::string profileTimestamp() {
         return utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%dT%H:%M:%S");
     }
-    void cacheOfficialGroupNickname(const Message& msg) {
-        if (msg.platform != "qq_official" || msg.type != MessageType::kGroup || msg.senderId.empty()
+    void cacheOfficialNickname(const Message& msg) {
+        if (msg.platform != "qq_official" || msg.senderId.empty()
             || msg.senderName.empty() || (msg.extra.is_object() && msg.extra.value("__sender_name_fallback", false))) return;
         auto* st = db_.getStorage(); if (!st) return;
         try {
@@ -214,7 +241,8 @@ private:
                 PlayerProfileRow row; row.platform = "qq_official"; row.userId = msg.senderId;
                 row.nickname = msg.senderName; row.createdAt = profileTimestamp(); st->insert(row);
             } else if (profiles.front().nickname != msg.senderName) {
-                auto row = profiles.front(); row.nickname = msg.senderName; st->update(row);
+                st->update_all(orm::set(orm::assign(&PlayerProfileRow::nickname, msg.senderName)),
+                    orm::where(orm::c(&PlayerProfileRow::id) == profiles.front().id));
             }
         } catch (...) {}
     }
@@ -309,24 +337,27 @@ private:
             msg.extra["__identity_qualified_sender"] = BindingStore::qualified(Kind::User, publicSender);
             msg.targetId = publicTarget;
             msg.senderId = publicSender;
-            // QQ Official does not provide a private-chat nickname. If this
-            // endpoint resolves to a known public identity (including one
-            // joined by .bind), reuse its group-cached name instead of exposing
-            // an OpenID or reserved virtual QQ number.
+            // New events can carry username. Empty values use the adapter's
+            // persisted OpenID/union-name cache, then a bound public profile.
+            // A display fallback must never become a cached platform nickname.
             if (msg.senderName.empty()) {
                 std::string cachedName;
+                if (const auto adapter = getAdapter(msg.adapterId)) cachedName = adapter->getUserName(publicSender,
+                    msg.type == MessageType::kGroup ? msg.targetId : std::string());
                 if (auto* st = db_.getStorage()) {
                     try {
                         auto profiles = st->get_all<PlayerProfileRow>(orm::where(
                             orm::c(&PlayerProfileRow::platform) == std::string("qq_official") and
                             orm::c(&PlayerProfileRow::userId) == publicSender), orm::limit(1));
-                        if (!profiles.empty()) cachedName = profiles.front().nickname;
+                        if (cachedName.empty() && !profiles.empty() && profiles.front().nickname != "用户"
+                            && profiles.front().nickname != rawSender && profiles.front().nickname != publicSender) cachedName = profiles.front().nickname;
                     } catch (...) {}
                 }
-                if (!cachedName.empty()) msg.senderName = cachedName;
+                if (!cachedName.empty()) { msg.senderName = cachedName; msg.extra["__sender_name_source"] = "cache"; }
                 else {
                     msg.senderName = "用户";
                     msg.extra["__sender_name_fallback"] = true;
+                    msg.extra["__sender_name_source"] = "missing";
                 }
             }
             for (auto& at : msg.atList) {

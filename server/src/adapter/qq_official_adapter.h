@@ -6,6 +6,7 @@
 
 #include "adapter_interface.h"
 #include "../message/qq_official_message.h"
+#include "qq_official_name_cache.h"
 #include "qq_gateway_socket.h"
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
@@ -38,6 +39,7 @@
 #include <ctime>
 #include <unordered_map>
 #include <cstring>
+#include <deque>
 #ifdef _WIN32
 #include <ws2tcpip.h>
 #else
@@ -66,19 +68,43 @@ public:
     }
     std::string getLoginId() const override { return loginId_; }
     std::string getLoginName() const override { return loginName_; }
+    void attachDatabase(Database& db) override { db_ = &db; names_.attach(db); }
+    std::string getUserName(const std::string& userId, const std::string& groupId = {}) const override {
+        const auto user = nativeId(userId, identity::Kind::User);
+        const auto cached = names_.user(appId_, user);
+        if (!cached.empty()) return cached;
+        if (!groupId.empty()) refreshUserName(nativeId(groupId, identity::Kind::Group), user);
+        if (db_ && db_->getStorage()) {
+            try {
+                const auto publicId = identity::BindingStore::instance().publicForOfficial(*db_, appId_, user, identity::Kind::User);
+                const auto rows = db_->getStorage()->get_all<PlayerProfileRow>(orm::where(
+                    orm::c(&PlayerProfileRow::platform) == platform() and orm::c(&PlayerProfileRow::userId) == publicId), orm::limit(1));
+                if (!rows.empty() && rows.front().nickname != "用户") return QQOfficialNameCache::name(rows.front().nickname, publicId);
+            } catch (...) {}
+        }
+        return names_.user(appId_, user); // A test transport may complete immediately.
+    }
     // 这几个通用接口要求同步返回，而官方查询全是异步的：读缓存，并在后台
-    // 按 TTL 刷新。群信息与群成员接口目前仍在内邀阶段，未获权限时缓存一直
-    // 为空，行为与接入前的空实现一致，不会把错误灌进调用方。
+    // 按 TTL 刷新。群信息与群成员接口需要平台权限；失败保留已有名字，
+    // 未授权时按接口类别退避，不能每条消息都请求或把错误存成名称。
     std::string getGroupName(const std::string& groupId) const override {
         const std::string g = nativeId(groupId, identity::Kind::Group);
         refreshGroupMeta(g);
-        std::lock_guard lock(metaMu_);
-        const auto it = groupMeta_.find(g);
-        return it == groupMeta_.end() ? std::string() : it->second.name;
+        auto cached = names_.group(appId_, g);
+        if (cached.empty() && db_ && db_->getStorage()) {
+            try {
+                const auto publicId = identity::BindingStore::instance().publicForOfficial(*db_, appId_, g, identity::Kind::Group);
+                const auto rows = db_->getStorage()->get_all<GroupSettingRow>(orm::where(
+                    orm::c(&GroupSettingRow::platform) == platform() and orm::c(&GroupSettingRow::groupId) == publicId
+                    and orm::c(&GroupSettingRow::key) == std::string("name")), orm::limit(1));
+                if (!rows.empty()) cached = QQOfficialNameCache::name(rows.front().value, publicId);
+            } catch (...) {}
+        }
+        return cached;
     }
     std::vector<std::string> getGroupMemberList(const std::string& groupId) const override {
         const std::string g = nativeId(groupId, identity::Kind::Group);
-        refreshGroupMeta(g);
+        refreshGroupMembersIfNeeded(g);
         std::lock_guard lock(metaMu_);
         const auto it = groupMeta_.find(g);
         return it == groupMeta_.end() ? std::vector<std::string>() : it->second.memberIds;
@@ -90,6 +116,34 @@ public:
     bool isGroupOwner(const std::string& groupId, const std::string& userId) const override {
         return memberRole(groupId, userId) == "owner";
     }
+    void refreshMembers(const std::string& groupId) override {
+        refreshGroupMembersIfNeeded(nativeId(groupId, identity::Kind::Group));
+    }
+    json getMembers(const std::string& groupId) const override {
+        const auto group = nativeId(groupId, identity::Kind::Group);
+        refreshGroupMembersIfNeeded(group);
+        std::map<std::string, json> entries;
+        {
+            std::lock_guard lock(metaMu_); const auto it = groupMeta_.find(group);
+            if (it != groupMeta_.end()) for (const auto& user : it->second.memberIds) {
+                const auto found = it->second.members.find(user);
+                if (found != it->second.members.end()) entries.emplace(user, found->second);
+            }
+        }
+        json result = json::array();
+        for (const auto& [user, entry] : entries) {
+            const auto publicId = db_ ? identity::BindingStore::instance().observeOfficial(*db_, appId_, user, identity::Kind::User) : user;
+            result.push_back({{"user_id", publicId}, {"member_openid", user}, {"nickname", names_.user(appId_, user)},
+                {"card", ""}, {"role", QQOfficialNameCache::text(entry, "member_role")}, {"bot", entry.value("bot", false)}});
+        }
+        return result;
+    }
+    int getGroupMemberCount(const std::string& groupId) const override {
+        const auto group = nativeId(groupId, identity::Kind::Group); refreshGroupMeta(group);
+        std::lock_guard lock(metaMu_); const auto it = groupMeta_.find(group);
+        return it == groupMeta_.end() ? 0 : it->second.memberCount;
+    }
+    std::string getSelfRole(const std::string& groupId) const override { return loginId_.empty() ? std::string() : memberRole(groupId, loginId_); }
     /// `.log export` 一类功能走这里，而不是消息里的媒体码。官方没有独立的"群文件"
     /// 接口，按文件类型（file_type=4）发富媒体到群里，落到群聊里就是一个文件。
     void uploadGroupFile(const std::string& groupId, const std::string& name,
@@ -189,9 +243,9 @@ public:
         return caps;
     }
     void invokeActionAsync(const std::string& action, const json& params, ActionCallback cb) override {
-        const std::string groupId = params.value("groupId", std::string());
+        const std::string groupId = nativeId(params.value("groupId", std::string()), identity::Kind::Group);
         const std::string strategyId = params.value("strategyId", std::string());
-        const std::string userOpenId = params.value("userOpenId", std::string());
+        const std::string userOpenId = nativeId(params.value("userOpenId", std::string()), identity::Kind::User);
         const std::string panelId = params.value("panelId", std::string());
         const std::string messageId = params.value("messageId", std::string());
         const std::string guildId = params.value("guildId", std::string());
@@ -244,7 +298,7 @@ public:
             if (params.contains("cursor")) query["cursor"] = params["cursor"];
             officialApi(drogon::Get, "/v2/groups/" + groupId + "/members", query, std::move(cb));
         } else if (action == "qq_group_member" && !groupId.empty()) {
-            const std::string member = params.value("memberOpenId", std::string());
+            const std::string member = nativeId(params.value("memberOpenId", std::string()), identity::Kind::User);
             if (member.empty()) { cb(apiResult(false, 0, "memberOpenId required")); return; }
             officialApi(drogon::Get, "/v2/groups/" + groupId + "/members/" + member, json::object(), std::move(cb));
         // ── 群管理 ────────────────────────────────────────────
@@ -326,7 +380,18 @@ public:
 
     bool configure(const json& cfg) override {
         name_ = cfg.value("name", std::string("QQ 官方机器人"));
-        appId_ = cfg.value("appId", std::string());
+        const auto newApp = cfg.value("appId", std::string());
+        if (newApp != appId_) {
+            ++nameGeneration_;
+            std::lock_guard lock(metaMu_);
+            groupMeta_.clear(); nameQueries_.clear(); infoRequests_.clear(); memberRequests_.clear(); listRequests_.clear();
+            infoBlockedUntil_ = memberBlockedUntil_ = listBlockedUntil_ = 0;
+            nameWarmGroups_.clear(); nameRemovedGroups_.clear(); nameWarmCursor_.clear(); nameDiscoveryAt_ = nameNextWorkAt_ = 0;
+            nameGroupEpochs_.clear();
+            lastNameActivity_ = 0;
+            nameClient_.reset(); accessToken_.clear();
+        }
+        appId_ = newApp;
         appSecret_ = cfg.value("appSecret", std::string());
         displayQQ_ = cfg.value("qqNumber", std::string());
         forceVerifyImageResource_ = cfg.value("forceVerifyImageResource", cfg.value("force_verify_image_resource", false));
@@ -348,8 +413,18 @@ public:
 
     void stop() override {
         stopping_ = true; connecting_ = false; connected_ = false;
+        ++nameGeneration_;
         if (heartbeatTimer_) { drogon::app().getLoop()->invalidateTimer(*heartbeatTimer_); heartbeatTimer_.reset(); }
         if (accessTokenTimer_) { drogon::app().getLoop()->invalidateTimer(*accessTokenTimer_); accessTokenTimer_.reset(); }
+        if (nameMaintenanceTimer_) { drogon::app().getLoop()->invalidateTimer(*nameMaintenanceTimer_); nameMaintenanceTimer_.reset(); }
+        {
+            std::lock_guard lock(metaMu_);
+            for (auto& [group, meta] : groupMeta_) {
+                meta.infoRefreshing = meta.refreshing = false;
+                meta.pendingCursor.clear(); meta.pendingMembers.clear(); meta.seenCursors.clear();
+            }
+            nameQueries_.clear(); nameDiscoveryAt_ = 0;
+        }
         if (gateway_) gateway_->stop();
         gateway_.reset();
     }
@@ -443,6 +518,11 @@ public:
     // 文件名没后缀、媒体码切错），值得单独钉住。
     static std::string queryStringForTest(const json& params) { return queryString(params); }
     void dispatchForTest(const std::string& eventType, const json& payload) { dispatch(eventType, payload, "test"); }
+    using ApiTransport = std::function<void(drogon::HttpMethod, const std::string&, const json&, ActionCallback)>;
+    void setApiTransportForTest(ApiTransport transport) { testApi_ = std::move(transport); }
+    static json apiResponseForTest(int status, const json& data) { return checkedApiResponse(status, data); }
+    void setNameTimeForTest(std::time_t now) { nameTimeForTest_ = now; }
+    void maintainNamesForTest(bool online = true) { connected_ = online; maintainNameCache(); }
     static std::string urlEncodeForTest(const std::string& value) { return urlEncode(value); }
     static int fileTypeForTest(int kind, const std::string& name) { return fileTypeFor(kind, name); }
     static std::string mediaFileNameForTest(const std::string& name, int kind, const std::string& localPath) {
@@ -491,6 +571,23 @@ private:
     static json apiResult(bool ok, int status, const std::string& message = {}, json data = json::object()) {
         return json{{"ok", ok}, {"httpStatus", status}, {"message", message}, {"data", std::move(data)}};
     }
+    static json checkedApiResponse(int status, const json& data) {
+        int64_t code = 0;
+        if (data.is_object()) {
+            for (const char* field : {"err_code", "code"}) {
+                if (!data.contains(field)) continue;
+                if (!data[field].is_number_integer()) { code = -1; break; }
+                const auto current = data[field].get<int64_t>();
+                if (current != 0) { code = current; break; }
+            }
+        }
+        const bool ok = status >= 200 && status < 300 && code == 0 && !data.is_discarded();
+        auto message = ok ? std::string() : QQOfficialNameCache::text(data, "message");
+        if (!ok && message.empty()) message = "QQ 官方接口未成功（HTTP " + std::to_string(status) + "，错误码 " + std::to_string(code) + "）";
+        auto result = apiResult(ok, status, message, data.is_discarded() ? json::object() : data);
+        result["error_code"] = code;
+        return result;
+    }
     static std::vector<std::string> splitFlag(const std::string& flag) {
         std::vector<std::string> out; size_t start = 0;
         while (start <= flag.size()) {
@@ -515,14 +612,135 @@ private:
     }
     // ── 群信息缓存 ────────────────────────────────────────────
     struct GroupMeta {
-        std::string name;
         std::vector<std::string> memberIds;
         std::unordered_map<std::string, std::string> roles;   // openid → member / admin / owner
+        std::map<std::string, json> members;
+        int memberCount = 0;
+        std::time_t infoRefreshedAt = 0;
+        std::time_t infoRetryAt = 0;
+        bool infoRefreshing = false;
         std::time_t refreshedAt = 0;
+        std::time_t retryAt = 0;
         bool refreshing = false;
+        std::string pendingCursor;
+        std::vector<std::pair<std::string, std::string>> pendingMembers;
+        std::set<std::string> seenCursors;
     };
+    struct NameQuery { std::time_t attemptedAt = 0; bool refreshing = false; };
     static constexpr int kGroupMetaTtlSeconds = 300;
-    static constexpr size_t kGroupMemberCap = 3000;   // 每页 30 条，给翻页设个上限
+    static constexpr int kBackgroundNameTtlSeconds = 3600;
+    static constexpr size_t kMemberPageBatch = 5;
+    static constexpr size_t kMemberPageSize = 30;
+    static constexpr size_t kPaginationSafetyPages = 10000; // Guard broken cursors, not normal group size.
+
+    std::time_t nameNow() const { return nameTimeForTest_.value_or(std::time(nullptr)); }
+    void markNameActivity() { lastNameActivity_ = nameNow(); }
+    void rememberNameGroup(const std::string& group) {
+        if (group.empty()) return;
+        std::lock_guard lock(metaMu_);
+        nameRemovedGroups_.erase(group); nameWarmGroups_.insert(group);
+    }
+    void forgetNameGroup(const std::string& group) {
+        if (group.empty()) return;
+        std::lock_guard lock(metaMu_);
+        nameWarmGroups_.erase(group); nameRemovedGroups_.insert(group);
+        ++nameGroupEpochs_[group];
+        groupMeta_.erase(group);
+        const auto prefix = group + '\x1f';
+        for (auto it = nameQueries_.begin(); it != nameQueries_.end(); ) {
+            if (it->first.rfind(prefix, 0) == 0) it = nameQueries_.erase(it); else ++it;
+        }
+    }
+    uint64_t nameGroupEpoch(const std::string& group) const {
+        std::lock_guard lock(metaMu_); const auto found = nameGroupEpochs_.find(group);
+        return found == nameGroupEpochs_.end() ? 0 : found->second;
+    }
+    bool currentNameGroup(const std::string& group, uint64_t epoch) const {
+        std::lock_guard lock(metaMu_); const auto found = nameGroupEpochs_.find(group);
+        return !nameRemovedGroups_.count(group) && epoch == (found == nameGroupEpochs_.end() ? 0 : found->second);
+    }
+    void discoverNameGroups() {
+        if (!db_ || !db_->getStorage() || appId_.empty()) return;
+        try {
+            auto* st = db_->getStorage();
+            std::map<int, std::string> publicGroups;
+            for (const auto& row : st->get_all<IdentityRow>(orm::where(orm::c(&IdentityRow::kind) == std::string("group"))))
+                publicGroups[row.id] = row.publicId;
+            std::map<std::string, std::map<std::string, std::string>> flags;
+            auto presenceFlag = [](const std::string& key) { return key == "left" || key == "leaving" || key == "__removed"; };
+            for (const auto& row : st->get_all<GroupSettingRow>(orm::where(orm::c(&GroupSettingRow::platform) == platform())))
+                if (presenceFlag(row.key)) flags[row.groupId][row.key] = row.value;
+            // Concrete account state overrides legacy/shared presence. bot off
+            // only disables commands; it must not disable name prefetching.
+            for (const auto& row : st->get_all<GroupAccountSettingRow>(orm::where(
+                    orm::c(&GroupAccountSettingRow::adapterId) == id_ and orm::c(&GroupAccountSettingRow::platform) == platform())))
+                if (presenceFlag(row.key)) flags[row.groupId][row.key] = row.value;
+            const auto endpoints = st->get_all<IdentityEndpointRow>(orm::where(
+                orm::c(&IdentityEndpointRow::adapterType) == platform() and
+                orm::c(&IdentityEndpointRow::adapterAccount) == appId_ and orm::c(&IdentityEndpointRow::kind) == std::string("group")));
+            std::lock_guard lock(metaMu_);
+            for (const auto& endpoint : endpoints) {
+                if (endpoint.endpointId.empty()) continue;
+                const auto found = publicGroups.find(endpoint.identityId);
+                if (found == publicGroups.end()) continue;
+                bool absent = false;
+                for (const auto& [key, value] : flags[found->second]) if (value == "1") { absent = true; break; }
+                if (absent) {
+                    nameWarmGroups_.erase(endpoint.endpointId);
+                    if (nameRemovedGroups_.insert(endpoint.endpointId).second) ++nameGroupEpochs_[endpoint.endpointId];
+                }
+                else if (!nameRemovedGroups_.count(endpoint.endpointId)) nameWarmGroups_.insert(endpoint.endpointId);
+            }
+        } catch (...) { DICE_LOG_DEBUG("QQOfficial '{}': 暂未读取到后台名称刷新所需的群资料。", name_); }
+    }
+    void maintainNameCache() {
+        if (stopping_ || !connected_ || (accessToken_.empty() && !testApi_)) return;
+        const auto now = nameNow();
+        const auto lastActivity = lastNameActivity_.load();
+        if (lastActivity && (now < lastActivity || now - lastActivity < 3)) return;
+        bool discover = false;
+        {
+            std::lock_guard lock(metaMu_);
+            if (now < nameNextWorkAt_) return;
+            discover = !nameDiscoveryAt_ || now - nameDiscoveryAt_ >= 60;
+            // One page at a time; foreground lookups have priority. The 10s
+            // HTTP timeout clears in-flight flags when a server does not reply.
+            for (const auto& [group, meta] : groupMeta_) if (meta.refreshing || meta.infoRefreshing) return;
+            for (const auto& [user, query] : nameQueries_) if (query.refreshing) return;
+            if (discover) nameDiscoveryAt_ = now;
+        }
+        if (discover) discoverNameGroups();
+        std::vector<std::string> groups;
+        {
+            std::lock_guard lock(metaMu_);
+            auto begin = nameWarmGroups_.upper_bound(nameWarmCursor_);
+            groups.insert(groups.end(), begin, nameWarmGroups_.end());
+            groups.insert(groups.end(), nameWarmGroups_.begin(), begin);
+        }
+        for (const auto& group : groups) {
+            {
+                std::lock_guard lock(metaMu_);
+                nameWarmCursor_ = group;
+                if (nameRemovedGroups_.count(group)) continue;
+            }
+            if (refreshGroupMeta(group, kBackgroundNameTtlSeconds) ||
+                refreshGroupMembersIfNeeded(group, kBackgroundNameTtlSeconds, 1)) {
+                std::lock_guard lock(metaMu_); nameNextWorkAt_ = now + 2;
+                return;
+            }
+        }
+    }
+    void beginNameMaintenance() {
+        if (nameMaintenanceTimer_) return;
+        { std::lock_guard lock(metaMu_); nameDiscoveryAt_ = nameNextWorkAt_ = 0; }
+        const auto weak = weak_from_this();
+        nameMaintenanceTimer_ = drogon::app().getLoop()->runEvery(2.0, [weak] {
+            if (const auto self = weak.lock()) {
+                try { self->maintainNameCache(); }
+                catch (...) { DICE_LOG_DEBUG("QQOfficial '{}': 后台名称刷新暂时失败，将稍后重试。", self->name_); }
+            }
+        });
+    }
 
     /// 骰子内部 ID → 官方 openid。未绑定时原样返回。
     std::string nativeId(const std::string& value, identity::Kind kind) const {
@@ -533,58 +751,158 @@ private:
 
     std::string memberRole(const std::string& groupId, const std::string& userId) const {
         const std::string g = nativeId(groupId, identity::Kind::Group);
-        refreshGroupMeta(g);
+        const auto user = nativeId(userId, identity::Kind::User);
+        refreshGroupMembersIfNeeded(g);
         std::lock_guard lock(metaMu_);
         const auto it = groupMeta_.find(g);
         if (it == groupMeta_.end()) return {};
-        const auto role = it->second.roles.find(nativeId(userId, identity::Kind::User));
+        const auto role = it->second.roles.find(user);
         return role == it->second.roles.end() ? std::string() : role->second;
     }
 
-    void refreshGroupMeta(const std::string& groupId) const {
-        if (groupId.empty() || accessToken_.empty()) return;
+    bool refreshGroupMeta(const std::string& groupId, int ttl = kGroupMetaTtlSeconds) const {
+        if (stopping_ || groupId.empty() || (accessToken_.empty() && !testApi_)) return false;
         {
             std::lock_guard lock(metaMu_);
+            if (nameRemovedGroups_.count(groupId)) return false;
             auto& meta = groupMeta_[groupId];
-            if (meta.refreshing) return;
-            if (meta.refreshedAt && std::time(nullptr) - meta.refreshedAt < kGroupMetaTtlSeconds) return;
-            meta.refreshing = true;
+            if (meta.infoRefreshing || nameNow() < meta.infoRetryAt || (meta.infoRefreshedAt && nameNow() - meta.infoRefreshedAt < ttl)) return false;
+            if (!queryBudget(infoRequests_, 28, infoBlockedUntil_)) return false;
+            meta.infoRefreshing = true;
         }
         auto self = std::const_pointer_cast<QQOfficialAdapter>(shared_from_this());
+        const auto app = appId_;
+        const auto generation = nameGeneration_.load();
+        const auto groupEpoch = nameGroupEpoch(groupId);
         self->officialApi(drogon::Get, "/v2/groups/" + groupId + "/info", json::object(),
-            [self, groupId](json result) {
-                if (result.value("ok", false)) {
-                    const json data = result.value("data", json::object());
-                    std::lock_guard lock(self->metaMu_);
-                    self->groupMeta_[groupId].name = data.value("group_name", std::string());
-                }
-                self->refreshGroupMembers(groupId, std::string(), {});
+            [self, groupId, app, generation, groupEpoch](json result) {
+                if (self->stopping_ || self->appId_ != app || self->nameGeneration_ != generation || !self->currentNameGroup(groupId, groupEpoch)) return;
+                std::lock_guard lock(self->metaMu_);
+                if (self->nameRemovedGroups_.count(groupId)) return;
+                auto& meta = self->groupMeta_[groupId]; meta.infoRefreshing = false;
+                if (result.value("ok", false)) { meta.infoRefreshedAt = self->nameNow(); meta.infoRetryAt = 0; }
+                else meta.infoRetryAt = self->nameNow() + 60;
+                self->queryBackoff(result, self->infoBlockedUntil_);
+            });
+        return true;
+    }
+
+    bool refreshGroupMembersIfNeeded(const std::string& groupId, int ttl = kGroupMetaTtlSeconds, size_t batch = kMemberPageBatch) const {
+        if (stopping_ || groupId.empty() || (accessToken_.empty() && !testApi_)) return false;
+        std::string cursor;
+        std::vector<std::pair<std::string, std::string>> collected;
+        {
+            std::lock_guard lock(metaMu_);
+            if (nameRemovedGroups_.count(groupId)) return false;
+            auto& meta = groupMeta_[groupId];
+            if (meta.refreshing || nameNow() < meta.retryAt || (meta.refreshedAt && nameNow() - meta.refreshedAt < ttl)) return false;
+            if (!queryBudget(listRequests_, 58, listBlockedUntil_)) return false;
+            meta.refreshing = true;
+            cursor = std::move(meta.pendingCursor); collected = std::move(meta.pendingMembers);
+            if (cursor.empty()) meta.seenCursors.clear();
+        }
+        std::const_pointer_cast<QQOfficialAdapter>(shared_from_this())->refreshGroupMembers(groupId, cursor, std::move(collected), batch);
+        return true;
+    }
+
+    bool queryBudget(std::deque<std::time_t>& requests, size_t cap, std::time_t blockedUntil) const {
+        const auto now = nameNow();
+        if (now < blockedUntil) return false;
+        while (!requests.empty() && now - requests.front() >= 60) requests.pop_front();
+        if (requests.size() >= cap) return false;
+        requests.push_back(now); return true;
+    }
+    void queryBackoff(const json& result, std::time_t& blockedUntil) const {
+        if (result.value("ok", false)) return;
+        const auto code = result.value("error_code", int64_t(0));
+        if (code == 11253 || code == 11254) blockedUntil = nameNow() + 3600;
+        else if (result.value("httpStatus", 0) == 429) blockedUntil = nameNow() + 60;
+    }
+    void refreshUserName(const std::string& groupId, const std::string& user) const {
+        if (stopping_ || groupId.empty() || user.empty() || (accessToken_.empty() && !testApi_)) return;
+        const auto key = groupId + '\x1f' + user;
+        {
+            std::lock_guard lock(metaMu_);
+            if (nameRemovedGroups_.count(groupId)) return;
+            if (nameQueries_.size() >= 4096 && !nameQueries_.count(key)) {
+                auto oldest = nameQueries_.end();
+                for (auto it = nameQueries_.begin(); it != nameQueries_.end(); ++it)
+                    if (!it->second.refreshing && (oldest == nameQueries_.end() || it->second.attemptedAt < oldest->second.attemptedAt)) oldest = it;
+                if (oldest == nameQueries_.end()) return;
+                nameQueries_.erase(oldest);
+            }
+            auto& query = nameQueries_[key];
+            if (query.refreshing || (query.attemptedAt && nameNow() - query.attemptedAt < kGroupMetaTtlSeconds)) return;
+            if (!queryBudget(memberRequests_, 28, memberBlockedUntil_)) return;
+            query.refreshing = true; query.attemptedAt = nameNow();
+        }
+        auto self = std::const_pointer_cast<QQOfficialAdapter>(shared_from_this());
+        const auto app = appId_;
+        const auto generation = nameGeneration_.load();
+        const auto groupEpoch = nameGroupEpoch(groupId);
+        self->officialApi(drogon::Get, "/v2/groups/" + groupId + "/members/" + user, json::object(),
+            [self, key, groupId, app, generation, groupEpoch](json result) {
+                if (self->stopping_ || self->appId_ != app || self->nameGeneration_ != generation || !self->currentNameGroup(groupId, groupEpoch)) return;
+                std::lock_guard lock(self->metaMu_); self->nameQueries_[key].refreshing = false;
+                self->queryBackoff(result, self->memberBlockedUntil_);
             });
     }
 
     void refreshGroupMembers(const std::string& groupId, const std::string& cursor,
-                             std::vector<std::pair<std::string, std::string>> collected) {
-        json query;
+                             std::vector<std::pair<std::string, std::string>> collected, size_t remainingPages) {
+        {
+            std::lock_guard lock(metaMu_);
+            if (stopping_ || nameRemovedGroups_.count(groupId)) return;
+            groupMeta_[groupId].seenCursors.insert(cursor);
+        }
+        json query = json::object();
         if (!cursor.empty()) query["cursor"] = cursor;
         auto self = shared_from_this();
+        const auto app = appId_;
+        const auto generation = nameGeneration_.load();
+        const auto groupEpoch = nameGroupEpoch(groupId);
         officialApi(drogon::Get, "/v2/groups/" + groupId + "/members", query,
-            [self, groupId, collected = std::move(collected)](json result) mutable {
-                if (!result.value("ok", false)) { self->finishGroupMeta(groupId, std::move(collected), false); return; }
-                const json data = result.value("data", json::object());
+            [self, groupId, app, generation, groupEpoch, remainingPages, collected = std::move(collected)](json result) mutable {
+                if (self->stopping_ || self->appId_ != app || self->nameGeneration_ != generation || !self->currentNameGroup(groupId, groupEpoch)) return;
+                { std::lock_guard lock(self->metaMu_); if (self->nameRemovedGroups_.count(groupId)) return; }
+                if (!result.value("ok", false)) {
+                    { std::lock_guard lock(self->metaMu_); self->queryBackoff(result, self->listBlockedUntil_); }
+                    self->finishGroupMeta(groupId, std::move(collected), false); return;
+                }
+                const json data = apiData(result);
+                if (!data.is_object() || !data.contains("members") || !data["members"].is_array()
+                    || data["members"].size() > kMemberPageSize) {
+                    self->finishGroupMeta(groupId, std::move(collected), false); return;
+                }
                 if (data.contains("members") && data["members"].is_array()) {
                     for (const auto& entry : data["members"]) {
                         if (!entry.is_object()) continue;
-                        const std::string openid = entry.value("member_openid", std::string());
+                        const std::string openid = QQOfficialNameCache::text(entry, "member_openid");
                         if (openid.empty()) continue;
-                        collected.emplace_back(openid, entry.value("member_role", std::string("member")));
+                        collected.emplace_back(openid, QQOfficialNameCache::text(entry, "member_role"));
                     }
                 }
-                const std::string next = data.value("next_cursor", std::string());
-                if (!next.empty() && collected.size() < kGroupMemberCap) {
-                    self->refreshGroupMembers(groupId, next, std::move(collected));
+                const std::string next = QQOfficialNameCache::text(data, "next_cursor");
+                if (!next.empty()) {
+                    bool allowed, invalid;
+                    {
+                        std::lock_guard lock(self->metaMu_); const auto& meta = self->groupMeta_[groupId];
+                        invalid = next.size() > 2048 || meta.seenCursors.count(next) || meta.seenCursors.size() >= kPaginationSafetyPages;
+                        allowed = !invalid && remainingPages > 1 && self->queryBudget(self->listRequests_, 58, self->listBlockedUntil_);
+                    }
+                    if (!allowed) {
+                        if (invalid) { self->finishGroupMeta(groupId, std::move(collected), false); return; }
+                        // Yield after a bounded batch, or when the rate budget
+                        // is exhausted. The idle worker resumes at this cursor.
+                        std::lock_guard lock(self->metaMu_); auto& meta = self->groupMeta_[groupId];
+                        meta.refreshing = false; meta.refreshedAt = 0;
+                        meta.pendingCursor = next; meta.pendingMembers = std::move(collected);
+                        return;
+                    }
+                    self->refreshGroupMembers(groupId, next, std::move(collected), remainingPages - 1);
                     return;
                 }
-                self->finishGroupMeta(groupId, std::move(collected), true);
+                self->finishGroupMeta(groupId, std::move(collected), next.empty());
             });
     }
 
@@ -593,14 +911,70 @@ private:
         std::lock_guard lock(metaMu_);
         auto& meta = groupMeta_[groupId];
         meta.refreshing = false;
-        meta.refreshedAt = std::time(nullptr);
-        if (!ok) return;
+        meta.pendingCursor.clear(); meta.pendingMembers.clear();
+        meta.seenCursors.clear();
+        if (!ok) { meta.retryAt = nameNow() + 60; return; }
+        meta.refreshedAt = nameNow(); meta.retryAt = 0;
         meta.memberIds.clear();
         meta.roles.clear();
         meta.memberIds.reserve(members.size());
         for (auto& entry : members) {
-            meta.memberIds.push_back(entry.first);
+            if (!meta.roles.count(entry.first)) meta.memberIds.push_back(entry.first);
             meta.roles[entry.first] = entry.second;
+        }
+        for (auto it = meta.members.begin(); it != meta.members.end(); ) {
+            if (!meta.roles.count(it->first)) it = meta.members.erase(it); else ++it;
+        }
+        if (!meta.infoRefreshedAt) meta.memberCount = static_cast<int>(meta.memberIds.size());
+    }
+
+    static json apiData(const json& result) {
+        if (!result.is_object()) return json::object();
+        auto data = result.value("data", json::object());
+        if (data.is_object() && data.contains("data") && data["data"].is_object()) data = data["data"];
+        return data;
+    }
+    std::string rememberAuthor(const json& author, bool group, uint64_t revision = (std::numeric_limits<uint64_t>::max)()) {
+        auto user = QQOfficialNameCache::text(author, group ? "member_openid" : "user_openid");
+        if (user.empty()) user = QQOfficialNameCache::text(author, "id");
+        const auto supplied = QQOfficialNameCache::name(QQOfficialNameCache::text(author, "username"), user);
+        const auto cached = names_.rememberUser(appId_, user, supplied, QQOfficialNameCache::text(author, "union_openid"), revision);
+        return cached.empty() ? supplied : cached;
+    }
+    std::string rememberMember(const std::string& group, const json& entry, uint64_t revision = (std::numeric_limits<uint64_t>::max)()) {
+        const auto user = QQOfficialNameCache::text(entry, "member_openid");
+        if (group.empty() || user.empty()) return {};
+        const auto nickname = rememberAuthor(entry, true, revision);
+        const auto role = QQOfficialNameCache::text(entry, "member_role");
+        std::lock_guard lock(metaMu_); auto& meta = groupMeta_[group];
+        auto& cached = meta.members[user];
+        if (!cached.is_object()) cached = json::object();
+        cached["member_openid"] = user;
+        if (role == "member" || role == "admin" || role == "owner") { meta.roles[user] = role; cached["member_role"] = role; }
+        if (entry.contains("bot") && entry["bot"].is_boolean()) cached["bot"] = entry["bot"];
+        return nickname;
+    }
+    void observeApiNames(drogon::HttpMethod method, const std::string& path, const json& result, uint64_t revision) {
+        if (method != drogon::Get || !result.value("ok", false)) return;
+        const std::string prefix = "/v2/groups/";
+        if (path.rfind(prefix, 0) != 0) return;
+        const auto slash = path.find('/', prefix.size());
+        if (slash == std::string::npos) return;
+        const auto group = path.substr(prefix.size(), slash - prefix.size());
+        { std::lock_guard lock(metaMu_); if (nameRemovedGroups_.count(group)) return; }
+        const auto suffix = path.substr(slash);
+        const auto data = apiData(result);
+        if (!data.is_object()) return;
+        if (suffix == "/info") {
+            names_.rememberGroup(appId_, group, QQOfficialNameCache::text(data, "group_name"), revision);
+            if (data.contains("group_member_num") && data["group_member_num"].is_number_integer()) {
+                const auto count = data["group_member_num"].get<int64_t>();
+                if (count >= 0 && count <= 100000) { std::lock_guard lock(metaMu_); groupMeta_[group].memberCount = static_cast<int>(count); }
+            }
+        } else if (suffix == "/members" && data.contains("members") && data["members"].is_array() && data["members"].size() <= kMemberPageSize) {
+            for (const auto& member : data["members"]) if (member.is_object()) rememberMember(group, member, revision);
+        } else if (suffix.rfind("/members/", 0) == 0 && QQOfficialNameCache::text(data, "member_openid") == suffix.substr(9)) {
+            rememberMember(group, data, revision);
         }
     }
 
@@ -632,8 +1006,30 @@ private:
     }
 
     void officialApi(drogon::HttpMethod method, const std::string& path, const json& body, ActionCallback cb) {
-        if (accessToken_.empty()) { cb(apiResult(false, 0, "QQ 官方机器人尚未取得 AccessToken")); return; }
-        auto client = httpsClient("api.bot.qq.com");
+        if (accessToken_.empty() && !testApi_) { cb(apiResult(false, 0, "QQ 官方机器人尚未取得 AccessToken")); return; }
+        const auto revision = names_.revision();
+        const auto app = appId_;
+        const auto generation = nameGeneration_.load();
+        const bool nameRequest = method == drogon::Get && path.rfind("/v2/groups/", 0) == 0;
+        const auto groupSlash = nameRequest ? path.find('/', 11) : std::string::npos;
+        const auto group = groupSlash == std::string::npos ? std::string() : path.substr(11, groupSlash - 11);
+        const auto groupEpoch = nameGroupEpoch(group);
+        ActionCallback finish = [self = shared_from_this(), method, path, app, revision, generation, nameRequest, group, groupEpoch, cb = std::move(cb)](json result) mutable {
+            if (nameRequest && (self->stopping_ || self->nameGeneration_ != generation || self->appId_ != app || !self->currentNameGroup(group, groupEpoch))) {
+                cb(apiResult(false, 0, "名称查询已取消：适配器已停止或配置已变化。"));
+                return;
+            }
+            if (self->appId_ == app) {
+                try { self->observeApiNames(method, path, result, revision); }
+                catch (...) { DICE_LOG_WARN("QQOfficial '{}': 名称缓存更新失败，保留原有名称。", self->name_); }
+            }
+            cb(std::move(result));
+        };
+        if (testApi_) { testApi_(method, path, body, std::move(finish)); return; }
+        cb = std::move(finish);
+        drogon::HttpClientPtr client;
+        if (nameRequest) { std::lock_guard lock(metaMu_); client = nameClient_; }
+        if (!client) client = httpsClient("api.bot.qq.com");
         if (!client) { cb(apiResult(false, 0, "无法解析 api.bot.qq.com")); return; }
         auto request = drogon::HttpRequest::newHttpRequest();
         request->setMethod(method);
@@ -660,21 +1056,20 @@ private:
             const int status = static_cast<int>(response->statusCode());
             const auto raw = response->body();
             json data = raw.empty() ? json::object() : json::parse(raw, nullptr, false);
-            if (data.is_discarded()) data = json{{"raw", std::string(raw)}};
-            if (status >= 300) {
-                std::string message = "QQ 官方接口返回 HTTP " + std::to_string(status);
-                if (data.is_object()) message = data.value("message", message);
-                DICE_LOG_WARN("QQOfficial '{}': {} {} failed: HTTP {} {}", self->name_,
+            auto checked = checkedApiResponse(status, data);
+            if (!checked.value("ok", false)) {
+                DICE_LOG_WARN("QQOfficial '{}': {} {} 失败：HTTP {}，错误码 {}，{}", self->name_,
                               method == drogon::Get ? "GET" : method == drogon::Post ? "POST" : method == drogon::Patch ? "PATCH" : method == drogon::Delete ? "DELETE" : "HTTP",
-                              path, status, std::string(raw));
-                cb(apiResult(false, status, message, std::move(data)));
-                return;
+                              path, status, checked.value("error_code", int64_t(0)), checked.value("message", std::string()));
             }
-            cb(apiResult(true, status, {}, std::move(data)));
-        });
+            cb(std::move(checked));
+        }, nameRequest ? 10.0 : 0.0);
     }
     void fetchAccessToken() {
         auto self=shared_from_this(); auto c=httpsClient("api.bot.qq.com"); if(!c){fail("无法解析 api.bot.qq.com");return;} auto r=drogon::HttpRequest::newHttpRequest(); r->setMethod(drogon::Post); r->setPath("/app/getAppAccessToken"); r->setContentTypeCode(drogon::CT_APPLICATION_JSON); r->addHeader("Host","api.bot.qq.com"); r->setBody(json{{"appId",appId_},{"clientSecret",appSecret_}}.dump());
+        // Resolve once during connection setup. Name refreshes reuse this
+        // asynchronous client, so they do not repeat blocking DNS in a reply.
+        { std::lock_guard lock(metaMu_); nameClient_ = c; }
         c->sendRequest(r,[self](drogon::ReqResult rr,const drogon::HttpResponsePtr& resp){ try { if(self->stopping_) return; if(rr!=drogon::ReqResult::Ok||!resp||resp->statusCode()>=300) throw std::runtime_error("获取 AccessToken 失败"); auto j=json::parse(resp->body()); self->accessToken_=j.at("access_token").get<std::string>(); int expiresIn=7200; if(j.contains("expires_in")){const auto& v=j["expires_in"]; if(v.is_number_integer()||v.is_number_unsigned()) expiresIn=v.get<int>(); else if(v.is_string()) try{expiresIn=std::stoi(v.get<std::string>());}catch(...){}} self->scheduleTokenRefresh(expiresIn); if(!self->connected_) self->fetchBotProfile(); } catch(const std::exception& e){ self->fail(e.what()); }});
     }
     static std::string queryValue(const std::string& url,const std::string& name){const std::string key=name+"="; auto p=url.find(key); if(p==std::string::npos)return {}; p+=key.size(); auto e=url.find('&',p); return url.substr(p,e==std::string::npos?std::string::npos:e-p);}
@@ -715,7 +1110,7 @@ private:
         gateway_->start();
     }
     void onGateway(const std::string& raw) {
-        try { auto p=json::parse(raw); if(p.contains("s")&&!p["s"].is_null()) seq_=p["s"].get<int64_t>(); int op=p.value("op",-1); if(op==10){ if(!sessionId_.empty() && seq_>=0) resume(); else identify(); return; } if(op==7){ scheduleGatewayReconnect(); return; } if(op==0){ auto t=p.value("t",std::string()); auto d=p.value("d",json::object()); if(t=="READY"){sessionId_=d.value("session_id",std::string()); auto u=d.value("user",json::object()); loginId_=u.value("id",std::string()); loginName_=u.value("username",std::string()); connected_=true; connecting_=false; beginHeartbeat(p["d"].value("heartbeat_interval",45000));} else if(t=="RESUMED"){connected_=true; connecting_=false;} else dispatch(t,d,p.value("id",std::string())); }} catch(const std::exception&e){DICE_LOG_WARN("QQOfficial parse: {}",e.what());}
+        try { auto p=json::parse(raw); if(p.contains("s")&&!p["s"].is_null()) seq_=p["s"].get<int64_t>(); int op=p.value("op",-1); if(op==10){ if(!sessionId_.empty() && seq_>=0) resume(); else identify(); return; } if(op==7){ scheduleGatewayReconnect(); return; } if(op==0){ auto t=p.value("t",std::string()); auto d=p.value("d",json::object()); if(t=="READY"){sessionId_=d.value("session_id",std::string()); auto u=d.value("user",json::object()); loginId_=u.value("id",std::string()); loginName_=u.value("username",std::string()); connected_=true; connecting_=false; beginHeartbeat(p["d"].value("heartbeat_interval",45000)); beginNameMaintenance();} else if(t=="RESUMED"){connected_=true; connecting_=false; beginNameMaintenance();} else dispatch(t,d,p.value("id",std::string())); }} catch(const std::exception&e){DICE_LOG_WARN("QQOfficial parse: {}",e.what());}
     }
     void identify(){ if(gateway_) gateway_->sendText(json{{"op",2},{"d",{{"token","QQBot "+accessToken_},{"intents",(1<<25)|(1<<26)|(1<<30)},{"shard",json::array({0,1})},{"properties",{{"$os","DiceNext"},{"$browser","DiceNext"},{"$device","DiceNext"}}}}}}.dump()); }
     void resume(){ if(gateway_) gateway_->sendText(json{{"op",6},{"d",{{"token","QQBot "+accessToken_},{"session_id",sessionId_},{"seq",seq_}}}}.dump()); }
@@ -723,10 +1118,23 @@ private:
     void scheduleTokenRefresh(int expiresIn){ if(accessTokenTimer_) drogon::app().getLoop()->invalidateTimer(*accessTokenTimer_); const int refreshIn=expiresIn>300?expiresIn-300:60; auto self=shared_from_this(); accessTokenTimer_=drogon::app().getLoop()->runAfter(static_cast<double>(refreshIn),[self]{ if(!self->stopping_) self->fetchAccessToken(); }); }
     void beginHeartbeat(int ms){ if(heartbeatTimer_)drogon::app().getLoop()->invalidateTimer(*heartbeatTimer_); auto self=shared_from_this(); const int intervalMs=ms>0?ms:1000; heartbeatTimer_=drogon::app().getLoop()->runEvery(static_cast<double>(intervalMs)/1000.0,[self]{if(self->gateway_)self->gateway_->sendText(json{{"op",1},{"d",self->seq_>=0?json(self->seq_):json(nullptr)}}.dump());}); }
     void dispatch(const std::string&t,const json&d,const std::string&eventId){
+        markNameActivity();
         Message m; m.platform=platform();m.adapterId=id_;m.selfId=loginId_;m.id=d.value("id",eventId);m.content=d.value("content",std::string());m.rawContent=m.content;m.displayContent=m.content;m.timestamp=std::time(nullptr);m.extra={{"event_id",eventId},{"event_type",t},{"official_bot_id",appId_}};
         const auto author=d.value("author",json::object());
-        if(t=="C2C_MESSAGE_CREATE"){m.type=MessageType::kPrivate;m.senderId=author.value("user_openid",std::string());m.senderName=author.value("username",std::string());m.targetId=m.senderId;}
-        else if(t=="GROUP_AT_MESSAGE_CREATE"||t=="GROUP_MESSAGE_CREATE"){m.type=MessageType::kGroup;m.senderId=author.value("member_openid",std::string());m.senderName=author.value("username",std::string());m.targetId=d.value("group_openid",std::string());m.extra["group_id"]=d.value("group_id",std::string());
+        if(t=="C2C_MESSAGE_CREATE"){
+            m.type=MessageType::kPrivate; m.senderId=QQOfficialNameCache::text(author,"user_openid");
+            if(m.senderId.empty())m.senderId=QQOfficialNameCache::text(author,"id");
+            m.senderName=rememberAuthor(author,false);m.targetId=m.senderId;
+        }
+        else if(t=="GROUP_AT_MESSAGE_CREATE"||t=="GROUP_MESSAGE_CREATE"){
+            m.type=MessageType::kGroup;m.senderId=QQOfficialNameCache::text(author,"member_openid");
+            if(m.senderId.empty())m.senderId=QQOfficialNameCache::text(author,"id");
+            m.targetId=d.value("group_openid",std::string());m.extra["group_id"]=d.value("group_id",std::string());
+            rememberNameGroup(m.targetId);
+            auto member=author.is_object()?author:json::object();member["member_openid"]=m.senderId;m.senderName=rememberMember(m.targetId,member);
+            const auto role=QQOfficialNameCache::text(author,"member_role");
+            if(role=="member"||role=="admin"||role=="owner")m.extra["role"]=role;
+            names_.rememberGroup(appId_,m.targetId,QQOfficialNameCache::text(d,"group_name"));
             // GROUP_AT_MESSAGE_CREATE is delivered only to the bot which was @ed.
             // Its payload is allowed to omit mentions, so the event itself must be
             // treated as an explicit mention; this also lets @ wake a disabled bot.
@@ -740,7 +1148,7 @@ private:
                     while ((pos = m.content.find(token, pos)) != std::string::npos) m.content.erase(pos, token.size());
                 }
             };
-            if(d.contains("mentions")&&d["mentions"].is_array()){m.extra["mentions"]=d["mentions"];for(const auto& mention:d["mentions"]){const auto id=mention.value("member_openid",mention.value("user_openid",mention.value("id",std::string()))); const bool mine=mention.value("is_you",false)||id==loginId_||id==appId_||mention.value("bot_appid",mention.value("bot_app_id",std::string()))==appId_; if(mine){m.atList.push_back(loginId_); eraseMention(id); eraseMention(loginId_); eraseMention(appId_);}else if(!id.empty())m.atList.push_back(id);}}
+            if(d.contains("mentions")&&d["mentions"].is_array()){m.extra["mentions"]=d["mentions"];for(const auto& mention:d["mentions"]){if(!mention.is_object())continue;const auto id=mention.value("member_openid",mention.value("user_openid",mention.value("id",std::string()))); const bool mine=mention.value("is_you",false)||id==loginId_||id==appId_||mention.value("bot_appid",mention.value("bot_app_id",std::string()))==appId_; if(mine){m.atList.push_back(loginId_); eraseMention(id); eraseMention(loginId_); eraseMention(appId_);}else if(!id.empty()){m.atList.push_back(id);rememberAuthor(mention,true);}}}
             // 有些 GROUP_AT_MESSAGE_CREATE 载荷不会带 mentions，只能安全地移除正文最前
             // 的一个 @ 标记；事件类型本身已证明它指向当前机器人。
             if(t=="GROUP_AT_MESSAGE_CREATE"){
@@ -756,8 +1164,10 @@ private:
             m.rawContent=m.content;m.displayContent=m.content;
             // Receipt logging happens after public-ID/nickname normalization.
         }
-        else if(t=="AT_MESSAGE_CREATE"){m.type=MessageType::kChannel;m.senderId=author.value("id",std::string());m.senderName=author.value("username",m.senderId);m.targetId=d.value("channel_id",std::string());}
+        else if(t=="AT_MESSAGE_CREATE"){m.type=MessageType::kChannel;m.senderId=QQOfficialNameCache::text(author,"id");m.senderName=rememberAuthor(author,false);m.targetId=d.value("channel_id",std::string());}
         else { dispatchEvent(t,d,eventId); return; }
+        m.extra["__sender_name_source"] = !QQOfficialNameCache::name(QQOfficialNameCache::text(author,"username"),m.senderId).empty()
+            ? "platform" : !m.senderName.empty() ? "cache" : "missing";
         if(d.contains("attachments"))m.extra["attachments"]=d["attachments"];
         if(d.contains("msg_elements"))m.extra["msg_elements"]=d["msg_elements"];
         const auto normalized = qqmsg::normalizeIncoming(m.content, d.value("attachments", json::array()));
@@ -771,6 +1181,15 @@ private:
         ev.extra["official_bot_id"] = appId_;   // 供事件层按 bot 映射 OpenID → 公共号
         if(type=="GROUP_ADD_ROBOT"||type=="GROUP_DEL_ROBOT"){ev.type=type=="GROUP_ADD_ROBOT"?EventType::kGroupIncrease:EventType::kGroupDecrease;ev.groupId=data.value("group_openid",std::string());ev.userId=loginId_;ev.operatorId=data.value("op_member_openid",std::string());rememberPassiveEvent(MessageType::kGroup,ev.groupId,eventId);}
         else if(type=="FRIEND_ADD"||type=="FRIEND_DEL"){ev.type=type=="FRIEND_ADD"?EventType::kFriendAdd:EventType::kOther;ev.userId=data.value("openid",std::string());if(type=="FRIEND_ADD")rememberPassiveEvent(MessageType::kPrivate,ev.userId,eventId);}
+        else if(type=="GROUP_MEMBER_ADD"||type=="GROUP_MEMBER_REMOVE"){
+            ev.type=type=="GROUP_MEMBER_ADD"?EventType::kGroupIncrease:EventType::kGroupDecrease;
+            ev.groupId=QQOfficialNameCache::text(data,"group_openid");ev.userId=QQOfficialNameCache::text(data,"member_openid");
+            if(type=="GROUP_MEMBER_REMOVE"){
+                std::lock_guard lock(metaMu_);auto it=groupMeta_.find(ev.groupId);
+                if(it!=groupMeta_.end()){auto& meta=it->second;meta.members.erase(ev.userId);meta.roles.erase(ev.userId);
+                    meta.memberIds.erase(std::remove(meta.memberIds.begin(),meta.memberIds.end(),ev.userId),meta.memberIds.end());meta.refreshedAt=0;}
+            }
+        }
         else if(type=="GROUP_MSG_RECEIVE"||type=="GROUP_MSG_REJECT"){ev.groupId=data.value("group_openid",std::string());ev.operatorId=data.value("op_member_openid",std::string());if(type=="GROUP_MSG_RECEIVE")rememberPassiveEvent(MessageType::kGroup,ev.groupId,eventId);}
         else if(type=="GROUP_JOIN_REQUEST"){
             ev.type=EventType::kGroupRequest;
@@ -792,6 +1211,27 @@ private:
             DICE_LOG_INFO("QQOfficial '{}': group join request group={} member={} request={}",name_,ev.groupId,ev.userId,requestId);
         }
         else if(type=="C2C_MSG_RECEIVE"||type=="C2C_MSG_REJECT"){ev.userId=data.value("openid",std::string());if(type=="C2C_MSG_RECEIVE")rememberPassiveEvent(MessageType::kPrivate,ev.userId,eventId);}
+        if(!ev.groupId.empty()) {
+            if(type=="GROUP_DEL_ROBOT") forgetNameGroup(ev.groupId);
+            else {
+                rememberNameGroup(ev.groupId);
+                if(type=="GROUP_ADD_ROBOT"||type=="GROUP_MEMBER_ADD") {
+                    std::lock_guard lock(metaMu_); groupMeta_[ev.groupId].refreshedAt=0;
+                }
+            }
+        }
+        if(!ev.userId.empty() && ev.userId!=loginId_){
+            const auto author=data.value("author",json::object());
+            auto username=QQOfficialNameCache::text(author,"username");
+            if(username.empty())username=QQOfficialNameCache::text(data,"username");
+            ev.extra["user_name"]=names_.rememberUser(appId_,ev.userId,username,QQOfficialNameCache::text(author,"union_openid"));
+            if(ev.extra["user_name"]=="" && !ev.groupId.empty())ev.extra["user_name"]=getUserName(ev.userId,ev.groupId);
+        }
+        if(!ev.groupId.empty()){
+            names_.rememberGroup(appId_,ev.groupId,QQOfficialNameCache::text(data,"group_name"));
+            ev.extra["group_name"]=getGroupName(ev.groupId);
+        }
+        if(!ev.operatorId.empty())ev.extra["operator_name"]=getUserName(ev.operatorId,ev.groupId);
         if(eventCb_)eventCb_(ev);
     }
     static std::string eventKey(MessageType type,const std::string& target){return std::to_string(static_cast<int>(type))+":"+target;}
@@ -1257,6 +1697,7 @@ private:
 
     /// 富媒体入口：远程 URL 直传，本地文件走分片上传。
     void sendMediaTo(const Message& message, const MediaItem& item) {
+        markNameActivity();
         Message m = message;
         m.logMediaSummary = "[" + std::string(item.kind == 1 ? "图片" : item.kind == 2 ? "视频" : item.kind == 3 ? "语音" : "文件")
             + "：" + (item.name.empty() ? item.ref : item.name) + "]";
@@ -1283,6 +1724,7 @@ private:
 
     /// 出站入口：拆出媒体标记走富媒体（限 3 条防刷频），剩余文本走文字消息。
     void sendTo(const Message& message, const std::string& text, ContentFormat format) {
+        markNameActivity();
         Message m = message;
         if (!m.logOutput) {
             m.logOutput = activeOutboundContext.output;
@@ -1405,6 +1847,20 @@ private:
     void fail(const std::string&e){lastError_=e;connecting_=false;connected_=false;DICE_LOG_ERROR("QQOfficial '{}': {}",name_,e);}
     std::string richStyle_ = "off", interactions_ = "links";
     inline static std::function<std::string(const std::string&)> imagePublisher_;   // 本地图 → 公网 URL（图床）
-    std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,accessToken_,loginId_,loginName_,sessionId_,gatewayUrl_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{identity::BindingStore::instance().database()}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; int64_t seq_=-1; std::shared_ptr<QQGatewaySocket> gateway_; std::optional<trantor::TimerId> heartbeatTimer_,accessTokenTimer_; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::unordered_map<std::string,int> replySeq_; std::unordered_map<std::string,std::pair<std::string,std::time_t>> pendingEvents_; mutable std::mutex metaMu_; mutable std::unordered_map<std::string,GroupMeta> groupMeta_;
+    std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,accessToken_,loginId_,loginName_,sessionId_,gatewayUrl_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{nullptr}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; int64_t seq_=-1; std::shared_ptr<QQGatewaySocket> gateway_; std::optional<trantor::TimerId> heartbeatTimer_,accessTokenTimer_; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::unordered_map<std::string,int> replySeq_; std::unordered_map<std::string,std::pair<std::string,std::time_t>> pendingEvents_; mutable std::mutex metaMu_; mutable std::unordered_map<std::string,GroupMeta> groupMeta_;
+    QQOfficialNameCache names_;
+    ApiTransport testApi_;
+    drogon::HttpClientPtr nameClient_;
+    std::optional<trantor::TimerId> nameMaintenanceTimer_;
+    std::optional<std::time_t> nameTimeForTest_;
+    std::atomic<uint64_t> nameGeneration_{0};
+    std::atomic<std::time_t> lastNameActivity_{0};
+    mutable std::set<std::string> nameWarmGroups_, nameRemovedGroups_;
+    std::unordered_map<std::string, uint64_t> nameGroupEpochs_;
+    std::string nameWarmCursor_;
+    std::time_t nameDiscoveryAt_ = 0, nameNextWorkAt_ = 0;
+    mutable std::unordered_map<std::string, NameQuery> nameQueries_;
+    mutable std::deque<std::time_t> infoRequests_, memberRequests_, listRequests_;
+    mutable std::time_t infoBlockedUntil_ = 0, memberBlockedUntil_ = 0, listBlockedUntil_ = 0;
 };
 }

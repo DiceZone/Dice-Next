@@ -389,6 +389,10 @@ ext.onGroupLeave = (ctx, event) => globalThis.__lastEvent =
   `leave:${event.groupId}:${event.userId}:${event.operatorId}`;
 ext.onGroupMemberJoined = (ctx, msg) => globalThis.__lastEvent =
   `join:${msg.sender.userId}:${msg.groupId}`;
+ext.onBecomeFriend = (ctx, msg) => globalThis.__lastEvent =
+  `friend:${ctx.player.name}:${msg.sender.nickname}`;
+ext.onGroupJoined = (ctx, msg) => globalThis.__lastEvent =
+  `inviter:${ctx.player.name}:${msg.sender.nickname}`;
 seal.ext.register(ext);
 )JS";
         plugin.close();
@@ -417,6 +421,21 @@ seal.ext.register(ext);
         manager.handleEvent(joined);
         const auto joinState = manager.evalString("globalThis.__lastEvent");
         ASSERT_TRUE(joinState && *joinState == "join:newcomer:g");
+
+        BotEvent friendAdded;
+        friendAdded.type = EventType::kFriendAdd; friendAdded.platform = "qq_official";
+        friendAdded.userId = "public-user"; friendAdded.extra = {{"user_name", "已缓存昵称"}};
+        manager.handleEvent(friendAdded);
+        const auto friendState = manager.evalString("globalThis.__lastEvent");
+        ASSERT_TRUE(friendState && *friendState == "friend:已缓存昵称:已缓存昵称");
+
+        BotEvent botJoined;
+        botJoined.type = EventType::kGroupIncrease; botJoined.platform = "qq_official";
+        botJoined.userId = botJoined.selfId = "bot"; botJoined.groupId = "public-group";
+        botJoined.operatorId = "public-inviter"; botJoined.extra = {{"operator_name", "邀请人昵称"}};
+        manager.handleEvent(botJoined);
+        const auto inviterState = manager.evalString("globalThis.__lastEvent");
+        ASSERT_TRUE(inviterState && *inviterState == "inviter:邀请人昵称:邀请人昵称");
     }
 
     fs::remove_all(root, ec);
