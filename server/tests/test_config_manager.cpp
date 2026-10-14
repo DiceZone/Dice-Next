@@ -10,6 +10,12 @@
 #include <chrono>
 #include <atomic>
 #include <thread>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace dice;
 namespace fs = std::filesystem;
@@ -331,6 +337,50 @@ TEST(WebAuth, SessionCookieNamesAreStableAndSeparateInstallations) {
     auth.configure("", {});
     fs::remove_all(root, ec);
 }
+
+#ifdef _WIN32
+TEST(WebAuth, ShortPathCookiesStayStableBeforeCreatingTheSessionDirectoryAndAcrossRestart) {
+    const fs::path root = temporaryConfigRoot("web_auth_short_path");
+    ASSERT_TRUE(fs::create_directory(root));
+    struct Cleanup {
+        fs::path root;
+        ~Cleanup() {
+            WebAuth::instance().configure("", {});
+            std::error_code ec;
+            if (fs::equivalent(root.parent_path(), fs::temp_directory_path(), ec) && !ec)
+                fs::remove_all(root, ec);
+        }
+    } cleanup{root};
+    const DWORD required = GetShortPathNameW(root.c_str(), nullptr, 0);
+    ASSERT_TRUE(required > 0);
+    std::wstring name(required, L'\0');
+    const DWORD copied = GetShortPathNameW(root.c_str(), name.data(), required);
+    ASSERT_TRUE(copied > 0 && copied < required);
+    name.resize(copied);
+    const fs::path alias(name);
+    const auto real = fs::canonical(root);
+    ASSERT_TRUE(fs::equivalent(alias, real));
+    if (alias == real) {
+        std::cout << "8.3 aliases unavailable on this volume; short-path cookie check not exercised\n";
+        return;
+    }
+    const auto shortSessions = alias / "new-config" / "webui_sessions.json";
+    const auto longSessions = real / "new-config" / "webui_sessions.json";
+    ASSERT_FALSE(fs::exists(shortSessions.parent_path()));
+    const auto cookie = WebAuth::cookieNameForSessionsPath(shortSessions);
+    ASSERT_EQ(cookie, WebAuth::cookieNameForSessionsPath(longSessions));
+    auto& auth = WebAuth::instance();
+    auth.configure("test-password", shortSessions);
+    ASSERT_EQ(auth.sessionCookieName(), cookie);
+    const auto token = auth.issueToken(true);
+    ASSERT_TRUE(fs::is_regular_file(longSessions));
+    ASSERT_EQ(WebAuth::cookieNameForSessionsPath(shortSessions), cookie);
+    ASSERT_EQ(WebAuth::cookieNameForSessionsPath(longSessions), cookie);
+    auth.configure("test-password", longSessions);
+    ASSERT_EQ(auth.sessionCookieName(), cookie);
+    ASSERT_TRUE(auth.validToken(token));
+}
+#endif
 
 TEST(WebAuth, HashedPasswordSurvivesRestart) {
     const fs::path root = temporaryConfigRoot("web_auth_password");

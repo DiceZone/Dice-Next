@@ -39,8 +39,26 @@ public:
             ec.clear();
             normalized = sessionsPath.lexically_normal();
         }
-        const auto canonical = std::filesystem::weakly_canonical(normalized, ec);
-        if (!ec) normalized = canonical;
+        // MSVC weakly_canonical can retain 8.3 aliases when the tail does not
+        // exist, then expand them after the first session file is saved. Resolve
+        // the nearest EXISTING ancestor and append the missing tail ourselves,
+        // so the cookie name is identical before creation and after a restart.
+        auto existing = normalized;
+        std::filesystem::path tail;
+        while (!existing.empty()) {
+            ec.clear();
+            const bool exists = std::filesystem::exists(existing, ec);
+            if (ec) break;
+            if (exists) {
+                const auto canonical = std::filesystem::canonical(existing, ec);
+                if (!ec) normalized = (tail.empty() ? canonical : canonical / tail).lexically_normal();
+                break;
+            }
+            const auto parent = existing.parent_path();
+            if (parent == existing) break;
+            tail = tail.empty() ? existing.filename() : existing.filename() / tail;
+            existing = parent;
+        }
 
         const auto utf8 = normalized.generic_u8string();
         std::string material(utf8.begin(), utf8.end());
