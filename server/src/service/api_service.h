@@ -209,6 +209,8 @@ static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std:
         {"appId", official && cfg.is_object() ? cfg.value("appId", std::string()) : std::string()},
         {"qqNumber", official && cfg.is_object() ? cfg.value("qqNumber", std::string()) : std::string()},
         {"forceVerifyImageResource", official && cfg.is_object() ? cfg.value("forceVerifyImageResource", false) : false},
+        {"subscribeGroupMemberEvents", official && cfg.is_object() ? cfg.value("subscribeGroupMemberEvents", false) : false},
+        {"autoAcknowledgeInteractions", official && cfg.is_object() ? cfg.value("autoAcknowledgeInteractions", true) : true},
         {"qqRichReplies", official ? qq_rich::style(cfg.value("qqRichReplies", std::string("off"))) : "off"},
         {"qqInteractions", official ? qq_rich::interaction(cfg.value("qqInteractions", std::string("links"))) : "off"},
         {"personaSelection", cfg.value("personaSelection", std::string("all"))},
@@ -237,6 +239,8 @@ static J adapterToConfigJson(const AdapterRow& a) {
         out["app_secret"] = extra.value("appSecret", std::string());
         out["qq_number"] = extra.value("qqNumber", std::string());
         out["force_verify_image_resource"] = extra.value("forceVerifyImageResource", false);
+        out["subscribe_group_member_events"] = extra.value("subscribeGroupMemberEvents", false);
+        out["auto_acknowledge_interactions"] = extra.value("autoAcknowledgeInteractions", true);
         out["qq_rich_replies"] = extra.value("qqRichReplies", std::string("off"));
         out["qq_interactions"] = extra.value("qqInteractions", std::string("links"));
     }
@@ -292,6 +296,8 @@ static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
                             {"appSecret", cfg.value("appSecret", std::string())},
                             {"qqNumber", cfg.value("qqNumber", std::string())},
                             {"forceVerifyImageResource", cfg.value("forceVerifyImageResource", false)},
+                            {"subscribeGroupMemberEvents", cfg.value("subscribeGroupMemberEvents", false)},
+                            {"autoAcknowledgeInteractions", cfg.value("autoAcknowledgeInteractions", true)},
                             {"qqRichReplies", cfg.value("qqRichReplies", std::string("off"))},
                             {"qqInteractions", cfg.value("qqInteractions", std::string("links"))},
                             {"message_format", cfg.value("message_format", std::string())}});
@@ -2547,6 +2553,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     a.config = J{{"appId", appId}, {"appSecret", appSecret},
                                  {"qqNumber", j.value("qqNumber", std::string())},
                                  {"forceVerifyImageResource", j.value("forceVerifyImageResource", false)},
+                                 {"subscribeGroupMemberEvents", j.value("subscribeGroupMemberEvents", false)},
+                                 {"autoAcknowledgeInteractions", j.value("autoAcknowledgeInteractions", true)},
                                  {"qqRichReplies", qq_rich::style(j.value("qqRichReplies", std::string("off")))},
                                  {"qqInteractions", qq_rich::interaction(j.value("qqInteractions", std::string("links")))},
                                  {"heartApiKey", heartApiKey}}.dump();
@@ -2619,6 +2627,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     if (j.contains("forceVerifyImageResource") && j["forceVerifyImageResource"].is_boolean()) {
                         runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value("forceVerifyImageResource", false) != j["forceVerifyImageResource"].get<bool>();
                         adapterCfg["forceVerifyImageResource"] = j["forceVerifyImageResource"];
+                    }
+                    for (const char* key : {"subscribeGroupMemberEvents", "autoAcknowledgeInteractions"}) if (j.contains(key)) {
+                        if (!j[key].is_boolean()) throw std::runtime_error(std::string(key) + " must be a boolean");
+                        runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value(key, std::string(key) == "autoAcknowledgeInteractions") != j[key].get<bool>();
+                        adapterCfg[key] = j[key];
                     }
                     if (adapterCfg.value("appId", std::string()).empty() || adapterCfg.value("appSecret", std::string()).empty()) throw std::runtime_error("QQ 官方机器人需要 AppID 和 AppSecret");
                     for (const auto* key : {"qqRichReplies", "qqInteractions"}) if (j.contains(key)) {
@@ -5924,6 +5937,30 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             jsonReply(ok(nullptr), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
+
+    // Authenticated, account-scoped access to the documented QQ action set.
+    // No arbitrary URL/method proxy and no token is returned to clients.
+    app.registerHandler("/api/adapters/{1}/qq-official-actions",
+        [&adapterMgr](Req req, CB&& cb, const std::string& adapterId) {
+        try {
+            auto adapter = adapterMgr.getAdapter(adapterId);
+            if (!adapter || adapter->platform() != "qq_official") { jsonReply(fail("QQ Official adapter required"), std::move(cb)); return; }
+            const auto caps = adapter->capabilities();
+            const auto actions = caps.value("api_actions", J::array());
+            if (req->method() == drogon::Get) { jsonReply(ok(J{{"actions", actions}, {"capabilities", caps}}), std::move(cb)); return; }
+            const auto posted = J::parse(req->body(), nullptr, false);
+            if (!posted.is_object()) { jsonReply(fail("invalid JSON request"), std::move(cb)); return; }
+            const auto action = posted.value("action", std::string());
+            if (std::find(actions.begin(), actions.end(), J(action)) == actions.end()) { jsonReply(fail("unsupported QQ Official action"), std::move(cb)); return; }
+            const auto params = posted.value("params", J::object());
+            adapter->invokeActionAsync(action, params, [cb = std::move(cb)](J result) mutable {
+                if (!result.is_object() || !result.value("ok", false)) {
+                    jsonReply(fail(result.is_object() ? result.value("message", std::string("QQ Official action failed")) : "QQ Official action returned no result"), std::move(cb)); return;
+                }
+                jsonReply(ok(result.value("data", J::object())), std::move(cb));
+            });
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Post});
 
     // QQ 官方机器人 2.0 群管理：禁言、用户入群审批与自动审批策略。
     // OpenID 是适配器账号级标识，必须使用当前群详情所选账号的 endpointId。

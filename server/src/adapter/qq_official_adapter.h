@@ -7,6 +7,7 @@
 #include "adapter_interface.h"
 #include "../message/qq_official_message.h"
 #include "qq_official_name_cache.h"
+#include "qq_official_protocol.h"
 #include "qq_gateway_socket.h"
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
@@ -143,7 +144,11 @@ public:
         std::lock_guard lock(metaMu_); const auto it = groupMeta_.find(group);
         return it == groupMeta_.end() ? 0 : it->second.memberCount;
     }
-    std::string getSelfRole(const std::string& groupId) const override { return loginId_.empty() ? std::string() : memberRole(groupId, loginId_); }
+    std::string getSelfRole(const std::string& groupId) const override {
+        const auto group = nativeId(groupId, identity::Kind::Group); refreshBotState(group);
+        std::lock_guard lock(metaMu_); const auto found = groupMeta_.find(group);
+        return found == groupMeta_.end() ? std::string() : found->second.selfRole;
+    }
     /// `.log export` 一类功能走这里，而不是消息里的媒体码。官方没有独立的"群文件"
     /// 接口，按文件类型（file_type=4）发富媒体到群里，落到群聊里就是一个文件。
     void uploadGroupFile(const std::string& groupId, const std::string& name,
@@ -240,31 +245,47 @@ public:
         caps["stream_message"] = true;  // 单聊流式输出
         caps["custom_menu"] = true;
         caps["command_panel"] = true;
+        caps["group_member_events"] = true;
+        caps["group_member_events_enabled"] = subscribeGroupMemberEvents_;
+        caps["interaction_events"] = true;
+        caps["subscription_status_events"] = true;
+        caps["typing_indicator"] = true;
+        caps["wakeup_message"] = true;
+        caps["share_link"] = true;
+        caps["api_actions"] = qqprotocol::actions();
         return caps;
     }
     void invokeActionAsync(const std::string& action, const json& params, ActionCallback cb) override {
-        const std::string groupId = nativeId(params.value("groupId", std::string()), identity::Kind::Group);
-        const std::string strategyId = params.value("strategyId", std::string());
-        const std::string userOpenId = nativeId(params.value("userOpenId", std::string()), identity::Kind::User);
-        const std::string panelId = params.value("panelId", std::string());
-        const std::string messageId = params.value("messageId", std::string());
-        const std::string guildId = params.value("guildId", std::string());
-        const std::string channelId = params.value("channelId", std::string());
+        if (const auto error = qqprotocol::validate(action, params); !error.empty()) { cb(apiResult(false, 0, error)); return; }
+        const std::string groupId = urlEncode(nativeId(params.value("groupId", std::string()), identity::Kind::Group));
+        const std::string strategyId = urlEncode(params.value("strategyId", std::string()));
+        const std::string userOpenId = urlEncode(nativeId(params.value("userOpenId", std::string()), identity::Kind::User));
+        const std::string panelId = urlEncode(params.value("panelId", std::string()));
+        const std::string messageId = urlEncode(params.value("messageId", std::string()));
+        const std::string guildId = urlEncode(params.value("guildId", std::string()));
+        const std::string channelId = urlEncode(params.value("channelId", std::string()));
+        auto nativeList = [&](const char* field, identity::Kind kind) {
+            auto list = params.value(field, json::array());
+            for (auto& value : list) value = nativeId(value.get<std::string>(), kind);
+            return list;
+        };
         // 撤回等接口群聊/单聊两侧路径不同，按调用方给的是群还是人来选。
         const std::string peerBase = groupId.empty() ? ("/v2/users/" + userOpenId) : ("/v2/groups/" + groupId);
         const bool hasPeer = !groupId.empty() || !userOpenId.empty();
         if (action == "qq_get_mute" && !groupId.empty()) {
             officialApi(drogon::Get, "/v2/groups/" + groupId + "/restrict_chat_setting", json::object(), std::move(cb));
         } else if (action == "qq_set_mute" && !groupId.empty()) {
+            auto members = params.value("members", json::array());
+            for (auto& member : members) member["member_openid"] = nativeId(member["member_openid"].get<std::string>(), identity::Kind::User);
             officialApi(drogon::Post, "/v2/groups/" + groupId + "/restrict_chat_setting",
-                        json{{"members", params.value("members", json::array())}}, std::move(cb));
+                        json{{"members", members}}, std::move(cb));
         } else if (action == "qq_join_requests" && !groupId.empty()) {
             json body;
             if (params.contains("cursor")) body["cursor"] = params["cursor"];
             if (params.contains("limit")) body["limit"] = params["limit"];
             officialApi(drogon::Get, "/v2/groups/" + groupId + "/join_request_list", body, std::move(cb));
         } else if (action == "qq_approve_join" && !groupId.empty()) {
-            const std::string member = params.value("memberOpenId", std::string());
+            const std::string member = urlEncode(nativeId(params.value("memberOpenId", std::string()), identity::Kind::User));
             if (member.empty()) { cb(apiResult(false, 0, "memberOpenId required")); return; }
             json body{{"op", params.value("op", std::string("approve"))}};
             if (params.contains("joinRequestId")) body["join_request_id"] = params["joinRequestId"];
@@ -298,7 +319,7 @@ public:
             if (params.contains("cursor")) query["cursor"] = params["cursor"];
             officialApi(drogon::Get, "/v2/groups/" + groupId + "/members", query, std::move(cb));
         } else if (action == "qq_group_member" && !groupId.empty()) {
-            const std::string member = nativeId(params.value("memberOpenId", std::string()), identity::Kind::User);
+            const std::string member = urlEncode(nativeId(params.value("memberOpenId", std::string()), identity::Kind::User));
             if (member.empty()) { cb(apiResult(false, 0, "memberOpenId required")); return; }
             officialApi(drogon::Get, "/v2/groups/" + groupId + "/members/" + member, json::object(), std::move(cb));
         // ── 群管理 ────────────────────────────────────────────
@@ -310,9 +331,9 @@ public:
         } else if (action == "qq_set_blacklist" && !groupId.empty()) {
             officialApi(drogon::Post, "/v2/groups/" + groupId + "/member_blacklist",
                         json{{"op", params.value("op", std::string("add"))},
-                             {"member_openids", params.value("memberOpenIds", json::array())}}, std::move(cb));
+                             {"member_openids", nativeList("memberOpenIds", identity::Kind::User)}}, std::move(cb));
         } else if (action == "qq_remove_members" && !groupId.empty()) {
-            json body{{"member_openids", params.value("memberOpenIds", json::array())}};
+            json body{{"member_openids", nativeList("memberOpenIds", identity::Kind::User)}};
             if (params.contains("addToMemberBlacklist")) body["add_to_member_blacklist"] = params["addToMemberBlacklist"];
             officialApi(drogon::Post, "/v2/groups/" + groupId + "/batch_remove_members", body, std::move(cb));
         // ── 消息撤回 ──────────────────────────────────────────
@@ -345,8 +366,8 @@ public:
             officialApi(drogon::Delete, "/v2/panels/" + panelId, json::object(), std::move(cb));
         } else if (action == "qq_panel_target" && !panelId.empty()) {
             json body{{"op", params.value("op", std::string("add"))}};
-            if (params.contains("userOpenIds")) body["user_openids"] = params["userOpenIds"];
-            if (params.contains("groupOpenIds")) body["group_openids"] = params["groupOpenIds"];
+            if (params.contains("userOpenIds")) body["user_openids"] = nativeList("userOpenIds", identity::Kind::User);
+            if (params.contains("groupOpenIds")) body["group_openids"] = nativeList("groupOpenIds", identity::Kind::Group);
             officialApi(drogon::Put, "/v2/panels/" + panelId + "/target", body, std::move(cb));
         // ── 频道（guild/channel）侧 ────────────────────────────
         } else if (action == "qq_me") {
@@ -370,7 +391,41 @@ public:
         } else if (action == "qq_interaction") {
             const std::string interactionId = params.value("interactionId", std::string());
             if (interactionId.empty()) { cb(apiResult(false, 0, "interactionId required")); return; }
-            officialApi(drogon::Put, "/interactions/" + interactionId, params.value("body", json::object()), std::move(cb));
+            auto body = params.value("body", json{{"code", 0}});
+            if (!body.contains("code")) body["code"] = 0;
+            if (qqprotocol::integer(body, "code", -1) < 0 || qqprotocol::integer(body, "code", -1) > 5) { cb(apiResult(false, 0, "互动回应 code 须为 0–5。")); return; }
+            std::string responseError;
+            {
+                std::lock_guard lock(replyMu_);
+                const auto now = std::time(nullptr);
+                for (auto it = interactionResponses_.begin(); it != interactionResponses_.end(); ) {
+                    if (now - it->second > 300) it = interactionResponses_.erase(it); else ++it;
+                }
+                if (interactionResponses_.count(interactionId)) responseError = "该互动已经回应，不能重复提交。";
+                else if (interactionResponses_.size() >= 16384) responseError = "互动回应队列繁忙，请稍后重试。";
+                else interactionResponses_[interactionId] = now;
+            }
+            if (!responseError.empty()) { cb(apiResult(false, 0, responseError)); return; }
+            officialApi(drogon::Put, "/interactions/" + urlEncode(interactionId), body, std::move(cb));
+        } else if (action == "qq_generate_share_url") {
+            officialApi(drogon::Post, "/v2/generate_url_link", json{{"callback_data", params.value("callbackData", std::string())}}, std::move(cb));
+        } else if (action == "qq_gateway") {
+            officialApi(drogon::Get, "/gateway", json::object(), std::move(cb));
+        } else if ((action == "qq_send_message" || action == "qq_media_files" || action == "qq_upload_prepare" || action == "qq_upload_part_finish") && hasPeer) {
+            const std::string suffix = action == "qq_send_message" ? "/messages" : action == "qq_media_files" ? "/files"
+                : action == "qq_upload_prepare" ? "/upload_prepare" : "/upload_part_finish";
+            officialApi(drogon::Post, peerBase + suffix, params.value("body", json::object()), std::move(cb));
+        } else if (action == "qq_input_notify" && !userOpenId.empty() && groupId.empty()) {
+            const int seconds = qqprotocol::integer(params, "seconds", 30);
+            if (seconds < 1 || seconds > 60) { cb(apiResult(false, 0, "输入中状态持续时间须为 1–60 秒。")); return; }
+            json body{{"msg_type", 6}, {"input_notify", {{"input_type", 1}, {"input_second", seconds}}}};
+            for (const char* field : {"msg_id", "event_id", "msg_seq"}) if (params.contains(field)) body[field] = params[field];
+            officialApi(drogon::Post, peerBase + "/messages", body, std::move(cb));
+        } else if (action == "qq_wakeup_message" && !userOpenId.empty() && groupId.empty()) {
+            auto body = params.value("body", json::object());
+            if (body.contains("msg_id") || body.contains("event_id")) { cb(apiResult(false, 0, "互动召回消息不能同时携带 msg_id 或 event_id。")); return; }
+            body["is_wakeup"] = true;
+            officialApi(drogon::Post, peerBase + "/messages", body, std::move(cb));
         } else {
             cb(apiResult(false, 0, "unsupported QQ Official action or missing parameter"));
         }
@@ -386,6 +441,7 @@ public:
             std::lock_guard lock(metaMu_);
             groupMeta_.clear(); nameQueries_.clear(); infoRequests_.clear(); memberRequests_.clear(); listRequests_.clear();
             infoBlockedUntil_ = memberBlockedUntil_ = listBlockedUntil_ = 0;
+            stateRequests_.clear(); stateBlockedUntil_ = 0;
             nameWarmGroups_.clear(); nameRemovedGroups_.clear(); nameWarmCursor_.clear(); nameDiscoveryAt_ = nameNextWorkAt_ = 0;
             nameGroupEpochs_.clear();
             lastNameActivity_ = 0;
@@ -395,6 +451,8 @@ public:
         appSecret_ = cfg.value("appSecret", std::string());
         displayQQ_ = cfg.value("qqNumber", std::string());
         forceVerifyImageResource_ = cfg.value("forceVerifyImageResource", cfg.value("force_verify_image_resource", false));
+        subscribeGroupMemberEvents_ = cfg.value("subscribeGroupMemberEvents", cfg.value("subscribe_group_member_events", false));
+        autoAcknowledgeInteractions_ = cfg.value("autoAcknowledgeInteractions", cfg.value("auto_acknowledge_interactions", true));
         richStyle_ = qq_rich::style(cfg.value("qqRichReplies", std::string("off")));
         interactions_ = qq_rich::interaction(cfg.value("qqInteractions", std::string("links")));
         setMessageFormatOverride(parseFormatOverride(cfg.value("message_format", std::string())));
@@ -421,6 +479,7 @@ public:
             std::lock_guard lock(metaMu_);
             for (auto& [group, meta] : groupMeta_) {
                 meta.infoRefreshing = meta.refreshing = false;
+                meta.stateRefreshing = false;
                 meta.pendingCursor.clear(); meta.pendingMembers.clear(); meta.seenCursors.clear();
             }
             nameQueries_.clear(); nameDiscoveryAt_ = 0;
@@ -521,6 +580,7 @@ public:
     using ApiTransport = std::function<void(drogon::HttpMethod, const std::string&, const json&, ActionCallback)>;
     void setApiTransportForTest(ApiTransport transport) { testApi_ = std::move(transport); }
     static json apiResponseForTest(int status, const json& data) { return checkedApiResponse(status, data); }
+    int gatewayIntentsForTest() const { return qqprotocol::intents(subscribeGroupMemberEvents_); }
     void setNameTimeForTest(std::time_t now) { nameTimeForTest_ = now; }
     void maintainNamesForTest(bool online = true) { connected_ = online; maintainNameCache(); }
     static std::string urlEncodeForTest(const std::string& value) { return urlEncode(value); }
@@ -625,6 +685,9 @@ private:
         std::string pendingCursor;
         std::vector<std::pair<std::string, std::string>> pendingMembers;
         std::set<std::string> seenCursors;
+        std::string selfMemberId, selfRole;
+        std::time_t stateRefreshedAt = 0, stateRetryAt = 0;
+        bool stateRefreshing = false;
     };
     struct NameQuery { std::time_t attemptedAt = 0; bool refreshing = false; };
     static constexpr int kGroupMetaTtlSeconds = 300;
@@ -705,7 +768,7 @@ private:
             discover = !nameDiscoveryAt_ || now - nameDiscoveryAt_ >= 60;
             // One page at a time; foreground lookups have priority. The 10s
             // HTTP timeout clears in-flight flags when a server does not reply.
-            for (const auto& [group, meta] : groupMeta_) if (meta.refreshing || meta.infoRefreshing) return;
+            for (const auto& [group, meta] : groupMeta_) if (meta.refreshing || meta.infoRefreshing || meta.stateRefreshing) return;
             for (const auto& [user, query] : nameQueries_) if (query.refreshing) return;
             if (discover) nameDiscoveryAt_ = now;
         }
@@ -750,6 +813,7 @@ private:
     }
 
     std::string memberRole(const std::string& groupId, const std::string& userId) const {
+        if (!loginId_.empty() && userId == loginId_) return getSelfRole(groupId);
         const std::string g = nativeId(groupId, identity::Kind::Group);
         const auto user = nativeId(userId, identity::Kind::User);
         refreshGroupMembersIfNeeded(g);
@@ -758,6 +822,26 @@ private:
         if (it == groupMeta_.end()) return {};
         const auto role = it->second.roles.find(user);
         return role == it->second.roles.end() ? std::string() : role->second;
+    }
+
+    void refreshBotState(const std::string& group) const {
+        if (stopping_ || group.empty() || (accessToken_.empty() && !testApi_)) return;
+        {
+            std::lock_guard lock(metaMu_); if (nameRemovedGroups_.count(group)) return;
+            auto& meta = groupMeta_[group]; const auto now = nameNow();
+            if (meta.stateRefreshing || now < meta.stateRetryAt || (meta.stateRefreshedAt && now - meta.stateRefreshedAt < kGroupMetaTtlSeconds)) return;
+            if (!queryBudget(stateRequests_, 28, stateBlockedUntil_)) return;
+            meta.stateRefreshing = true;
+        }
+        auto self = std::const_pointer_cast<QQOfficialAdapter>(shared_from_this());
+        const auto generation = nameGeneration_.load(), epoch = nameGroupEpoch(group);
+        self->officialApi(drogon::Get, "/v2/groups/" + group + "/bot_state", json::object(), [self, group, generation, epoch](json result) {
+            if (self->stopping_ || self->nameGeneration_ != generation || !self->currentNameGroup(group, epoch)) return;
+            std::lock_guard lock(self->metaMu_); auto& meta = self->groupMeta_[group]; meta.stateRefreshing = false;
+            if (result.value("ok", false)) { meta.stateRefreshedAt = self->nameNow(); meta.stateRetryAt = 0; }
+            else meta.stateRetryAt = self->nameNow() + 60;
+            self->queryBackoff(result, self->stateBlockedUntil_);
+        });
     }
 
     bool refreshGroupMeta(const std::string& groupId, int ttl = kGroupMetaTtlSeconds) const {
@@ -971,6 +1055,15 @@ private:
                 const auto count = data["group_member_num"].get<int64_t>();
                 if (count >= 0 && count <= 100000) { std::lock_guard lock(metaMu_); groupMeta_[group].memberCount = static_cast<int>(count); }
             }
+        } else if (suffix == "/bot_state") {
+            const auto role = qqprotocol::text(data, "member_role");
+            if (role == "member" || role == "admin" || role == "owner") {
+                std::lock_guard lock(metaMu_); auto& meta = groupMeta_[group];
+                meta.selfMemberId = qqprotocol::text(data, "member_openid"); meta.selfRole = role; meta.stateRefreshedAt = nameNow();
+            }
+        } else if (suffix == "/join_request_list" || suffix == "/member_blacklist" || suffix == "/restrict_chat_setting") {
+            const char* field = suffix == "/join_request_list" ? "list" : suffix == "/member_blacklist" ? "users" : "members";
+            if (data.contains(field) && data[field].is_array()) for (const auto& person : data[field]) if (person.is_object()) rememberAuthor(person, true, revision);
         } else if (suffix == "/members" && data.contains("members") && data["members"].is_array() && data["members"].size() <= kMemberPageSize) {
             for (const auto& member : data["members"]) if (member.is_object()) rememberMember(group, member, revision);
         } else if (suffix.rfind("/members/", 0) == 0 && QQOfficialNameCache::text(data, "member_openid") == suffix.substr(9)) {
@@ -1006,6 +1099,23 @@ private:
     }
 
     void officialApi(drogon::HttpMethod method, const std::string& path, const json& body, ActionCallback cb) {
+        std::optional<OutboundAttempt> outgoing;
+        if (method == drogon::Post && (path.ends_with("/messages") || path.ends_with("/stream_messages"))) {
+            const bool group = path.rfind("/v2/groups/", 0) == 0;
+            auto actual = qqprotocol::text(body, "content");
+            if (actual.empty()) actual = qqprotocol::text(qqprotocol::object(body, "markdown"), "content");
+            if (actual.empty()) actual = qqprotocol::text(body, "content_raw");
+            if (actual.empty()) actual = qqprotocol::integer(body, "msg_type") == 6 ? "[输入中状态]" : body.contains("media") ? "[富媒体消息]" : "[平台消息]";
+            const size_t begin = group ? 11 : 10;
+            const auto end = path.find('/', begin);
+            outgoing = OutboundAttempt::prepare("QQ 官方「" + name_ + "」", (group ? "群 " : "私聊 ") + path.substr(begin, end - begin), actual);
+            outgoing->submitted();
+            cb = [outgoing, original = std::move(cb)](json result) mutable {
+                if (result.value("ok", false)) outgoing->accepted(qqprotocol::text(qqprotocol::object(result, "data"), "id"));
+                else outgoing->failed(result.value("message", std::string("平台发送失败")));
+                original(std::move(result));
+            };
+        }
         if (accessToken_.empty() && !testApi_) { cb(apiResult(false, 0, "QQ 官方机器人尚未取得 AccessToken")); return; }
         const auto revision = names_.revision();
         const auto app = appId_;
@@ -1087,7 +1197,7 @@ private:
     void fetchShareUrl(){
         auto self=shared_from_this(); auto c=httpsClient("api.bot.qq.com"); if(!c){openGateway();return;} auto r=drogon::HttpRequest::newHttpRequest(); r->setMethod(drogon::Post); r->setPath("/v2/generate_url_link"); r->setContentTypeCode(drogon::CT_APPLICATION_JSON); r->addHeader("Host","api.bot.qq.com"); r->addHeader("Authorization","QQBot "+accessToken_); r->setBody(json{{"callback_data","dicenext"}}.dump());
         c->sendRequest(r,[self](drogon::ReqResult rr,const drogon::HttpResponsePtr& resp){
-            try{if(rr==drogon::ReqResult::Ok&&resp&&resp->statusCode()<300){auto j=json::parse(resp->body()); self->shareUrl_=j.value("url_link",std::string()); const std::string realQQ=queryValue(self->shareUrl_,"robot_uin"); if(!realQQ.empty()) self->displayQQ_=realQQ;} else DICE_LOG_WARN("QQOfficial '{}': 生成机器人分享链接失败，将继续连接 Gateway",self->name_);}catch(const std::exception&e){DICE_LOG_WARN("QQOfficial '{}': 解析机器人分享链接失败：{}",self->name_,e.what());}
+            try{if(rr==drogon::ReqResult::Ok&&resp&&resp->statusCode()<300){auto j=json::parse(resp->body());const auto checked=checkedApiResponse(static_cast<int>(resp->statusCode()),j);if(!checked.value("ok",false))throw std::runtime_error(checked.value("message",std::string("分享链接接口未成功")));const auto url=qqprotocol::shareUrl(j);if(url.empty())throw std::runtime_error("响应缺少有效的 data.url");self->shareUrl_=url; const std::string realQQ=queryValue(self->shareUrl_,"robot_uin"); if(!realQQ.empty()) self->displayQQ_=realQQ;} else DICE_LOG_WARN("QQOfficial '{}': 生成机器人分享链接失败，将继续连接 Gateway",self->name_);}catch(const std::exception&e){DICE_LOG_WARN("QQOfficial '{}': 解析机器人分享链接失败：{}",self->name_,e.what());}
             if(!self->stopping_&&!self->connected_) self->openGateway();
         });
     }
@@ -1112,15 +1222,24 @@ private:
     void onGateway(const std::string& raw) {
         try { auto p=json::parse(raw); if(p.contains("s")&&!p["s"].is_null()) seq_=p["s"].get<int64_t>(); int op=p.value("op",-1); if(op==10){ if(!sessionId_.empty() && seq_>=0) resume(); else identify(); return; } if(op==7){ scheduleGatewayReconnect(); return; } if(op==0){ auto t=p.value("t",std::string()); auto d=p.value("d",json::object()); if(t=="READY"){sessionId_=d.value("session_id",std::string()); auto u=d.value("user",json::object()); loginId_=u.value("id",std::string()); loginName_=u.value("username",std::string()); connected_=true; connecting_=false; beginHeartbeat(p["d"].value("heartbeat_interval",45000)); beginNameMaintenance();} else if(t=="RESUMED"){connected_=true; connecting_=false; beginNameMaintenance();} else dispatch(t,d,p.value("id",std::string())); }} catch(const std::exception&e){DICE_LOG_WARN("QQOfficial parse: {}",e.what());}
     }
-    void identify(){ if(gateway_) gateway_->sendText(json{{"op",2},{"d",{{"token","QQBot "+accessToken_},{"intents",(1<<25)|(1<<26)|(1<<30)},{"shard",json::array({0,1})},{"properties",{{"$os","DiceNext"},{"$browser","DiceNext"},{"$device","DiceNext"}}}}}}.dump()); }
+    void identify(){ if(gateway_) gateway_->sendText(json{{"op",2},{"d",{{"token","QQBot "+accessToken_},{"intents",qqprotocol::intents(subscribeGroupMemberEvents_)},{"shard",json::array({0,1})},{"properties",{{"$os","DiceNext"},{"$browser","DiceNext"},{"$device","DiceNext"}}}}}}.dump()); }
     void resume(){ if(gateway_) gateway_->sendText(json{{"op",6},{"d",{{"token","QQBot "+accessToken_},{"session_id",sessionId_},{"seq",seq_}}}}.dump()); }
     void scheduleGatewayReconnect(){ if(stopping_||gatewayUrl_.empty()) return; connected_=false; connecting_=true; auto self=shared_from_this(); drogon::app().getLoop()->runAfter(5.0,[self]{ if(!self->stopping_) self->connectGateway(self->gatewayUrl_); }); }
     void scheduleTokenRefresh(int expiresIn){ if(accessTokenTimer_) drogon::app().getLoop()->invalidateTimer(*accessTokenTimer_); const int refreshIn=expiresIn>300?expiresIn-300:60; auto self=shared_from_this(); accessTokenTimer_=drogon::app().getLoop()->runAfter(static_cast<double>(refreshIn),[self]{ if(!self->stopping_) self->fetchAccessToken(); }); }
     void beginHeartbeat(int ms){ if(heartbeatTimer_)drogon::app().getLoop()->invalidateTimer(*heartbeatTimer_); auto self=shared_from_this(); const int intervalMs=ms>0?ms:1000; heartbeatTimer_=drogon::app().getLoop()->runEvery(static_cast<double>(intervalMs)/1000.0,[self]{if(self->gateway_)self->gateway_->sendText(json{{"op",1},{"d",self->seq_>=0?json(self->seq_):json(nullptr)}}.dump());}); }
     void dispatch(const std::string&t,const json&d,const std::string&eventId){
         markNameActivity();
-        Message m; m.platform=platform();m.adapterId=id_;m.selfId=loginId_;m.id=d.value("id",eventId);m.content=d.value("content",std::string());m.rawContent=m.content;m.displayContent=m.content;m.timestamp=std::time(nullptr);m.extra={{"event_id",eventId},{"event_type",t},{"official_bot_id",appId_}};
-        const auto author=d.value("author",json::object());
+        if(!d.is_object())return;
+        Message m; m.platform=platform();m.adapterId=id_;m.selfId=loginId_;m.id=qqprotocol::text(d,"id");if(m.id.empty())m.id=eventId;
+        m.content=qqprotocol::text(d,"content");m.rawContent=m.content;m.displayContent=m.content;m.timestamp=qqprotocol::eventTime(d,std::time(nullptr));m.extra={{"event_id",eventId},{"event_type",t},{"official_bot_id",appId_}};
+        const auto author=qqprotocol::object(d,"author");
+        const auto providerId=qqprotocol::text(d,"id");
+        if(!providerId.empty()&&(t=="C2C_MESSAGE_CREATE"||t=="GROUP_AT_MESSAGE_CREATE"||t=="GROUP_MESSAGE_CREATE"||t=="AT_MESSAGE_CREATE")){
+            auto target=qqprotocol::text(d,t=="AT_MESSAGE_CREATE"?"channel_id":"group_openid");
+            if(t=="C2C_MESSAGE_CREATE"){target=qqprotocol::text(author,"user_openid");if(target.empty())target=qqprotocol::text(author,"id");}
+            const auto key=appId_+'\x1f'+t+'\x1f'+target+'\x1f'+providerId+'\x1f'+qqprotocol::sceneValue(d,"msg_idx");
+            if(!acceptOfficialOnce(key))return;
+        }
         if(t=="C2C_MESSAGE_CREATE"){
             m.type=MessageType::kPrivate; m.senderId=QQOfficialNameCache::text(author,"user_openid");
             if(m.senderId.empty())m.senderId=QQOfficialNameCache::text(author,"id");
@@ -1170,6 +1289,9 @@ private:
             ? "platform" : !m.senderName.empty() ? "cache" : "missing";
         if(d.contains("attachments"))m.extra["attachments"]=d["attachments"];
         if(d.contains("msg_elements"))m.extra["msg_elements"]=d["msg_elements"];
+        for(const char* field:{"message_scene","message_type","ark_data"})if(d.contains(field))m.extra[field]=d[field];
+        const auto messageIndex=qqprotocol::sceneValue(d,"msg_idx");
+        if(!messageIndex.empty())m.extra["message_reference_id"]=messageIndex;
         const auto normalized = qqmsg::normalizeIncoming(m.content, d.value("attachments", json::array()));
         m.content = normalized.command;
         m.rawContent = normalized.raw;
@@ -1177,7 +1299,7 @@ private:
         if(messageCb_)messageCb_(m);
     }
     void dispatchEvent(const std::string& type,const json& data,const std::string& eventId){
-        BotEvent ev; ev.platform=platform(); ev.adapterId=id_; ev.selfId=loginId_; ev.timestamp=data.value("timestamp",static_cast<int64_t>(std::time(nullptr))); ev.extra={{"event_id",eventId},{"event_type",type},{"data",data}};
+        BotEvent ev; ev.platform=platform(); ev.adapterId=id_; ev.selfId=loginId_; ev.timestamp=qqprotocol::eventTime(data,std::time(nullptr)); ev.extra={{"event_id",eventId},{"event_type",type},{"data",data}};
         ev.extra["official_bot_id"] = appId_;   // 供事件层按 bot 映射 OpenID → 公共号
         if(type=="GROUP_ADD_ROBOT"||type=="GROUP_DEL_ROBOT"){ev.type=type=="GROUP_ADD_ROBOT"?EventType::kGroupIncrease:EventType::kGroupDecrease;ev.groupId=data.value("group_openid",std::string());ev.userId=loginId_;ev.operatorId=data.value("op_member_openid",std::string());rememberPassiveEvent(MessageType::kGroup,ev.groupId,eventId);}
         else if(type=="FRIEND_ADD"||type=="FRIEND_DEL"){ev.type=type=="FRIEND_ADD"?EventType::kFriendAdd:EventType::kOther;ev.userId=data.value("openid",std::string());if(type=="FRIEND_ADD")rememberPassiveEvent(MessageType::kPrivate,ev.userId,eventId);}
@@ -1211,6 +1333,37 @@ private:
             DICE_LOG_INFO("QQOfficial '{}': group join request group={} member={} request={}",name_,ev.groupId,ev.userId,requestId);
         }
         else if(type=="C2C_MSG_RECEIVE"||type=="C2C_MSG_REJECT"){ev.userId=data.value("openid",std::string());if(type=="C2C_MSG_RECEIVE")rememberPassiveEvent(MessageType::kPrivate,ev.userId,eventId);}
+        else if(type=="INTERACTION_CREATE"){
+            ev.subType="interaction";ev.groupId=qqprotocol::text(data,"group_openid");
+            ev.userId=qqprotocol::text(data,ev.groupId.empty()?"user_openid":"group_member_openid");
+            const auto details=qqprotocol::object(data,"data"), resolved=qqprotocol::object(details,"resolved");
+            if(ev.userId.empty())ev.userId=qqprotocol::text(resolved,"user_id");
+            const int interactionType=qqprotocol::integer(data,"type",qqprotocol::integer(details,"type"));
+            const auto id=qqprotocol::text(data,"id");
+            if(!id.empty()&&!acceptOfficialOnce(appId_+'\x1f'+type+'\x1f'+id))return;
+            ev.extra["interaction_id"]=id;ev.extra["interaction_type"]=interactionType;
+            ev.extra["interaction_data"]=details;ev.extra["scene"]=qqprotocol::text(data,"scene");
+            for(const char* field:{"guild_id","channel_id"})if(data.contains(field))ev.extra[field]=data[field];
+            ev.extra["interaction_ack_automatic"]=autoAcknowledgeInteractions_&&(interactionType==11||interactionType==12);
+            if(!id.empty()&&(interactionType==11||interactionType==12)){
+                // Passive message replies use the OUTER event ID, never d.id
+                // (the interaction callback ID) or opaque button_data.
+                const auto target=ev.groupId.empty()?ev.userId:ev.groupId;
+                if(!target.empty())rememberPassiveEvent(ev.groupId.empty()?MessageType::kPrivate:MessageType::kGroup,target,eventId);
+                if(autoAcknowledgeInteractions_)invokeActionAsync("qq_interaction",{{"interactionId",id},{"body",{{"code",0}}}},[self=shared_from_this()](json result){
+                    if(!result.value("ok",false))DICE_LOG_DEBUG("QQOfficial '{}': 互动回应未完成：{}",self->name_,result.value("message",std::string()));
+                });
+            }
+        }
+        else if(type=="SUBSCRIBE_MESSAGE_STATUS"){
+            ev.subType="subscription_status";ev.groupId=qqprotocol::text(data,"group_openid");ev.userId=qqprotocol::text(data,"openid");
+            if(data.contains("result")&&data["result"].is_array())ev.extra["subscription_results"]=data["result"];
+        }
+        else if(type.rfind("GUILD_",0)==0||type.rfind("CHANNEL_",0)==0){
+            ev.subType="channel_event";ev.userId=qqprotocol::text(data,"op_user_id");
+            ev.extra["guild_id"]=type.rfind("GUILD_",0)==0?qqprotocol::text(data,"id"):qqprotocol::text(data,"guild_id");
+            if(type.rfind("CHANNEL_",0)==0)ev.extra["channel_id"]=qqprotocol::text(data,"id");
+        }
         if(!ev.groupId.empty()) {
             if(type=="GROUP_DEL_ROBOT") forgetNameGroup(ev.groupId);
             else {
@@ -1233,6 +1386,20 @@ private:
         }
         if(!ev.operatorId.empty())ev.extra["operator_name"]=getUserName(ev.operatorId,ev.groupId);
         if(eventCb_)eventCb_(ev);
+    }
+    bool acceptOfficialOnce(const std::string& key) {
+        std::lock_guard lock(replyMu_); const auto now = std::time(nullptr);
+        if (now - seenMessageSweepAt_ >= 30) {
+            for (auto it = seenMessages_.begin(); it != seenMessages_.end(); ) if (now - it->second > 600) it = seenMessages_.erase(it); else ++it;
+            seenMessageSweepAt_ = now;
+        }
+        if (seenMessages_.count(key)) return false;
+        if (seenMessages_.size() >= 16384) {
+            auto oldest = seenMessages_.begin();
+            for (auto it = seenMessages_.begin(); it != seenMessages_.end(); ++it) if (it->second < oldest->second) oldest = it;
+            seenMessages_.erase(oldest);
+        }
+        seenMessages_[key] = now; return true;
     }
     static std::string eventKey(MessageType type,const std::string& target){return std::to_string(static_cast<int>(type))+":"+target;}
     void rememberPassiveEvent(MessageType type,const std::string& target,const std::string& eventId){if(target.empty()||eventId.empty())return;std::lock_guard lock(replyMu_);pendingEvents_[eventKey(type,target)]={eventId,std::time(nullptr)};}
@@ -1755,10 +1922,16 @@ public:
             && m.type != MessageType::kChannel && markdownCardReady();
         const auto nativeUser = m.extra.is_object()
             ? m.extra.value("__identity_native_sender", std::string()) : std::string();
-        return outbound::qqText(text, format, useMarkdown, m.type == MessageType::kChannel,
+        auto body = outbound::qqText(text, format, useMarkdown, m.type == MessageType::kChannel,
             m.platform == "qq_official" ? m.qqRichReply.get() : nullptr, m.presentationActions,
             m.platform == "qq_official" ? richStyle_ : "off", interactions_, nativeUser,
             forceVerifyImageResource_, fallbackLevel);
+        auto reference = qqprotocol::text(m.extra, "__qq_quote_reference");
+        if (!reference.empty() && reference == m.id) reference = qqprotocol::text(m.extra, "message_reference_id");
+        if (!reference.empty() && m.type != MessageType::kChannel) {
+            body["message_reference"] = {{"message_id", reference}};
+        }
+        return body;
     }
 private:
     /// QQ 官方机器人支持 Markdown，但它仍受机器人后台能力开关约束。卡片模式
@@ -1849,6 +2022,9 @@ private:
     inline static std::function<std::string(const std::string&)> imagePublisher_;   // 本地图 → 公网 URL（图床）
     std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,accessToken_,loginId_,loginName_,sessionId_,gatewayUrl_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{nullptr}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; int64_t seq_=-1; std::shared_ptr<QQGatewaySocket> gateway_; std::optional<trantor::TimerId> heartbeatTimer_,accessTokenTimer_; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::unordered_map<std::string,int> replySeq_; std::unordered_map<std::string,std::pair<std::string,std::time_t>> pendingEvents_; mutable std::mutex metaMu_; mutable std::unordered_map<std::string,GroupMeta> groupMeta_;
     QQOfficialNameCache names_;
+    bool subscribeGroupMemberEvents_ = false, autoAcknowledgeInteractions_ = true;
+    std::unordered_map<std::string,std::time_t> seenMessages_, interactionResponses_;
+    std::time_t seenMessageSweepAt_ = 0;
     ApiTransport testApi_;
     drogon::HttpClientPtr nameClient_;
     std::optional<trantor::TimerId> nameMaintenanceTimer_;
@@ -1861,6 +2037,8 @@ private:
     std::time_t nameDiscoveryAt_ = 0, nameNextWorkAt_ = 0;
     mutable std::unordered_map<std::string, NameQuery> nameQueries_;
     mutable std::deque<std::time_t> infoRequests_, memberRequests_, listRequests_;
+    mutable std::deque<std::time_t> stateRequests_;
+    mutable std::time_t stateBlockedUntil_ = 0;
     mutable std::time_t infoBlockedUntil_ = 0, memberBlockedUntil_ = 0, listBlockedUntil_ = 0;
 };
 }

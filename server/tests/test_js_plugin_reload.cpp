@@ -393,6 +393,12 @@ ext.onBecomeFriend = (ctx, msg) => globalThis.__lastEvent =
   `friend:${ctx.player.name}:${msg.sender.nickname}`;
 ext.onGroupJoined = (ctx, msg) => globalThis.__lastEvent =
   `inviter:${ctx.player.name}:${msg.sender.nickname}`;
+ext.onQQInteraction = (ctx, event, msg) => globalThis.__lastEvent =
+  `interaction:${event.interaction_type}:${event.userId}:${ctx.player.name}:${msg.sender.nickname}`;
+ext.onQQSubscriptionStatus = (ctx, event) => globalThis.__lastEvent =
+  `subscription:${event.subscription_results[0].op}:${event.userId}`;
+ext.onQQOfficialEvent = (ctx, event) => globalThis.__lastEvent =
+  `official:${event.event_type}:${event.userId}`;
 seal.ext.register(ext);
 )JS";
         plugin.close();
@@ -436,6 +442,22 @@ seal.ext.register(ext);
         manager.handleEvent(botJoined);
         const auto inviterState = manager.evalString("globalThis.__lastEvent");
         ASSERT_TRUE(inviterState && *inviterState == "inviter:邀请人昵称:邀请人昵称");
+
+        BotEvent interaction;
+        interaction.type = EventType::kOther; interaction.platform = "qq_official"; interaction.userId = "public-user";
+        interaction.subType = "interaction"; interaction.extra = {{"interaction_type", 11}, {"user_name", "互动者"}};
+        manager.handleEvent(interaction);
+        const auto interactionState = manager.evalString("globalThis.__lastEvent");
+        ASSERT_TRUE(interactionState && *interactionState == "interaction:11:public-user:互动者:互动者");
+        interaction.subType = "subscription_status";
+        interaction.extra["subscription_results"] = json::array({{{"op", 2}}});
+        manager.handleEvent(interaction);
+        const auto subscriptionState = manager.evalString("globalThis.__lastEvent");
+        ASSERT_TRUE(subscriptionState && *subscriptionState == "subscription:2:public-user");
+        interaction.subType.clear(); interaction.extra["event_type"] = "FRIEND_DEL";
+        manager.handleEvent(interaction);
+        const auto otherState = manager.evalString("globalThis.__lastEvent");
+        ASSERT_TRUE(otherState && *otherState == "official:FRIEND_DEL:public-user");
     }
 
     fs::remove_all(root, ec);

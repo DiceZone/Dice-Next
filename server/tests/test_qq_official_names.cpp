@@ -23,6 +23,7 @@ struct NameFixture {
     std::vector<Request> requests;
     std::vector<Message> messages;
     std::vector<BotEvent> events;
+    unsigned messageSequence = 0;
     explicit NameFixture(bool persistent = true) {
         if (persistent) {
             if (!db.open((dir.path / "dice.db").string())) throw std::runtime_error("test database failed");
@@ -48,11 +49,11 @@ struct NameFixture {
         callback(QQOfficialAdapter::apiResponseForTest(status, data));
     }
     void group(const std::string& user, const json& username, const std::string& united = {}) {
-        adapter->dispatchForTest("GROUP_MESSAGE_CREATE", {{"id", "message"}, {"group_openid", "group-A"}, {"content", ".r"},
+        adapter->dispatchForTest("GROUP_MESSAGE_CREATE", {{"id", "message-" + std::to_string(++messageSequence)}, {"group_openid", "group-A"}, {"content", ".r"},
             {"author", {{"id", user}, {"member_openid", user}, {"username", username}, {"union_openid", united}, {"member_role", "member"}}}});
     }
     void privateMessage(const std::string& user, const json& username, const std::string& united = {}) {
-        adapter->dispatchForTest("C2C_MESSAGE_CREATE", {{"id", "private"}, {"content", ".r"},
+        adapter->dispatchForTest("C2C_MESSAGE_CREATE", {{"id", "private-" + std::to_string(++messageSequence)}, {"content", ".r"},
             {"author", {{"id", user}, {"user_openid", user}, {"username", username}, {"union_openid", united}}}});
     }
     PlayerProfileRow profile(const std::string& publicId) {

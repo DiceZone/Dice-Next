@@ -2223,6 +2223,20 @@ void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
     if (channelId.empty() && message.type == MessageType::kChannel) channelId = message.targetId;
     JS_SetPropertyStr(ctx_, jmsg, "guildId", JS_NewString(ctx_, guildId.c_str()));
     JS_SetPropertyStr(ctx_, jmsg, "channelId", JS_NewString(ctx_, channelId.c_str()));
+    if (message.platform == "qq_official" && message.extra.is_object()) {
+        json metadata = json::object();
+        for (const char* field : {"message_type", "message_scene", "ark_data", "attachments", "message_reference_id"})
+            if (message.extra.contains(field)) metadata[field] = message.extra[field];
+        if (metadata.contains("message_scene") && metadata["message_scene"].is_object()
+            && metadata["message_scene"].contains("ext") && metadata["message_scene"]["ext"].is_array()) {
+            auto& fields = metadata["message_scene"]["ext"];
+            fields.erase(std::remove_if(fields.begin(), fields.end(), [](const json& field) {
+                return field.is_string() && field.get_ref<const std::string&>().rfind("auth_token=", 0) == 0;
+            }), fields.end());
+        }
+        const auto source = metadata.dump();
+        JS_SetPropertyStr(ctx_, jmsg, "qqOfficial", JS_ParseJSON(ctx_, source.c_str(), source.size(), "qq-official-message"));
+    }
     JS_SetPropertyStr(ctx_, jmsg, "time", JS_NewInt64(ctx_, message.timestamp > 0
         ? message.timestamp : static_cast<int64_t>(std::time(nullptr))));
     // OneBot array messages are retained in extra.raw.message. Other adapters
@@ -2509,6 +2523,7 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
     const char* hook = nullptr;
     bool usePokeEvent = false;
     bool useLeaveEvent = false;
+    bool useOfficialEvent = false;
     switch (event.type) {
     case EventType::kGroupIncrease:
         if (event.userId == event.selfId) {
@@ -2539,7 +2554,12 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
         hook = "onGroupLeave";
         break;
     default:
-        return;
+        if (event.platform != "qq_official") return;
+        message.senderId = event.userId.empty() ? event.operatorId : event.userId;
+        hook = event.subType == "interaction" ? "onQQInteraction" : event.subType == "subscription_status" ? "onQQSubscriptionStatus" : "onQQOfficialEvent";
+        useOfficialEvent = true;
+        if (!extraId("channel_id").empty()) { message.type = MessageType::kChannel; message.targetId = extraId("channel_id"); }
+        break;
     }
 
     if (event.platform == "qq_official") {
@@ -2552,7 +2572,14 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
     JSValue jctx, jmsg;
     buildCtxMsg(message, privilege, jctx, jmsg);
     JSValue hookArg = JS_DupValue(ctx_, jmsg);
-    if (usePokeEvent) {
+    if (useOfficialEvent) {
+        JS_FreeValue(ctx_, hookArg);
+        auto payload = event.extra.is_object() ? event.extra : json::object();
+        payload["groupId"] = event.groupId; payload["userId"] = event.userId; payload["operatorId"] = event.operatorId;
+        payload["platform"] = event.platform; payload["adapterId"] = event.adapterId; payload["timestamp"] = event.timestamp;
+        const auto source = payload.dump();
+        hookArg = JS_ParseJSON(ctx_, source.c_str(), source.size(), "qq-official-event");
+    } else if (usePokeEvent) {
         JS_FreeValue(ctx_, hookArg);
         hookArg = JS_NewObject(ctx_);
         JS_SetPropertyStr(ctx_, hookArg, "groupId", JS_NewString(ctx_, event.groupId.c_str()));
@@ -2572,7 +2599,7 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
     // immediately through the injected adapter sender, matching SealDice.
     const bool previousCapture = capturing_;
     capturing_ = false;
-    JSValueConst args[2] = { jctx, hookArg };
+    JSValueConst args[3] = { jctx, hookArg, jmsg };
     for (auto& e : exts_) {
         if (suspendedFiles_.count(e.second)) continue;
         ScriptFaultScope fault(suspendedFiles_, e.second);
@@ -2581,7 +2608,7 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
         JSValue fn = JS_GetPropertyStr(ctx_, e.first, hook);
         if (JS_IsFunction(ctx_, fn)) {
             ProcessingScope logScope(loggingSource(e.second, hook), "平台事件：" + std::string(hook));
-            JSValue rv = JS_Call(ctx_, fn, e.first, 2, args);
+            JSValue rv = JS_Call(ctx_, fn, e.first, useOfficialEvent ? 3 : 2, args);
             if (JS_IsException(rv)) {
                 JSValue exc = JS_GetException(ctx_);
                 DICE_LOG_ERROR("[js] {} plugin='{}' error: {}", hook, e.second, jsErrorDetails(ctx_, exc));

@@ -1693,6 +1693,12 @@ static int realMain(int argc, char* argv[]) {
                 // 引用开关：骰主关「引用投掷对象发言」后，首段也不引用（但 .log on 等指定引用
                 // 的 quoteOverride 仍生效——那是刻意的定向引用）。
                 bool quote = cmdRouter.quoteReplyEnabled() || !quoteId.empty();
+                if (msg.platform == "qq_official") {
+                    // A quote reference is not a passive-reply msg_id. New QQ
+                    // events provide msg_idx; retain the current message ID for
+                    // reply authorization even when quoting another message.
+                    replyMsg.id = msg.id;
+                }
                 auto segs = cmdRouter.segmentReply(reply, msg.platform);
                 bool priv = msg.type == dice::MessageType::kPrivate;
                 // #6 合并转发(聊天记录)：仅群消息、开关开启、且**回复字符数超过阈值**(默认1200，
@@ -1714,6 +1720,10 @@ static int realMain(int argc, char* argv[]) {
                 // 造成分段 A/B 倒序显示（.draw 长结果尤其明显）。只有单段才引用；多段全部按
                 // 普通消息「顺序」发，保证 A→B 阅读顺序一致。
                 bool quoteFirst = quote && segs.size() == 1;
+                // A historical logical message ID is not a QQ reference index.
+                // Without that message's index, send the reply without a quote.
+                if (quoteFirst && msg.platform == "qq_official" && (quoteId.empty() || quoteId == msg.id))
+                    replyMsg.extra["__qq_quote_reference"] = quoteId.empty() ? msg.id : quoteId;
                 auto sendSegs = [&](const auto& a) {
                     dice::OutboundScope outputScope(replyPlan);
                     if (wantForward && !fwdNodes.empty() && a->sendGroupForwardMsgFormatted(msg.targetId, fwdNodes, replyFormat)) {
@@ -2634,6 +2644,8 @@ static int realMain(int argc, char* argv[]) {
                 extra["appSecret"] = a.value("app_secret", a.value("appSecret", std::string()));
                 extra["qqNumber"] = a.value("qq_number", a.value("qqNumber", std::string()));
                 extra["forceVerifyImageResource"] = a.value("force_verify_image_resource", a.value("forceVerifyImageResource", false));
+                extra["subscribeGroupMemberEvents"] = a.value("subscribe_group_member_events", a.value("subscribeGroupMemberEvents", false));
+                extra["autoAcknowledgeInteractions"] = a.value("auto_acknowledge_interactions", a.value("autoAcknowledgeInteractions", true));
                 extra["qqRichReplies"] = dice::qq_rich::style(a.value("qq_rich_replies", a.value("qqRichReplies", std::string("off"))));
                 extra["qqInteractions"] = dice::qq_rich::interaction(a.value("qq_interactions", a.value("qqInteractions", std::string("links"))));
             }
@@ -2655,6 +2667,8 @@ static int realMain(int argc, char* argv[]) {
                 a["app_secret"] = extra.value("appSecret", std::string());
                 a["qq_number"] = extra.value("qqNumber", std::string());
                 a["force_verify_image_resource"] = extra.value("forceVerifyImageResource", false);
+                a["subscribe_group_member_events"] = extra.value("subscribeGroupMemberEvents", false);
+                a["auto_acknowledge_interactions"] = extra.value("autoAcknowledgeInteractions", true);
                 a["qq_rich_replies"] = extra.value("qqRichReplies", std::string("off"));
                 a["qq_interactions"] = extra.value("qqInteractions", std::string("links"));
             }

@@ -56,6 +56,7 @@ set(TEST_SOURCES
     test_builtin_decks.cpp
     test_qq_official_adapter.cpp
     test_qq_official_names.cpp
+    test_qq_official_protocol.cpp
     test_identity_email.cpp
     test_milky_adapter.cpp
 
