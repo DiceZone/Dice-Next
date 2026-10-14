@@ -109,6 +109,41 @@ TEST(ConfigManager, MissingApiKeyDoesNotChangeOnEveryRead) {
     ASSERT_EQ(observer.get<std::string>("server/api_key"), key);
 }
 
+TEST(ConfigManager, FreshInstallWritesTheApiKeyBeforeAnyoneReadsIt) {
+    // main.cpp 启动时只读一次密钥。以前首次启动写出去的是空值，要等热重载才补上
+    const auto root = temporaryConfigRoot("fresh_key");
+    {
+        ConfigManager cfg((root / "config").string());
+        ASSERT_TRUE(cfg.load());
+        const auto key = cfg.get<std::string>("server/api_key", std::string());
+        ASSERT_FALSE(key.empty());
+        json server; { std::ifstream in(root / "config" / "server.json"); in >> server; }
+        ASSERT_EQ(server.value("api_key", std::string()), key);
+        ConfigManager again((root / "config").string());
+        ASSERT_TRUE(again.load());
+        ASSERT_EQ(again.get<std::string>("server/api_key", std::string()), key);
+    }
+    std::error_code ec; fs::remove_all(root, ec);
+}
+
+TEST(ConfigManager, DefaultsSavedAfterAnIncompleteDirectoryCarryTheApiKey) {
+    // BDC 托管实例首启：守护进程先放了别的配置文件，读取因缺 server.json 失败，随后写出默认值
+    const auto root = temporaryConfigRoot("partial_key");
+    {
+        fs::create_directories(root / "config");
+        { std::ofstream out(root / "config" / "dice.json"); out << "{}"; }
+        ConfigManager cfg((root / "config").string());
+        ASSERT_FALSE(cfg.load());
+        ASSERT_TRUE(cfg.save());
+        const auto key = cfg.get<std::string>("server/api_key", std::string());
+        ASSERT_FALSE(key.empty());
+        ConfigManager again((root / "config").string());
+        ASSERT_TRUE(again.load());
+        ASSERT_EQ(again.get<std::string>("server/api_key", std::string()), key);
+    }
+    std::error_code ec; fs::remove_all(root, ec);
+}
+
 TEST(ConfigManager, NativeWatcherCoalescesConfigChangesAndIgnoresRuntimeWrites) {
 #if defined(_WIN32) || defined(__linux__)
     TestWatchdog watchdog;

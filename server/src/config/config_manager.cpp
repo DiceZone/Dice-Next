@@ -210,6 +210,15 @@ static bool writeSplitConfig(const std::string& configPath, const json& value, s
     return true;
 }
 
+// 管理 API 密钥不能以空值写出去。main.cpp 启动时只读一次（托管引导和 X-API-Key 校验都用
+// 那一份），空值要等下一次热重载才补上——全新安装首次启动拿到的就是空 Key，BDC 托管实例
+// 只能靠守护进程重启一次补救。
+static void ensureApiKey(json& config) {
+    if (!config.contains("server") || !config["server"].is_object()) return;
+    if (config["server"].value("api_key", std::string()).empty())
+        config["server"]["api_key"] = utils::generateUuidV4();
+}
+
 static bool readSplitConfig(const std::string& configPath, json& value, std::string& error) {
     value = makeDefaultConfig();
     const fs::path dir = configDirectory(configPath);
@@ -282,6 +291,7 @@ bool ConfigManager::loadLocked() {
         if (!fs::exists(configPath_)) {
             std::string error;
             config_ = makeDefaultConfig();
+            ensureApiKey(config_);
             if (!writeSplitConfig(configPath_, config_, error)) {
                 DICE_LOG_ERROR("无法创建默认配置：{}；请检查配置目录权限。", error);
                 return false;
@@ -375,6 +385,7 @@ bool ConfigManager::save() {
         std::lock_guard<std::mutex> lock(mutex_);
         try {
             std::string error;
+            ensureApiKey(config_);
             if (validateConfig(config_, error) && writeSplitConfig(configPath_, config_, error)) {
                 splitLayout_ = true;
                 DICE_LOG_DEBUG("配置已保存至「{}」。", configPath_);
