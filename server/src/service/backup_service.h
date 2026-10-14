@@ -539,13 +539,35 @@ inline bool stageStoredRestore(const std::string& name, bool automatic, std::str
 
 inline bool clearForFullRestore(const fs::path& root, bool preserveActiveLogs, std::string& error) {
     std::error_code ec;
-    const auto absolute = fs::absolute(root, ec).lexically_normal();
-    const auto workspace = fs::weakly_canonical(fs::current_path(), ec);
+    auto reject = [&error] {
+        error = "拒绝清理工作目录之外或不安全的恢复路径";
+        return false;
+    };
+    const auto current = fs::current_path(ec);
+    if (ec) return reject();
+    if (root.has_root_name() && !root.is_absolute()) return reject();
+    // fs::absolute on Windows can erase "link/.." before we inspect it.
+    const auto original = root.is_absolute() ? root : current / root;
+    const auto absolute = original.lexically_normal();
     const auto name = absolute.filename().string();
-    if (ec || absolute.parent_path() != workspace || (name != "data" && name != "config" && name != "image")
-        || !migration_resources::safePath(workspace, absolute)) {
-        error = "拒绝清理工作目录之外或不安全的恢复路径"; return false;
+    // Inspect the ORIGINAL ancestors before resolving paths: normalization must
+    // not hide a link/reparse point, including one in "link/../data".
+    if (name != "data" && name != "config" && name != "image") return reject();
+    // Do not route this check through fs::absolute again: MSVC would normalize
+    // away the very link/.. components we need to inspect.
+    auto cursor = original.root_path();
+    if (migration_resources::isLink(cursor)) return reject();
+    for (const auto& part : original.relative_path()) {
+        cursor /= part;
+        if (migration_resources::isLink(cursor)) return reject();
     }
+    const auto workspace = fs::weakly_canonical(current, ec);
+    if (ec) return reject();
+    // Windows temp directories may contain 8.3 aliases (e.g. RUNNER~1).
+    // Resolve BOTH parents so an alias and its long name identify the same
+    // workspace, while still requiring an immediate whitelisted child.
+    const auto parent = fs::weakly_canonical(absolute.parent_path(), ec);
+    if (ec || parent != workspace) return reject();
     if (!fs::is_directory(root, ec)) return true;
     for (const auto& entry : fs::directory_iterator(root, ec)) {
         if (ec) { error = ec.message(); return false; }
