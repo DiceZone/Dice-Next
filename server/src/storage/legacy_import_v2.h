@@ -765,12 +765,19 @@ inline std::string v2KeyFor(const std::string& ourKey) {
 // Mapped keys → their DiceNext i18n key (zh-Hans+zh-Hant). UNmapped keys are
 // preserved under "legacy.<strXXX>" so the web 「无效文本」 tab can show them for
 // manual porting. The file is UTF-8 (NOT GBK) but has raw CR/LF inside strings.
-inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, int& orphans, json* details = nullptr, const ImportOptions& opts = {}) {
+//
+// strSelfName / strSelfCall 不是文案，是骰娘的名字和回执里的自称（原版 GlobalVar.cpp：
+// strSelfName 默认空=登录昵称，strSelfCall 默认 "&strSelfName"=同名）。DiceNext 把它们
+// 放在设置 dice/self_name、dice/self_call 里。给了 cfg 就迁进去；以前随其他认不得的键
+// 进了「无效文本」，迁完骰娘的自称就成了 QQ 昵称。
+inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, int& orphans, json* details = nullptr,
+                           const ImportOptions& opts = {}, ConfigManager* cfg = nullptr) {
     auto* st = db.getStorage();
     if (!st) return 0;
     std::string raw = readFile(confDir / "CustomMsg.json");
     if (raw.empty()) return 0;
     int imported = 0;
+    bool selfChanged = false;
     static const std::set<std::string> SKIP = {"Number", "str", "strHttpCode"};   // metadata, not text
     auto writeOv = [&](const char* loc, const std::string& key, const std::string& text) {
         auto rows = st->get_all<I18nOverrideRow>(
@@ -792,6 +799,29 @@ inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, in
             if (!val.is_string() || SKIP.count(origKey)) continue;
             std::string text = val.get<std::string>();
             if (text.empty()) continue;
+            if (cfg && (origKey == "strSelfName" || origKey == "strSelfCall")) {
+                std::string name = text;
+                while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
+                const auto first = name.find_first_not_of(" \t\r\n");
+                name = first == std::string::npos ? std::string() : name.substr(first);
+                // 原版的默认值，在 DiceNext 里就是「没设，跟名字一样」
+                if (origKey == "strSelfCall" && name == "&strSelfName") continue;
+                // 别的「&键名」引用和 {…} 模板不是名字，照旧留在无效文本里让人看
+                if (!name.empty() && name.front() != '&' && name.find('{') == std::string::npos) {
+                    const std::string path = origKey == "strSelfName" ? "dice/self_name" : "dice/self_call";
+                    const auto current = cfg->get<std::string>(path, std::string());
+                    if (current.empty() || current == name || opts.overwriteData) {
+                        cfg->set<std::string>(path, name); selfChanged = true; ++imported;
+                        if (details) details->push_back({{"source", origKey}, {"target", path},
+                            {"status", "active"}, {"issues", json::array()}});
+                        continue;
+                    }
+                    writeOv("zh-Hans", "legacy." + origKey, text); ++orphans;
+                    if (details) details->push_back({{"source", origKey}, {"target", path}, {"status", "conflict"},
+                        {"issues", {"保留已有自称；未授权覆盖数据"}}, {"original", text}});
+                    continue;
+                }
+            }
             auto it = M.find(origKey);
             if (it != M.end()) {                                  // mapped → real i18n key
                 const auto normalized = normalizeLegacyTemplate(origKey, text);
@@ -827,6 +857,7 @@ inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, in
             }
         }
     } catch (const std::exception&) { throw; }
+    if (selfChanged && !cfg->save()) throw std::runtime_error("无法保存迁入的骰娘自称");
     return imported;
 }
 
@@ -1961,7 +1992,7 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
     json customTexts = json::array();
     int msgs = timed("自定义文案", [&] {
         migration_report::validateJsonSource(confDir / "CustomMsg.json", false);
-        return importCustomMsg(db, i18n, confDir, orphans, &customTexts, opts);
+        return importCustomMsg(db, i18n, confDir, orphans, &customTexts, opts, &cfg);
     });
     int masters = timed("控制台配置", [&] { return importMasters(cfg, confDir, &consoleSettings, opts, &consoleDetails); });
     int links = timed("跨群链接", [&] {

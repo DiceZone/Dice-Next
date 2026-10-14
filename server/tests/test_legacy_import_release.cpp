@@ -239,6 +239,47 @@ TEST(ReleaseMigration, ConsoleClocksAreNotReportedAsCompleted) {
     ASSERT_FALSE(report["diagnostics"].empty());
 }
 
+TEST(ReleaseMigration, SelfNameAndSelfCallMoveIntoSettings) {
+    // 原版的自称在 CustomMsg.json，DiceNext 的在设置里。以前进了无效文本，迁完自称就成了 QQ 昵称
+    ReleaseImportFixture f; ASSERT_TRUE(f.i18n.load());
+    f.file("old/conf/CustomMsg.json", R"({"strSelfName":" 希亚 ","strSelfCall":"&strSelfName","strRollFumble":"大失败"})");
+    int orphans = 0; json details = json::array();
+    ASSERT_EQ(importCustomMsg(f.db, f.i18n, "old/conf", orphans, &details, {}, &f.cfg), 2);
+    ASSERT_EQ(f.cfg.get<std::string>("dice/self_name", std::string()), "希亚");
+    // "&strSelfName" 是原版默认的「同名」，不是一个名字
+    ASSERT_TRUE(f.cfg.get<std::string>("dice/self_call", std::string()).empty());
+    ASSERT_EQ(orphans, 0);
+    ASSERT_FALSE(f.i18n.hasConfigured(Locale::kZhHans, "legacy.strSelfName"));
+}
+
+TEST(ReleaseMigration, SelfNameKeepsExistingSettingsAndLeavesTemplatesForReview) {
+    ReleaseImportFixture f; ASSERT_TRUE(f.i18n.load());
+    f.cfg.set<std::string>("dice/self_name", "新名字");
+    f.file("old/conf/CustomMsg.json", R"({"strSelfName":"旧名字","strSelfCall":"{self}"})");
+    int orphans = 0; json details = json::array();
+    ASSERT_EQ(importCustomMsg(f.db, f.i18n, "old/conf", orphans, &details, {}, &f.cfg), 0);
+    ASSERT_EQ(f.cfg.get<std::string>("dice/self_name", std::string()), "新名字");
+    ASSERT_TRUE(f.cfg.get<std::string>("dice/self_call", std::string()).empty());
+    ASSERT_EQ(orphans, 2);
+    ASSERT_EQ(f.i18n.tr(Locale::kZhHans, "legacy.strSelfName"), "旧名字");
+    ASSERT_EQ(f.i18n.tr(Locale::kZhHans, "legacy.strSelfCall"), "{self}");
+    ImportOptions overwrite; overwrite.overwriteData = true; orphans = 0;
+    ASSERT_EQ(importCustomMsg(f.db, f.i18n, "old/conf", orphans, nullptr, overwrite, &f.cfg), 1);
+    ASSERT_EQ(f.cfg.get<std::string>("dice/self_name", std::string()), "旧名字");
+}
+
+TEST(ReleaseMigration, FullImportCarriesTheSelfName) {
+    ReleaseImportFixture f; ASSERT_TRUE(f.i18n.load());
+    f.file("old/conf/CustomMsg.json", R"({"strSelfName":"希亚","strSelfCall":"小希"})");
+    ReplyManager replies(f.db, f.cfg);
+    const auto report = runImport(f.db, f.cfg, f.i18n, replies, "old", nullptr, &f.lua);
+    ASSERT_TRUE(report["ok"].get<bool>());
+    ASSERT_EQ(f.cfg.get<std::string>("dice/self_name", std::string()), "希亚");
+    ASSERT_EQ(f.cfg.get<std::string>("dice/self_call", std::string()), "小希");
+    ConfigManager reread{"config"}; ASSERT_TRUE(reread.load());
+    ASSERT_EQ(reread.get<std::string>("dice/self_name", std::string()), "希亚");
+}
+
 TEST(ReleaseMigration, ScopedMastersNotificationsAndSharedNoticeOffAreConsistent) {
     ReleaseImportFixture f; ASSERT_TRUE(f.i18n.load());
     f.file("old/conf/console.yaml","master: 10001\n"); f.file("old/conf/NoticeList.json",R"([{"gid":20001,"type":15}])");
