@@ -10521,10 +10521,19 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     static std::string todayYMD() {
         return utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%d");
     }
-    /// Mark a group active "today" (called on each incoming group message).
-    void markGroupActive(const std::string& platform, const std::string& gid) {
+    /// Called only for an actual command, not ordinary chat or custom replies.
+    /// Keep the original inactivity day and a precise UTC time per bot account.
+    void markGroupActive(const std::string& platform, const std::string& gid,
+                         const std::string& adapterId = {}, const std::string& endpointId = {}) {
         if (gid.empty()) return;
-        setGroupSettingFor(platform, gid, "lastActiveAt", todayYMD());
+        const auto day = todayYMD();
+        const auto at = utils::nowIso8601();
+        setGroupSettingFor(platform, gid, "lastActiveAt", day);
+        setGroupSettingFor(platform, gid, "lastCommandAt", at);
+        if (!adapterId.empty()) {
+            setGroupSettingFor(platform, gid, "lastActiveAt", day, adapterId, endpointId);
+            setGroupSettingFor(platform, gid, "lastCommandAt", at, adapterId, endpointId);
+        }
     }
     /// "YYYY-MM-DD" → 距今整天数（正午锚点避开 DST 边界）；无法解析 → -1。
     /// inactiveGroups / groupInactiveDays 共用（此前两处各抄一份解析逻辑）。

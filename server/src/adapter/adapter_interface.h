@@ -268,6 +268,7 @@ public:
     virtual void setGroupBan(const std::string& groupId, const std::string& userId, int durationSec) = 0;
 
     /// Leave a group (.dismiss). Default no-op for platforms that don't support it.
+    virtual bool supportsGroupLeave() const { return false; }
     virtual void leaveGroup(const std::string& /*groupId*/) {}
 
     /// Set a member's group card / nickname (web group-management). For the bot's

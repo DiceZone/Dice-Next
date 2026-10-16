@@ -257,6 +257,7 @@ public:
     void setGroupBan(const std::string& groupId, const std::string& userId, int durationSec) override {
         sendAction("set_group_member_mute", {{"group_id", parseId(groupId)}, {"user_id", parseId(userId)}, {"duration", durationSec > 0 ? durationSec : 0}}, {});
     }
+    bool supportsGroupLeave() const override { return true; }
     void leaveGroup(const std::string& groupId) override { sendAction("quit_group", {{"group_id", parseId(groupId)}}, {}); }
     void setGroupCard(const std::string& groupId, const std::string& userId, const std::string& card) override {
         sendAction("set_group_member_card", {{"group_id", parseId(groupId)}, {"user_id", parseId(userId)}, {"card", card}}, {});

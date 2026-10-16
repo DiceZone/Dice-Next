@@ -19,6 +19,7 @@ set(TEST_SOURCES
     test_causal_rule_manager.cpp
     test_help_entry_filter.cpp
     test_config_manager.cpp
+    test_ai_settings.cpp
     test_persona_manager.cpp
     test_i18n_persona.cpp
     test_outcome_replies.cpp

@@ -38,6 +38,7 @@
 #include "../i18n/i18n.h"
 #include "../common/types.h"
 #include "group_chat_buffer.h"
+#include "group_management.h"
 #include "broadcast_manager.h"
 #include "log_service.h"
 #include "ai_gateway.h"     // AI 网关
@@ -47,6 +48,7 @@
 #include "ai_memory.h"      // 智能化阶段B：记忆（摘要默认提示词）
 #include "ai_npc.h"         // 智能化阶段E：NPC 扮演
 #include "ai_vision.h"      // 多模态图像识别（默认提示词）
+#include "ai_vision_config.h"
 #include "notice_manager.h" // B：通知系统（全局开关变更推送）
 #include "heart_service.h"  // 心跳上报（heart.dice.zone）
 #include "cloudban_service.h" // 云黑名单同步（cloudban.dice.zone）
@@ -940,13 +942,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 out["whitelist"] = J{{"enabled", wlj.value("enabled", false)}, {"list", wlList}};
                 // 图像识别（多模态）配置。
                 J vsj = (j.contains("vision") && j["vision"].is_object()) ? j["vision"] : J::object();
-                int vmi = vsj.value("max_images", 2); if (vmi < 1) vmi = 1; if (vmi > 4) vmi = 4;
-                out["vision"] = J{
-                    {"enabled", vsj.value("enabled", false)},
-                    {"model_id", vsj.value("model_id", std::string())},
-                    {"prompt", vsj.value("prompt", std::string())},
-                    {"max_images", (long long)vmi}
-                };
+                out["vision"] = dice::aivision::normalizeSettings(vsj,
+                    cfg.get<J>("dice/ai/vision", J::object()));
                 cfg.set<J>("dice/ai", out);
                 cfg.save();
             }
@@ -989,10 +986,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 cur["npc"] = J{{"enabled", false}, {"list", J::array()}};
             if (!cur.contains("whitelist") || !cur["whitelist"].is_object())
                 cur["whitelist"] = J{{"enabled", false}, {"list", J::array()}};
-            if (!cur.contains("vision") || !cur["vision"].is_object())
-                cur["vision"] = J{{"enabled", false}, {"model_id", std::string()}, {"prompt", std::string()}, {"max_images", 2}, {"pass_url", true}};
-            else if (!cur["vision"].contains("pass_url"))
-                cur["vision"]["pass_url"] = true;
+            cur["vision"] = dice::aivision::normalizeSettings(cur.value("vision", J::object()));
             // 内置默认提示词（只读参考，供前端「载入默认」按钮填入编辑框）。
             cur["defaults"] = J{
                 {"polish_text", dice::aipolish::defaultPromptText()},
@@ -5530,6 +5524,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 auto sep = pg.find('\x1f');
                 std::string plat = pg.substr(0, sep);
                 std::string name = (kv.count("name") && !kv["name"].empty()) ? kv["name"] : gid;
+                std::string lastCommandAt = group_management::commandTime(kv);
                 J accounts = J::array();
                 if (accountGroups.count(gid)) {
                     for (auto& [aid, akv] : accountGroups[gid]) {
@@ -5556,10 +5551,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         int observers = 0;
                         try { auto o = J::parse(value("observers")); if (o.is_array()) observers = (int)o.size(); } catch (...) {}
                         auto glIt = groupLocales.find(aplat + ":" + gid);
+                        const auto accountCommandAt = group_management::commandTime(akv);
+                        if (accountCommandAt > lastCommandAt) lastCommandAt = accountCommandAt;
                         accounts.push_back(J{
                             {"adapterId", aid}, {"adapterName", accountName}, {"loginId", loginId},
                             {"loginName", loginName}, {"appId", appId},
                             {"platform", aplat}, {"endpointId", endpoint}, {"connected", connected},
+                            {"canLeaveGroup", connected && a->supportsGroupLeave()}, {"lastCommandAt", accountCommandAt},
                             {"enabled", value("enabled") != "0"}, {"ai_enabled", value("aiEnabled") != "0"},
                             {"log_enabled", value("logEnabled") != "0"}, {"reply_enabled", value("replyDisabled") != "1"},
                             {"roll_enabled", value("rollEnabled") != "0"}, {"plugin_enabled", value("pluginEnabled") != "0"},
@@ -5582,6 +5580,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     auto glIt = groupLocales.find(plat + ":" + gid);
                     accounts.push_back(J{{"adapterId", ""}, {"adapterName", ""}, {"loginId", ""},
                         {"platform", plat}, {"endpointId", gid}, {"connected", false},
+                        {"canLeaveGroup", false}, {"lastCommandAt", group_management::commandTime(kv)},
                         {"enabled", !kv.count("enabled") || kv["enabled"] != "0"},
                         {"log_enabled", kv["logEnabled"] != "0"}, {"reply_enabled", kv["replyDisabled"] != "1"},
                         {"roll_enabled", kv["rollEnabled"] != "0"}, {"plugin_enabled", kv["pluginEnabled"] != "0"},
@@ -5601,6 +5600,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     if (account.value("connected", false) && !account.value("left", false)) { selected = account; break; }
                 arr.push_back(J{
                     {"platform", selected.value("platform", plat)}, {"groupId", gid}, {"name", name},
+                    {"lastCommandAt", lastCommandAt}, {"canLeaveGroup", selected.value("canLeaveGroup", false)},
                     {"enabled", selected.value("enabled", true)}, {"ai_enabled", selected.value("ai_enabled", true)},
                     {"log_enabled", selected.value("log_enabled", true)}, {"reply_enabled", selected.value("reply_enabled", true)},
                     {"roll_enabled", selected.value("roll_enabled", true)}, {"plugin_enabled", selected.value("plugin_enabled", true)},
@@ -5719,13 +5719,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             auto a = !adapterId.empty() ? adapterMgr.getAdapter(adapterId) : pickAdapter(adapterMgr, plat);
             if (!a) { jsonReply(fail("no connected adapter"), std::move(cb)); return; }
             if (action == "leave") {
+                if (!a->isConnected()) throw std::invalid_argument("The selected bot account is offline");
+                if (!a->supportsGroupLeave()) throw std::invalid_argument("This adapter does not support leaving groups");
+                if (a->platform() != plat) throw std::invalid_argument("Adapter platform does not match the selected group");
+                endpointId = group_management::requireLeaveEndpoint(*st, adapterId, plat, gid,
+                    j.value("endpointId", std::string()));
                 a->leaveGroup(endpointId);
                 if (!adapterId.empty()) agsSet(st, adapterId, plat, gid, endpointId, "left", "1");
                 else gsSet(st, plat, gid, "left", "1");
             }
             else if (action == "message") a->sendGroupMessage(endpointId, j.value("text", ""));
             else { jsonReply(fail("unknown action"), std::move(cb)); return; }
-            jsonReply(ok(nullptr), std::move(cb));
+            jsonReply(ok(J{{"accepted", true}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 

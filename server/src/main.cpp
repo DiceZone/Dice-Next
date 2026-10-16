@@ -1997,7 +1997,8 @@ static int realMain(int argc, char* argv[]) {
         // “活跃” = 本群最近用过指令（与 recordPlayerActivity 同口径）。
         // 这样定时任务的 inactive>=N 条件表示“N 天无指令”，纯聊天不计入，符合“无指令退群”语义。
         if (msg.type == dice::MessageType::kGroup && !msg.targetId.empty() && didCommand)
-            cmdRouter.markGroupActive(msg.platform, msg.targetId);   // #47 群活跃度（按指令）
+            cmdRouter.markGroupActive(msg.platform, msg.targetId, msg.adapterId,
+                msg.extra.is_object() ? msg.extra.value("__identity_native_target", msg.targetId) : msg.targetId);
         // Transcript recording obeys the overall and log switches, preserving the session.
         // recordIncoming/recordBotReply enforce active-log and hard-lock checks.
         // 操作者手打的自控消息（fromSelf 且已过自回声去重）视同正常消息记录；

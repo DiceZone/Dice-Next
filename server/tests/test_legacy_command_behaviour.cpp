@@ -1003,6 +1003,28 @@ TEST(BotText, OfficialInviterUsesNativeIdentityAndOnlyControlsTheInvitedBotAndGr
 }
 
 
+TEST(GroupManagement, LastCommandTimeIsPreciseAndAccountScoped) {
+    LegacyFixture f;
+    f.router.setGroupSettingFor(f.msg.platform, f.msg.targetId, "lastCommandAt",
+        "2026-01-01T00:00:00.000Z", "other-account", "other-native-id");
+    f.router.markGroupActive(f.msg.platform, f.msg.targetId, f.msg.adapterId, "native-group");
+    const auto at = f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, "lastCommandAt", f.msg.adapterId);
+    ASSERT_EQ(at.size(), size_t(24));
+    ASSERT_EQ(at.back(), 'Z');
+    ASSERT_EQ(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, "lastCommandAt"), at);
+    ASSERT_EQ(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, "lastCommandAt", "other-account"),
+        "2026-01-01T00:00:00.000Z");
+    ASSERT_EQ(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, "lastActiveAt", f.msg.adapterId).size(), size_t(10));
+    const auto rows = f.db.getStorage()->get_all<GroupAccountSettingRow>(sqlite_orm::where(
+        sqlite_orm::c(&GroupAccountSettingRow::adapterId) == f.msg.adapterId and
+        sqlite_orm::c(&GroupAccountSettingRow::key) == std::string("lastCommandAt")));
+    ASSERT_EQ(rows.size(), size_t(1));
+    ASSERT_EQ(rows.front().endpointId, "native-group");
+    f.db.close();
+    ASSERT_TRUE(f.db.open(u8str(f.dir.path / "test.db")));
+    ASSERT_EQ(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, "lastCommandAt", f.msg.adapterId), at);
+}
+
 TEST(LegacyCommands, GrowthParsesCompactValuesAndWritesTheCorrectSign) {
     LegacyFixture f;
     f.cards.setAttr(f.msg.senderId, f.msg.targetId, "侦查", 60);

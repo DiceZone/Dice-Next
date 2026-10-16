@@ -9,6 +9,7 @@
 #include "test_framework.h"
 #include "../src/storage/database.h"
 #include "../src/storage/group_account_settings.h"
+#include "../src/service/group_management.h"
 #include "../src/core/identity/identity_binding.h"
 #include "../src/i18n/locale_resolver.h"
 #include "../src/config/config_manager.h"
@@ -214,4 +215,37 @@ TEST(GroupAccountScoping, OfficialEndpointPhantomRowsAreCleanedUp) {
     ASSERT_EQ((int)accountRows.size(), 1);
     ASSERT_EQ(accountRows.front().groupId, std::string("20001"));
     ASSERT_EQ((int)st->get_all<GroupSettingRow>().size(), 0);
+}
+
+TEST(GroupManagement, ActivityKeepsLegacyDatePrecisionAndDoesNotInventHistory) {
+    ASSERT_EQ(group_management::commandTime({}), "");
+    ASSERT_EQ(group_management::commandTime({{"lastActiveAt", "2026-10-01"}}), "2026-10-01");
+    ASSERT_EQ(group_management::commandTime({{"lastActiveAt", "2026-10-01"},
+        {"lastCommandAt", "2026-10-01T03:04:05.000Z"}}), "2026-10-01T03:04:05.000Z");
+}
+
+TEST(GroupManagement, LeaveRequiresTheExactAccountAndNativeGroupBinding) {
+    auto db = makeDb();
+    auto& st = *db->getStorage();
+    setAccountGroupSetting(st, "adapterA", "onebot_v11", "9001", "native-9001", "enabled", "1");
+    setAccountGroupSetting(st, "adapterB", "onebot_v11", "9002", "native-9002", "enabled", "1");
+    ASSERT_EQ(group_management::requireLeaveEndpoint(st, "adapterA", "onebot_v11", "9001", ""), "native-9001");
+    ASSERT_EQ(group_management::requireLeaveEndpoint(st, "adapterA", "onebot_v11", "9001", "native-9001"), "native-9001");
+    auto rejected = [&](const std::string& aid, const std::string& platform,
+                        const std::string& gid, const std::string& endpoint) {
+        try { (void)group_management::requireLeaveEndpoint(st, aid, platform, gid, endpoint); }
+        catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+    ASSERT_TRUE(rejected("", "onebot_v11", "9001", "native-9001"));
+    ASSERT_TRUE(rejected("adapterB", "onebot_v11", "9001", "native-9001"));
+    ASSERT_TRUE(rejected("adapterA", "milky", "9001", "native-9001"));
+    ASSERT_TRUE(rejected("adapterA", "onebot_v11", "9001", "native-9002"));
+    for (const auto* key : {"left", "__removed", "leaving"}) {
+        setAccountGroupSetting(st, "adapterA", "onebot_v11", "9001", "native-9001", key, "1");
+        ASSERT_TRUE(rejected("adapterA", "onebot_v11", "9001", "native-9001"));
+        setAccountGroupSetting(st, "adapterA", "onebot_v11", "9001", "native-9001", key, "0");
+    }
+    ASSERT_EQ(accountGroupSetting(st, "adapterA", "onebot_v11", "9001", "left"), "0");
+    ASSERT_EQ(accountGroupSetting(st, "adapterB", "onebot_v11", "9002", "enabled"), "1");
 }

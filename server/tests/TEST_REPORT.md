@@ -3,6 +3,41 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-16: Issues #51 / #52 management regressions (local)
+
+- #52: the AI settings write schema discarded vision.pass_url, after which
+  read-side defaults re-enabled it. Read/write now share the production vision
+  normalizer. Explicit false survives repeated saves and restart; clients that
+  omit this newer field preserve an existing value. Tests cover both states,
+  defaults, image-count bounds, invalid boolean types and file persistence.
+- #51: actual command handling records a precise UTC timestamp per adapter
+  account while retaining the existing inactivity-day semantics. Group DTOs
+  expose account and aggregate times. Historical date-only values retain their
+  precision; missing history is not treated as evidence of inactivity.
+- Group lists, cards, tables and details show the time, with recent/older
+  sorting. Manual selection is bounded to 100 groups, supports pagination and
+  confirms the exact bot/account targets. Changing search/account/tab clears
+  selection. Failed submissions remain selected; leaving the page cancels
+  remaining submissions. Records, character sheets and transcripts are kept.
+- Destructive API actions reject offline/unsupported adapters, missing or
+  mismatched account/native-endpoint bindings and already-left/removed/leaving
+  groups. OneBot V11 and Milky advertise the implemented leave capability;
+  platforms inheriting the no-op method cannot report a submitted leave.
+- Stable-source Windows amd64 Release server and both test executables built.
+  Full core regression passed **743 cases / 48928 assertions**. Default real-Lua
+  regression passed **528 assertions** across 58 registrations; the four
+  optional external corpus entries were not enabled (54 self-contained cases).
+- WebUI full regression passed **276 tests**, with **2 optional production
+  renderer tests skipped** (278 registered), including 13 new management/AI
+  cases. TypeScript/production build passed. Four-language documentation
+  catalog validation and VitePress build passed (existing chunk warnings only).
+- Browser checks used the real React pages and an isolated in-memory preview,
+  not a running Dice backend: exact-account selection, unsupported/multi-bot
+  restrictions, date-only display, filter clearing, styled confirmation and
+  partial-failure retry selection were observed. No real group leave, live
+  credentials, external-model request or Release was performed. Linux/macOS
+  and platform-confirmed leave delivery were not locally certified.
+
 ## 2026-10-16: Named resources and native Mod help followup (local)
 
 - Three added cases failed before their fixes: case-varied named scripts picked

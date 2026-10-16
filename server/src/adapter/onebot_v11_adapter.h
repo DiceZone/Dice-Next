@@ -458,6 +458,7 @@ public:
     }
 
     /// Leave the group, deferred ~1.5s so the .dismiss reply is delivered first.
+    bool supportsGroupLeave() const override { return true; }
     void leaveGroup(const std::string& groupId) override {
         auto self = shared_from_this();
         int64_t gid = parseId(groupId);
