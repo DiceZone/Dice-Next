@@ -390,7 +390,7 @@
       "npc": "NPC .npc\n.npc new <name> // create a group-shared character card\n.npc list // list NPCs\n.npc <name> st <attr><value> // set attributes, e.g. .npc Bob st str50\n.npc <name> ra <skill> // roll as that NPC\n.npc show <name> // view that NPC\n.npc del <name> // delete that NPC\n.npc clr <name> // clear that NPC's attributes",
       "coc": "Chargen .coc\n.coc [count] // generate COC7 investigator stats",
       "dnd": "Chargen .dnd\n.dnd [count] // generate DND stats, 4d6 keep highest 3",
-      "deck": "Decks .deck\n.deck // list available decks\n.draw <deck> // draw one card\n.gacha // pull",
+      "deck": "Decks .deck\n.deck // list available decks\n.draw <deck> // draw one card\n.deck session help // manage Session decks without replacement\n.gacha // pull",
       "jrrp": "Luck .jrrp\n.jrrp // luck of the day, fixed per person per day",
       "bot": "Bot .bot\n.bot // show version and status\n.bot on // enable the bot in this group\n.bot off // disable it here; only .bot still works",
       "group": "Group settings .group\n.group [group ID] <state|info> // show this group's state or info\n.group [group ID] +<term> // turn a term on, e.g. +禁用回复\n.group [group ID] -<term> // turn a term off, e.g. -禁用help\n.group [group ID] clr // clear this group's settings\n.group all +<term> // apply to every group; owner or trust>=5, current bot account only\n.group all -<term> // same conditions, turning the term off",
@@ -700,7 +700,18 @@
     "temp_new": "Created temp deck \"{name}\" ({count} items) for this group; draw with .draw {name}.",
     "temp_del": "Deleted this group's temp deck \"{name}\".",
     "temp_usage": ".deck new <name> <a>/<b>/<c> // create a temporary deck; anyone can create one",
-    "temp_tag": "(temp)"
+    "temp_tag": "(temp)",
+    "session_usage": ".deck session // List Session decks\n.deck session new <name> <a/b/c> // Create a deck without replacement; supports ::copies::card\n.deck session from <name> <public deck> // Copy a public deck\n.deck session rest [name] // Show remaining counts\n.deck session reset <name> // Restore all cards\n.deck session del <name> // Delete a deck\n.deck session clr // Clear Session decks\nChanges require a Session GM, group administrator or bot owner. Use .draw <name> to draw. Existing group temp decks are unchanged.",
+    "session_invalid": "Invalid Session deck data; no card drawn: {reason}",
+    "session_exhausted": "Session deck \"{name}\" is empty. Ask a GM to use .deck session reset {name}.",
+    "session_save_failed": "Could not save Session deck state; this operation was not applied.",
+    "session_cleared": "Cleared this Session's private decks.",
+    "session_none": "This Session has no private decks. Create one with .deck session new <name> <a/b>.",
+    "session_state": "Session deck \"{name}\": {left} / {total} cards remaining",
+    "session_full": "A Session can hold at most 10 private decks. Remove an unused deck first.",
+    "session_deleted": "Deleted Session deck \"{name}\".",
+    "session_created": "Created or replaced Session deck \"{name}\". Use .draw {name} to draw without replacement.",
+    "session_reset": "Reset Session deck \"{name}\"; all cards are available again."
   },
   "mod": {
     "info": "Mod {name} ({id})\nState: {state}\nVersion: {version}\nAuthor: {author}\nDescription: {brief}",

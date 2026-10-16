@@ -30,6 +30,7 @@
 #include "../common/utils.h"
 #include "../common/logger.h"
 #include "../common/legacy_conf_value.h"
+#include "../common/session_deck.h"
 #include "../common/legacy_reply_references.h"
 #include "../core/reply/reply_definition.h"
 #include "../service/sensitive_word_filter.h"
@@ -1585,7 +1586,11 @@ inline int importSessions(const fs::path& root, LuaPluginManager* luaMod,
         if (old.contains("player")) set("__pls", legacyIdList(old["player"]).dump());
         for (const auto* field : {"observer", "decks", "tables"}) if (old.contains(field) && !old[field].empty()) {
             set(std::string("__legacy_") + field, old[field].dump());
-            if (diagnostics) legacyResourceDetail(*diagnostics, name + "/" + field, "preserved", "原状态已保留，未伪装成新版活动状态");
+            if (std::string_view(field) == "decks") {
+                std::string error;
+                if (session_deck::validCollection(old[field], error)) set("__decks", old[field].dump());
+                else if (diagnostics) legacyResourceDetail(*diagnostics, name + "/decks", "preserved", "原牌堆存档已保留，未启用无效状态：" + error);
+            } else if (diagnostics) legacyResourceDetail(*diagnostics, name + "/" + field, "preserved", "原状态已保留，未伪装成新版活动状态");
         }
         if (old.contains("observer")) set("legacyObservers", legacyIdList(old["observer"]).dump());
         if (old.contains("roulette")) {

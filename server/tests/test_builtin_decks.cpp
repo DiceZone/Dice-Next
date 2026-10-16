@@ -1,4 +1,5 @@
 #include "test_framework.h"
+#include "test_watchdog.h"
 #include "../src/core/deck/card_deck.h"
 #include "../src/core/deck/deck_file_utils.h"
 
@@ -9,6 +10,8 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <thread>
 
 namespace {
 
@@ -79,6 +82,25 @@ TEST(BundledDecks, DeckFilenamesStayInsideFlatJsonDirectory) {
     ASSERT_FALSE(isSafeJsonFilename("CON.json"));
     ASSERT_FALSE(isSafeJsonFilename(".json"));
     ASSERT_FALSE(isSafeJsonFilename("bad:name.json"));
+}
+
+TEST(BundledDecks, TextExpansionAndSourceReloadCanRunConcurrently) {
+    TestWatchdog watchdog(std::chrono::seconds(20));
+    dice::CardDeck decks;
+    decks.setDiceEval([](const auto&) { return 1LL; });
+    decks.setHelpLookup([](const std::string& name) -> std::optional<std::string> {
+        return name=="topic" ? std::optional<std::string>("help") : std::nullopt;
+    });
+    std::atomic<int> invalid{0}; std::vector<std::thread> workers;
+    workers.emplace_back([&] { for (int i=0;i<100;++i) decks.reload({}); });
+    for (int worker=0;worker<4;++worker) workers.emplace_back([&] {
+        for (int i=0;i<100;++i) {
+            const auto text=decks.expandText("{数字} [1d1] {topic}");
+            if (text.size()!=8 || text[0]<'0' || text[0]>'9' || text.substr(1)!=" 1 help") ++invalid;
+        }
+    });
+    for (auto& worker:workers) worker.join();
+    ASSERT_EQ(invalid.load(),0);
 }
 
 TEST(BundledDecks, ReloadAppliesUserOverridesAndDropsRemovedEntries) {

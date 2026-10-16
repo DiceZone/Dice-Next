@@ -6,15 +6,13 @@
 //   data/mod/<模块名>/descriptor.json   模块元数据（title/ver/author/brief/helpdoc）
 //   data/mod/<模块名>/reply/*.{lua,toml} msg_reply 因果回复
 //   data/mod/<模块名>/script/*.lua       loadLua 调用的函数脚本
-//   data/mod/<模块名>/speech/*.yaml      模板词条（阶段二）
-//   data/mod/<模块名>/event/*.lua        旧 Dice! 周期事件
-//
-// 阶段一（本轮）：引擎嵌入 + 模块发现(descriptor) + 核心 C API
-//   (log/ranint/getUserConf/setUserConf/getGroupConf/setGroupConf/getUserToday/
-//    setUserToday/getDiceDir/mkDirs/loadLua/sleepTime/drawDeck) + 配置持久化。
-// 后续阶段：reply 因果系统 + speech 模板 + 人物卡属性 + sendMsg 派发 + WebUI。
+//   data/mod/<模块名>/speech/*.yaml      模板词条
+//   data/mod/<模块名>/event/*.lua        cycle / clock / 安全 hook
+//   data/mod/<模块名>/rulebook/*.yaml    分规则手册与 tape
+// 目录资源可递归；脚本按全局命名空间登记，但不会自动执行资源 Lua。
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <map>
 #include <set>
@@ -26,18 +24,37 @@
 #include <cstdint>
 #include <atomic>
 #include <filesystem>
+#include <memory>
+#include <deque>
+#include <ctime>
 #include <nlohmann/json_fwd.hpp>
 
 struct lua_State;
 struct sqlite3;
 
 namespace dice {
+namespace legacy_mod { struct Limits; }
 
 class LuaPluginManager {
 public:
+    // Dice! named resources fold ASCII only. Keep UTF-8 bytes and display names.
+    struct LegacyNameLess {
+        using is_transparent = void;
+        bool operator()(std::string_view a, std::string_view b) const {
+            const auto fold = [](unsigned char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; };
+            const auto count = a.size() < b.size() ? a.size() : b.size();
+            for (size_t i = 0; i < count; ++i) {
+                const auto x = fold(static_cast<unsigned char>(a[i])), y = fold(static_cast<unsigned char>(b[i]));
+                if (x != y) return x < y;
+            }
+            return a.size() < b.size();
+        }
+    };
     explicit LuaPluginManager(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
                               size_t memoryLimit = 256 * 1024 * 1024)
-        : mutex_(timeout), memoryLimit_(memoryLimit) {}
+        : callbackState_(std::make_shared<CallbackState>()), mutex_(timeout), memoryLimit_(memoryLimit) {
+        callbackState_->owner = this;
+    }
     ~LuaPluginManager();
 
     bool init();                       // 创建 lua_State + 注册全局 + 打开配置库
@@ -59,7 +76,15 @@ public:
     // ── 阶段二：reply 因果系统 ───────────────────────────────────
     void setSelfName(const std::string& n) { selfName_ = n; }
     void setBotId(const std::string& id) { botId_ = id; }   // getDiceQQ() 返回值
-    std::string botId() const { return botId_; }
+    using SelfIdLookupFn = std::function<std::string(const std::string& platform, const std::string& adapterId)>;
+    void setSelfIdLookup(SelfIdLookupFn fn) { selfIdLookup_ = std::move(fn); }
+    std::string botIdFor(const std::string& platform, const std::string& adapterId) const {
+        // A known account with no resolved identity must never borrow another
+        // bot's configured ID. The global value is only an unscoped fallback.
+        if (selfIdLookup_ && (!platform.empty() || !adapterId.empty())) return selfIdLookup_(platform, adapterId);
+        return botId_;
+    }
+    std::string botId() const { return botIdFor(activePlatform_, activeAdapter_); }
     // 对一条消息派发 msg_reply 因果回复：keyword 匹配 → echo() → 模板格式化。
     struct DispatchResult { bool matched = false; std::string reply; std::vector<ProcessingSource> sources; bool failed = false, pending = false; };
     ProcessingSource loggingSource(const std::string& mod, const std::string& entry = {}) const;
@@ -87,12 +112,19 @@ public:
                                           const std::string& user, const std::string& rule,
                                           const std::string& adapterId)>;
     void setRuleGate(RuleGateFn f) { ruleGate_ = std::move(f); }
+    using ReplyTypeGateFn = std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&)>;
+    void setReplyTypeGate(ReplyTypeGateFn f) { replyTypeGate_ = std::move(f); }
     // 旧 Dice! 模板的 {help:主题}：先查当前 Mod 的 helpdoc，再交给核心帮助系统。
     using HelpLookupFn = std::function<std::optional<std::string>(const std::string& topic)>;
     void setHelpLookup(HelpLookupFn f) { helpLookup_ = std::move(f); }
     // 原版 fmt->format：把 {key} 递归解析为 speech 别名/嵌套模板 / msg 变量 / 全局。
     std::string formatTemplate(const std::string& text,
                                const std::map<std::string, std::string>& vars, int depth = 0) const;
+    // Help references additionally see the merged Mod help namespace, as in Dice!.
+    std::string formatHelpTemplate(const std::string& text,
+                                   const std::map<std::string, std::string>& vars) const;
+    std::string formatHelpTopic(const std::string& topic,
+                                const std::map<std::string, std::string>& vars) const;
     // &field（getUserConf 等）→ 经 speech 解析成实际字段名。
     std::string resolveAmp(const std::string& key) const;
 
@@ -106,11 +138,13 @@ public:
         int replies = 0;        // reply/*.{lua,toml} 数（目录）或 msg_order 条目数（单文件）
         int scripts = 0;        // script/*.lua 数
         int events = 0;         // 已注册的 event 条目数
-        std::map<std::string, std::string> helpdoc;   // descriptor.json helpdoc{主题:文本}
+        std::map<std::string, std::string, LegacyNameLess> helpdoc; // descriptor helpdoc, case-insensitive
         std::vector<std::string> permissions;   // descriptor 声明的能力（空=未声明）
         std::vector<std::string> risks;         // 静态预检命中的高危标签（仅告警不硬拦）
         std::vector<std::string> compatibilityWarnings; // Skipped legacy features, not permission warnings.
         bool permissionDeclared = false;
+        bool ancestorDisabled = false;
+        std::vector<std::string> managedPaths; // exact discovered paths, never reconstructed from an API name
     };
     std::vector<LuaMod> mods() const;
 
@@ -146,6 +180,13 @@ public:
     // 注入：drawDeck(牌堆名) → 抽牌结果（main.cpp 接牌堆引擎）。
     using DeckDrawFn = std::function<std::string(const std::string&)>;
     void setDeckDraw(DeckDrawFn f) { deckDraw_ = std::move(f); }
+    using ScopedDeckDrawFn = std::function<std::string(const std::string& platform, const std::string& adapterId,
+        const std::string& group, const std::string& user, const std::string& name)>;
+    void setScopedDeckDraw(ScopedDeckDrawFn fn) { scopedDeckDraw_ = std::move(fn); }
+    std::string drawDeck(const std::string& name, const std::string& group = {}, const std::string& user = {}) const {
+        if (scopedDeckDraw_) return scopedDeckDraw_(activePlatform_, activeAdapter_, group, user, name);
+        return deckDraw_ ? deckDraw_(name) : std::string();
+    }
 
     // 配置存取（供 C 函数与外部用）。scope 形如 "u:<uid>" / "g:<gid>"。
     static bool s_cpathStrict;
@@ -223,6 +264,15 @@ public:
     // sendMsg(text, groupId, userId)：插件主动发消息（主机按 platform 路由适配器）。
     using SendFn = std::function<void(const std::string& text, const std::string& gid, const std::string& uid)>;
     void setSender(SendFn f) { sender_ = std::move(f); }
+    using ScopedSendFn = std::function<void(const std::string& platform, const std::string& adapterId,
+                                           const std::string& text, const std::string& gid, const std::string& uid)>;
+    void setScopedSender(ScopedSendFn f) { scopedSender_ = std::move(f); }
+    void setScopedAsyncReply(ScopedSendFn f) { scopedAsyncReply_ = std::move(f); }
+    bool hasSender() const { return scopedSender_ || sender_; }
+    void send(const std::string& text, const std::string& group, const std::string& user) const {
+        if (scopedSender_) scopedSender_(activePlatform_, activeAdapter_, text, group, user);
+        else if (sender_) sender_(text, group, user);
+    }
 
     // eventMsg(text, gid, uid)：把 text 当作 uid 在 gid 群的消息跑完整回复管线并发出
     //（复刻原版 DiceLua.cpp::eventMsg → DiceEvent::virtualCall）。gid 空=私聊。
@@ -234,7 +284,21 @@ public:
     using AsyncReplyFn = std::function<void(const std::string& platform, const std::string& gid,
                                              const std::string& uid, const std::string& text)>;
     void setScheduler(ScheduleFn f) { scheduler_ = std::move(f); }
+    using ClockFn = std::function<std::time_t()>;
+    void setClock(ClockFn f) { clock_ = std::move(f); }
+    using DiceLookupFn = std::function<bool(const std::string&, const std::string&, const std::string&)>;
+    void setDiceLookup(DiceLookupFn f) { diceLookup_ = std::move(f); }
+    using TrustLookupFn = std::function<int(const std::string&, const std::string&, const std::string&, const std::string&, bool)>;
+    void setTrustLookup(TrustLookupFn f) { trustLookup_ = std::move(f); }
     void setAsyncReply(AsyncReplyFn f) { asyncReply_ = std::move(f); }
+
+    // Safe old event/tape bridge. The host retains blacklist, disable and approval policy.
+    bool dispatchHook(const std::string& hook, nlohmann::json& context, std::vector<ProcessingSource>* sources = nullptr);
+    bool hasHook(const std::string& hook) const;
+    void startEventHooks(); // actual host startup only, not import preflight
+    std::optional<std::string> ruleManual(const std::string& topic, const std::string& activeRule = {}) const;
+    DispatchResult dispatchTape(const std::string& rule, const std::string& tape, nlohmann::json& context);
+    std::filesystem::path resolveScript(const std::string& name, const std::string& ownerDir) const;
 
     // 单文件插件 task_call{name="globalFunction"} 兼容桥。
     std::vector<std::string> taskNames() const;
@@ -258,13 +322,17 @@ public:
     // 当前正加载的模块目录（loadLua 解析相对 script 路径用）。
     std::string loadingModDir_;
     DeckDrawFn  deckDraw_;
+    ScopedDeckDrawFn scopedDeckDraw_;
+    SelfIdLookupFn selfIdLookup_;
     SendFn      sender_;
     EventFn     eventMsg_;
     ScheduleFn  scheduler_;
     AsyncReplyFn asyncReply_;
+    ScopedSendFn scopedSender_, scopedAsyncReply_;
     HttpFetchFn httpFetch_;
     GroupGateFn groupGate_;   // 分群启停 gate（地基）
     RuleGateFn ruleGate_;     // 旧 TOML reply 的 rule 条件
+    ReplyTypeGateFn replyTypeGate_;
     HelpLookupFn helpLookup_; // {help:主题} 核心帮助查询桥
     CardLockFn  cardLockFn_;  // 卡片锁定桥接（真人物卡）
     PlayerCardReadFn playerCardRead_;
@@ -275,46 +343,98 @@ public:
     FavorSetFn favorSet_, favorAdd_;
     FavorGrowFn favorGrow_;
     std::string activePlatform_;  // 仅在 Lua echo/msg_order 调用栈内设置
+    std::string activeAdapter_;
     RollFn      roller_;      // 掷骰引擎桥（pc:rollDice）
     ExtraFn     askExtra_;    // 平台扩展查询（askExtra）
 
 private:
+    struct CallbackState { std::recursive_mutex mutex; LuaPluginManager* owner = nullptr; };
+    std::shared_ptr<CallbackState> callbackState_;
+    ClockFn clock_;
+    DiceLookupFn diceLookup_;
+    TrustLookupFn trustLookup_;
+    std::time_t nowSeconds() const { return clock_ ? clock_() : std::time(nullptr); }
+    bool postCallback(double delay, std::function<void(LuaPluginManager&)> callback);
     void registerGlobals();
     void openConfStore();
     int  loadDirLocked(const std::string& dir);
     void loadModReplies(LuaMod& mod);   // 载入 speech + reply(.lua/.toml) + event(.lua)
     void loadModFile(const std::filesystem::path& path, bool enabled);   // 单文件 Lua 插件（msg_order）
-    std::string valueOf(const std::string& key,
-                        const std::map<std::string, std::string>& vars, int depth) const;
+    struct TemplateBudget { size_t steps = 10000, bytes = 32 * 1024 * 1024; bool exhausted = false; };
+    std::string valueOf(const std::string& key, const std::map<std::string, std::string>& vars,
+                        int depth, bool helpScope, TemplateBudget& budget) const;
+    std::string formatTemplateImpl(const std::string& text, const std::map<std::string, std::string>& vars,
+                                  int depth, bool helpScope, TemplateBudget& budget) const;
+    std::string formatHelpTemplateImpl(const std::string& text, const std::map<std::string, std::string>& vars,
+                                      int depth, TemplateBudget& budget) const;
 
     // 一条 msg_reply 因果规则（来自 reply/*.lua 或 reply/*.toml）。
     struct ReplyRule {
-        std::string name, modName, modDir;
+        std::string name, modName, modDir, type = "reply";
         std::vector<std::string> matchPatterns;    // keyword.match（精确等于）
         std::vector<std::string> prefixPatterns;   // keyword.prefix（前缀，余下为 suffix）
         std::vector<std::string> searchPatterns;   // keyword.search（包含即命中）
         std::vector<std::string> regexPatterns;    // keyword.regex/Regex（正则）
-        int cdUser = 0, cdGrp = 0;           // limit.cd（秒）
-        int trustAtLeast = 0;                // limit.user_var.trust.at_least
-        std::map<std::string, std::string> userVarEquals;  // JSON-encoded typed conditions
-        std::map<std::string, std::string> groupVarEquals;
-        bool groupOnly = false;              // limit.grp_id → 仅群聊
         bool requiresGame = false;            // type="Game"：需已开团且发送者为参与者
         std::string requiredRule;             // rule="BRP"：仅匹配该群规则
         int  echoRef = 0;                    // echo 为函数时的 registry 引用
+        bool echoTakesMessage = true;
         std::string echoScript;              // echo={lua="name"} 时的脚本名（跑 script/<name>.lua）
         std::string staticEcho;               // TOML echo="..." 静态回复
-        bool maySleep = false;                // 单文件源码使用 sleepTime → 以协程调用
+        bool staticEchoDefined = false;
+        std::string echoDeckJson;
+        std::shared_ptr<const legacy_mod::Limits> limits;
         std::string legacySourceFile;         // data/plugin 单文件：每次调用重新执行源码
         std::string legacyFunctionName;       // msg_order 指向的全局函数名（位于独立 _ENV）
     };
+    bool matchesLimits(const ReplyRule& rule, const std::string& uid, const std::string& gid,
+                       bool isPrivate, int trust, const std::string& platform, const std::string& adapterId) const;
+    std::string limitScopeKey(int scope, const std::string& uid, const std::string& gid,
+                              bool isPrivate, const std::string& platform, const std::string& adapterId) const;
+    bool consumeLimits(const ReplyRule& rule, const std::string& uid, const std::string& gid,
+                       bool isPrivate, const std::string& platform, const std::string& adapterId,
+                       std::string& notice, std::vector<std::string>& locks, bool& busy);
+    void releaseLegacyLocks(const std::vector<std::string>& locks);
+    struct LimitLease {
+        LuaPluginManager& owner; std::vector<std::string> keys; bool retain = false;
+        ~LimitLease() { if (!retain) owner.releaseLegacyLocks(keys); }
+    };
+    struct QueuedDispatch {
+        std::string text, uid, gid, nick, card, platform, adapterId, ruleKey;
+        bool isPrivate = false; int trust = 0, depth = 0;
+        uint64_t generation = 0;
+        std::vector<std::string> locks;
+        ProcessingContext context;
+    };
+    std::set<std::string> activeLegacyLocks_;
+    std::deque<QueuedDispatch> queuedDispatches_;
+    bool lockDrainScheduled_ = false;
+    void drainLegacyLocks(uint64_t generation);
 
     struct LegacyCycleEvent {
         std::string id, modName, modDir, actionLua;
+        std::string actionText;
+        std::string defaultsJson;
+        int actionRef = 0;
         double intervalSeconds = 0.0;
+        std::vector<std::pair<int, int>> clocks;
+        std::vector<std::string> hooks;
     };
     void scheduleCycleEvent(const std::string& id, bool runNow);
     void runCycleEvent(const std::string& id, uint64_t generation);
+    bool runLegacyEvent(const LegacyCycleEvent& event, nlohmann::json& context, bool mayYield);
+    void scheduleClockTick();
+    void runClockTick(uint64_t generation);
+    std::time_t lastClockTime_ = 0;
+    bool hostStarted_ = false;
+    struct RuleBook {
+        std::map<std::string, std::string> manual;
+        std::map<std::string, LegacyCycleEvent> tapes;
+    };
+    std::map<std::string, RuleBook> ruleBooks_;
+    struct ScriptEntry { std::filesystem::path path; std::string modName; };
+    std::map<std::string, ScriptEntry, LegacyNameLess> scriptRegistry_;
+    std::map<std::string, HelpItem, LegacyNameLess> legacyHelp_;
 
     struct LegacyTask {
         std::string name, modName, modDir;
@@ -324,9 +444,11 @@ private:
         uint64_t generation = 0;
         int threadRef = 0;
         int messageRef = 0;
-        std::string ruleName, modName, modDir, platform, gid, uid;
+        std::string ruleName, modName, modDir, platform, adapterId, gid, uid;
         std::map<std::string, std::string> vars;
         ProcessingContext logContext;
+        std::vector<std::string> locks;
+        bool event = false;
     };
     void scheduleCoroutineResume(int threadRef, double delaySeconds);
     void resumeCoroutine(int threadRef);
@@ -341,7 +463,8 @@ private:
     std::string dir_;
     std::vector<std::string> extraDirs_;   // 规则包附加 mod 目录
     std::vector<LuaMod> mods_;
-    std::map<std::string, std::string> speech_;   // 全局 speech 词条（各 mod 合并）
+    // Original Dice! speech keys ignore ASCII case; scalar or uniform choices.
+    std::map<std::string, std::vector<std::string>> speech_;
     std::vector<ReplyRule> replyRules_;
     std::map<std::string, LegacyCycleEvent> cycleEvents_;
     std::map<std::string, LegacyTask> taskCalls_;

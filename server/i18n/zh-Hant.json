@@ -396,7 +396,7 @@
       "npc": "NPC .npc\n.npc new <名字> // 新建群組共享角色卡\n.npc list // 查看 NPC 列表\n.npc <名字> st <屬性><值> // 給該 NPC 錄屬性，如 .npc 張三 st 力量50\n.npc <名字> ra <技能> // 以該 NPC 代骰\n.npc show <名字> // 查看該 NPC\n.npc del <名字> // 刪除該 NPC\n.npc clr <名字> // 清空該 NPC 的屬性",
       "coc": "製卡 .coc\n.coc [數量] // 生成 COC7 調查員屬性",
       "dnd": "製卡 .dnd\n.dnd [數量] // 生成 DND 屬性，4d6 取高 3",
-      "deck": "牌堆 .deck\n.deck // 查看牌堆一覽\n.draw <牌堆> // 抽一張牌\n.gacha // 抽卡",
+      "deck": "牌堆 .deck\n.deck // 查看牌堆一覽\n.draw <牌堆> // 抽一張牌\n.deck session help // 管理團務私有牌堆（不放回）\n.gacha // 抽卡",
       "jrrp": "人品 .jrrp\n.jrrp // 查看今日人品，每人每天固定",
       "bot": "骰娘 .bot\n.bot // 查看版本與狀態\n.bot on // 在本群啟用骰娘\n.bot off // 在本群停用骰娘，停用後僅 .bot 可用",
       "group": "群設定 .group\n.group [群號] <state|info> // 查看本群狀態或資訊\n.group [群號] +<詞條> // 啟用某項，如 +禁用回复\n.group [群號] -<詞條> // 關閉某項，如 -禁用help\n.group [群號] clr // 清除本群設定\n.group all +<詞條> // 對所有群啟用，需要骰主或信任≥5，僅限目前帳號\n.group all -<詞條> // 對所有群關閉，條件同上",
@@ -706,7 +706,18 @@
     "temp_new": "已建立本群臨時牌堆「{name}」（{count} 項），用 .draw {name} 抽取。",
     "temp_del": "已刪除本群臨時牌堆「{name}」。",
     "temp_usage": ".deck new <牌堆名> <選項1>/<選項2>/<選項3> // 建立臨時牌堆，任何人可建",
-    "temp_tag": "(臨時)"
+    "temp_tag": "(臨時)",
+    "session_usage": ".deck session // 查看團務牌堆\n.deck session new <名稱> <甲/乙/丙> // 建立不放回牌堆，支援 ::份數::牌面\n.deck session from <名稱> <公共牌堆> // 複製公共牌堆\n.deck session rest [名稱] // 查看剩餘數量\n.deck session reset <名稱> // 恢復全部牌\n.deck session del <名稱> // 刪除指定牌堆\n.deck session clr // 清空團務牌堆\n修改需本團 GM、群管或骰主；抽取使用 .draw <名稱>。群臨時牌堆的原有行為不變。",
+    "session_invalid": "團務牌堆資料無效，未抽取：{reason}",
+    "session_exhausted": "團務牌堆「{name}」已抽空，請由 GM 使用 .deck session reset {name} 重設。",
+    "session_save_failed": "團務牌堆狀態儲存失敗，本次操作未生效。",
+    "session_cleared": "已清空本團的私有牌堆。",
+    "session_none": "本團尚無私有牌堆。使用 .deck session new <名稱> <甲/乙> 建立。",
+    "session_state": "團務牌堆「{name}」：剩餘 {left} / {total} 張",
+    "session_full": "本團最多保留 10 個私有牌堆，請先刪除不需要的牌堆。",
+    "session_deleted": "已刪除團務牌堆「{name}」。",
+    "session_created": "已建立或替換團務牌堆「{name}」，使用 .draw {name} 不放回抽取。",
+    "session_reset": "已重設團務牌堆「{name}」，全部牌恢復可抽。"
   },
   "mod": {
     "info": "模組 {name}（{id}）\n狀態：{state}\n版本：{version}\n作者：{author}\n簡介：{brief}",

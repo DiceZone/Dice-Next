@@ -1,5 +1,7 @@
 #pragma once
 #include "../common/legacy_conf_value.h"
+#include "../common/legacy_model.h"
+#include "../common/session_deck.h"
 // ─── Dice!Next v3.0.0 — Command Router ───────────────────────
 // Routes incoming messages to dice engine, reply system, etc.
 // Faithfully implements original Dice! command set (.r .coc .dnd etc.)
@@ -205,10 +207,18 @@ public:
     void rememberProcessingSources(std::vector<ProcessingSource> sources, bool partial = false) {
         processingSources_ = std::move(sources); processingPartial_ = partial;
     }
+    void markLegacyHandled(std::vector<ProcessingSource> sources, bool partial = false) {
+        shortcutHandled_ = true; shortcutPlugin_ = true;
+        rememberProcessingSources(std::move(sources), partial);
+    }
     // nullopt = no plugin matched; an empty string is a matched, deliberately
     // silent command. Never retry that command as an ordinary custom reply.
     using ShortcutPluginFn = std::function<std::optional<std::string>(const Message&, const std::string&)>;
     void setShortcutPluginBridge(ShortcutPluginFn fn) { shortcutPluginBridge_ = std::move(fn); }
+    using LegacyMessageStageFn = std::function<std::optional<std::string>(const Message&)>;
+    void setLegacyMessageStage(LegacyMessageStageFn fn) { legacyMessageStage_ = std::move(fn); }
+    using LegacyLogEndFn = std::function<bool(const Message&, int)>;
+    void setLegacyLogEndHook(LegacyLogEndFn fn) { legacyLogEndHook_ = std::move(fn); }
     inline static thread_local std::shared_ptr<const qq_rich::Card> officialCard_;
     std::shared_ptr<const qq_rich::Card> lastOfficialCard() const { return officialCard_; }
 
@@ -236,6 +246,19 @@ public:
         recordBotProbe(msg);      // 记录本群 .bot 探测时间，作为识别的时间窗
         std::string text = trim(msg.content);
         if (text.empty()) return "";
+        // Old Message/tape handlers can intercept normal messages and game rolls,
+        // never credentials, recovery controls or blocked/disabled conversations.
+        if (legacyMessageStage_ && !isBlocked(msg) && !isGroupLocked(msg) && !isGroupDisabled(msg)
+            && groupFeatureEnabled(msg, "plugin")
+            && !censor::blocks(sensitiveWordMatcher_.searchText(text).level, senderTrust(msg))) {
+            const auto body = commandBody(text);
+            const auto word = body ? toLower(splitCommand(*body).first) : std::string();
+            static const std::set<std::string> protectedCommands = {"bot", "master", "mod", "plugin", "game", "log", "dismiss", "alias", "bind", "lang", "help"};
+            if (!protectedCommands.count(word) && word.rfind("bot", 0) != 0 && (!body || !shortcut::invocation(*body))) if (auto reply = legacyMessageStage_(msg)) {
+                shortcutHandled_ = true; shortcutPlugin_ = true; s_replyCat = "plugin";
+                return *reply;
+            }
+        }
 
         // 好感度查询走原版的「无前缀关键词」习惯：整条消息恰为「好感 / 好感排行 /
         // 群内好感排行」时直接响应（不劫持其它含「好感」的消息）。操控类仍需前缀。
@@ -4348,6 +4371,12 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
     // CommandRouter 不直接依赖 JS 引擎，故用回调解耦。
     using HelpProviderFn = std::function<std::vector<std::pair<std::string, std::string>>()>;
     void setHelpProvider(HelpProviderFn f) { helpProvider_ = std::move(f); }
+    using LegacyHelpRenderFn = std::function<std::string(const std::string& topic, const Message&)>;
+    void setLegacyModHelpProvider(HelpProviderFn provider, LegacyHelpRenderFn render) {
+        legacyModHelpProvider_ = std::move(provider); legacyModHelpRenderer_ = std::move(render);
+    }
+    using ScopedHelpFn = std::function<std::optional<std::string>(const std::string&, const Message&)>;
+    void setLegacyRuleHelp(ScopedHelpFn f) { legacyRuleHelp_ = std::move(f); }
 
     // 插件清单提供器（main.cpp 注入 lua/js 插件列表），供 .plugin 指令枚举/启停。
     struct PluginEntry { std::string id; std::string name; std::string kind; bool enabledGlobal = true; };
@@ -4384,7 +4413,10 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
     }
 
     // 一条帮助条目（合并自内置 i18n / 规则包 / 插件 / 文件四源）。
-    struct HelpEntry { std::string key, content, source; };  // builtin | rule:<包> | plugin:<名> | file:<名>
+    struct HelpEntry {
+        std::string key, content, source; // builtin | rule:<包> | plugin | file:<名>
+        bool legacyMod = false; // Render only the selected entry, never the whole catalog.
+    };
 
     // data/help/*.md 用户自管帮助文档（第四源）。专用读写锁；启动期与 CRUD 后 loadHelpFiles。
     static std::shared_mutex& helpLock() { static std::shared_mutex m; return m; }
@@ -4463,10 +4495,10 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         // scope 非空 = 搜索域锁定：内置指令帮助保留，其余只收来源匹配的（在「去重前」过滤，
         // 否则别的来源的同名词条会先占位、再被过滤掉，导致域内词条反而查不到）。
         std::unordered_set<std::string> seenKeys;
-        auto add = [&](const std::string& k, const std::string& c, const std::string& src) {
+        auto add = [&](const std::string& k, const std::string& c, const std::string& src, bool legacyMod = false) {
             if (!scope.empty() && src != "builtin" && !helpSourceMatches(src, scope)) return;
             if (!seenKeys.insert(toLower(k)).second) return;   // 已存在
-            v.push_back({k, c, src});
+            v.push_back({k, c, src, legacyMod});
         };
         for (const auto& t : helpTopics())
             add(t, i18n_.tr(loc, "help.topic." + t), "builtin");
@@ -4478,6 +4510,9 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         if (helpProvider_)
             for (const auto& [k, c] : helpProvider_())
                 if (!c.empty()) add(k, c, "plugin");
+        if (legacyModHelpProvider_)
+            for (const auto& [k, c] : legacyModHelpProvider_())
+                if (!c.empty()) add(k, c, "plugin", true);
         {
             std::shared_lock<std::shared_mutex> lk(helpLock());
             for (const auto& [k, c] : helpFiles())
@@ -4628,6 +4663,11 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
     }
 
 private:
+    std::string renderSelectedHelp(const HelpEntry& entry, const Message& msg) const {
+        const auto text = entry.legacyMod && legacyModHelpRenderer_
+            ? legacyModHelpRenderer_(entry.key, msg) : entry.content;
+        return expandHelpRefs(text, msg);
+    }
     std::string handleHelp(Locale loc, const std::string& args, const Message& msg) {
         const std::string toggle = toLower(trim(args));
         if (toggle == "on" || toggle == "off") {
@@ -4643,6 +4683,7 @@ private:
         // 深化：本群激活的规则包，其同名帮助词条优先于内置/其它来源。
         if (auto rp = activeRulePack(msg))
             for (auto& [k, c] : rp->helpEntries) if (toLower(k) == topic) return expandHelpRefs(c, msg);
+        if (legacyRuleHelp_) if (auto text = legacyRuleHelp_(topic, msg)) return expandHelpRefs(*text, msg);
         // 设了默认帮助来源 → 同名词条优先该来源（如 dnd5r 压过 dnd3r）。
         if (std::string defSrc = helpdocDefaultSource(msg); !defSrc.empty()) {
             std::shared_lock<std::shared_mutex> lk(helpDocLock());
@@ -4658,13 +4699,13 @@ private:
             if (!hasDoc) return i18n_.tr(loc, "helpdoc.scope.empty", {{"scope", scope}, {"topic", topic}});
         }
         // 精确命中（忽略大小写）任一来源。
-        for (auto& e : entries) if (toLower(e.key) == topic) return expandHelpRefs(e.content, msg);
+        for (auto& e : entries) if (toLower(e.key) == topic) return renderSelectedHelp(e, msg);
         // 模糊查找：唯一命中→显示；多个→列候选；无→未知。
         std::vector<std::string> keys; keys.reserve(entries.size());
         for (auto& e : entries) keys.push_back(e.key);
         auto hits = fuzzyFind(topic, keys);
         if (hits.size() == 1)
-            for (auto& e : entries) if (e.key == hits[0]) return expandHelpRefs(e.content, msg);
+            for (auto& e : entries) if (e.key == hits[0]) return renderSelectedHelp(e, msg);
         if (hits.size() > 1) {
             std::string list;
             for (auto& c : hits) { if (!list.empty()) list += " "; list += "." + c; }
@@ -5151,88 +5192,38 @@ public:
     /// 解析规则 mod 的属性模板 model/*.xml（原版 Dice! 的 <property>/<any name alias>），
     /// 把属性别名并入全局同义词表 → .st/.ra 认得该规则系统的属性名（如 .st STR50 → 力量）。
     /// 扫 data/mod 与 data/rulepacks（含包内 lua/.../model/）。返回注册的别名数。
-    /// 注：text='javascript'/'dicexp' 的衍生/默认/上限值暂不集成（需 JS 上下文；内置
-    ///     COC7/DND 的 max 由 builtinComputed 覆盖，自定义规则可在 rules/*.json 的 computed 声明）。
+    /// text='javascript'/'dicexp' 仅转换纯数值表达式，不执行模型脚本；规则包
+    /// 自己声明的 computed/defaultsComputed 仍优先于这些旧模板。
     static int loadModelTemplates() {
         namespace fs = std::filesystem; std::error_code ec; int n = 0;
         derivedRegistry().clear();   // 重载时不累积（alias 由 resetAliases 另清）
         // 先播内置派生（闪避=敏捷/2 等），规则 mod/包可覆盖同名条目。
         for (auto& [k, v] : builtinDerived()) derivedRegistry()[CharacterCardStore::canonicalUnlocked(k)] = v;
-        auto attrOf = [](const std::string& tag, const std::string& key) -> std::string {
-            for (char q : { '\'', '"' }) {
-                std::string pat = key + "=" + q;
-                auto p = tag.find(pat);
-                if (p == std::string::npos) continue;
-                auto s = p + pat.size(); auto e = tag.find(q, s);
-                if (e != std::string::npos) return tag.substr(s, e - s);
-            }
-            return "";
-        };
-        auto parseXml = [&](const fs::path& xml) {
-            std::ifstream f(xml, std::ios::binary);
-            std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-            for (size_t pos = 0; (pos = s.find("<any", pos)) != std::string::npos; ) {
-                auto end = s.find('>', pos);
-                if (end == std::string::npos) break;
-                std::string tag = s.substr(pos, end - pos);
-                std::string name = attrOf(tag, "name"), alias = attrOf(tag, "alias"), text = attrOf(tag, "text");
-                if (!name.empty() && !alias.empty()) {
-                    std::string cur;
-                    for (char c : alias + "/")
-                        if (c == '/') { if (!cur.empty()) { CharacterCardStore::registerAlias(cur, name); ++n; } cur.clear(); }
-                        else cur += c;
+        for (const auto& root : {fs::path("data/mod"), fs::path("data/rulepacks")})
+            for (const auto& file : legacy_model::orderedFiles(root)) {
+                std::error_code error;
+                if (fs::file_size(file, error) > 4 * 1024 * 1024 || error) {
+                    DICE_LOG_WARN("模型「{}」不可读或超过 4 MiB，已跳过。", u8str(file)); continue;
                 }
-                // 衍生值/默认值：<any name='X' text='javascript'|'dicexp'>EXPR</any> → derivedRegistry。
-                if (!name.empty() && (text == "javascript" || text == "dicexp") && end > pos && s[end - 1] != '/') {
-                    auto close = s.find("</any>", end);
-                    if (close != std::string::npos) {
-                        std::string raw = s.substr(end + 1, close - end - 1), dsl;
-                        if (text == "javascript") dsl = translateModelExpr(raw);
-                        else {                       // dicexp：默认值（&X 引用 / 简单算术）。去 & ；含掷骰/复杂→放弃。
-                            for (size_t p; (p = raw.find('&')) != std::string::npos; ) raw.erase(p, 1);
-                            auto t0 = raw.find_first_not_of(" \t\r\n");
-                            dsl = (t0 == std::string::npos) ? "" : raw.substr(t0, raw.find_last_not_of(" \t\r\n") - t0 + 1);
-                            // 含掷骰(数字d)/JS/字符串/比较 → 放弃
-                            bool bad = dsl.empty();
-                            for (size_t k = 0; k + 1 < dsl.size() && !bad; ++k)
-                                if ((dsl[k] == 'd' || dsl[k] == 'D') && std::isdigit((unsigned char)dsl[k + 1])
-                                    && (k == 0 || std::isdigit((unsigned char)dsl[k - 1]))) bad = true;
-                            if (dsl.find_first_of("\"'<>{}[]?|") != std::string::npos) bad = true;
-                            if (bad) dsl.clear();
-                        }
-                        if (!dsl.empty()) {
-                            derivedRegistry()[name] = dsl;
-                            // 同时按所有别名注册（canonical 可能落在别名/内建同义词上，确保查得到）。
-                            std::string cur2;
-                            for (char c : alias + "/")
-                                if (c == '/') { if (!cur2.empty()) derivedRegistry()[cur2] = dsl; cur2.clear(); }
-                                else cur2 += c;
-                        }
-                        pos = close + 6; continue;
+                std::ifstream input(file, std::ios::binary);
+                const std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+                const auto document = legacy_model::parse(text);
+                for (const auto& warning : document.warnings) DICE_LOG_WARN("模型「{}」：{}", u8str(file), warning);
+                for (const auto& property : document.properties) {
+                    std::vector<std::string> names = {property.name};
+                    std::string alias;
+                    for (const char c : property.alias + "/") {
+                        if (c != '/') { alias += c; continue; }
+                        alias = trim(alias);
+                        if (!alias.empty()) { CharacterCardStore::registerAlias(alias, property.name); names.push_back(alias); ++n; }
+                        alias.clear();
+                    }
+                    if (!property.formula.empty()) for (const auto& name : names) {
+                        derivedRegistry()[name] = property.formula;
+                        derivedRegistry()[CharacterCardStore::canonicalUnlocked(name)] = property.formula;
                     }
                 }
-                pos = end + 1;
             }
-        };
-        auto scanDir = [&](const std::string& base) {
-            std::error_code e2;
-            if (!fs::is_directory(base, e2)) return;
-            for (fs::recursive_directory_iterator it(base, e2), endit; it != endit; it.increment(e2)) {
-                if (e2) { e2.clear(); continue; }
-                if (it->is_directory()) {
-                    const std::string folder = u8str(it->path().filename());
-                    if (folder.size() > 9 && folder.substr(folder.size() - 9) == ".disabled")
-                        it.disable_recursion_pending();
-                    continue;
-                }
-                std::error_code fe;
-                if (it->is_regular_file(fe) && it->path().extension() == ".xml"
-                    && it->path().parent_path().filename() == "model")
-                    try { parseXml(it->path()); } catch (...) {}
-            }
-        };
-        scanDir("data/mod");
-        scanDir("data/rulepacks");
         n += loadJsGameSystems();   // seal.gameSystem.newTemplate 的属性别名/衍生
         return n;
     }
@@ -5612,6 +5603,7 @@ public:
         if (role == "admin") return 50;
         return 0;
     }
+    int legacyTrustLevel(const Message& msg) const { return isMaster(msg) ? (std::max)(4, senderTrust(msg)) : senderTrust(msg); }
 
     /// Return the body after a configured prefix, or after the forced `.` / `。`
     /// safety prefix for bot controls and dismiss. Used by plugins and routing gates.
@@ -8144,8 +8136,17 @@ public:
         std::function<std::string(const std::string& scope, const std::string& key)> get;
         std::function<void(const std::string& scope, const std::string& key, const std::string& val)> set;
         std::function<std::vector<std::pair<std::string, std::string>>(const std::string& scope)> all;
+        std::function<bool(const std::string& scope, const std::string& key, const std::string& val)> setChecked;
     };
     void setGameConf(GameConfBridge b) { gameConf_ = std::move(b); }
+    // Lua's old drawDeck(gid, uid, name) uses the same Session-owned state as
+    // native .draw. Unscoped one-argument calls still use public decks only.
+    std::string legacyDrawDeck(const Message& msg, const std::string& name) {
+        if (name.empty() || isBlocked(msg) || isGroupDisabled(msg) || isGroupLocked(msg)
+            || !groupFeatureEnabled(msg, "plugin")) return "";
+        if (auto card = drawSessionDeck(msg, name, resolver_.resolve(msg))) return *card;
+        return deck_.drawFromDeck(name).value_or("{" + name + "}");
+    }
 private:
     GameConfBridge gameConf_;
 
@@ -8171,11 +8172,65 @@ private:
     }
     // 团是否存在且未暂关（掷骰轮盘、msg.game 语义与此一致）。
     bool gameActive(const Message& msg) const {
-        return msg.type == MessageType::kGroup && !gGet(msg, "__name").empty() && gGet(msg, "__closed").empty();
+        if (msg.type != MessageType::kGroup || gGet(msg, "__name").empty()) return false;
+        const auto raw = gameConf_.get ? gameConf_.get(gameScope(msg), "__closed") : std::string();
+        if (raw.empty()) return true;
+        json closed;
+        if (!legacy_conf::decode(raw, closed)) closed = json::parse(raw, nullptr, false);
+        return closed.is_boolean() && !closed.get<bool>();
+    }
+    bool saveSessionDecks(const Message& msg, const json& decks) {
+        const auto text = decks.dump(), scope = gameScope(msg);
+        if (gameConf_.setChecked) return gameConf_.setChecked(scope, "__decks", text);
+        if (!gameConf_.set || !gameConf_.get) return false;
+        gameConf_.set(scope, "__decks", text);
+        return gameConf_.get(scope, "__decks") == text;
+    }
+    bool sessionDecks(const Message& msg, json& decks, std::string& error) {
+        auto raw = gGet(msg, "__decks");
+        if (raw.empty()) {
+            // Earlier imports archived this data without activating it. Upgrade
+            // only validated plain deck data and never reset an existing pool.
+            raw = gGet(msg, "__legacy_decks");
+            if (!raw.empty() && session_deck::decode(raw, decks, error)) {
+                if (saveSessionDecks(msg, decks)) return true;
+                error = "无法保存团务牌堆状态"; return false;
+            }
+        }
+        return session_deck::decode(raw, decks, error);
+    }
+    std::optional<std::string> drawSessionDeck(const Message& msg, const std::string& name, Locale loc, int times = 1) {
+        std::vector<std::string> cards;
+        {
+            // Conf callbacks only take the storage mutex, not the Lua VM mutex.
+            // Keep rendering/help expansion outside this lock to avoid VM/core
+            // lock inversion and commit the draw before delivering its result.
+            std::lock_guard<std::mutex> lock(gameSessionMutex());
+            if (!gameActive(msg) || !gameConf_.set) return std::nullopt;
+            json decks; std::string error;
+            if (!sessionDecks(msg, decks, error)) return i18n_.tr(loc, "deck.session_invalid", {{"reason", error}});
+            const auto key = session_deck::findName(decks, name);
+            if (key.empty()) return std::nullopt;
+            static thread_local std::mt19937_64 random{std::random_device{}()};
+            for (int i = 0; i < (std::clamp)(times, 1, 10); ++i) {
+                const auto result = session_deck::draw(decks[key], random);
+                if (result.empty) {
+                    if (cards.empty()) return i18n_.tr(loc, "deck.session_exhausted", {{"name", key}});
+                    break;
+                }
+                if (!result.ok) return i18n_.tr(loc, "deck.session_invalid", {{"reason", result.error}});
+                cards.push_back(result.text);
+            }
+            if (!saveSessionDecks(msg, decks)) return i18n_.tr(loc, "deck.session_save_failed");
+        }
+        std::string text;
+        for (const auto& card : cards) { if (!text.empty()) text += '\n'; text += deck_.expandText(card); }
+        return text;
     }
     static std::vector<std::string> gList(const std::string& j) {
         std::vector<std::string> v;
         auto a = nlohmann::json::parse(j.empty() ? "[]" : j, nullptr, false);
+        if (legacy_conf::isSet(a)) a = json(a["values"]);
         if (a.is_array()) for (auto& e : a) if (e.is_string()) v.push_back(e.get<std::string>());
         return v;
     }
@@ -8275,7 +8330,7 @@ private:
         if (cmd.size() > 4 && !std::isspace((unsigned char)cmd[4])) return std::nullopt;
         // 团号索引、群→会话映射及会话成员必须作为一个事务更新。这样两个群主同时
         // 开团时也会领到不同的随机团号，不会覆盖或串进同一会话。
-        std::lock_guard<std::mutex> gameLock(gameSessionMutex());
+        std::unique_lock<std::mutex> gameLock(gameSessionMutex());
         std::string rest = trim(cmd.substr(4));
         auto v = [&](std::initializer_list<std::pair<std::string, std::string>> kv) {
             std::map<std::string, std::string> m;
@@ -8419,6 +8474,7 @@ private:
         if (lact == "over") {
             if (!gameIsGm(msg, uid) && !senderIsGroupAdmin(msg)) return i18n_.tr(loc, "game.not_master", {{"nick", nick}});
             std::string extra;
+            std::vector<std::pair<Message, int>> closedLogs;
             // 原版 Dice! 的 .game over 会对仍在记录的团务日志执行 log_end。
             // 暂停中的日志不自动结束，和旧版 is_logging() 的语义一致。
             std::string sessionId = gameSessionId(msg);
@@ -8438,7 +8494,7 @@ private:
                         std::string timer = timerSuffixStop(loc, areaMsg, activeLog);
                         setGroupSetting(areaMsg, "activeLog", "");
                         setGroupSetting(areaMsg, "activeLogName", "");
-                        shareLog(areaMsg, activeLog);
+                        closedLogs.emplace_back(areaMsg, activeLog);
                         if (includeReply)
                             extra = "\n" + i18n_.tr(loc, "log.ended", {{"count", std::to_string(count)}}) + timer;
                     }
@@ -8466,6 +8522,10 @@ private:
             } else {
                 clearGameScope(gameScope(msg));   // 兼容旧版单群存档
             }
+            // Hooks may call Lua drawDeck/eventMsg and re-enter game handling.
+            // Finish all native state changes, then release the game mutex.
+            gameLock.unlock();
+            for (const auto& [area, id] : closedLogs) publishClosedLog(area, id);
             return i18n_.tr(loc, "game.over", {{"game_id", gname}}) + extra;
         }
         if (lact == "rou") {
@@ -8598,67 +8658,17 @@ private:
     static std::map<std::string, std::string>& derivedRegistry() { static std::map<std::string, std::string> m; return m; }
     static void resetDerived() { derivedRegistry().clear(); }
     /// 把 model.xml 的 text='javascript' 公式翻成 computed DSL（属性名留待 evalComputedFormula
-    /// 自动 canonical 解析）；含无法翻译的 JS（Math.*函数/三元/比较/字符串/对象）→ 返回空。
-    static std::string translateModelExpr(std::string s) {
-        if (auto p = s.rfind("&&"); p != std::string::npos) s = s.substr(p + 2);   // 取守卫后的实际表达式
-        auto rep = [&](const std::string& a, const std::string& b) {
-            for (size_t p; (p = s.find(a)) != std::string::npos; ) s.replace(p, a.size(), b);
-        };
-        rep("this.", ""); rep("pc.", "");
-        rep("Math.floor(", "(");      // floor 由整数除法天然实现
-        rep(" || 0", ""); rep("||0", "");
-        auto t0 = s.find_first_not_of(" \t\r\n");
-        s = (t0 == std::string::npos) ? "" : s.substr(t0, s.find_last_not_of(" \t\r\n") - t0 + 1);
-        if (s.empty() || s.find("Math.") != std::string::npos || s.find('?') != std::string::npos
-            || s.find("function") != std::string::npos || s.find('{') != std::string::npos
-            || s.find('[') != std::string::npos || s.find('"') != std::string::npos
-            || s.find('\'') != std::string::npos || s.find("==") != std::string::npos
-            || s.find('<') != std::string::npos || s.find('>') != std::string::npos
-            || s.find('|') != std::string::npos || s.find('&') != std::string::npos)
-            return "";
-        return s;
-    }
+    /// 自动 canonical 解析）；允许白名单数学函数、数值比较和三元，不接入 JS 执行器。
+    static std::string translateModelExpr(std::string s) { return legacy_model::expression(std::move(s)); }
 
-    /// 求值一条 computed 公式，如 "(体质+体型)/10" 或 "99-克苏鲁神话?0"。
-    /// 引用的属性名→卡值；裸引用缺失 → 返回 nullopt（公式失败）；带 "?N" 的
-    /// 引用缺失 → 用 N。整数运算，* / 优先于 + -，支持括号。
+    // Keep Next's integer-division DSL while accepting explicit Math.floor/ceil,
+    // safe numeric conditionals and short-circuit defaults from old XML models.
     std::optional<int> evalComputedFormula(const std::string& expr, const Message& msg,
             const std::function<std::optional<int>(const std::string&)>& lookOverride = {}) const {
-        struct P {
-            const std::string& s; size_t i = 0; bool fail = false;
-            std::function<std::optional<int>(const std::string&)> look;
-            void skip() { while (i < s.size() && s[i] == ' ') ++i; }
-            long readNum() { long v = 0; while (i < s.size() && std::isdigit((unsigned char)s[i])) v = v * 10 + (s[i++] - '0'); return v; }
-            long factor() {
-                skip();
-                if (i < s.size() && s[i] == '(') { ++i; long v = expr_(); skip(); if (i < s.size() && s[i] == ')') ++i; return v; }
-                if (i < s.size() && std::isdigit((unsigned char)s[i])) return readNum();
-                size_t start = i;                                  // 标识符：读到运算符/括号/空格/?
-                while (i < s.size()) { char c = s[i];
-                    if (c == '+' || c == '-' || c == '*' || c == '/' || c == '(' || c == ')' || c == ' ' || c == '?') break; ++i; }
-                std::string name = s.substr(start, i - start);
-                std::optional<int> def;
-                if (i < s.size() && s[i] == '?') { ++i; bool neg = false; if (i < s.size() && s[i] == '-') { neg = true; ++i; }
-                    long d = readNum(); def = (int)(neg ? -d : d); }
-                if (name.empty()) { fail = true; return 0; }
-                auto v = look(CharacterCardStore::canonical(name));
-                if (v) return *v;
-                if (def) return *def;
-                fail = true; return 0;                              // 裸引用缺失 → 失败
-            }
-            long term() { long v = factor(); skip();
-                while (i < s.size() && (s[i] == '*' || s[i] == '/')) { char op = s[i++]; long r = factor();
-                    if (op == '*') v *= r; else v = (r != 0 ? v / r : 0); skip(); } return v; }
-            long expr_() { long v = term(); skip();
-                while (i < s.size() && (s[i] == '+' || s[i] == '-')) { char op = s[i++]; long r = term();
-                    v = (op == '+') ? v + r : v - r; skip(); } return v; }
-        } p{expr, 0, false,
-            lookOverride ? lookOverride
-                         : std::function<std::optional<int>(const std::string&)>(
-                               [&](const std::string& name) { return cards_.getAttr(msg.senderId, cardScope(msg), name); })};
-        long v = p.expr_();
-        if (p.fail) return std::nullopt;
-        return (int)v;
+        return model_formula::evaluate(expr, [&](const std::string& name) {
+            const auto canonical = CharacterCardStore::canonical(name);
+            return lookOverride ? lookOverride(canonical) : cards_.getAttr(msg.senderId, cardScope(msg), canonical);
+        });
     }
 
     /// 渲染规则包自定义指令的输出模板。模板中的 `{表达式}` 占位会被
@@ -9162,6 +9172,13 @@ private:
     /// 群文件格式可由群管 .log type txt|html 设置（日志站收自己的协议格式）。
     /// 上传协议默认 DiceNext 专属 zstd JSON（config dice/logsite_format=seal 走 SealDice V1、legacy 走旧多段 txt POST）；
     /// 目标非官方站时回覆附加提示。@p sendFile=false 仅取链接（.log get / masterget）。
+    void publishClosedLog(const Message& msg, int logId) {
+        bool handled = false;
+        try { handled = legacyLogEndHook_ && legacyLogEndHook_(msg, logId); }
+        catch (const std::exception& error) { DICE_LOG_ERROR("LogEnd 钩子执行失败，日志已结束，将使用默认上传：{}", error.what()); }
+        catch (...) { DICE_LOG_ERROR("LogEnd 钩子执行失败，日志已结束，将使用默认上传。"); }
+        if (!handled) shareLog(msg, logId);
+    }
     void shareLog(const Message& msg, int logId, bool sendFile = true) {
         auto* st = db_.getLogStorage();
         if (!st) return;
@@ -9466,7 +9483,9 @@ private:
                 setGroupSetting(msg, "activeLog", "");
                 setGroupSetting(msg, "activeLogName", "");
                 int cnt = (int)st->count<GameLogMessageRow>(orm::where(orm::c(&GameLogMessageRow::logId) == target));
-                shareLog(msg, target);   // auto-upload to log site + send txt to group file
+                // Closing/bookkeeping always happens first. A trusted LogEnd hook
+                // may take over publication, but cannot keep the log open.
+                publishClosedLog(msg, target);
                 return i18n_.tr(loc, "log.ended", {{"count", std::to_string(cnt)}}) + timerSuf;
             }
             // .log type [txt|html] —— 群管设置 .log end 上传到群文件的格式
@@ -9697,12 +9716,15 @@ private:
         return std::nullopt;
     }
 
-    std::optional<std::string> replyHelpEntryContent(const std::string& name) const {
+    std::optional<std::string> replyHelpEntryContent(const std::string& name, const Message* message = nullptr) const {
         if (auto content = helpEntryContent(name)) return content;
         const auto key = "help.topic." + name;
         if (i18n_.hasOverride(Locale::kZhHans, key)) return i18n_.tr(Locale::kZhHans, key);
         for (const auto& entry : allHelp(Locale::kZhHans))
-            if (toLower(trim(entry.key)) == toLower(trim(name)) && !entry.content.empty()) return entry.content;
+            if (toLower(trim(entry.key)) == toLower(trim(name)) && !entry.content.empty()) {
+                if (message && entry.legacyMod && legacyModHelpRenderer_) return legacyModHelpRenderer_(entry.key, *message);
+                return entry.content;
+            }
         return std::nullopt;
     }
 
@@ -9768,7 +9790,7 @@ private:
         }
         if (tok.rfind("help:", 0) == 0) {
             if (escapedDeck) return "{" + tok + "}";
-            if (auto help = replyHelpEntryContent(tok.substr(5))) return expandHelpRefs(*help, msg);
+            if (auto help = replyHelpEntryContent(tok.substr(5), &msg)) return expandHelpRefs(*help, msg);
             return "{" + tok + "}";
         }
         if (tok.rfind("text:", 0) == 0) {
@@ -9799,7 +9821,7 @@ private:
             const std::string deckName = !tok.empty() && tok.front() == '%' ? tok.substr(1) : tok;
             if (legacyReferences && !escapedDeck && deck_.has(deckName)) return deck_.expandReference(tok, deckReferences);
             if (auto h = helpEntryContent(tok)) return expandHelpRefs(*h, msg);
-            if (legacyReferences) if (auto h = replyHelpEntryContent(tok)) return expandHelpRefs(*h, msg);
+            if (legacyReferences) if (auto h = replyHelpEntryContent(tok, &msg)) return expandHelpRefs(*h, msg);
             std::string dx = tok;
             while (!dx.empty() && (dx.front() == '%' || dx.front() == '_')) dx.erase(dx.begin());
             if (looksDiceExpr(dx)) { auto r = engine_.roll(dx); if (r.ok()) return std::to_string(r.modifiedTotal); }
@@ -11480,6 +11502,10 @@ private:
             if (name.empty()) return i18n_.tr(loc, "deck.usage");
         }
 
+        // Explicit Session decks are a separate, depleting layer. Keep Next's
+        // pre-existing group temp decks below this layer with replacement.
+        if (auto result = drawSessionDeck(msg, name, loc, times)) return deliver(name, *result);
+
         // 本群临时牌堆优先于文件牌堆。
         if (msg.type != MessageType::kPrivate) {
             json td = getTempDecks(msg);
@@ -11531,9 +11557,76 @@ private:
         return deliver(name, res);
     }
 
+    std::string handleSessionDeck(Locale loc, const Message& msg, const std::string& args) {
+        if (msg.type != MessageType::kGroup) return i18n_.tr(loc, "deck.default_group_only");
+        auto [verb, tail] = splitCommand(trim(args)); verb = toLower(verb);
+        const bool listing = verb.empty() || verb == "list" || verb == "show" || verb == "rest";
+        const bool creating = verb == "new" || verb == "from" || verb == "set";
+        const bool removing = verb == "del" || verb == "rm";
+        if (!listing && !creating && !removing && verb != "reset" && verb != "wash" && verb != "clr" && verb != "clear")
+            return i18n_.tr(loc, "deck.session_usage");
+        std::string name = trim(tail), error; json created;
+        if (creating) {
+            {
+                std::lock_guard<std::mutex> lock(gameSessionMutex());
+                if (!gameActive(msg)) return i18n_.tr(loc, "game.void_here", {{"nick", displayName(msg)}});
+                if (!gameIsGm(msg, msg.senderId) && !senderIsGroupAdmin(msg) && !isMaster(msg))
+                    return i18n_.tr(loc, "game.not_master", {{"nick", displayName(msg)}});
+            }
+            auto parts = splitCommand(name); name = parts.first;
+            if (name.empty() || name.size() > 256 || parts.second.empty()) return i18n_.tr(loc, "deck.session_usage");
+            std::vector<std::string> cards;
+            if (verb == "new") cards = splitChoices(parts.second);
+            else {
+                const auto source = trim(parts.second);
+                const auto snapshot = !source.empty() && source[0] != '_' ? deck_.entries(source) : std::nullopt;
+                if (!snapshot) return i18n_.tr(loc, "deck.no_deck", {{"name", source}});
+                cards = *snapshot;
+            }
+            // This may expand a weight's [dice]/help references: no game/storage
+            // lock may be held while invoking the public deck formatter.
+            created = session_deck::create(cards, [this](const auto& text) { return deck_.expandText(text); }, error);
+            if (!created.is_object()) return i18n_.tr(loc, "deck.session_invalid", {{"reason", error}});
+        }
+        std::lock_guard<std::mutex> lock(gameSessionMutex());
+        if (!gameActive(msg) || !gameConf_.set) return i18n_.tr(loc, "game.void_here", {{"nick", displayName(msg)}});
+        if (!listing && !gameIsGm(msg, msg.senderId) && !senderIsGroupAdmin(msg) && !isMaster(msg))
+            return i18n_.tr(loc, "game.not_master", {{"nick", displayName(msg)}});
+        if (verb == "clr" || verb == "clear") return i18n_.tr(loc,
+            saveSessionDecks(msg, json::object()) ? "deck.session_cleared" : "deck.session_save_failed");
+        json decks;
+        if (!sessionDecks(msg, decks, error)) return i18n_.tr(loc, "deck.session_invalid", {{"reason", error}});
+        auto key = session_deck::findName(decks, name);
+        if (listing) {
+            if (decks.empty()) return i18n_.tr(loc, "deck.session_none");
+            if (!name.empty() && key.empty()) return i18n_.tr(loc, "deck.no_deck", {{"name", name}});
+            std::string lines;
+            for (const auto& [entry, data] : decks.items()) if (name.empty() || entry == key) {
+                if (!lines.empty()) lines += '\n';
+                lines += i18n_.tr(loc, "deck.session_state", {{"name", entry}, {"left", data["size"].dump()},
+                    {"total", std::to_string(data["idxs"].size())}});
+            }
+            return lines;
+        }
+        if (creating) {
+            if (key.empty() && decks.size() >= session_deck::maxDecks) return i18n_.tr(loc, "deck.session_full");
+            if (key.empty()) key = name;
+            decks[key] = std::move(created);
+            if (!session_deck::validCollection(decks, error)) return i18n_.tr(loc, "deck.session_invalid", {{"reason", error}});
+        } else {
+            if (key.empty()) return i18n_.tr(loc, "deck.no_deck", {{"name", name}});
+            if (removing) decks.erase(key);
+            else if (!session_deck::reset(decks[key], error)) return i18n_.tr(loc, "deck.session_invalid", {{"reason", error}});
+        }
+        if (!saveSessionDecks(msg, decks)) return i18n_.tr(loc, "deck.session_save_failed");
+        return i18n_.tr(loc, removing ? "deck.session_deleted" : creating ? "deck.session_created" : "deck.session_reset", {{"name", key}});
+    }
+
     std::optional<std::string> tryHandleDeck(Locale loc, const Message& msg, const std::string& cmd) {
         if (toLower(cmd).rfind("deck", 0) != 0) return std::nullopt;
         std::string rest = trim(cmd.substr(4)), restL = toLower(rest);
+        const auto [namespaceWord, namespaceArgs] = splitCommand(rest);
+        if (toLower(namespaceWord) == "session") return handleSessionDeck(loc, msg, namespaceArgs);
 
         // .deck set/default <name> — 设置/查看本群默认牌堆（牌堆Pro：设默认）
         if (restL.rfind("set", 0) == 0 || restL.rfind("default", 0) == 0) {
@@ -12348,6 +12441,11 @@ private:
 
     // 插件帮助提供器（main.cpp 注入），供 .help 合并插件 cmd.help。
     HelpProviderFn helpProvider_;
+    HelpProviderFn legacyModHelpProvider_;
+    LegacyHelpRenderFn legacyModHelpRenderer_;
+    LegacyMessageStageFn legacyMessageStage_;
+    LegacyLogEndFn legacyLogEndHook_;
+    ScopedHelpFn legacyRuleHelp_;
     PluginListFn pluginProvider_;   // 
     PluginCommandClaimFn pluginCommandClaim_;
     ModListFn modProvider_;

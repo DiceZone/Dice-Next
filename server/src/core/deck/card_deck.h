@@ -32,7 +32,10 @@ public:
     void setHelpLookup(std::function<std::optional<std::string>(const std::string&)> fn) { helpLookup_ = std::move(fn); }
 
     /// 把任意文本里的 {引用}/[骰子] 展开（供 .help 词条内容复用同一套展开语义）。
-    std::string expandText(const std::string& text) { TempMap t; return expand(text, t, 0); }
+    std::string expandText(const std::string& text) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        TempMap t; return expand(text, t, 0);
+    }
 
     /// Load all *.json deck files from a directory. Returns number of decks loaded.
     int loadDir(const std::string& dir);
@@ -43,6 +46,9 @@ public:
     void reload(const std::vector<std::string>& dirs);
 
     bool has(const std::string& name) const;
+    // A snapshot for explicitly creating a Session-owned deck. Never expose a
+    // mutable reference to the shared/public source or its transient draw pool.
+    std::optional<std::vector<std::string>> entries(const std::string& name) const;
     std::vector<std::string> deckNames() const;
     size_t deckCount() const;
 

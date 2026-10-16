@@ -52,6 +52,12 @@ bool CardDeck::has(const std::string& name) const {
     return find(name) != nullptr;
 }
 
+std::optional<std::vector<std::string>> CardDeck::entries(const std::string& name) const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    const auto* deck = find(name);
+    return deck ? std::optional<std::vector<std::string>>(*deck) : std::nullopt;
+}
+
 size_t CardDeck::deckCount() const {
     std::lock_guard<std::mutex> lk(mutex_);
     return decks_.size();

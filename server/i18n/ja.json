@@ -391,7 +391,7 @@
       "npc": "NPC .npc\n.npc new <名前> // グループ共有キャラクターカードを作成\n.npc list // NPC 一覧\n.npc <名前> st <能力値><数値> // 能力値を登録。例 .npc 太郎 st str50\n.npc <名前> ra <技能> // その NPC として判定\n.npc show <名前> // その NPC を表示\n.npc del <名前> // その NPC を削除\n.npc clr <名前> // その NPC の能力値を消去",
       "coc": "キャラ作成 .coc\n.coc [回数] // COC7探索者の能力値を生成",
       "dnd": "キャラ作成 .dnd\n.dnd [回数] // DND能力値を生成、4d6で上位3つ",
-      "deck": "デッキ .deck\n.deck // デッキ一覧を表示\n.draw <デッキ> // カードを1枚引く\n.gacha // ガチャ",
+      "deck": "デッキ .deck\n.deck // デッキ一覧を表示\n.draw <デッキ> // カードを1枚引く\n.deck session help // 戻さないセッションデッキの管理\n.gacha // ガチャ",
       "jrrp": "運勢 .jrrp\n.jrrp // 今日の運勢。人ごと・日ごとに固定",
       "bot": "ボット .bot\n.bot // バージョンと状態を表示\n.bot on // このグループでボットを有効化\n.bot off // このグループで無効化。無効時は .bot のみ動作",
       "group": "グループ設定 .group\n.group [グループID] <state|info> // このグループの状態や情報を表示\n.group [グループID] +<項目> // 項目を有効化。例 +禁用回复\n.group [グループID] -<項目> // 項目を無効化。例 -禁用help\n.group [グループID] clr // このグループの設定を消去\n.group all +<項目> // 全グループに適用。所有者または信頼≥5、現在のボットアカウントのみ\n.group all -<項目> // 条件は同じ。項目を無効化",
@@ -701,7 +701,18 @@
     "temp_new": "このグループに一時デッキ「{name}」（{count} 項目）を作成しました。.draw {name} で引けます。",
     "temp_del": "このグループの一時デッキ「{name}」を削除しました。",
     "temp_usage": ".deck new <名前> <選択肢1>/<選択肢2>/<選択肢3> // 一時デッキを作成。誰でも作成可",
-    "temp_tag": "（一時）"
+    "temp_tag": "（一時）",
+    "session_usage": ".deck session // セッションデッキ一覧\n.deck session new <名前> <甲/乙/丙> // 戻さない抽選デッキを作成。::枚数::カードに対応\n.deck session from <名前> <公開デッキ> // 公開デッキをコピー\n.deck session rest [名前] // 残り枚数\n.deck session reset <名前> // 全カードを復元\n.deck session del <名前> // デッキを削除\n.deck session clr // セッションデッキを全削除\n変更にはセッションGM・グループ管理者・ボット管理者の権限が必要です。.draw <名前> で抽選します。既存のグループ一時デッキは変更しません。",
+    "session_invalid": "セッションデッキが無効なため抽選しませんでした：{reason}",
+    "session_exhausted": "セッションデッキ「{name}」は空です。GMが .deck session reset {name} で復元できます。",
+    "session_save_failed": "セッションデッキを保存できなかったため、操作を適用しませんでした。",
+    "session_cleared": "このセッションの専用デッキを全削除しました。",
+    "session_none": "専用デッキはありません。.deck session new <名前> <甲/乙> で作成できます。",
+    "session_state": "セッションデッキ「{name}」：残り {left} / {total} 枚",
+    "session_full": "専用デッキは1セッションにつき最大10個です。不要なデッキを削除してください。",
+    "session_deleted": "セッションデッキ「{name}」を削除しました。",
+    "session_created": "セッションデッキ「{name}」を作成・置換しました。.draw {name} で戻さずに抽選します。",
+    "session_reset": "セッションデッキ「{name}」の全カードを復元しました。"
   },
   "mod": {
     "info": "Mod {name}（{id}）\n状態：{state}\nバージョン：{version}\n作者：{author}\n説明：{brief}",

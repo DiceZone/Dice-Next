@@ -129,7 +129,188 @@ struct RuleReloadDirectory {
         std::filesystem::current_path(previous);
     }
 };
+
+struct SessionDeckFixture : LegacyFixture {
+    std::map<std::pair<std::string, std::string>, std::string> conf;
+    bool failWrites = false;
+    SessionDeckFixture() {
+        router.setGameConf({
+            [this](const auto& scope, const auto& key) { const auto it = conf.find({scope,key}); return it == conf.end() ? std::string() : it->second; },
+            [this](const auto& scope, const auto& key, const auto& value) { if (value.empty()) conf.erase({scope,key}); else conf[{scope,key}] = value; },
+            [this](const auto& scope) { std::vector<std::pair<std::string,std::string>> values;
+                for (const auto& [address,value] : conf) if (address.first == scope) values.emplace_back(address.second,value); return values; },
+            [this](const auto& scope, const auto& key, const auto& value) { if (failWrites) return false; conf[{scope,key}] = value; return true; },
+        });
+        i18n.setOverride(Locale::kZhHans,"deck.result","{res}");
+        i18n.setOverride(Locale::kZhHans,"deck.session_exhausted","EMPTY:{name}");
+        i18n.setOverride(Locale::kZhHans,"deck.session_invalid","INVALID:{reason}");
+        const auto directory = dir.path / "decks"; std::filesystem::create_directory(directory);
+        { std::ofstream out(directory / "public.json"); out << R"({"X":["public"],"CopySource":["::2::copied","other"]})"; }
+        deck.loadDir(u8str(directory));
+    }
+    std::string scope() { return "game:session:" + conf[{"game:" + msg.targetId,"__session"}]; }
+    json decks() { const auto value = conf[{scope(),"__decks"}]; return json::parse(value.empty() ? "{}" : value); }
+};
 } // namespace
+
+TEST(SessionDeckCommands, LuaAndNativeDrawsShareDepletionWithoutChangingGroupTempDecks) {
+    SessionDeckFixture f;
+    f.run(".game new first");
+    ASSERT_EQ(f.run(".deck new X temporary"), std::string("deck.temp_new"));
+    ASSERT_EQ(f.run(".deck session new X a/b"), std::string("deck.session_created"));
+    const auto one = f.router.legacyDrawDeck(f.msg, "x"); ASSERT_TRUE(one == "a" || one == "b");
+    const auto two = f.run(".draw X"); ASSERT_TRUE(two == "a" || two == "b"); ASSERT_TRUE(one != two);
+    ASSERT_EQ(f.run(".draw X"), std::string("EMPTY:X"));
+    ASSERT_EQ(f.decks()["X"]["size"], 0);
+    ASSERT_EQ(f.run(".deck session reset x"), std::string("deck.session_reset"));
+    const auto batch = f.run(".draw3 X"); ASSERT_TRUE(batch == "a\nb" || batch == "b\na");
+    ASSERT_EQ(f.decks()["X"]["size"], 0);
+    ASSERT_EQ(f.run(".deck session del X"), std::string("deck.session_deleted"));
+    ASSERT_EQ(f.run(".draw X"), std::string("temporary"));
+    ASSERT_EQ(f.run(".draw X"), std::string("temporary")); // existing with-replacement behavior
+    ASSERT_EQ(f.router.legacyDrawDeck(f.msg,"X"), std::string("public"));
+}
+
+TEST(SessionDeckCommands, SharedAreasShareAPoolAndDifferentSessionsRemainIndependent) {
+    SessionDeckFixture f;
+    f.run(".game new shared"); f.run(".deck session new X first/second");
+    const auto originalScope = f.scope(); const auto index = json::parse(f.conf[{"game:index","sessions"}]);
+    const auto code = index.begin().key();
+    const auto one = f.router.legacyDrawDeck(f.msg,"X");
+    f.msg.targetId = "3000"; ASSERT_EQ(f.run(".game open " + code), std::string("game.area_open"));
+    ASSERT_EQ(f.scope(), originalScope);
+    const auto two = f.router.legacyDrawDeck(f.msg,"X"); ASSERT_TRUE(one != two);
+    ASSERT_EQ(f.router.legacyDrawDeck(f.msg,"X"), std::string("EMPTY:X"));
+    f.msg.targetId = "4000"; f.run(".game new independent"); f.run(".deck session new X other");
+    ASSERT_EQ(f.run(".draw X"), std::string("other"));
+    ASSERT_EQ(json::parse(f.conf[{originalScope,"__decks"}])["X"]["size"], 0);
+    f.msg.targetId = "3000"; f.run(".game close");
+    ASSERT_EQ(f.router.legacyDrawDeck(f.msg,"X"), std::string("public"));
+}
+
+TEST(SessionDeckCommands, SourceGatesAndTypedClosedStateCannotConsumeAHiddenPool) {
+    SessionDeckFixture f; f.run(".game new first"); f.run(".deck session new X private");
+    const auto scope=f.scope();
+    f.conf[{scope,"__closed"}]=legacy_conf::encode(false);
+    f.setting("enabled","0"); ASSERT_TRUE(f.router.legacyDrawDeck(f.msg,"X").empty()); ASSERT_EQ(f.decks()["X"]["size"],1);
+    f.setting("enabled","1"); f.setting("pluginEnabled","0");
+    ASSERT_TRUE(f.router.legacyDrawDeck(f.msg,"X").empty()); ASSERT_EQ(f.decks()["X"]["size"],1);
+    f.setting("pluginEnabled","1"); f.conf[{scope,"__closed"}]=legacy_conf::encode(std::string("false"));
+    ASSERT_EQ(f.router.legacyDrawDeck(f.msg,"X"),std::string("public")); ASSERT_EQ(f.decks()["X"]["size"],1);
+    f.conf[{scope,"__closed"}]=legacy_conf::encode(false);
+    ASSERT_EQ(f.router.legacyDrawDeck(f.msg,"X"),std::string("private")); ASSERT_EQ(f.decks()["X"]["size"],0);
+}
+
+TEST(SessionDeckCommands, ArchivedImportsKeepRemainingCardsAndFailedWritesNeverConsumeThem) {
+    SessionDeckFixture f; f.run(".game new old");
+    const auto scope = f.scope();
+    f.conf[{scope,"__legacy_decks"}] = R"({"X":{"meta":["spent","remaining"],"idxs":[1,0],"size":1}})";
+    f.failWrites = true;
+    ASSERT_TRUE(f.router.legacyDrawDeck(f.msg,"X").find("INVALID:") == 0);
+    ASSERT_TRUE((f.conf[{scope,"__decks"}]).empty());
+    f.failWrites = false;
+    ASSERT_EQ(f.router.legacyDrawDeck(f.msg,"X"), std::string("remaining"));
+    ASSERT_EQ(f.decks()["X"]["size"], 0);
+    f.run(".deck session reset X"); f.failWrites = true;
+    ASSERT_EQ(f.router.legacyDrawDeck(f.msg,"X"), std::string("deck.session_save_failed"));
+    ASSERT_EQ(f.decks()["X"]["size"], 2);
+    f.failWrites = false;
+    f.conf[{scope,"__decks"}] = R"({"X":{"meta":["bad"],"idxs":[1],"size":1}})";
+    ASSERT_TRUE(f.run(".draw X").find("INVALID:") == 0);
+    ASSERT_EQ(f.run(".deck session clr"), std::string("deck.session_cleared"));
+    ASSERT_TRUE(f.decks().empty());
+}
+
+TEST(SessionDeckCommands, CopyingIsExplicitPermissionsArePreservedAndConcurrentDrawsAreUnique) {
+    RuleReloadDeadline deadline;
+    SessionDeckFixture f; f.run(".game new first");
+    f.msg.senderId = "ordinary"; f.msg.extra["role"] = "member";
+    ASSERT_EQ(f.run(".deck session new X unauthorized"), std::string("game.not_master"));
+    ASSERT_EQ(f.run(".deck session from X CopySource"), std::string("game.not_master"));
+    ASSERT_TRUE(f.decks().empty());
+    f.msg.senderId = "1000";
+    ASSERT_EQ(f.run(".deck session from Copy CopySource"), std::string("deck.session_created"));
+    ASSERT_EQ(f.decks()["Copy"]["size"], 3);
+    ASSERT_EQ(f.deck.entries("CopySource")->at(0), std::string("::2::copied"));
+    std::vector<std::string> cards; for (int i=0;i<80;++i) cards.push_back(std::to_string(i));
+    std::string error; f.conf[{f.scope(),"__decks"}] = json({{"X",session_deck::create(cards,{},error)}}).dump();
+    const auto message = f.msg;
+    std::mutex mutex; std::set<std::string> results; std::vector<std::thread> workers;
+    for (int worker=0;worker<4;++worker) workers.emplace_back([&] {
+        for (int i=0;i<20;++i) {
+            const auto result=f.router.legacyDrawDeck(message,"X");
+            std::lock_guard lock(mutex); results.insert(result);
+        }
+    });
+    for (auto& worker:workers) worker.join();
+    ASSERT_EQ(results.size(),size_t(80)); ASSERT_EQ(f.decks()["X"]["size"],0);
+    ASSERT_EQ(f.router.legacyDrawDeck(message,"X"),std::string("EMPTY:X"));
+}
+
+TEST(LegacyHooks, GameOverClosesLogsBeforeCallingHooksWithoutHoldingTheGameMutex) {
+    RuleReloadDeadline deadline;
+    SessionDeckFixture f; f.run(".game new original"); f.run(".log new synthetic");
+    int hooks=0; bool closedBeforeHook=false;
+    f.router.setLegacyLogEndHook([&](const Message& source,int id) {
+        ++hooks;
+        closedBeforeHook=f.db.getLogStorage()->get<GameLogRow>(id).status==2;
+        Message nested=source; nested.content=".game new from-hook";
+        f.router.handleMessage(nested,Locale::kZhHans); // would deadlock if game mutex were held
+        return true;
+    });
+    f.run(".game over"); ASSERT_EQ(hooks,1); ASSERT_TRUE(closedBeforeHook);
+    ASSERT_EQ((f.conf[{f.scope(),"__name"}]),std::string("from-hook"));
+    ASSERT_FALSE(f.router.isLogRecording(f.msg));
+}
+
+TEST(LegacyHooks, LogEndHookCannotPreventClosingTheLog) {
+    LegacyFixture f;
+    int ended = 0;
+    f.router.setLegacyLogEndHook([&](const Message&, int id) { ended = id; return true; });
+    ASSERT_EQ(f.run(".log new synthetic"), std::string("log.new"));
+    ASSERT_EQ(f.run(".log end"), std::string("log.ended"));
+    ASSERT_TRUE(ended > 0);
+    ASSERT_EQ(f.logs().front().status, 2);
+    ASSERT_FALSE(f.router.isLogRecording(f.msg));
+}
+
+TEST(LegacyHooks, MessageAndTapeStageCannotBypassHostControls) {
+    LegacyFixture f;
+    int calls = 0;
+    f.router.setLegacyMessageStage([&](const Message&) -> std::optional<std::string> {
+        ++calls;
+        f.router.rememberProcessingSources({{"Lua 插件", "Synthetic", "", "Message"}});
+        return "handled-by-legacy";
+    });
+    ASSERT_EQ(f.run("plain message"), std::string("handled-by-legacy"));
+    ASSERT_EQ(f.run(".r1"), std::string("handled-by-legacy"));
+    ASSERT_TRUE(f.router.lastShortcutHandled());
+    ASSERT_TRUE(f.router.lastShortcutWasPlugin());
+    ASSERT_EQ(f.router.lastProcessingSources().front().name, std::string("Synthetic"));
+    f.run(".help r"); ASSERT_EQ(calls, 2);
+    f.run(".bot"); ASSERT_EQ(calls, 2);
+    f.setting("enabled", "0"); f.run("plain message"); ASSERT_EQ(calls, 2);
+    f.setting("enabled", "1"); f.setting("locked", "1"); f.run("plain message"); ASSERT_EQ(calls, 2);
+    f.setting("locked", "0"); f.setting("pluginEnabled", "0"); f.run("plain message"); ASSERT_EQ(calls, 2);
+    f.setting("pluginEnabled", "1");
+    f.cfg.set<json>("dice/censor", {{"enabled", true}, {"words", {{"sensitive-test-marker", "Danger"}}}});
+    f.router.reloadSensitiveWordRules();
+    f.run(".r sensitive-test-marker"); ASSERT_EQ(calls, 2);
+}
+
+TEST(RuleReload, XmlNumericModelsLoadWithStablePriorityAndDoNotRunScripts) {
+    LegacyFixture f; RuleReloadDirectory cwd(f.dir.path);
+    std::filesystem::create_directories("data/mod/a/model/nested");
+    std::filesystem::create_directories("data/mod/z/model");
+    { std::ofstream out("data/mod_order.json"); out << "[\"z\",\"a\"]"; }
+    { std::ofstream out("data/mod/z/model/Z.xml"); out << "<model><property><any name='SyntheticDerived' alias='SyntheticAlias' text='javascript'>1</any></property></model>"; }
+    { std::ofstream out("data/mod/a/model/nested/A.xml"); out << "<model><script>never_execute()</script><property><any name = 'SyntheticDerived' alias = 'SyntheticAlias' text='javascript'>Math.floor(9/2-5)</any></property></model>"; }
+    ASSERT_TRUE(CommandRouter::loadModelTemplates() >= 2);
+    ASSERT_EQ(f.router.aiGetAttr(f.msg, "SyntheticAlias").value_or(-999), -1);
+    std::filesystem::rename("data/mod/a", "data/mod/a.disabled");
+    CommandRouter::loadModelTemplates();
+    ASSERT_EQ(f.router.aiGetAttr(f.msg, "SyntheticAlias").value_or(-999), 1);
+}
 
 TEST(RuleReload, UploadDisableEnableAndDeleteRestoreAliasesAndSkillDefaults) {
     RuleReloadDeadline deadline;
@@ -617,6 +798,32 @@ TEST(LegacyReply, ExplicitHelpAndGlobalTextUseTheirOwnNamespaces) {
     ASSERT_EQ(f.router.renderReply(f.msg, "{deck:同名}/{help:同名}/{text:同名}", "", MatchType::kKeyword), "牌面/帮助内容/全局内容");
     ASSERT_EQ(f.router.renderReply(f.msg, "{help:缺失}/{text:缺失}/{deck:缺失}", "", MatchType::kKeyword), "{help:缺失}/{text:缺失}/{deck:缺失}");
     ASSERT_EQ(f.router.renderReply(f.msg, "\\{help:同名}/\\{text:同名}", "", MatchType::kKeyword), "\\{help:同名}/\\{text:同名}");
+}
+
+TEST(LegacyHelp, SelectedModHelpUsesContextWithoutChangingExistingPrioritiesOrScope) {
+    LegacyFixture f;
+    int calls=0;
+    f.router.setHelpProvider([] { return std::vector<std::pair<std::string,std::string>>{{"shared","JS help"}}; });
+    f.router.setLegacyModHelpProvider([] { return std::vector<std::pair<std::string,std::string>>{
+        {"mod-example","raw:{nick}"},{"shared","must-not-win"},{"r","must-not-win"},{"unselected","untouched"}
+    }; }, [&](const std::string& topic,const Message& message) {
+        ++calls;
+        if(topic!="mod-example") throw std::runtime_error("rendered unselected help");
+        return "mod:"+message.senderName+":"+message.senderId;
+    });
+    const auto catalog=f.router.allHelp(Locale::kZhHans);
+    ASSERT_EQ(calls,0);
+    ASSERT_EQ(f.run(".help MOD-EXAMPLE"),std::string("mod:玩家:1000"));
+    ASSERT_EQ(calls,1);
+    ASSERT_EQ(f.run(".help shared"),std::string("JS help"));
+    ASSERT_TRUE(f.run(".help r").find("must-not-win")==std::string::npos);
+    ASSERT_EQ(calls,1);
+    ASSERT_EQ(f.router.renderReply(f.msg,"{help:MOD-EXAMPLE}","",MatchType::kKeyword),std::string("mod:玩家:1000"));
+    ASSERT_EQ(f.router.renderReply(f.msg,"{mod-example}","",MatchType::kKeyword,true),std::string("mod:玩家:1000"));
+    ASSERT_EQ(calls,3);
+    f.setting("helpScope","not-the-plugin-source");
+    ASSERT_TRUE(f.run(".help mod-example").find("mod:玩家:1000")==std::string::npos);
+    ASSERT_EQ(calls,3);
 }
 
 TEST(ReplyWeights, FormalWeightsPersistZeroAndDoNotParseLiteralMarkers) {

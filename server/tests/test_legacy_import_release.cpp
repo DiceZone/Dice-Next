@@ -316,6 +316,35 @@ TEST(ReleaseMigration, PriorAndCopiedSessionSourcesRequireConfirmationAndReuseCo
     ASSERT_EQ(json::parse(f.lua.confGet("game:index","sessions")).size(),size_t(1));
 }
 
+TEST(ReleaseMigration, SessionDeckImportsKeepDepletionAndDoNotRefillOnRepeatedImport) {
+    ReleaseImportFixture f;
+    f.file("old/user/session/game.json",R"({"name":"Cards","chats":[{"gid":20001}],"decks":{"X":{"meta":["spent","left"],"idxs":[1,0],"size":1}}})");
+    std::map<std::string,LegacyLogContext> contexts; ImportResult detail;
+    ASSERT_EQ(importSessions("old",&f.lua,contexts,{},&detail),1);
+    const auto session=f.lua.confGet("game:20001","__session"), scope="game:session:"+session;
+    auto decks=json::parse(f.lua.confGet(scope,"__decks"));
+    ASSERT_EQ(decks["X"]["size"],1); ASSERT_EQ(decks["X"]["idxs"][0],1);
+    std::mt19937_64 rng(1); ASSERT_EQ(session_deck::draw(decks["X"],rng).text,std::string("left"));
+    f.lua.confSet(scope,"__decks",decks.dump());
+    ASSERT_EQ(importSessions("old",&f.lua,contexts,{},&detail),1);
+    ASSERT_EQ(json::parse(f.lua.confGet(scope,"__decks"))["X"]["size"],0);
+    ImportOptions options; options.overwriteData=true;
+    ASSERT_EQ(importSessions("old",&f.lua,contexts,options,&detail),1);
+    ASSERT_EQ(json::parse(f.lua.confGet(scope,"__decks"))["X"]["size"],1);
+    ASSERT_TRUE(!f.lua.confGet(scope,"__legacy_decks").empty());
+}
+
+TEST(ReleaseMigration, InvalidSessionDecksRemainArchivedWithoutPartialActivation) {
+    ReleaseImportFixture f;
+    f.file("old/user/session/game.json",R"({"name":"Cards","chats":[{"gid":20001}],"decks":{"ok":{"meta":["card"],"idxs":[0],"size":1},"bad":{"meta":["card"],"idxs":[99],"size":1}}})");
+    std::map<std::string,LegacyLogContext> contexts; ImportResult detail;
+    ASSERT_EQ(importSessions("old",&f.lua,contexts,{},&detail),1);
+    const auto scope="game:session:"+f.lua.confGet("game:20001","__session");
+    ASSERT_TRUE(f.lua.confGet(scope,"__decks").empty());
+    const auto archived=json::parse(f.lua.confGet(scope,"__legacy_decks"));
+    ASSERT_TRUE(archived.contains("ok")); ASSERT_TRUE(archived.contains("bad"));
+}
+
 TEST(ReleaseMigration, RootMediaIsBackedUpAndRestoredWithoutLosingOldFormatCompatibility) {
     ReleaseImportFixture f; f.file("image/picture.png","original"); f.file("data/legacy_assets/deck/picture.png","deck");
     fs::path archive; std::string error; ASSERT_TRUE(backup::createArchive(f.db,"config",archive,error,backup::Selection::full()));

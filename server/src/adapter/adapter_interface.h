@@ -101,6 +101,12 @@ struct BotEvent {
     json extra;               // 平台原始事件
 };
 
+// Poke's subject is the recipient; plugin/user-policy context needs the actor.
+// Other notices keep their subject (e.g. the member who left, not the kicker).
+inline const std::string& eventTriggerUserId(const BotEvent& event) {
+    return event.type == EventType::kPoke && !event.operatorId.empty() ? event.operatorId : event.userId;
+}
+
 /// Invitation permissions are account/transport scoped, not display-name or
 /// public-identity scoped. Keep the original operator when storing an inviter.
 inline std::string eventInviterId(const BotEvent& event) {

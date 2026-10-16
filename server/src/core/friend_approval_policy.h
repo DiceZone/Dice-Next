@@ -1,10 +1,20 @@
 #pragma once
 
 #include <string>
+#include <optional>
 
 namespace dice {
 
 enum class FriendRequestDecision { kPending, kApprove, kReject };
+enum class LegacyRequestAction { kContinueHost, kLeavePending, kReject };
+// Shared by friend/group hooks. A plugin may make a decision stricter, never
+// turn an application the owner left for manual review into an automatic approval.
+inline LegacyRequestAction legacyRequestAction(bool blocked, std::optional<bool> approval, bool hostAllowsApproval) {
+    if (!blocked) return LegacyRequestAction::kContinueHost;
+    if (approval && !*approval) return LegacyRequestAction::kReject;
+    if (approval && *approval && hostAllowsApproval) return LegacyRequestAction::kContinueHost;
+    return LegacyRequestAction::kLeavePending;
+}
 
 inline FriendRequestDecision evaluateFriendRequest(
         const std::string& policy,

@@ -4,9 +4,12 @@
 #include "common/subprocess.h"
 #include "common/bounded_regex.h"
 #include "common/legacy_conf_value.h"
+#include "common/legacy_mod_limit.h"
+#include "common/sample_template.h"
+#include "common/legacy_model.h"
+#include "../../../third_party/tomlplusplus/toml.hpp"
 
 #include <nlohmann/json.hpp>
-#include <yaml-cpp/yaml.h>
 #include <yaml-cpp/yaml.h>
 #include <sqlite3.h>
 #include <fstream>
@@ -49,6 +52,7 @@ static inline std::string dnx_u8str(const std::filesystem::path& p) {
     auto u = p.u8string();
     return std::string(u.begin(), u.end());
 }
+static inline fs::path dnx_path(std::string_view text) { return fs::path(std::u8string(text.begin(), text.end())); }
 
 // 宽路径读全文（fs::path 构造 ifstream 走宽字符 API，任何文件名都能打开——
 // 窄 .string() 对 emoji 等抛异常，u8 串又打不开 GBK 中文名，两头都不行）。
@@ -59,6 +63,54 @@ static inline bool dnx_readFile(const std::filesystem::path& p, std::string& out
     if (!f) return false;
     out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     return true;
+}
+
+static bool dnx_isLinked(const fs::path& path) {
+    std::error_code ec;
+    if (fs::is_symlink(path, ec)) return true;
+#ifdef _WIN32
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return true;
+#endif
+    return false;
+}
+static bool dnx_safeUnder(const fs::path& path, const fs::path& root) {
+    std::error_code ec;
+    const auto parent = fs::absolute(root, ec).lexically_normal();
+    if (ec || parent.empty()) return false;
+    const auto child = fs::absolute(path, ec).lexically_normal();
+    if (ec || child == parent) return false;
+    auto pi = parent.begin(), ci = child.begin();
+    for (; pi != parent.end(); ++pi, ++ci) {
+        if (ci == child.end()) return false;
+#ifdef _WIN32
+        auto a = pi->native(), b = ci->native();
+        std::transform(a.begin(), a.end(), a.begin(), ::towlower);
+        std::transform(b.begin(), b.end(), b.begin(), ::towlower);
+        if (a != b) return false;
+#else
+        if (*pi != *ci) return false;
+#endif
+    }
+    auto current = parent;
+    if (dnx_isLinked(current)) return false;
+    for (; ci != child.end(); ++ci) { current /= *ci; if (dnx_isLinked(current)) return false; }
+    return true;
+}
+static std::vector<fs::path> dnx_ownedFiles(const fs::path& root) {
+    std::vector<fs::path> files; std::error_code ec;
+    if (!fs::is_directory(root, ec) || dnx_isLinked(root)) return files;
+    for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+         it != end && files.size() < 10000; it.increment(ec)) {
+        if (ec) { ec.clear(); continue; }
+        const auto name = dnx_u8str(it->path().filename());
+        if (dnx_isLinked(it->path()) || (name.size() >= 9 && name.ends_with(".disabled")) || it.depth() >= 16) {
+            it.disable_recursion_pending(); continue;
+        }
+        if (it->is_regular_file(ec)) files.push_back(it->path());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
 }
 
 static size_t dnx_utf8SequenceLength(const std::string& s, size_t i) {
@@ -382,6 +434,26 @@ static int dnx_loadLegacyEnvironment(lua_State* L, const fs::path& path) {
     if (callStatus != LUA_OK) lua_remove(L, env);
     return callStatus;
 }
+
+// Directory script/text entrypoints also ran in a fresh LuaState in Dice!.
+// Keep their temporary globals per invocation (and per suspended coroutine),
+// while loadLua deliberately inherits this same environment for helper scripts.
+// Do not rebind registered function closures: Next preserves their captured
+// locals. This is lifecycle compatibility, not a security sandbox for Lua.
+static void dnx_isolateScriptChunk(lua_State* L) {
+    const int chunk = lua_absindex(L, -1);
+    lua_newtable(L);
+    const int env = lua_absindex(L, -1);
+    lua_pushvalue(L, env); lua_setfield(L, env, "_G");
+    for (const char* key : {"msg", "event"}) {
+        lua_getglobal(L, key); lua_setfield(L, env, key);
+    }
+    lua_newtable(L);
+    lua_pushglobaltable(L); lua_setfield(L, -2, "__index");
+    lua_setmetatable(L, env);
+    if (!lua_setupvalue(L, chunk, 1)) lua_pop(L, 1);
+}
+
 // Old single-file plugins often ship a generated cache containing absolute paths
 // from the author's Dice! installation. Dice! resolved those paths relative to
 // the active plugin directory after the bundle was moved. Preserve that useful
@@ -914,12 +986,12 @@ static int l_getDiceDir(lua_State* L) {
     // 返回 mod/plugin 的父目录（如 data），让插件的 getDiceDir().."/plugin/x" 解析正确。
     auto* m = mgrOf(L); std::error_code ec;
     fs::path base = (m && !m->modDir().empty())
-        ? fs::absolute(fs::path(m->modDir()).parent_path(), ec) : fs::current_path(ec);
+        ? fs::absolute(dnx_path(m->modDir()).parent_path(), ec) : fs::current_path(ec);
     std::string s = base.string();
     for (auto& c : s) if (c == '\\') c = '/';   // 统一正斜杠（插件常拼接路径）
     lua_pushstring(L, s.c_str()); return 1;
 }
-// getDiceQQ()：机器人账号（main 注入 botId_，未知则空）。
+// getDiceQQ(): resolve the triggering account, including delayed continuations.
 static int l_getDiceQQ(lua_State* L) {
     auto* m = mgrOf(L);
     std::string id = m ? m->botId() : std::string();
@@ -1034,11 +1106,23 @@ static int l_sleepTime(lua_State* L) {
 static int l_drawDeck(lua_State* L) {
     auto* m = mgrOf(L);
     // 原版 drawDeck(fromGID, fromUID, deckName) 三参（DiceLua.cpp 1027）；牌名是最后一个参数。
-    // 也容忍 1 参 drawDeck(name)。gid/uid 用于原版的 session 牌堆优先，本实现只抽公共牌堆。
+    // Also accept drawDeck(name). Three-argument calls preserve their chat scope.
     int n = lua_gettop(L);
     std::string name = (n >= 3) ? argStr(L, 3) : argStr(L, 1);
-    std::string r = (m && m->deckDraw_) ? m->deckDraw_(name) : std::string();
-    lua_pushstring(L, r.c_str()); return 1;
+    std::string group = n >= 3 ? argStr(L, 1) : std::string();
+    std::string user = n >= 3 ? argStr(L, 2) : std::string();
+    if (group == "0") group.clear();
+    if (user == "0") user.clear();
+    std::string r;
+    try { if (m) r = m->drawDeck(name, group, user); }
+    catch (const std::exception& error) {
+        DICE_LOG_ERROR("Lua 抽牌宿主调用失败：{}", error.what());
+        lua_pushnil(L); lua_pushliteral(L, "drawDeck host callback failed"); return 2;
+    } catch (...) {
+        DICE_LOG_ERROR("Lua 抽牌宿主调用失败：未知异常。");
+        lua_pushnil(L); lua_pushliteral(L, "drawDeck host callback failed"); return 2;
+    }
+    lua_pushlstring(L, r.data(), r.size()); return 1;
 }
 
 // 当前加载中的 mod 名（供审计）。
@@ -1063,9 +1147,9 @@ static int l_sendMsg(lua_State* L) {
     std::string text = dnx_normalizeLuaText(argStr(L, 1));
     std::string gid = dnx_normalizeLuaText(argStr(L, 2));
     std::string uid = dnx_normalizeLuaText(argStr(L, 3));
-    if (m && m->sender_ && !text.empty()) {
+    if (m && m->hasSender() && !text.empty()) {
         luaAudit(luaAuditMod(m), "sendMsg", "gid=" + gid + " uid=" + uid + " len=" + std::to_string(text.size()));
-        try { m->sender_(text, gid, uid); }
+        try { m->send(text, gid, uid); }
         catch (const std::exception& e) { DICE_LOG_ERROR("[lua] sendMsg host callback failed: {}", e.what()); }
         catch (...) { DICE_LOG_ERROR("[lua] sendMsg host callback failed with unknown error"); }
     }
@@ -1251,40 +1335,9 @@ static bool dnx_pushCallerEnvironment(lua_State* L) {
 static int l_loadLua(lua_State* L) {
     auto* m = mgrOf(L); std::string name = argStr(L, 1);
     if (!m || name.empty()) { lua_pushnil(L); return 1; }
-    // 目录型 mod 使用 script/<namespace>.lua；旧 Dice! 单文件插件则把辅助脚本
-    // 放在入口 .lua 的同级子目录（如 plugin/求签/月老灵签.lua）。两种布局都支持，
-    // 并使用 u8 path 构造，避免 Windows 中文文件名经过本地代码页后找不到。
-    std::string rel = name;
-    for (auto& c : rel) {
-        if (c == '.') c = '/';
-        else if (c == '\\') c = '/';
-    }
-    rel += ".lua";
-    const fs::path relPath(std::u8string(rel.begin(), rel.end()));
-    if (relPath.is_absolute() || relPath.has_root_name()) {
-        DICE_LOG_ERROR("[lua] loadLua: absolute path rejected '{}'", name);
-        lua_pushnil(L); return 1;
-    }
-    for (const auto& part : relPath) {
-        if (part == "..") {
-            DICE_LOG_ERROR("[lua] loadLua: traversal rejected '{}'", name);
-            lua_pushnil(L); return 1;
-        }
-    }
-
-    const fs::path base(m->loadingModDir_);
-    const std::array<fs::path, 2> candidates = {
-        base / "script" / relPath,
-        base / relPath,
-    };
-    std::error_code ec;
-    fs::path p;
-    for (const auto& candidate : candidates) {
-        ec.clear();
-        if (fs::is_regular_file(candidate, ec)) { p = candidate; break; }
-    }
+    const auto p = m->resolveScript(name, m->loadingModDir_);
     if (p.empty()) {
-        DICE_LOG_ERROR("[lua] loadLua: not found '{}' below {}", name, dnx_u8str(base));
+        DICE_LOG_ERROR("loadLua 无法读取脚本「{}」：未找到已启用的脚本或路径不安全。", name);
         lua_pushnil(L); return 1;
     }
     const int stackBefore = lua_gettop(L);
@@ -1373,6 +1426,7 @@ static std::vector<std::string> scanLuaRisks(const std::filesystem::path& root) 
 }
 // ─── LuaPluginManager ────────────────────────────────────────
 LuaPluginManager::~LuaPluginManager() {
+    { std::lock_guard<std::recursive_mutex> lock(callbackState_->mutex); callbackState_->owner = nullptr; }
     freeRuntime();
     std::lock_guard<std::mutex> lk(confMutex_);
     if (confDb_) { sqlite3_close(confDb_); confDb_ = nullptr; }
@@ -1720,6 +1774,8 @@ end
     if (dnx_dostring(state_, kBootstrap) != LUA_OK) {
         DICE_LOG_WARN("[lua] bootstrap error: {}", argStr(state_, -1));
     }
+    // require aliases return the same public objects, not independent copies.
+    dnx_dostring(state_, "package.loaded.Set=Set; package.loaded.Actor=Actor; package.loaded.GameTable=GameTable; package.loaded.SelfData=getSelfData");
     // ── 审计包装：io.open/io.popen/os.execute/package.loadlib 等记录到审计日志 ──
     static const char* kAuditWrap = R"lua(
 if __dnx_audit then
@@ -2053,13 +2109,24 @@ static std::string stripJsonTrailingCommas(const std::string& s) {
 }
 
 // 解析 mod 描述档（<name>.json 或 <name>/descriptor.json）。字段兼容 mod/title、ver/version。
-// speechOut：原版 loadDesc 还认 json 内嵌 speech{}（值为串或数组，数组取首项）。
+// speechOut：原版 loadDesc 还认 json 内嵌 speech{}（文本或均匀随机文本数组）。
 static void parseModDescriptor(const fs::path& descPath, LuaPluginManager::LuaMod& m,
-                               std::map<std::string, std::string>* speechOut = nullptr) {
+                               std::map<std::string, std::vector<std::string>>* speechOut = nullptr) {
     try {
         std::ifstream f(descPath, std::ios::binary);
         std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        json j = json::parse(stripJsonTrailingCommas(raw), nullptr, true, true);
+        // Preserve declaration order for case-equivalent keys without using
+        // ordered_json's linear-search object container on large query Mods.
+        std::string section;
+        std::vector<std::string> helpKeys, speechKeys;
+        auto j = json::parse(stripJsonTrailingCommas(raw), [&](int depth, json::parse_event_t event, json& value) {
+            if (event == json::parse_event_t::key) {
+                if (depth == 1) section = value.get<std::string>();
+                else if (depth == 2 && section == "helpdoc") helpKeys.push_back(value.get<std::string>());
+                else if (depth == 2 && section == "speech") speechKeys.push_back(value.get<std::string>());
+            }
+            return true;
+        }, true, true);
         m.title = j.value("title", j.value("mod", m.name));
         m.author = j.value("author", "");
         m.version = j.value("ver", j.value("version", ""));
@@ -2069,13 +2136,15 @@ static void parseModDescriptor(const fs::path& descPath, LuaPluginManager::LuaMo
             m.permissionDeclared = true;
         }
         if (j.contains("helpdoc") && j["helpdoc"].is_object())
-            for (auto it = j["helpdoc"].begin(); it != j["helpdoc"].end(); ++it)
-                if (it.value().is_string()) m.helpdoc[it.key()] = it.value().get<std::string>();
+            for (const auto& key : helpKeys)
+                if (j["helpdoc"][key].is_string()) m.helpdoc[key] = j["helpdoc"][key].get<std::string>();
         if (speechOut && j.contains("speech") && j["speech"].is_object())
-            for (auto it = j["speech"].begin(); it != j["speech"].end(); ++it) {
-                if (it.value().is_string()) (*speechOut)[it.key()] = it.value().get<std::string>();
-                else if (it.value().is_array() && !it.value().empty() && it.value()[0].is_string())
-                    (*speechOut)[it.key()] = it.value()[0].get<std::string>();
+            for (const auto& key : speechKeys) {
+                const auto& value = j["speech"][key];
+                if (value.is_string()) (*speechOut)[legacy_mod::lower(key)] = {value.get<std::string>()};
+                else if (value.is_array() && std::all_of(value.begin(), value.end(),
+                    [](const auto& item) { return item.is_string(); }))
+                    (*speechOut)[legacy_mod::lower(key)] = value.get<std::vector<std::string>>();
             }
     } catch (const std::exception& ex) {
         DICE_LOG_ERROR("[lua] mod descriptor '{}' parse error: {}", dnx_u8str(descPath.filename()), ex.what());
@@ -2090,16 +2159,17 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
     speech_.clear();
     replyRules_.clear();   // echo refs 随旧 state 关闭已失效
     cycleEvents_.clear();  // 已排队回调靠 runtimeGeneration_ 自动失效
+    ruleBooks_.clear(); scriptRegistry_.clear(); legacyHelp_.clear();
+    activeLegacyLocks_.clear(); queuedDispatches_.clear(); lockDrainScheduled_ = false;
     taskCalls_.clear();
     pendingCoroutines_.clear();
     std::error_code ec;
-    int n = 0;
 
     // 旧版 conf/ModList.json 的顺序由导入器保存到 data/mod_order.json。
     // 顺序会影响同名 speech/help/reply 的覆盖关系，因此不能依赖目录枚举顺序。
     std::map<std::string, size_t> legacyOrder;
     try {
-        const fs::path orderFile = fs::path(dir).parent_path() / "mod_order.json";
+        const fs::path orderFile = dnx_path(dir).parent_path() / "mod_order.json";
         std::ifstream orderIn(orderFile, std::ios::binary);
         if (orderIn) {
             json orderJson; orderIn >> orderJson;
@@ -2113,12 +2183,12 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
 
     // require("X") 能找到 mod/plugin 目录下的 X.lua（跨插件依赖，如 lua_useful_extensions）。
     if (state_) {
-        fs::path base = fs::path(dir).parent_path();   // data
-        auto fwd = [](fs::path p) { std::string s = p.string(); for (auto& c : s) if (c == '\\') c = '/'; return s; };
-        std::string paths = fwd(fs::path(dir) / "?.lua") + ";" + fwd(fs::path(dir) / "?" / "init.lua") + ";"
+        fs::path base = dnx_path(dir).parent_path();   // data
+        auto fwd = [](fs::path p) { std::string s = dnx_u8str(p); for (auto& c : s) if (c == '\\') c = '/'; return s; };
+        std::string paths = fwd(dnx_path(dir) / "?.lua") + ";" + fwd(dnx_path(dir) / "?" / "init.lua") + ";"
                           + fwd(base / "plugin" / "?.lua") + ";" + fwd(base / "plugin" / "?" / "init.lua") + ";";
         for (auto& ed : extraDirs_)   // 规则包附加 lua 目录也可 require
-            paths += fwd(fs::path(ed) / "?.lua") + ";" + fwd(fs::path(ed) / "?" / "init.lua") + ";";
+            paths += fwd(dnx_path(ed) / "?.lua") + ";" + fwd(dnx_path(ed) / "?" / "init.lua") + ";";
         lua_getglobal(state_, "package");
         lua_getfield(state_, -1, "path");
         std::string cur = (lua_type(state_, -1) == LUA_TSTRING) ? argStr(state_, -1) : "";
@@ -2131,7 +2201,7 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
         // cpath：默认与 Dice! 一致（不覆盖，兼容依赖原生库的 mod）；
         // dice/lua_cpath_strict=true 时收窄到插件/内置目录，阻断 loadlib 加载系统 .dll。
         if (s_cpathStrict) {
-            std::string cpaths = fwd(fs::path(dir) / "?.dll") + ";" + fwd(base / "plugin" / "?.dll") + ";";
+            std::string cpaths = fwd(dnx_path(dir) / "?.dll") + ";" + fwd(base / "plugin" / "?.dll") + ";";
             fs::path luaDir = fs::current_path() / "lua";
             if (fs::is_directory(luaDir, ec)) cpaths += fwd(luaDir / "?.dll") + ";";
             lua_getglobal(state_, "package");
@@ -2141,159 +2211,138 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
         }
     }
 
-    // 先发现所有目录/描述档，再统一排序并加载，避免三轮扫描打乱 ModList 顺序。
-    auto finishMod = [&](LuaMod& m, const fs::path& modPath, bool hasModDir) {
-        if (hasModDir) {
-            m.dir = modPath.string();
-            std::error_code e2;
-            if (fs::is_directory(modPath / "reply", e2))
-                for (auto& r : fs::directory_iterator(modPath / "reply", e2))
-                    if (!e2 && r.is_regular_file() && (r.path().extension() == ".lua" || r.path().extension() == ".toml")) ++m.replies;
-            if (fs::is_directory(modPath / "script", e2))
-                for (auto& s : fs::directory_iterator(modPath / "script", e2))
-                    if (!e2 && s.is_regular_file() && s.path().extension() == ".lua") ++m.scripts;
-            // 规则类信号：含 model/*.xml 属性模板（COC7.xml/DND5E.xml…）。
-            if (fs::is_directory(modPath / "model", e2))
-                for (auto& x : fs::directory_iterator(modPath / "model", e2))
-                    if (!e2 && x.is_regular_file() && x.path().extension() == ".xml") { m.ruleCompat = true; break; }
-            // 旧版 yaml 规则手册：rulebook/*.yaml（{rule, manual:{术语:解释}}）→ 并入 mod helpdoc，
-            // 供 .help <术语> 查询（COC 法术/武器/神话、DND 法术/怪物/物品、Maid 手册等速查）。
-            if (fs::is_directory(modPath / "rulebook", e2))
-                for (auto& f : fs::directory_iterator(modPath / "rulebook", e2)) {
-                    if (e2 || !f.is_regular_file()) continue;
-                    auto ext = f.path().extension();
-                    if (ext != ".yaml" && ext != ".yml") continue;
-                    try {
-                        std::ifstream yf(f.path(), std::ios::binary);
-                        std::string content((std::istreambuf_iterator<char>(yf)), std::istreambuf_iterator<char>());
-                        YAML::Node doc = YAML::Load(content);
-                        if (doc["manual"] && doc["manual"].IsMap())
-                            for (auto it = doc["manual"].begin(); it != doc["manual"].end(); ++it) {
-                                std::string term = it->first.as<std::string>(""), text = it->second.as<std::string>("");
-                                if (!term.empty() && !text.empty()) m.helpdoc.emplace(term, text);   // 不覆盖 descriptor.helpdoc
-                            }
-                    } catch (...) { /* 跳过坏 yaml */ }
-                }
-        }
-        mods_.push_back(std::move(m));
-        ++n;
-    };
-
-    // 非抛版目录列举：遇坏文件名也不中断（throwing operator++ 会让单个怪文件名废掉整批）。
+    // Discover first, then load deterministically. Reserved resource directories are
+    // owned by their mod, not standalone plugins; symlinks/junctions are never followed.
+    std::map<std::string, std::map<std::string, std::vector<std::string>>> descriptorSpeech;
+    std::vector<std::pair<fs::path, bool>> singleFiles;
+    const std::set<std::string> resources = {"reply", "script", "speech", "event", "model", "rulebook",
+                                              ".git", ".svn", "node_modules"};
+    auto isDir = [](const fs::path& p) { std::error_code e; return !dnx_isLinked(p) && fs::is_directory(p, e); };
+    auto isFile = [](const fs::path& p) { std::error_code e; return !dnx_isLinked(p) && fs::is_regular_file(p, e); };
     auto safeList = [&](const fs::path& d) {
-        std::vector<fs::path> out; std::error_code e2;
-        for (fs::directory_iterator it(d, e2), end; it != end; it.increment(e2)) {
-            if (e2) { e2.clear(); continue; }
-            out.push_back(it->path());
+        std::vector<fs::path> paths; std::error_code e;
+        for (fs::directory_iterator it(d, fs::directory_options::skip_permission_denied, e), end;
+             it != end && paths.size() < 10000; it.increment(e)) {
+            if (e) { e.clear(); continue; }
+            if (!dnx_isLinked(it->path())) paths.push_back(it->path());
         }
-        auto logicalName = [](const fs::path& path) {
-            std::string name = dnx_u8str(path.filename());
-            for (const std::string suffix : {std::string(".json.disabled"), std::string(".lua.disabled"),
-                                             std::string(".disabled"), std::string(".json"), std::string(".lua")})
-                if (name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
-                    name.resize(name.size() - suffix.size()); break;
-                }
-            return name;
-        };
-        std::sort(out.begin(), out.end(), [&](const fs::path& a, const fs::path& b) {
-            if (d == fs::path(dir) && !legacyOrder.empty()) {
-                const auto ia = legacyOrder.find(logicalName(a)), ib = legacyOrder.find(logicalName(b));
-                const size_t ra = ia == legacyOrder.end() ? static_cast<size_t>(-1) : ia->second;
-                const size_t rb = ib == legacyOrder.end() ? static_cast<size_t>(-1) : ib->second;
-                if (ra != rb) return ra < rb;
-            }
-            return dnx_u8str(a.filename()) < dnx_u8str(b.filename());
-        });
-        return out;
+        std::sort(paths.begin(), paths.end());
+        return paths;
     };
-    auto isDir = [](const fs::path& p) { std::error_code e2; return fs::is_directory(p, e2); };
-    auto isFile = [](const fs::path& p) { std::error_code e2; return fs::is_regular_file(p, e2); };
-
-    // 扫描一个 mod 目录（Pass1 同层 .json 描述档 / Pass2 目录型 mod / Pass3 单文件 .lua）。
-    // 供主目录 data/mod 与各规则包 data/rulepacks/<包>/lua 共用。
-    auto scanOne = [&](const std::string& dstr) {
-        fs::path d = fs::path(std::u8string(dstr.begin(), dstr.end()));   // 按 UTF-8 构造（规则包中文目录安全）
-        if (!isDir(d)) return;
-        auto entries = safeList(d);
-        const size_t firstMod = mods_.size();
-        std::map<std::string, std::map<std::string, std::string>> descriptorSpeech;
+    auto descriptor = [&](const fs::path& file) {
+        std::string raw;
+        if (!dnx_readFile(file, raw)) return false;
+        const auto data = json::parse(stripJsonTrailingCommas(raw), nullptr, false, true);
+        if (!data.is_object()) return false;
+        for (const char* key : {"mod", "title", "ver", "version", "author", "helpdoc", "speech", "permissions"})
+            if (data.contains(key)) return true;
+        return false;
+    };
+    std::set<std::string> discovered;
+    auto finishMod = [&](LuaMod& mod, const fs::path& path, const fs::path& desc, bool hasDirectory) {
+        if (!discovered.insert(mod.name).second) {
+            DICE_LOG_WARN("模组名称「{}」重复，已跳过后发现的目录。", mod.name); return;
+        }
+        if (!desc.empty()) mod.managedPaths.push_back(dnx_u8str(desc));
+        if (hasDirectory) {
+            mod.dir = dnx_u8str(path); mod.managedPaths.push_back(mod.dir);
+            for (const auto& file : dnx_ownedFiles(path / "reply"))
+                if (file.extension() == ".lua" || file.extension() == ".toml") ++mod.replies;
+            for (const auto& file : dnx_ownedFiles(path / "script"))
+                if (file.extension() == ".lua") ++mod.scripts;
+            for (const auto& file : dnx_ownedFiles(path / "model"))
+                if (file.extension() == ".xml") { mod.ruleCompat = true; break; }
+        }
+        mods_.push_back(std::move(mod));
+    };
+    std::function<void(const fs::path&, const std::string&, bool, int, bool)> scan;
+    scan = [&](const fs::path& directory, const std::string& prefix, bool parentDisabled, int depth, bool ownerRoot) {
+        if (depth > 16 || mods_.size() >= 2000 || !isDir(directory)) return;
+        const auto entries = safeList(directory);
         std::set<std::string> claimed;
-        for (auto& p : entries) {   // Pass 1：<name>.json 描述档（原版正式登记形态；.json.disabled=停用）
-            try {
-                if (!isFile(p)) continue;
-                std::string fn = dnx_u8str(p.filename());
-                std::string name; bool disabled = false;
-                const std::string kJson = ".json", kJsonOff = ".json.disabled";
-                if (fn.size() > kJsonOff.size() && fn.compare(fn.size() - kJsonOff.size(), kJsonOff.size(), kJsonOff) == 0) {
-                    name = fn.substr(0, fn.size() - kJsonOff.size()); disabled = true;
-                } else if (fn.size() > kJson.size() && fn.compare(fn.size() - kJson.size(), kJson.size(), kJson) == 0) {
-                    name = fn.substr(0, fn.size() - kJson.size());
-                } else continue;
-                LuaMod m; m.name = name; m.title = name; m.enabled = !disabled;
-                std::map<std::string, std::string> inlineSpeech;
-                parseModDescriptor(p, m, &inlineSpeech);
-                // 成对目录：启用态 <name>，停用态 <name>.disabled（半残状态下两种都探一次）。
-                fs::path modPath = d / fs::path(std::u8string(name.begin(), name.end()));
-                if (!isDir(modPath)) {
-                    fs::path off = d / fs::path(std::u8string(name.begin(), name.end())).concat(".disabled");
-                    if (isDir(off)) modPath = off;
-                }
-                // 有描述档即认领此名，Pass 2 不再把成对目录列成第二个条目。
-                claimed.insert(name);
-                descriptorSpeech[name] = std::move(inlineSpeech);
-                finishMod(m, modPath, isDir(modPath));
-            } catch (const std::exception& ex) { DICE_LOG_ERROR("[lua] mod '{}' load failed: {}", dnx_u8str(p.filename()), ex.what()); }
+        for (const auto& file : entries) {
+            if (!isFile(file)) continue;
+            auto filename = dnx_u8str(file.filename());
+            if (filename == "descriptor.json") continue;
+            const bool disabled = filename.ends_with(".json.disabled");
+            if (!disabled && !filename.ends_with(".json")) continue;
+            auto name = filename.substr(0, filename.size() - (disabled ? 14 : 5));
+            if (name.empty() || !descriptor(file)) continue;
+            auto path = directory / dnx_path(name);
+            if (!isDir(path) && isDir(directory / dnx_path(name + ".disabled"))) path = directory / dnx_path(name + ".disabled");
+            const bool directoryDisabled = dnx_u8str(path.filename()).ends_with(".disabled");
+            LuaMod mod; mod.name = prefix + name; mod.title = name;
+            mod.ancestorDisabled = parentDisabled; mod.enabled = !parentDisabled && !disabled && !directoryDisabled;
+            parseModDescriptor(file, mod, &descriptorSpeech[mod.name]);
+            claimed.insert(name);
+            finishMod(mod, path, file, isDir(path));
         }
-        for (auto& p : entries) {   // Pass 2
-            try {
-                if (!isDir(p)) continue;
-                std::string dname = dnx_u8str(p.filename());
-                bool disabled = dname.size() > 9 && dname.substr(dname.size() - 9) == ".disabled";
-                std::string name = disabled ? dname.substr(0, dname.size() - 9) : dname;
-                if (claimed.count(name)) continue;
-                fs::path inner = p / "descriptor.json";
-                bool hasInner = isFile(inner);
-                // 除 reply/script 外，仅含 speech/event/model/rulebook 的（规则/词条类）目录也是 mod。
-                bool looksMod = hasInner;
-                for (const char* sub : {"reply", "script", "speech", "event", "model", "rulebook"})
-                    if (!looksMod && isDir(p / sub)) looksMod = true;
-                if (!looksMod) continue;
-                LuaMod m; m.name = name; m.title = name; m.enabled = !disabled;
-                if (hasInner) parseModDescriptor(inner, m, &descriptorSpeech[name]);
-                finishMod(m, p, true);
-            } catch (const std::exception& ex) { DICE_LOG_ERROR("[lua] mod dir '{}' load failed: {}", dnx_u8str(p.filename()), ex.what()); }
+        for (const auto& path : entries) {
+            if (!isDir(path)) continue;
+            auto filename = dnx_u8str(path.filename());
+            const bool disabled = filename.ends_with(".disabled");
+            const auto name = disabled ? filename.substr(0, filename.size() - 9) : filename;
+            if (resources.count(legacy_mod::lower(name))) continue;
+            const auto inner = path / "descriptor.json";
+            bool looksMod = isFile(inner);
+            for (const auto& sub : resources) if (isDir(path / sub) && sub.front() != '.' && sub != "node_modules") looksMod = true;
+            if (looksMod && !claimed.count(name)) {
+                LuaMod mod; mod.name = prefix + name; mod.title = name;
+                mod.ancestorDisabled = parentDisabled; mod.enabled = !parentDisabled && !disabled;
+                if (isFile(inner)) parseModDescriptor(inner, mod, &descriptorSpeech[mod.name]);
+                // Inner descriptor is renamed with its directory, not separately.
+                finishMod(mod, path, {}, true);
+            }
+            bool inactive = parentDisabled || disabled;
+            for (const auto& mod : mods_) if (mod.name == prefix + name && !mod.enabled) inactive = true;
+            scan(path, prefix + name + ".", inactive, depth + 1, looksMod);
         }
-        std::stable_sort(mods_.begin() + firstMod, mods_.end(), [&](const LuaMod& a, const LuaMod& b) {
-            const auto ia = legacyOrder.find(a.name), ib = legacyOrder.find(b.name);
-            const size_t ra = ia == legacyOrder.end() ? static_cast<size_t>(-1) : ia->second;
-            const size_t rb = ib == legacyOrder.end() ? static_cast<size_t>(-1) : ib->second;
-            return ra != rb ? ra < rb : a.name < b.name;
-        });
-        for (size_t i = firstMod; i < mods_.size(); ++i) {
-            auto& mod = mods_[i];
-            if (!mod.enabled) continue;
-            for (const auto& [key, value] : descriptorSpeech[mod.name]) speech_[key] = value;
-            if (!mod.dir.empty()) loadModReplies(mod);
-        }
-        for (auto& p : entries) {   // Pass 3
-            if (!isFile(p)) continue;
-            std::string fn = dnx_u8str(p.filename());
-            bool dis = fn.size() > 13 && fn.substr(fn.size() - 13) == ".lua.disabled";
-            if (p.extension() == ".lua" || dis) { try { loadModFile(p, !dis); } catch (const std::exception& ex) { DICE_LOG_ERROR("[lua] plugin '{}' load failed: {}", fn, ex.what()); } }
+        // A Lua file inside a mod is a resource, not an executable entry point.
+        if (!ownerRoot && depth == 0) for (const auto& file : entries) {
+            const auto filename = dnx_u8str(file.filename());
+            const bool disabled = filename.ends_with(".lua.disabled");
+            if (isFile(file) && (file.extension() == ".lua" || disabled))
+                singleFiles.emplace_back(file, !disabled && !parentDisabled);
         }
     };
-    scanOne(dir);
-    for (auto& ed : extraDirs_) scanOne(ed);   // 规则包附加 lua 目录
-
-    // Pass 4：插件目录 data/plugin（单文件 .lua = msg_order 插件；子目录为资源，由插件引用）。
-    fs::path pluginDir = fs::path(dir).parent_path() / "plugin";
-    if (isDir(pluginDir))
-        for (auto& p : safeList(pluginDir)) {
-            if (!isFile(p)) continue;
-            std::string fn = dnx_u8str(p.filename());
-            bool dis = fn.size() > 13 && fn.substr(fn.size() - 13) == ".lua.disabled";
-            if (p.extension() == ".lua" || dis) { try { loadModFile(p, !dis); } catch (const std::exception& ex) { DICE_LOG_ERROR("[lua] plugin '{}' load failed: {}", fn, ex.what()); } }
+    scan(dnx_path(dir), "", false, 0, false);
+    for (const auto& extra : extraDirs_) scan(dnx_path(extra), "", false, 0, false);
+    std::stable_sort(mods_.begin(), mods_.end(), [&](const auto& a, const auto& b) {
+        const auto ai = legacyOrder.find(a.name), bi = legacyOrder.find(b.name);
+        const size_t ar = ai == legacyOrder.end() ? static_cast<size_t>(-1) : ai->second;
+        const size_t br = bi == legacyOrder.end() ? static_cast<size_t>(-1) : bi->second;
+        return ar != br ? ar < br : a.name < b.name;
+    });
+    for (const auto& mod : mods_) if (mod.enabled)
+        for (const auto& [topic, text] : mod.helpdoc) legacyHelp_[topic] = {topic, text, mod.name};
+    // Old loadLua names are a global last-loaded-wins namespace. Registration
+    // never executes a resource; disabled parents and resources remain inactive.
+    for (const auto& mod : mods_) if (mod.enabled && !mod.dir.empty()) {
+        const auto scriptRoot = dnx_path(mod.dir) / "script";
+        for (const auto& file : dnx_ownedFiles(scriptRoot)) if (file.extension() == ".lua") {
+            auto name = dnx_u8str(file.lexically_relative(scriptRoot));
+            name.resize(name.size() - 4);
+            for (auto& c : name) if (c == '/' || c == '\\') c = '.';
+            scriptRegistry_[name] = {file, mod.name};
+            // Old cut_stem(parent) registers foo/init.lua as "foo". Keep Next's
+            // explicit foo.init spelling too; both retain the same safe path.
+            if (legacy_mod::lower(dnx_u8str(file.stem())) == "init" && name.size() > 5 && legacy_mod::lower(name).ends_with(".init"))
+                scriptRegistry_[name.substr(0, name.size() - 5)] = {file, mod.name};
         }
+    }
+    for (auto& mod : mods_) if (mod.enabled) {
+        for (const auto& [key, value] : descriptorSpeech[mod.name]) speech_[key] = value;
+        if (!mod.dir.empty()) loadModReplies(mod);
+    }
+    const auto pluginDir = dnx_path(dir).parent_path() / "plugin";
+    if (isDir(pluginDir)) for (const auto& file : safeList(pluginDir)) {
+        const auto filename = dnx_u8str(file.filename());
+        const bool disabled = filename.ends_with(".lua.disabled");
+        if (isFile(file) && (file.extension() == ".lua" || disabled)) singleFiles.emplace_back(file, !disabled);
+    }
+    for (const auto& [file, enabled] : singleFiles)
+        try { loadModFile(file, enabled); }
+        catch (const std::exception& ex) { DICE_LOG_ERROR("Lua 插件「{}」加载失败：{}", dnx_u8str(file.filename()), ex.what()); }
 
     // 目录型旧 Mod 的 reply ID 是全局覆盖键；单文件插件仍保留各自独立的规则。
     std::set<std::string> seenReplyIds;
@@ -2315,6 +2364,8 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
         (void)unused;
         scheduleCycleEvent(id, true);
     }
+    lastClockTime_ = nowSeconds();
+    scheduleClockTick();
 
     DICE_LOG_INFO("插件扫描结束：目录「{}」及插件目录共发现 {} 个模组／插件，注册 {} 条回复规则。",
                   dir, (int)mods_.size(), (int)replyRules_.size());
@@ -2323,160 +2374,94 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
 
 namespace {
 
+static bool dnx_dataOnly(lua_State* state, int index, int depth = 0, size_t* budget = nullptr, bool functions = false) {
+    size_t remaining = 10000;
+    if (!budget) budget = &remaining;
+    if (!*budget) return false;
+    --*budget;
+    index = lua_absindex(state, index);
+    const auto type = lua_type(state, index);
+    if (type == LUA_TFUNCTION) return functions;
+    if (type == LUA_TNUMBER) return std::isfinite(lua_tonumber(state, index));
+    if (type != LUA_TTABLE) return type == LUA_TNIL || type == LUA_TSTRING || type == LUA_TBOOLEAN;
+    if (depth >= 32) return false;
+    lua_pushnil(state);
+    while (lua_next(state, index)) {
+        const bool valid = (lua_type(state, -2) == LUA_TSTRING || lua_type(state, -2) == LUA_TNUMBER) && dnx_dataOnly(state, -1, depth + 1, budget, functions);
+        lua_pop(state, 1);
+        if (!valid) { lua_pop(state, 1); return false; }
+    }
+    return true;
+}
+static bool dnx_inlineDeckValid(const json& value) {
+    return value.is_array() && !value.empty() && value.size() <= 10000
+        && std::all_of(value.begin(), value.end(), [](const auto& item) { return item.is_string(); });
+}
 struct DnxLegacyTomlReply {
-    std::string name, type, requiredRule, echoLua, echoJs, staticEcho;
+    std::string name, type, requiredRule, echoLua, echoJs, staticEcho, echoDeckJson;
     std::vector<std::string> match, prefix, search, regex;
-    std::map<std::string, std::string> userVars, groupVars;
     std::string unsupportedLimit;
-    int cdUser = 0, cdGroup = 0, trustAtLeast = 0;
-    bool groupOnly = false;
+    bool staticEchoDefined = false;
+    std::shared_ptr<legacy_mod::Limits> limits;
 };
 
-static std::string dnx_trimToml(std::string value) {
-    auto ws = [](unsigned char c) { return std::isspace(c) != 0; };
-    while (!value.empty() && ws(static_cast<unsigned char>(value.front()))) value.erase(value.begin());
-    while (!value.empty() && ws(static_cast<unsigned char>(value.back()))) value.pop_back();
-    return value;
-}
-
-static std::string dnx_stripTomlComment(const std::string& line) {
-    char quote = 0; bool escaped = false;
-    for (size_t i = 0; i < line.size(); ++i) {
-        const char c = line[i];
-        if (quote == '"' && c == '\\' && !escaped) { escaped = true; continue; }
-        if (!escaped && (c == '"' || c == '\'')) {
-            if (!quote) quote = c;
-            else if (quote == c) quote = 0;
-        }
-        if (c == '#' && !quote) return line.substr(0, i);
-        escaped = false;
-    }
-    return line;
-}
-
-static std::string dnx_tomlString(std::string value) {
-    value = dnx_trimToml(value);
-    if (value.rfind("\"\"\"", 0) == 0 || value.rfind("'''", 0) == 0)
-        throw std::runtime_error("multiline TOML strings are not supported");
-    if (!value.empty() && (value.front() == '"' || value.front() == '\'')) {
-        if (value.size() < 2 || value.back() != value.front()) throw std::runtime_error("unterminated TOML string");
-        if (value.front() == '\'') return value.substr(1, value.size() - 2);
-    }
-    if (value.size() < 2 || value.front() != '"' || value.back() != '"') return value;
-    std::string out;
-    out.reserve(value.size() - 2);
-    for (size_t i = 1; i + 1 < value.size(); ++i) {
-        char c = value[i];
-        if (c != '\\' || i + 2 >= value.size()) { out.push_back(c); continue; }
-        const char n = value[++i];
-        if (n == 'n') out.push_back('\n');
-        else if (n == 'r') out.push_back('\r');
-        else if (n == 't') out.push_back('\t');
-        else if (n == 'b') out.push_back('\b');
-        else if (n == 'f') out.push_back('\f');
-        else if (n == '\\' || n == '"') out.push_back(n);
-        else throw std::runtime_error("unsupported TOML escape; use a literal string for regex or paths");
-    }
-    return out;
-}
-
-static std::vector<std::string> dnx_tomlStrings(std::string value) {
-    value = dnx_trimToml(value);
-    if (value.empty()) return {};
-    if (value.front() != '[') return {dnx_tomlString(value)};
-    if (value.back() != ']') throw std::runtime_error("multiline/unterminated TOML arrays are not supported");
-    value = value.substr(1, value.size() - 2);
-    std::vector<std::string> out;
-    char quote = 0; bool escaped = false;
-    size_t start = 0;
-    for (size_t i = 0; i <= value.size(); ++i) {
-        const char c = i < value.size() ? value[i] : ',';
-        if (quote == '"' && c == '\\' && !escaped) { escaped = true; continue; }
-        if (!escaped && (c == '"' || c == '\'')) {
-            if (!quote) quote = c;
-            else if (quote == c) quote = 0;
-        }
-        if (c == ',' && !quote) {
-            std::string item = dnx_trimToml(value.substr(start, i - start));
-            if (!item.empty()) out.push_back(dnx_tomlString(item));
-            start = i + 1;
-        }
-        escaped = false;
-    }
-    if (quote) throw std::runtime_error("unterminated TOML array string");
-    return out;
-}
-
-static int dnx_tomlInt(const std::string& value) {
-    const auto text = dnx_trimToml(value);
-    size_t used = 0;
-    const auto number = std::stoi(text, &used);
-    if (used != text.size() || number < 0) throw std::runtime_error("invalid non-negative TOML cooldown");
-    return number;
-}
-
-// 兼容常见 reply TOML 子集；未实现的限制必须跳过回复并诊断，不能放宽权限。
+// Use the SAME TOML 1.0 parser as Dice!, not a line-oriented approximation.
+// Files are data only; neither parsing nor JSON conversion executes a script.
 static std::vector<DnxLegacyTomlReply> dnx_parseLegacyReplyToml(const fs::path& path) {
+    std::error_code ec;
+    if (fs::file_size(path, ec) > 4 * 1024 * 1024 || ec)
+        throw std::runtime_error("reply TOML exceeds the 4 MiB safety limit or cannot be read");
     std::ifstream in(path, std::ios::binary);
     if (!in) throw std::runtime_error("cannot open TOML");
+    const auto document = toml::parse(in, dnx_u8str(path));
+    std::ostringstream serialized;
+    serialized << toml::json_formatter{document};
+    const auto root = json::parse(serialized.str());
     std::vector<DnxLegacyTomlReply> out;
-    DnxLegacyTomlReply* current = nullptr;
-    std::string line;
-    while (std::getline(in, line)) {
-        line = dnx_trimToml(dnx_stripTomlComment(line));
-        if (line.empty()) continue;
-        if (line.front() == '[' && line.back() == ']') {
-            std::string section = dnx_trimToml(line.substr(1, line.size() - 2));
-            constexpr const char* prefix = "reply.";
-            if (section.rfind(prefix, 0) == 0 && section.size() > 6) {
-                out.push_back({});
-                out.back().name = section.substr(6);
-                current = &out.back();
-            } else current = nullptr;
-            continue;
+    if (!root.contains("reply")) return out;
+    if (!root["reply"].is_object()) throw std::runtime_error("reply must be a TOML table");
+    for (const auto& [id, value] : root["reply"].items()) {
+        if (!value.is_object()) throw std::runtime_error("reply entry must be a table");
+        DnxLegacyTomlReply reply;
+        reply.name = id;
+        reply.type = value.value("type", std::string());
+        reply.requiredRule = value.value("rule", std::string());
+        const auto keyword = value.value("keyword", json::object());
+        if (!keyword.is_object()) throw std::runtime_error("keyword must be a table");
+        auto words = [](const json& input, std::vector<std::string>& result) {
+            if (input.is_string()) result.push_back(input.get<std::string>());
+            else if (input.is_array()) {
+                for (const auto& item : input) {
+                    if (!item.is_string()) throw std::runtime_error("keyword entries must be strings");
+                    result.push_back(item.get<std::string>());
+                }
+            } else throw std::runtime_error("keyword must be a string or array");
+        };
+        for (const auto& [kind, input] : keyword.items()) {
+            const auto key = legacy_mod::lower(kind);
+            if (key == "match") words(input, reply.match);
+            else if (key == "prefix") words(input, reply.prefix);
+            else if (key == "search") words(input, reply.search);
+            else if (key == "regex") words(input, reply.regex);
+            else reply.unsupportedLimit = "keyword." + kind;
         }
-        if (!current) continue;
-        const size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        const std::string key = dnx_trimToml(line.substr(0, eq));
-        const std::string value = dnx_trimToml(line.substr(eq + 1));
-        if (key == "type") current->type = dnx_tomlString(value);
-        else if (key == "rule") current->requiredRule = dnx_tomlString(value);
-        else if (key == "keyword.match" || key == "keyword.Match") current->match = dnx_tomlStrings(value);
-        else if (key == "keyword.prefix" || key == "keyword.Prefix") current->prefix = dnx_tomlStrings(value);
-        else if (key == "keyword.search" || key == "keyword.Search") current->search = dnx_tomlStrings(value);
-        else if (key == "keyword.regex" || key == "keyword.Regex") current->regex = dnx_tomlStrings(value);
-        else if (key == "echo.lua") current->echoLua = dnx_tomlString(value);
-        else if (key == "echo.js") current->echoJs = dnx_tomlString(value);
-        else if (key == "echo") current->staticEcho = dnx_tomlString(value);
-        else if (key == "limit.cd") current->cdUser = current->cdGroup = dnx_tomlInt(value);
-        else if (key == "limit.cd.user") current->cdUser = dnx_tomlInt(value);
-        else if (key == "limit.cd.grp" || key == "limit.cd.group") current->cdGroup = dnx_tomlInt(value);
-        else if (key.rfind("limit.user_var.", 0) == 0 || key.rfind("limit.grp_var.", 0) == 0) {
-            const bool user = key.rfind("limit.user_var.", 0) == 0;
-            std::string variable = key.substr(user ? 15 : 14);
-            std::string op;
-            if (auto dot = variable.rfind('.'); dot != std::string::npos) {
-                op = variable.substr(dot + 1); variable.resize(dot);
-            }
-            json operand = json::parse(value, nullptr, false);
-            if (value.size() >= 2 && (value.front() == '"' || value.front() == '\''))
-                operand = dnx_tomlString(value);
-            const bool validOp = op.empty() || op == "equal" || op == "neq" ||
-                op == "at_least" || op == "at_most" || op == "more" || op == "less";
-            if (variable.empty() || operand.is_discarded() || !operand.is_primitive() || !validOp) {
-                current->unsupportedLimit = key;
-            } else {
-                if (!op.empty()) operand = json{{op, operand}};
-                (user ? current->userVars : current->groupVars)[variable] = operand.dump();
-            }
-        }
-        else if (key == "limit.grp_id.nor" && value == "0") current->groupOnly = true;
-        else if (key.rfind("limit", 0) == 0) current->unsupportedLimit = key;
+        reply.limits = std::make_shared<legacy_mod::Limits>();
+        if (!legacy_mod::parseLimits(value.value("limit", json()), *reply.limits, reply.unsupportedLimit))
+            reply.limits.reset();
+        const auto echo = value.value("echo", json());
+        if (echo.is_string()) { reply.staticEcho = echo.get<std::string>(); reply.staticEchoDefined = true; }
+        else if (dnx_inlineDeckValid(echo)) reply.echoDeckJson = echo.dump();
+        else if (echo.is_object()) {
+            if (echo.contains("js") || echo.contains("py")) reply.echoJs = echo.contains("js") ? "js" : "py";
+            if (echo.contains("lua")) reply.echoLua = echo.at("lua").get<std::string>();
+            if (!echo.contains("lua") && !echo.contains("js") && !echo.contains("py"))
+                reply.unsupportedLimit = "echo action";
+            if (echo.size() != 1 && !echo.contains("js") && !echo.contains("py")) reply.unsupportedLimit = "echo 混合动作";
+        } else reply.unsupportedLimit = "echo action";
+        out.push_back(std::move(reply));
     }
     return out;
 }
-
 } // namespace
 
 // 载入一个旧 Dice! mod 的 speech + reply(.lua/.toml) + event(.lua)。
@@ -2487,10 +2472,10 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
         if (mod.compatibilityWarnings.size() < 100) mod.compatibilityWarnings.push_back(std::move(text));
     };
     std::error_code ec;
-    // 1) speech 词条：平铺 key:value 标量。
-    fs::path sp = fs::path(mod.dir) / "speech";
+    // 1) speech 词条：平铺标量或随机候选数组；与旧版 dict_ci 同样忽略 ASCII 大小写。
+    fs::path sp = dnx_path(mod.dir) / "speech";
     if (fs::is_directory(sp, ec)) {
-        for (auto& f : fs::directory_iterator(sp, ec)) {
+        for (const auto& file : dnx_ownedFiles(sp)) { fs::directory_entry f(file, ec);
             if (ec || !f.is_regular_file()) continue;
             auto ext = f.path().extension();
             if (ext != ".yaml" && ext != ".yml") continue;
@@ -2498,14 +2483,20 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
                 std::string ytext; if (!dnx_readFile(f.path(), ytext)) continue;
                 YAML::Node doc = YAML::Load(ytext);
                 if (doc.IsMap())
-                    for (auto it = doc.begin(); it != doc.end(); ++it)
-                        if (it->second.IsScalar()) speech_[it->first.as<std::string>()] = it->second.as<std::string>();
+                    for (auto it = doc.begin(); it != doc.end(); ++it) {
+                        const auto key = legacy_mod::lower(it->first.as<std::string>());
+                        if (it->second.IsScalar()) speech_[key] = {it->second.as<std::string>()};
+                        else if (it->second.IsSequence() && std::all_of(it->second.begin(), it->second.end(),
+                            [](const YAML::Node& item) { return item.IsScalar(); }))
+                            speech_[key] = it->second.as<std::vector<std::string>>();
+                    }
             } catch (const std::exception& ex) {
                 DICE_LOG_ERROR("[lua] speech '{}' parse error: {}", dnx_u8str(f.path().filename()), ex.what());
             }
         }
     }
     auto collectReplies = [&]() {
+        const auto firstRule = replyRules_.size();
         lua_getglobal(state_, "msg_reply");
         if (!lua_istable(state_, -1)) { lua_pop(state_, 1); return; }
         lua_pushnil(state_);
@@ -2515,107 +2506,92 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
             rule.name = argStr(state_, -1); rule.modName = mod.name; rule.modDir = mod.dir;
             lua_pop(state_, 1);
             if (lua_istable(state_, -1)) {
-                // keyword.match/prefix/search 可为「字符串」或「字符串数组」。
-                auto readArr = [&](const char* field, std::vector<std::string>& out) {
-                    lua_getfield(state_, -1, field);
-                    if (lua_type(state_, -1) == LUA_TSTRING) {
-                        std::string p = argStr(state_, -1); if (!p.empty()) out.push_back(p);
-                    } else if (lua_istable(state_, -1)) {
-                        lua_Integer len = (lua_Integer)lua_rawlen(state_, -1);
-                        for (lua_Integer i = 1; i <= len; ++i) {
-                            lua_rawgeti(state_, -1, i);
-                            std::string p = argStr(state_, -1); lua_pop(state_, 1);
-                            if (!p.empty()) out.push_back(p);
-                        }
-                    }
-                    lua_pop(state_, 1);
-                };
                 lua_getfield(state_, -1, "keyword");
-                if (lua_istable(state_, -1)) {
-                    readArr("match", rule.matchPatterns);
-                    readArr("Match", rule.matchPatterns);
-                    readArr("prefix", rule.prefixPatterns);
-                    readArr("Prefix", rule.prefixPatterns);
-                    readArr("search", rule.searchPatterns);
-                    readArr("Search", rule.searchPatterns);
-                    readArr("regex", rule.regexPatterns);
-                    readArr("Regex", rule.regexPatterns);
+                bool validKeywords = dnx_dataOnly(state_, -1) && lua_istable(state_, -1);
+                if (validKeywords) {
+                    const auto fields = luaToJson(state_, -1);
+                    const std::map<std::string, std::vector<std::string>*> targets = {
+                        {"match", &rule.matchPatterns}, {"prefix", &rule.prefixPatterns},
+                        {"search", &rule.searchPatterns}, {"regex", &rule.regexPatterns}
+                    };
+                    for (const auto& [kind, value] : fields.items()) {
+                        const auto target = targets.find(legacy_mod::lower(kind));
+                        if (target == targets.end()) { validKeywords = false; continue; }
+                        if (value.is_string()) target->second->push_back(value.get<std::string>());
+                        else if (value.is_array()) for (const auto& item : value) {
+                            if (item.is_string()) target->second->push_back(item.get<std::string>());
+                            else validKeywords = false;
+                        } else validKeywords = false;
+                    }
                 }
                 lua_pop(state_, 1);
+                if (!validKeywords) { compatibilityWarning("回复 " + rule.name + " 已跳过：keyword 包含不支持的匹配条件。"); lua_pop(state_, 1); continue; }
                 lua_getfield(state_, -1, "rule");
+                if (!lua_isnil(state_, -1) && !lua_isstring(state_, -1)) {
+                    compatibilityWarning("回复 " + rule.name + " 已跳过：rule 不是规则名称。"); lua_pop(state_, 2); continue;
+                }
                 if (lua_isstring(state_, -1)) rule.requiredRule = argStr(state_, -1);
                 lua_pop(state_, 1);
                 lua_getfield(state_, -1, "type");
+                if (!lua_isnil(state_, -1) && !lua_isstring(state_, -1)) {
+                    compatibilityWarning("回复 " + rule.name + " 已跳过：type 无效。"); lua_pop(state_, 2); continue;
+                }
                 if (lua_isstring(state_, -1)) {
                     std::string type = argStr(state_, -1);
                     for (auto& c : type) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+                    rule.type = type;
                     rule.requiresGame = type == "game";
                 }
                 lua_pop(state_, 1);
-                // limit.cd / limit.user_var.trust.at_least / limit.grp_id → 仅群
+                // Shared fail-closed limits for Lua and TOML; never discard an unknown restriction.
                 lua_getfield(state_, -1, "limit");
-                if (lua_istable(state_, -1)) {
-                    lua_getfield(state_, -1, "cd");
-                    if (lua_isnumber(state_, -1)) { rule.cdUser = rule.cdGrp = (int)lua_tointeger(state_, -1); }
-                    else if (lua_istable(state_, -1)) {
-                        lua_getfield(state_, -1, "user"); if (lua_isnumber(state_, -1)) rule.cdUser = (int)lua_tointeger(state_, -1); lua_pop(state_, 1);
-                        lua_getfield(state_, -1, "grp");  if (lua_isnumber(state_, -1)) rule.cdGrp  = (int)lua_tointeger(state_, -1); lua_pop(state_, 1);
-                    }
-                    lua_pop(state_, 1);
-                    lua_getfield(state_, -1, "user_var");
-                    if (lua_istable(state_, -1)) {
-                        lua_getfield(state_, -1, "trust");
-                        if (lua_istable(state_, -1)) {
-                            lua_getfield(state_, -1, "at_least");
-                            if (lua_isnumber(state_, -1)) rule.trustAtLeast = (int)lua_tointeger(state_, -1);
-                            lua_pop(state_, 1);
-                        }
-                        lua_pop(state_, 1);
-                        lua_pushnil(state_);
-                        while (lua_next(state_, -2)) {
-                            lua_pushvalue(state_, -2);
-                            const std::string key = argStr(state_, -1); lua_pop(state_, 1);
-                            if (!key.empty())
-                                rule.userVarEquals[key] = luaToJson(state_, -1).dump();
-                            lua_pop(state_, 1);
-                        }
-                    }
-                    lua_pop(state_, 1);
-                    lua_getfield(state_, -1, "grp_var");
-                    if (lua_istable(state_, -1)) {
-                        lua_pushnil(state_);
-                        while (lua_next(state_, -2)) {
-                            lua_pushvalue(state_, -2);
-                            const std::string key = argStr(state_, -1); lua_pop(state_, 1);
-                            if (!key.empty())
-                                rule.groupVarEquals[key] = luaToJson(state_, -1).dump();
-                            lua_pop(state_, 1);
-                        }
-                    }
-                    lua_pop(state_, 1);
-                    lua_getfield(state_, -1, "grp_id");
-                    if (lua_istable(state_, -1)) rule.groupOnly = true;
-                    lua_pop(state_, 1);
-                }
+                const bool dataOnly = dnx_dataOnly(state_, -1);
+                auto limits = std::make_shared<legacy_mod::Limits>();
+                std::string limitError;
+                auto limitJson = luaToJson(state_, -1);
+                if (lua_istable(state_, -1) && lua_rawlen(state_, -1) == 0 && limitJson.is_array() && limitJson.empty())
+                    limitJson = json::object();
+                const bool validLimit = dataOnly && legacy_mod::parseLimits(limitJson, *limits, limitError);
+                if (!dataOnly) limitError = "limit 含非数据值、循环引用或超过嵌套限制";
                 lua_pop(state_, 1);
+                if (validLimit) rule.limits = std::move(limits);
+                else {
+                    compatibilityWarning("回复 " + rule.name + " 已跳过：" + limitError + "。");
+                    lua_pop(state_, 1); // entry; retain iteration table and key
+                    continue;
+                }
                 // echo：函数、静态串，或 {lua="脚本名"}。
                 lua_getfield(state_, -1, "echo");
                 if (lua_isfunction(state_, -1)) rule.echoRef = luaL_ref(state_, LUA_REGISTRYINDEX);
-                else if (lua_isstring(state_, -1)) { rule.staticEcho = argStr(state_, -1); lua_pop(state_, 1); }
+                else if (lua_type(state_, -1) == LUA_TSTRING) { rule.staticEcho = argStr(state_, -1); rule.staticEchoDefined = true; lua_pop(state_, 1); }
                 else if (lua_istable(state_, -1)) {
+                    auto action = dnx_dataOnly(state_, -1, 0, nullptr, true) ? luaToJson(state_, -1) : json();
                     lua_getfield(state_, -1, "lua");
-                    if (lua_isstring(state_, -1)) rule.echoScript = argStr(state_, -1);
-                    lua_pop(state_, 1);
+                    const bool function = action.is_object() && action.size() == 1 && lua_isfunction(state_, -1);
+                    if (function) { rule.echoRef = luaL_ref(state_, LUA_REGISTRYINDEX); rule.echoTakesMessage = false; }
+                    else lua_pop(state_, 1);
+                    if (!function) {
+                        if (dnx_inlineDeckValid(action)) rule.echoDeckJson = action.dump();
+                        else if (action.is_object() && action.size() == 1 && action.contains("lua") && action["lua"].is_string())
+                            rule.echoScript = action["lua"].get<std::string>();
+                        else compatibilityWarning("回复 " + rule.name + " 已跳过：无效或不安全的 echo 动作（不执行旧 JS/Python 或混合动作）。");
+                    }
                     lua_pop(state_, 1);
                 } else lua_pop(state_, 1);
             }
-            if ((rule.echoRef != 0 || !rule.echoScript.empty() || !rule.staticEcho.empty())
+            if (rule.type != "nor" && rule.type != "reply" && rule.type != "order" && rule.type != "both" && rule.type != "game") {
+                compatibilityWarning("回复 " + rule.name + " 已跳过：不支持的 type " + rule.type + "。");
+                if (rule.echoRef) luaL_unref(state_, LUA_REGISTRYINDEX, rule.echoRef);
+                lua_pop(state_, 1); continue;
+            }
+            if ((rule.echoRef != 0 || !rule.echoScript.empty() || rule.staticEchoDefined || !rule.echoDeckJson.empty())
                 && (!rule.matchPatterns.empty() || !rule.prefixPatterns.empty()
                     || !rule.searchPatterns.empty() || !rule.regexPatterns.empty()))
                 replyRules_.push_back(std::move(rule));
             lua_pop(state_, 1);
         }
         lua_pop(state_, 1);
+        std::stable_sort(replyRules_.begin() + firstRule, replyRules_.end(), [](const auto& a, const auto& b) { return a.name < b.name; });
     };
 
     auto collectEvents = [&]() {
@@ -2627,43 +2603,67 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
             LegacyCycleEvent event;
             event.id = argStr(state_, -1); event.modName = mod.name; event.modDir = mod.dir;
             lua_pop(state_, 1);
-            if (lua_istable(state_, -1)) {
-                lua_getfield(state_, -1, "trigger");
-                if (lua_istable(state_, -1)) {
-                    bool unsupportedTrigger = false;
-                    for (const char* field : {"clock", "hook"}) {
-                        lua_getfield(state_, -1, field);
-                        unsupportedTrigger = unsupportedTrigger || !lua_isnil(state_, -1);
-                        lua_pop(state_, 1);
-                    }
-                    lua_getfield(state_, -1, "cycle");
-                    if (lua_isnumber(state_, -1)) event.intervalSeconds = lua_tonumber(state_, -1);
-                    else if (lua_istable(state_, -1)) {
-                        auto unit = [&](const char* key, double scale) {
-                            lua_getfield(state_, -1, key);
-                            if (lua_isnumber(state_, -1)) event.intervalSeconds += lua_tonumber(state_, -1) * scale;
-                            lua_pop(state_, 1);
-                        };
-                        unit("second", 1.0); unit("minute", 60.0); unit("hour", 3600.0); unit("day", 86400.0);
-                    }
-                    lua_pop(state_, 1);
-                    if (unsupportedTrigger) event.intervalSeconds = 0;
+            std::string error;
+            if (!lua_istable(state_, -1) || !dnx_dataOnly(state_, -1, 0, nullptr, true)) error = "事件必须是有界数据表，不能循环引用";
+            else {
+                const auto definition = luaToJson(state_, -1);
+                event.defaultsJson = definition.dump();
+                const auto trigger = definition.value("trigger", json());
+                if (!trigger.is_object() || trigger.empty()) error = "trigger 必须声明有效触发器";
+                else for (const auto& [kind, value] : trigger.items()) {
+                    if (kind == "cycle") {
+                        double interval = 0;
+                        if (value.is_number()) interval = value.get<double>();
+                        else if (value.is_object()) {
+                            for (const auto& [unit, number] : value.items()) {
+                                const double scale = unit == "second" ? 1 : unit == "minute" ? 60 : unit == "hour" ? 3600 : unit == "day" ? 86400 : 0;
+                                if (scale == 0 || !number.is_number() || number.get<double>() < 0) { error = "无效的 cycle 时间单位或数值"; break; }
+                                interval += scale * number.get<double>();
+                            }
+                        }
+                        if (!std::isfinite(interval) || interval < 1 || interval > 7 * 86400)
+                            error = "cycle 必须在 1 秒至 7 天之间";
+                        else event.intervalSeconds = interval;
+                    } else if (kind == "clock") {
+                        const auto clocks = value.is_array() ? value : json::array({value});
+                        if (clocks.empty() || clocks.size() > 1440) { error = "clock 列表为空或过长"; continue; }
+                        for (const auto& clock : clocks) {
+                            if (!clock.is_object()) { error = "clock 必须是 hour/minute 对象"; break; }
+                            long long hour = 0, minute = 0;
+                            if (!legacy_mod::scalarNumber(clock.value("hour", json(0)), hour) || hour > 23
+                                || !legacy_mod::scalarNumber(clock.value("minute", json(0)), minute) || minute > 59
+                                || clock.size() > 2) { error = "clock 的小时或分钟无效"; break; }
+                            for (const auto& [key, unused] : clock.items()) if (key != "hour" && key != "minute") error = "不支持的 clock 字段 " + key;
+                            event.clocks.emplace_back(static_cast<int>(hour), static_cast<int>(minute));
+                        }
+                    } else if (kind == "hook") {
+                        static const std::set<std::string> allowed = {"startup", "dayend", "daynew", "message", "friendrequest", "friendadd",
+                            "grouprequest", "groupadd", "groupwelcome", "groupdecrease", "grouprecall", "groupupload", "poke", "logend"};
+                        if (!value.is_string() || !allowed.count(legacy_mod::lower(value.get<std::string>())))
+                            error = "不支持或不安全的 hook（不覆盖授权、敏感词或黑名单处理）";
+                        else event.hooks.push_back(legacy_mod::lower(value.get<std::string>()));
+                    } else error = "不支持的 trigger." + kind;
                 }
-                lua_pop(state_, 1);
                 lua_getfield(state_, -1, "action");
                 if (lua_istable(state_, -1)) {
+                    lua_pushnil(state_); size_t fields = 0;
+                    while (lua_next(state_, -2)) { ++fields; lua_pop(state_, 1); }
                     lua_getfield(state_, -1, "lua");
-                    if (lua_isstring(state_, -1)) event.actionLua = argStr(state_, -1);
-                    lua_pop(state_, 1);
-                }
+                    if (lua_isfunction(state_, -1)) event.actionRef = luaL_ref(state_, LUA_REGISTRYINDEX);
+                    else { if (lua_type(state_, -1) == LUA_TSTRING) event.actionLua = argStr(state_, -1); lua_pop(state_, 1); }
+                    if (fields != 1 || (event.actionRef == 0 && event.actionLua.empty()))
+                        error = "action 仅接受单一 Lua 动作，不执行混合 JS/Python 动作";
+                } else error = "缺少有效的 action";
                 lua_pop(state_, 1);
             }
-            if (!event.id.empty() && event.intervalSeconds > 0.0 && !event.actionLua.empty()) {
-                cycleEvents_[event.id] = std::move(event);
-                ++mod.events;
+            if (error.empty() && !event.id.empty()) {
+                if (const auto previous = cycleEvents_.find(event.id); previous != cycleEvents_.end() && previous->second.actionRef)
+                    luaL_unref(state_, LUA_REGISTRYINDEX, previous->second.actionRef);
+                cycleEvents_[event.id] = std::move(event); ++mod.events;
             } else {
-                DICE_LOG_WARN("[lua] mod '{}' event '{}': requires a positive trigger.cycle and action.lua; clock/hook actions are not supported", mod.name, event.id);
-                compatibilityWarning("事件 " + event.id + " 已跳过：仅支持有效的 trigger.cycle 与 action.lua，clock/hook 尚不支持。");
+                if (event.actionRef) luaL_unref(state_, LUA_REGISTRYINDEX, event.actionRef);
+                compatibilityWarning("事件 " + event.id + " 已跳过：" + error + "。");
+                DICE_LOG_WARN("模组「{}」事件「{}」已跳过：{}", mod.name, event.id, error);
             }
             lua_pop(state_, 1);
         }
@@ -2684,9 +2684,9 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
     };
 
     // 2) reply/*.lua|toml。TOML 是旧版规则模组的主要声明格式。
-    fs::path rp = fs::path(mod.dir) / "reply";
+    fs::path rp = dnx_path(mod.dir) / "reply";
     loadingModDir_ = mod.dir;
-    if (fs::is_directory(rp, ec)) for (auto& f : fs::directory_iterator(rp, ec)) {
+    if (fs::is_directory(rp, ec)) for (const auto& file : dnx_ownedFiles(rp)) { fs::directory_entry f(file, ec);
         if (ec || !f.is_regular_file()) continue;
         if (f.path().extension() == ".lua") loadLuaDefinition(f.path());
         else if (f.path().extension() == ".toml") {
@@ -2702,20 +2702,22 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
                     rule.name = legacy.name; rule.modName = mod.name; rule.modDir = mod.dir;
                     rule.matchPatterns = legacy.match; rule.prefixPatterns = legacy.prefix;
                     rule.searchPatterns = legacy.search; rule.regexPatterns = legacy.regex;
-                    rule.cdUser = legacy.cdUser; rule.cdGrp = legacy.cdGroup;
-                    rule.trustAtLeast = legacy.trustAtLeast; rule.groupOnly = legacy.groupOnly;
-                    rule.userVarEquals = legacy.userVars; rule.groupVarEquals = legacy.groupVars;
                     rule.requiredRule = legacy.requiredRule; rule.echoScript = legacy.echoLua; rule.staticEcho = legacy.staticEcho;
+                    rule.staticEchoDefined = legacy.staticEchoDefined; rule.echoDeckJson = legacy.echoDeckJson; rule.limits = legacy.limits;
                     std::string legacyType = legacy.type;
                     for (auto& c : legacyType) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+                    if (!legacyType.empty()) rule.type = legacyType;
                     rule.requiresGame = legacyType == "game";
+                    if (rule.type != "nor" && rule.type != "reply" && rule.type != "order" && rule.type != "both" && rule.type != "game") {
+                        compatibilityWarning("回复 " + rule.name + " 已跳过：不支持的 type " + rule.type + "。"); continue;
+                    }
                     if (!legacy.echoJs.empty()) {
                         DICE_LOG_WARN("[lua] TOML reply '{}:{}' uses legacy Dice! JS action '{}'; skipped (not a SealDice plugin)",
                                       mod.name, legacy.name, legacy.echoJs);
                         compatibilityWarning(dnx_u8str(f.path().filename()) + " / " + legacy.name + " 已跳过：旧 Dice! JS 不属于海豹 JS 插件体系，不提供兼容执行。");
                         continue;
                     }
-                    if ((!rule.echoScript.empty() || !rule.staticEcho.empty())
+                    if ((!rule.echoScript.empty() || rule.staticEchoDefined || !rule.echoDeckJson.empty())
                         && (!rule.matchPatterns.empty() || !rule.prefixPatterns.empty()
                             || !rule.searchPatterns.empty() || !rule.regexPatterns.empty()))
                         replyRules_.push_back(std::move(rule));
@@ -2727,63 +2729,234 @@ void LuaPluginManager::loadModReplies(LuaMod& mod) {
         }
     }
 
-    // 3) event/*.lua：旧版 event 表。当前先完整恢复真实内置模组使用的 cycle 动作；
-    // clock/hook 仍会在诊断日志中保持可见，不冒充已支持。
-    fs::path ep = fs::path(mod.dir) / "event";
-    if (fs::is_directory(ep, ec)) for (auto& f : fs::directory_iterator(ep, ec))
-        if (!ec && f.is_regular_file() && f.path().extension() == ".lua") loadLuaDefinition(f.path());
+    // 3) event/*.lua：混合 cycle / clock / hook 的每个触发器都必须有效。
+    fs::path ep = dnx_path(mod.dir) / "event";
+    if (fs::is_directory(ep, ec)) for (const auto& file : dnx_ownedFiles(ep))
+        if (file.extension() == ".lua") loadLuaDefinition(file);
+
+    for (const auto& file : dnx_ownedFiles(dnx_path(mod.dir) / "rulebook")) {
+        if (file.extension() != ".yaml" && file.extension() != ".yml") continue;
+        try {
+            std::string text; if (!dnx_readFile(file, text)) throw std::runtime_error("文件不可读或超过 4 MiB");
+            const auto document = YAML::Load(text);
+            const auto rule = document["rule"].as<std::string>();
+            if (rule.empty() || rule.size() > 256) throw std::runtime_error("rule 名称无效");
+            auto& book = ruleBooks_[legacy_mod::lower(rule)];
+            if (const auto manual = document["manual"]; manual && manual.IsMap()) {
+                if (manual.size() > 10000) throw std::runtime_error("manual 条目过多");
+                for (const auto& item : manual)
+                    book.manual[legacy_mod::lower(item.first.as<std::string>())] = item.second.as<std::string>();
+            }
+            if (const auto tapes = document["tape"]; tapes && tapes.IsMap()) {
+                if (tapes.size() > 1000) throw std::runtime_error("tape 条目过多");
+                for (const auto& item : tapes) {
+                    const auto name = item.first.as<std::string>(); const auto action = item.second;
+                    if (name.empty() || !action.IsMap() || action.size() != 1
+                        || (!action["lua"] && !action["text"])) {
+                        compatibilityWarning("规则 " + rule + " 的 tape " + name + " 已跳过：仅支持单一 Lua 或文本动作。");
+                        continue;
+                    }
+                    LegacyCycleEvent tape;
+                    tape.id = "tape:" + rule + ":" + name; tape.modName = mod.name; tape.modDir = mod.dir;
+                    if (action["lua"]) tape.actionLua = action["lua"].as<std::string>();
+                    else tape.actionText = action["text"].as<std::string>();
+                    book.tapes[legacy_mod::lower(name)] = std::move(tape);
+                }
+            }
+        } catch (const std::exception& ex) {
+            compatibilityWarning(dnx_u8str(file.filename()) + " 规则书读取失败：" + ex.what());
+            DICE_LOG_WARN("规则书「{}」读取失败：{}", dnx_u8str(file.filename()), ex.what());
+        }
+    }
+    for (const auto& file : dnx_ownedFiles(dnx_path(mod.dir) / "model")) if (file.extension() == ".xml") {
+        std::string text;
+        if (!dnx_readFile(file, text)) { compatibilityWarning(dnx_u8str(file.filename()) + " 模型不可读或超过 4 MiB。"); continue; }
+        for (const auto& warning : legacy_model::parse(text).warnings) compatibilityWarning(dnx_u8str(file.filename()) + "：" + warning);
+    }
     loadingModDir_.clear();
 }
 
 void LuaPluginManager::scheduleCycleEvent(const std::string& id, bool runNow) {
     if (!scheduler_) return;
-    const auto it = cycleEvents_.find(id);
-    if (it == cycleEvents_.end() || it->second.intervalSeconds <= 0.0) return;
+    const auto found = cycleEvents_.find(id);
+    if (found == cycleEvents_.end() || found->second.intervalSeconds <= 0) return;
     const uint64_t generation = runtimeGeneration_;
-    auto enqueue = [&]() {
-        try {
-            scheduler_(it->second.intervalSeconds, [this, id, generation]() {
-                runCycleEvent(id, generation);
-            });
-        } catch (const std::exception& ex) {
-            DICE_LOG_ERROR("[lua] schedule legacy event '{}' failed: {}", id, ex.what());
-        } catch (...) {
-            DICE_LOG_ERROR("[lua] schedule legacy event '{}' failed", id);
-        }
-    };
-    // 原版首次 build 时会先排下一次，再立刻执行一次 action。
-    enqueue();
-    if (runNow) {
-        const LegacyCycleEvent event = it->second;
-        ProcessingScope logScope(loggingSource(event.modName, event.actionLua), "Lua 周期事件「" + id + "」");
-        const int base = state_ ? lua_gettop(state_) : 0;
-        if (!state_) return;
-        loadingModDir_ = event.modDir;
-        lua_newtable(state_);
-        lua_pushlstring(state_, event.id.data(), event.id.size()); lua_setfield(state_, -2, "id");
-        lua_pushlstring(state_, event.modName.data(), event.modName.size()); lua_setfield(state_, -2, "mod");
-        lua_setglobal(state_, "event");
-        std::string relative = event.actionLua;
-        for (auto& c : relative) if (c == '.') c = '/';
-        const fs::path script = fs::path(event.modDir) / "script" / (relative + ".lua");
-        if (dnx_dofile(state_, script) != LUA_OK) {
-            DICE_LOG_ERROR("[lua] legacy event '{}' action '{}' failed: {}", id, event.actionLua,
-                           dnx_normalizeLuaText(argStr(state_, -1)));
-        }
-        lua_settop(state_, base);
-        loadingModDir_.clear();
-    }
+    const auto event = found->second;
+    postCallback(event.intervalSeconds, [id, generation](LuaPluginManager& owner) { owner.runCycleEvent(id, generation); });
+    if (runNow) { json context = json::object(); runLegacyEvent(event, context, true); }
 }
 
 void LuaPluginManager::runCycleEvent(const std::string& id, uint64_t generation) {
-    std::lock_guard<ScriptMutex> lk(mutex_);
+    std::lock_guard<ScriptMutex> guard(mutex_);
     if (!state_ || generation != runtimeGeneration_) return;
     const auto event = cycleEvents_.find(id);
     if (event == cycleEvents_.end() || suspendedMods_.count(event->second.modName)) return;
-    ScriptFaultScope fault(suspendedMods_, event->second.modName);
-    // 先重排再执行，保持与 Dice! Scheduler 的周期行为一致；重载会通过 generation
-    // 让旧回调静默失效，而新运行时只保留一套事件。
     scheduleCycleEvent(id, true);
+}
+
+static std::string dnx_contextString(const json& context, const char* key) {
+    const auto found = context.find(key);
+    if (found == context.end()) return {};
+    if (found->is_string()) return found->get<std::string>();
+    if (found->is_number_integer() || found->is_number_unsigned()) return found->dump();
+    return {};
+}
+
+bool LuaPluginManager::runLegacyEvent(const LegacyCycleEvent& action, json& context, bool mayYield) {
+    if (!state_ || suspendedMods_.count(action.modName)) { context["@dice_event_failed"] = true; return false; }
+    ScriptFaultScope fault(suspendedMods_, action.modName);
+    auto values = json::parse(action.defaultsJson, nullptr, false);
+    if (!values.is_object()) values = json::object();
+    if (context.is_object()) for (const auto& [key, value] : context.items()) values[key] = value;
+    const auto platform = dnx_contextString(values, "platform");
+    const auto gid = dnx_contextString(values, "gid"), uid = dnx_contextString(values, "uid");
+    const auto adapter = dnx_contextString(values, "adapterId");
+    if (groupGate_ && !gid.empty() && !groupGate_(platform, gid, "lua:" + action.modName, adapter)) return false;
+    const int trust = trustLookup_ && !uid.empty() ? trustLookup_(uid, gid, platform, adapter, gid.empty()) : 0;
+    if (trust < 0) return false;
+    ProcessingScope processing(loggingSource(action.modName, action.id), "Lua 事件「" + action.id + "」");
+    values["id"] = action.id; values["mod"] = action.modName;
+    if (!values.contains("time")) values["time"] = nowSeconds();
+    const int base = lua_gettop(state_);
+    lua_getglobal(state_, "event"); const int oldEvent = luaL_ref(state_, LUA_REGISTRYINDEX);
+    lua_getglobal(state_, "msg"); const int oldMessage = luaL_ref(state_, LUA_REGISTRYINDEX);
+    jsonToLua(state_, values);
+    lua_getglobal(state_, "__dnx_wrap_msg");
+    if (lua_isfunction(state_, -1)) {
+        lua_pushvalue(state_, -2); lua_pushinteger(state_, trust);
+        if (dnx_pcall(state_, 2, 1) == LUA_OK) lua_remove(state_, -2);
+        else lua_pop(state_, 1);
+    } else lua_pop(state_, 1);
+    lua_pushvalue(state_, -1); lua_setglobal(state_, "event");
+    lua_pushvalue(state_, -1); lua_setglobal(state_, "msg");
+    const int contextRef = luaL_ref(state_, LUA_REGISTRYINDEX);
+    const auto previousDir = loadingModDir_, previousPlatform = activePlatform_, previousAdapter = activeAdapter_;
+    loadingModDir_ = action.modDir; activePlatform_ = platform; activeAdapter_ = adapter;
+    int status = LUA_OK;
+    bool pending = false;
+    if (!action.actionText.empty()) {
+        std::map<std::string, std::string> vars;
+        for (const auto& [key, value] : values.items()) if (value.is_string()) vars[key] = value.get<std::string>();
+        context["msg_reply"] = formatTemplate(action.actionText, vars);
+        context["blocked"] = true;
+    } else {
+        if (action.actionRef) lua_rawgeti(state_, LUA_REGISTRYINDEX, action.actionRef);
+        else {
+            const auto script = resolveScript(action.actionLua, action.modDir);
+            if (!script.empty()) status = dnx_loadfile(state_, script);
+            else status = luaL_loadbufferx(state_, action.actionLua.data(), action.actionLua.size(), action.id.c_str(), "t");
+            if (status == LUA_OK) dnx_isolateScriptChunk(state_);
+        }
+        if (status == LUA_OK && mayYield && scheduler_ && pendingCoroutines_.size() < 256) {
+            auto* coroutine = lua_newthread(state_);
+            const int reference = luaL_ref(state_, LUA_REGISTRYINDEX);
+            lua_xmove(state_, coroutine, 1);
+            int count = 0; status = dnx_resume(coroutine, state_, 0, &count, true);
+            if (status == LUA_YIELD) {
+                PendingCoroutine task;
+                task.generation = runtimeGeneration_; task.threadRef = reference; task.messageRef = contextRef; task.event = true;
+                task.ruleName = action.id; task.modName = action.modName; task.modDir = action.modDir;
+                task.platform = platform; task.adapterId = adapter; task.gid = gid; task.uid = uid; task.logContext = activeProcessingContext;
+                pendingCoroutines_[reference] = std::move(task); pending = true;
+                scheduleCoroutineResume(reference, yieldedDelaySeconds(coroutine, count));
+                if (!pendingCoroutines_.count(reference)) context["@dice_event_failed"] = true;
+            } else {
+                if (status != LUA_OK) { const auto error = dnx_coroutineError(coroutine); lua_pushlstring(state_, error.data(), error.size()); }
+                luaL_unref(state_, LUA_REGISTRYINDEX, reference);
+            }
+        } else if (status == LUA_OK) status = dnx_pcall(state_, 0, 0);
+        if (status != LUA_OK && status != LUA_YIELD)
+            DICE_LOG_ERROR("Lua 事件「{}」执行失败：{}", action.id, dnx_normalizeLuaText(argStr(state_, -1)));
+        if (status != LUA_OK && status != LUA_YIELD) context["@dice_event_failed"] = true;
+        if (!pending && status == LUA_OK) {
+            lua_rawgeti(state_, LUA_REGISTRYINDEX, contextRef);
+            const auto result = luaToJson(state_, -1);
+            if (result.is_object()) context = result;
+            lua_pop(state_, 1);
+        }
+    }
+    loadingModDir_ = previousDir; activePlatform_ = previousPlatform; activeAdapter_ = previousAdapter;
+    lua_rawgeti(state_, LUA_REGISTRYINDEX, oldEvent); lua_setglobal(state_, "event");
+    lua_rawgeti(state_, LUA_REGISTRYINDEX, oldMessage); lua_setglobal(state_, "msg");
+    luaL_unref(state_, LUA_REGISTRYINDEX, oldEvent); luaL_unref(state_, LUA_REGISTRYINDEX, oldMessage);
+    if (!pending) luaL_unref(state_, LUA_REGISTRYINDEX, contextRef);
+    lua_settop(state_, base);
+    return status == LUA_OK && context.is_object() && context.value("blocked", json(false)).is_boolean() && context["blocked"] == true;
+}
+
+bool LuaPluginManager::hasHook(const std::string& hook) const {
+    std::lock_guard<ScriptMutex> guard(mutex_);
+    if (!state_) return false;
+    const auto key = legacy_mod::lower(hook);
+    for (const auto& [id, action] : cycleEvents_) if (!suspendedMods_.count(action.modName)
+        && std::find(action.hooks.begin(), action.hooks.end(), key) != action.hooks.end()) return true;
+    return false;
+}
+
+bool LuaPluginManager::dispatchHook(const std::string& hook, json& context, std::vector<ProcessingSource>* sources) {
+    std::lock_guard<ScriptMutex> guard(mutex_);
+    if (!state_ || !context.is_object()) return false;
+    const auto key = legacy_mod::lower(hook);
+    context["Event"] = hook; context["hook"] = hook;
+    bool blocked = false, denied = false, failed = false;
+    for (const auto& [id, action] : cycleEvents_)
+        if (std::find(action.hooks.begin(), action.hooks.end(), key) != action.hooks.end()) {
+            blocked = runLegacyEvent(action, context, key == "startup" || key == "dayend" || key == "daynew") || blocked;
+            denied = denied || (context.contains("approval") && context["approval"].is_boolean() && context["approval"] == false);
+            failed = failed || (context.contains("@dice_event_failed") && context["@dice_event_failed"] == true);
+            if (sources) addProcessingSource(*sources, loggingSource(action.modName, action.id));
+        }
+    if (denied) context["approval"] = false;
+    if (failed) context["@dice_event_failed"] = true;
+    return blocked;
+}
+
+void LuaPluginManager::startEventHooks() {
+    std::lock_guard<ScriptMutex> guard(mutex_);
+    if (hostStarted_) return;
+    hostStarted_ = true;
+    const uint64_t generation = runtimeGeneration_;
+    auto startup = [generation](LuaPluginManager& owner) {
+        if (generation != owner.runtimeGeneration_) return;
+        json context = json::object(); owner.dispatchHook("StartUp", context);
+    };
+    if (!postCallback(0, startup)) startup(*this);
+}
+
+void LuaPluginManager::scheduleClockTick() {
+    if (!scheduler_) return;
+    bool needed = false;
+    for (const auto& [id, event] : cycleEvents_)
+        if (!event.clocks.empty() || std::find(event.hooks.begin(), event.hooks.end(), "daynew") != event.hooks.end()
+            || std::find(event.hooks.begin(), event.hooks.end(), "dayend") != event.hooks.end()) { needed = true; break; }
+    if (!needed) return;
+    const uint64_t generation = runtimeGeneration_;
+    const auto now = nowSeconds();
+    const double delay = static_cast<double>(60 - (now % 60 + 60) % 60);
+    postCallback(delay, [generation](LuaPluginManager& owner) { owner.runClockTick(generation); });
+}
+
+void LuaPluginManager::runClockTick(uint64_t generation) {
+    std::lock_guard<ScriptMutex> guard(mutex_);
+    if (!state_ || generation != runtimeGeneration_) return;
+    const auto now = nowSeconds();
+    const auto current = utils::timezoneTm(now), previous = utils::timezoneTm(lastClockTime_);
+    const bool newMinute = now / 60 != lastClockTime_ / 60;
+    const bool newDay = current.tm_year != previous.tm_year || current.tm_yday != previous.tm_yday;
+    lastClockTime_ = now; // save before user code, never replay missed days or duplicate callbacks
+    scheduleClockTick();
+    if (newDay && hostStarted_) {
+        json ended = {{"year", previous.tm_year + 1900}, {"month", previous.tm_mon + 1}, {"day", previous.tm_mday}};
+        dispatchHook("DayEnd", ended);
+        json started = {{"year", current.tm_year + 1900}, {"month", current.tm_mon + 1}, {"day", current.tm_mday}};
+        dispatchHook("DayNew", started);
+    }
+    if (newMinute) for (const auto& [id, action] : cycleEvents_)
+        if (std::find(action.clocks.begin(), action.clocks.end(), std::make_pair(current.tm_hour, current.tm_min)) != action.clocks.end()) {
+            json context = {{"year", current.tm_year + 1900}, {"month", current.tm_mon + 1}, {"day", current.tm_mday},
+                            {"hour", current.tm_hour}, {"minute", current.tm_min}};
+            runLegacyEvent(action, context, true);
+        }
 }
 
 // 单文件 Lua 插件：dofile 后读 msg_order[关键字]=函数名 → 前缀匹配调用该全局函数(msg)。
@@ -2793,18 +2966,20 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     if (!enabled && fn.size() > 9 && fn.substr(fn.size() - 9) == ".disabled") fn = fn.substr(0, fn.size() - 9);
     m.name = (fn.rfind('.') != std::string::npos) ? fn.substr(0, fn.rfind('.')) : fn;   // 去扩展名（fn 是 UTF-8，不回喂窄 path）
     m.title = m.name;
-    m.dir = path.parent_path().string();
+    const auto originalName = m.name;
+    for (size_t suffix = 1; std::any_of(mods_.begin(), mods_.end(), [&](const auto& mod) { return mod.name == m.name; }); ++suffix)
+        m.name = originalName + "@plugin" + (suffix == 1 ? std::string() : std::to_string(suffix));
+    if (m.name != originalName) m.compatibilityWarnings.push_back("存在同名扩展，使用独立管理标识「" + m.name + "」，启停和删除仅作用于本文件。");
+    m.dir = dnx_u8str(path.parent_path());
     m.singleFile = true;
     m.enabled = enabled;
+    m.managedPaths.push_back(dnx_u8str(path));
     if (!enabled) { mods_.push_back(std::move(m)); return; }
     ScriptFaultScope fault(suspendedMods_, m.name);
     ProcessingScope logScope(ProcessingSource{"Lua 插件", m.title, dnx_u8str(path), "加载"}, "插件加载");
 
     LogOperation operation(DICE_LOG_SOURCE, "lua", "load_plugin", "file=" + dnx_u8str(path));
-    loadingModDir_ = path.parent_path().string();
-    std::string pluginSource;
-    dnx_readFile(path, pluginSource);
-    const bool maySleep = pluginSource.find("sleepTime") != std::string::npos;
+    loadingModDir_ = m.dir;
     const int stackBase = lua_gettop(state_);
     if (dnx_loadLegacyEnvironment(state_, path) != LUA_OK) {
         ++lastLoadErrors_;
@@ -2858,9 +3033,8 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
         if (!lua_isfunction(state_, -1)) { lua_pop(state_, 1); continue; }
         lua_pop(state_, 1);
         ReplyRule rule;
-        rule.name = m.name + ":" + key; rule.modName = m.name; rule.modDir = m.dir;
+        rule.name = m.name + ":" + key; rule.modName = m.name; rule.modDir = m.dir; rule.type = "order";
         rule.prefixPatterns.push_back(key);
-        rule.maySleep = maySleep;
         rule.legacySourceFile = dnx_u8str(path);
         rule.legacyFunctionName = func;
         replyRules_.push_back(std::move(rule));
@@ -2990,61 +3164,153 @@ std::vector<LuaPluginManager::ModCommand> LuaPluginManager::commandsOf(const std
 std::vector<LuaPluginManager::HelpItem> LuaPluginManager::helpEntries() const {
     std::lock_guard<ScriptMutex> lk(mutex_);
     std::vector<HelpItem> out;
-    for (const auto& m : mods_) {
-        if (!m.enabled) continue;
-        for (const auto& [topic, text] : m.helpdoc) {
-            std::string t = text;
-            if (!t.empty() && t[0] == '&') {   // 别名：&其他主题 → 取该主题文本（一级）
-                auto it = m.helpdoc.find(t.substr(1));
-                if (it != m.helpdoc.end()) t = it->second;
-            }
-            out.push_back({topic, t, m.name});
+    for (const auto& [key, item] : legacyHelp_) {
+        auto entry = item;
+        std::set<std::string> visited;
+        for (size_t depth = 0; !entry.text.empty() && entry.text[0] == '&'; ++depth) {
+            const auto target = entry.text.substr(1);
+            if (depth >= 24 || !visited.insert(legacy_mod::lower(target)).second) { entry.text.clear(); break; }
+            const auto next = legacyHelp_.find(target);
+            if (next == legacyHelp_.end()) break; // Context/speech alias: render only when selected.
+            entry.text = next->second.text;
         }
+        out.push_back(std::move(entry));
+    }
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>> manuals;
+    for (const auto& [rule, book] : ruleBooks_) for (const auto& [topic, text] : book.manual) {
+        out.push_back({rule + ":" + topic, text, "rule:" + rule});
+        manuals[topic].emplace_back(rule, text);
+    }
+    for (const auto& [topic, values] : manuals) {
+        std::string text;
+        for (const auto& [rule, content] : values) {
+            if (!text.empty()) text += "\n\n";
+            text += values.size() > 1 ? rule + ":" + topic + "\n" + content : content;
+        }
+        out.push_back({topic, text, "rulebook"});
     }
     return out;
 }
 
-bool LuaPluginManager::setModEnabled(const std::string& name, bool enabled) {
-    std::lock_guard<ScriptMutex> lk(mutex_);
-    if (dir_.empty()) return false;
-    std::error_code ec;
-    // 三种形态成对处理：<name>.json（描述档）/<name>（目录）/<name>.lua（单文件）。
-    // 原版 mod 是「json+目录」成对，必须一起改名——只动其一会被扫描拆成两个半残条目。
-    auto u8 = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };
-    const fs::path pluginDir = fs::path(dir_).parent_path() / "plugin";   // 单文件插件在 data/plugin（Pass 4）
-    std::pair<fs::path, fs::path> cands[] = {
-        { fs::path(dir_) / u8(name + ".json"), fs::path(dir_) / u8(name + ".json.disabled") },
-        { fs::path(dir_) / u8(name),           fs::path(dir_) / u8(name + ".disabled") },
-        { fs::path(dir_) / u8(name + ".lua"),  fs::path(dir_) / u8(name + ".lua.disabled") },
-        { pluginDir / u8(name + ".lua"),       pluginDir / u8(name + ".lua.disabled") },
+std::optional<std::string> LuaPluginManager::ruleManual(const std::string& topic, const std::string& activeRule) const {
+    std::lock_guard<ScriptMutex> guard(mutex_);
+    auto term = legacy_mod::lower(topic), rule = legacy_mod::lower(activeRule);
+    const auto colon = term.find(':');
+    if (colon != std::string::npos) { rule = term.substr(0, colon); term.erase(0, colon + 1); }
+    auto own = [&](const std::string& name) -> std::optional<std::string> {
+        if (const auto book = ruleBooks_.find(name); book != ruleBooks_.end())
+            if (const auto item = book->second.manual.find(term); item != book->second.manual.end()) return item->second;
+        return std::nullopt;
     };
-    bool changed = false, present = false;
-    for (auto& [on, off] : cands) {
-        const fs::path& src = enabled ? off : on;
-        const fs::path& dst = enabled ? on : off;
-        if (fs::exists(src, ec)) {
-            fs::rename(src, dst, ec);
-            if (!ec) changed = true;
-            present = true;
-        } else if (fs::exists(dst, ec)) present = true;   // 已是目标状态
-        ec.clear();
+    if (!rule.empty()) {
+        if (auto value = own(rule)) return value;
+        for (const auto& [name, book] : ruleBooks_) if (name.rfind(rule + "-", 0) == 0)
+            if (auto value = own(name)) return value;
+        for (auto hyphen = rule.rfind('-'); hyphen != std::string::npos; hyphen = rule.rfind('-')) {
+            rule.resize(hyphen); if (auto value = own(rule)) return value;
+        }
+        return std::nullopt;
     }
-    return changed || present;
+    std::string result; size_t count = 0;
+    for (const auto& [name, book] : ruleBooks_) if (auto value = own(name)) {
+        if (!result.empty()) result += "\n\n";
+        result += name + ":" + term + "\n" + *value; ++count;
+    }
+    if (!count) return std::nullopt;
+    if (count == 1) for (const auto& [name, book] : ruleBooks_) if (auto value = own(name)) return value;
+    return result;
+}
+
+LuaPluginManager::DispatchResult LuaPluginManager::dispatchTape(const std::string& rule, const std::string& tape, json& context) {
+    std::lock_guard<ScriptMutex> guard(mutex_);
+    DispatchResult result;
+    if (const auto book = ruleBooks_.find(legacy_mod::lower(rule)); book != ruleBooks_.end())
+        if (const auto action = book->second.tapes.find(legacy_mod::lower(tape)); action != book->second.tapes.end()) {
+            result.matched = runLegacyEvent(action->second, context, false);
+            result.failed = context.value("@dice_event_failed", json(false)) == true;
+            result.matched = result.matched || result.failed;
+            if (result.matched && !result.failed) result.reply = dnx_contextString(context, "msg_reply");
+            result.sources = {loggingSource(action->second.modName, action->second.id)};
+        }
+    return result;
+}
+
+bool LuaPluginManager::setModEnabled(const std::string& name, bool enabled) {
+    std::lock_guard<ScriptMutex> guard(mutex_);
+    const auto found = std::find_if(mods_.begin(), mods_.end(), [&](const auto& mod) { return mod.name == name; });
+    if (found == mods_.end() || found->managedPaths.empty() || (enabled && found->ancestorDisabled)) return false;
+    auto allowed = [&](const fs::path& path) {
+        if (dnx_safeUnder(path, dnx_path(dir_)) || dnx_safeUnder(path, dnx_path(dir_).parent_path() / "plugin")) return true;
+        for (const auto& extra : extraDirs_) if (dnx_safeUnder(path, dnx_path(extra))) return true;
+        return false;
+    };
+    std::vector<std::pair<fs::path, fs::path>> operations;
+    std::error_code ec;
+    for (const auto& raw : found->managedPaths) {
+        const auto source = dnx_path(raw);
+        const bool off = raw.ends_with(".disabled");
+        if (!allowed(source) || !fs::exists(source, ec)) return false;
+        if (enabled == !off) continue;
+        const auto target = dnx_path(enabled ? raw.substr(0, raw.size() - 9) : raw + ".disabled");
+        if (!allowed(target) || fs::exists(target, ec)) return false;
+        operations.emplace_back(source, target);
+    }
+    size_t done = 0;
+    for (; done < operations.size(); ++done) {
+        fs::rename(operations[done].first, operations[done].second, ec);
+        if (ec) {
+            for (size_t rollback = done; rollback > 0; --rollback) {
+                std::error_code undo;
+                fs::rename(operations[rollback - 1].second, operations[rollback - 1].first, undo);
+                if (undo) DICE_LOG_ERROR("模组「{}」启停失败，回滚路径「{}」失败：{}", name, dnx_u8str(operations[rollback - 1].second), undo.message());
+            }
+            return false;
+        }
+    }
+    return true;
 }
 
 bool LuaPluginManager::deleteMod(const std::string& name) {
-    std::lock_guard<ScriptMutex> lk(mutex_);
-    if (dir_.empty()) return false;
-    std::error_code ec; bool removed = false;
-    auto u8 = [](const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); };
-    const fs::path pluginDir = fs::path(dir_).parent_path() / "plugin";   // 单文件插件在 data/plugin（Pass 4）
-    // 对齐原版 uninstall：<name>.json 与 <name>/ 一起删（漏删 json 会让 mod 重载后复活）。
-    for (const auto& cand : { fs::path(dir_) / u8(name), fs::path(dir_) / u8(name + ".disabled"),
-                              fs::path(dir_) / u8(name + ".json"), fs::path(dir_) / u8(name + ".json.disabled"),
-                              fs::path(dir_) / u8(name + ".lua"), fs::path(dir_) / u8(name + ".lua.disabled"),
-                              pluginDir / u8(name + ".lua"), pluginDir / u8(name + ".lua.disabled") })
-        if (fs::exists(cand, ec)) { fs::remove_all(cand, ec); if (!ec) removed = true; }
+    std::lock_guard<ScriptMutex> guard(mutex_);
+    const auto found = std::find_if(mods_.begin(), mods_.end(), [&](const auto& mod) { return mod.name == name; });
+    if (found == mods_.end() || found->managedPaths.empty()) return false;
+    std::vector<fs::path> targets;
+    for (const auto& raw : found->managedPaths) {
+        const auto path = dnx_path(raw);
+        bool allowed = dnx_safeUnder(path, dnx_path(dir_)) || dnx_safeUnder(path, dnx_path(dir_).parent_path() / "plugin");
+        for (const auto& extra : extraDirs_) allowed = allowed || dnx_safeUnder(path, dnx_path(extra));
+        if (!allowed) return false;
+        targets.push_back(path);
+    }
+    bool removed = false;
+    for (const auto& path : targets) {
+        std::error_code ec;
+        removed = fs::remove_all(path, ec) > 0 || removed;
+        if (ec) { DICE_LOG_ERROR("模组「{}」删除路径「{}」失败：{}", name, dnx_u8str(path), ec.message()); return false; }
+    }
     return removed;
+}
+
+std::filesystem::path LuaPluginManager::resolveScript(const std::string& name, const std::string& ownerDir) const {
+    std::lock_guard<ScriptMutex> guard(mutex_);
+    if (name.empty() || name.size() > 1024 || name.find("..") != std::string::npos || name.find(':') != std::string::npos) return {};
+    auto relative = name;
+    if (legacy_mod::lower(relative).ends_with(".lua")) relative.resize(relative.size() - 4);
+    for (auto& c : relative) if (c == '/' || c == '\\') c = '.';
+    if (const auto entry = scriptRegistry_.find(relative); entry != scriptRegistry_.end()) {
+        const auto mod = std::find_if(mods_.begin(), mods_.end(), [&](const auto& item) { return item.name == entry->second.modName; });
+        if (mod != mods_.end() && mod->enabled && !suspendedMods_.count(mod->name)
+            && dnx_safeUnder(entry->second.path, dnx_path(mod->dir))) return entry->second.path;
+    }
+    for (auto& c : relative) if (c == '.') c = '/';
+    const auto file = dnx_path(relative + ".lua");
+    if (file.is_absolute() || file.has_root_name()) return {};
+    const auto root = dnx_path(ownerDir);
+    for (const auto& candidate : {root / "script" / file, root / file}) {
+        std::error_code ec;
+        if (dnx_safeUnder(candidate, root) && fs::is_regular_file(candidate, ec)) return candidate;
+    }
+    return {};
 }
 
 bool LuaPluginManager::importUpload(const std::string& filename, const std::string& bytes,
@@ -3068,7 +3334,7 @@ bool LuaPluginManager::importUpload(const std::string& filename, const std::stri
         f.write(b.data(), (std::streamsize)b.size());
         return (bool)f;
     };
-    const fs::path modRoot = dir_.empty() ? fs::path("data/mod") : fs::path(dir_);
+    const fs::path modRoot = dir_.empty() ? fs::path("data/mod") : dnx_path(dir_);
     const fs::path pluginRoot = modRoot.parent_path() / "plugin";
     std::error_code ec;
     fs::create_directories(modRoot, ec); ec.clear();
@@ -3226,52 +3492,103 @@ bool LuaPluginManager::importUpload(const std::string& filename, const std::stri
 // ─── 阶段二：模板格式化 + reply 派发 ─────────────────────────────
 // 解析一个 {key}：msg 变量 > speech 词条(别名 &x / 递归展开 {…}) > 内置全局。
 std::string LuaPluginManager::valueOf(const std::string& key,
-                                      const std::map<std::string, std::string>& vars, int depth) const {
-    if (depth > 24) return "";
+                                      const std::map<std::string, std::string>& vars, int depth,
+                                      bool helpScope, TemplateBudget& budget) const {
+    if (depth > 24 || budget.exhausted) return "";
+    if (budget.steps == 0) { budget.exhausted = true; return ""; }
+    --budget.steps;
     if (auto it = vars.find(key); it != vars.end()) return it->second;
-    if (auto it = speech_.find(key); it != speech_.end()) {
-        const std::string& v = it->second;
-        if (!v.empty() && v[0] == '&') return valueOf(v.substr(1), vars, depth + 1);   // 别名
-        return formatTemplate(v, vars, depth + 1);                                     // 递归展开
+    // Keep Next's exact variable precedence, then provide the legacy dict_ci
+    // lookup without changing user-authored field names or UTF-8 bytes.
+    const auto foldedKey = legacy_mod::lower(key);
+    for (const auto& [name, value] : vars) if (legacy_mod::lower(name) == foldedKey) return value;
+    if (helpScope) if (const auto help = legacyHelp_.find(key); help != legacyHelp_.end())
+        return formatHelpTemplateImpl(help->second.text, vars, depth + 1, budget);
+    if (auto it = speech_.find(foldedKey); it != speech_.end()) {
+        if (it->second.empty()) return "";
+        static thread_local std::mt19937_64 random{std::random_device{}()};
+        const auto& choices = it->second;
+        const std::string& v = choices.size() == 1 ? choices.front()
+            : choices[std::uniform_int_distribution<size_t>(0, choices.size() - 1)(random)];
+        if (!v.empty() && v[0] == '&') return valueOf(v.substr(1), vars, depth + 1, helpScope, budget);
+        return formatTemplateImpl(v, vars, depth + 1, helpScope, budget);
     }
-    if (key.rfind("help:", 0) == 0) {
+    if (foldedKey.rfind("help:", 0) == 0) {
         const std::string topic = key.substr(5);
-        // 后加载的 Mod 与原版覆盖顺序一致；只暴露启用 Mod 的帮助。
-        for (auto it = mods_.rbegin(); it != mods_.rend(); ++it) {
-            if (!it->enabled) continue;
-            if (auto h = it->helpdoc.find(topic); h != it->helpdoc.end()) {
-                const std::string& v = h->second;
-                if (!v.empty() && v[0] == '&') return valueOf("help:" + v.substr(1), vars, depth + 1);
-                return formatTemplate(v, vars, depth + 1);
-            }
+        if (const auto help = legacyHelp_.find(topic); help != legacyHelp_.end())
+            return formatHelpTemplateImpl(help->second.text, vars, depth + 1, budget);
+        std::string active;
+        if (const auto group = vars.find("gid"); group != vars.end() && !group->second.empty()) {
+            auto scope = "game:" + group->second;
+            if (const auto session = confGet(scope, "__session"); !session.empty()) scope = "game:session:" + session;
+            active = confGet(scope, "rule");
         }
+        if (const auto manual = ruleManual(topic, active)) return formatHelpTemplateImpl(*manual, vars, depth + 1, budget);
         if (helpLookup_) {
-            if (auto value = helpLookup_(topic)) return formatTemplate(*value, vars, depth + 1);
+            if (auto value = helpLookup_(topic)) return formatHelpTemplateImpl(*value, vars, depth + 1, budget);
         }
         return "";
     }
-    if (key == "self" || key == "strSelfName" || key == "strSelfNick" || key == "Name") return selfName_;
+    if (foldedKey == "self" || foldedKey == "strselfname" || foldedKey == "strselfnick" || foldedKey == "name") return selfName_;
     return "";   // 未知 → 空
 }
 
 std::string LuaPluginManager::formatTemplate(const std::string& text,
                                              const std::map<std::string, std::string>& vars, int depth) const {
-    if (depth > 24) return text;
-    std::string out; out.reserve(text.size() + 16);
-    for (size_t i = 0; i < text.size();) {
-        if (text[i] == '{') {
-            size_t e = text.find('}', i + 1);
-            if (e == std::string::npos) { out += text.substr(i); break; }
-            out += valueOf(text.substr(i + 1, e - i - 1), vars, depth + 1);
+    std::lock_guard<ScriptMutex> lock(mutex_);
+    TemplateBudget budget;
+    return formatTemplateImpl(text, vars, depth, false, budget);
+}
+
+std::string LuaPluginManager::formatHelpTemplate(const std::string& text,
+                                                const std::map<std::string, std::string>& vars) const {
+    std::lock_guard<ScriptMutex> lock(mutex_);
+    TemplateBudget budget;
+    return formatHelpTemplateImpl(text, vars, 0, budget);
+}
+
+std::string LuaPluginManager::formatHelpTopic(const std::string& topic,
+                                           const std::map<std::string, std::string>& vars) const {
+    std::lock_guard<ScriptMutex> lock(mutex_);
+    TemplateBudget budget;
+    return valueOf("help:" + topic, vars, 0, false, budget);
+}
+
+std::string LuaPluginManager::formatHelpTemplateImpl(const std::string& text,
+        const std::map<std::string, std::string>& vars, int depth, TemplateBudget& budget) const {
+    if (depth > 24 || budget.exhausted) return "";
+    if (!text.empty() && text[0] == '&') return valueOf(text.substr(1), vars, depth + 1, true, budget);
+    return formatTemplateImpl(text, vars, depth, true, budget);
+}
+
+std::string LuaPluginManager::formatTemplateImpl(const std::string& text,
+        const std::map<std::string, std::string>& vars, int depth, bool helpScope, TemplateBudget& budget) const {
+    if (depth > 24 || budget.exhausted) return "";
+    constexpr size_t maxOutput = 4 * 1024 * 1024;
+    if (text.size() > maxOutput) { budget.exhausted = true; return ""; }
+    const auto expanded = sample_template::expand(text);
+    if (expanded.size() > maxOutput) { budget.exhausted = true; return ""; }
+    std::string out; out.reserve(expanded.size() + 16);
+    const auto append = [&](std::string_view value) {
+        if (value.size() > budget.bytes || value.size() > maxOutput - out.size()) { budget.exhausted = true; return; }
+        budget.bytes -= value.size(); out.append(value.data(), value.size());
+    };
+    for (size_t i = 0; i < expanded.size();) {
+        if (expanded[i] == '{' && !sample_template::escaped(expanded, i)) {
+            size_t e = expanded.find('}', i + 1);
+            if (e == std::string::npos) { append(std::string_view(expanded).substr(i)); break; }
+            append(valueOf(expanded.substr(i + 1, e - i - 1), vars, depth + 1, helpScope, budget));
             i = e + 1;
-        } else out += text[i++];
+        } else append(std::string_view(expanded).substr(i++, 1));
+        if (budget.exhausted) return "";
     }
-    return out;
+    return budget.exhausted ? "" : out;
 }
 
 std::string LuaPluginManager::resolveAmp(const std::string& key) const {
     std::lock_guard<ScriptMutex> lk(mutex_);
-    return valueOf(key, {}, 0);
+    TemplateBudget budget;
+    return valueOf(key, {}, 0, false, budget);
 }
 
 double LuaPluginManager::yieldedDelaySeconds(lua_State* coroutine, int resultCount) {
@@ -3284,17 +3601,191 @@ double LuaPluginManager::yieldedDelaySeconds(lua_State* coroutine, int resultCou
 }
 
 void LuaPluginManager::scheduleCoroutineResume(int threadRef, double delaySeconds) {
-    if (!scheduler_) return;
     const uint64_t generation = runtimeGeneration_;
+    if (!postCallback(delaySeconds, [threadRef, generation](LuaPluginManager& owner) {
+        if (generation == owner.runtimeGeneration_) owner.resumeCoroutine(threadRef);
+    })) {
+        const auto pending = pendingCoroutines_.find(threadRef);
+        if (pending != pendingCoroutines_.end()) {
+            releaseLegacyLocks(pending->second.locks);
+            luaL_unref(state_, LUA_REGISTRYINDEX, pending->second.messageRef);
+            luaL_unref(state_, LUA_REGISTRYINDEX, threadRef);
+            pendingCoroutines_.erase(pending);
+        }
+    }
+}
+
+bool LuaPluginManager::postCallback(double delay, std::function<void(LuaPluginManager&)> callback) {
+    if (!scheduler_) return false;
+    const std::weak_ptr<CallbackState> lifetime = callbackState_;
     try {
-        scheduler_(delaySeconds, [this, threadRef, generation]() {
-            if (generation != runtimeGeneration_) return;
-            resumeCoroutine(threadRef);
+        scheduler_(delay, [lifetime, callback = std::move(callback)]() {
+            const auto state = lifetime.lock();
+            if (!state) return;
+            std::lock_guard<std::recursive_mutex> guard(state->mutex);
+            if (state->owner) {
+                try { callback(*state->owner); }
+                catch (const std::exception& ex) { DICE_LOG_ERROR("Lua 异步任务发生异常：{}", ex.what()); }
+                catch (...) { DICE_LOG_ERROR("Lua 异步任务发生未知异常。"); }
+            }
         });
-    } catch (const std::exception& e) {
-        DICE_LOG_ERROR("[lua] failed to schedule sleepTime continuation: {}", e.what());
-    } catch (...) {
-        DICE_LOG_ERROR("[lua] failed to schedule sleepTime continuation");
+        return true;
+    } catch (const std::exception& ex) { DICE_LOG_ERROR("Lua 任务调度失败：{}", ex.what()); }
+    catch (...) { DICE_LOG_ERROR("Lua 任务调度失败。 "); }
+    return false;
+}
+
+bool LuaPluginManager::matchesLimits(const ReplyRule& rule, const std::string& uid, const std::string& gid,
+                                     bool isPrivate, int trust, const std::string& platform, const std::string& adapterId) const {
+    if (rule.type == "nor" || (rule.type != "order" && rule.type != "reply" && rule.type != "both" && rule.type != "game")) return false;
+    if (!isPrivate && replyTypeGate_ && !replyTypeGate_(platform, gid, rule.type, adapterId)) return false;
+    if (!rule.limits) return true; // single-file msg_order has no declarative limit
+    const auto& limit = *rule.limits;
+    const auto selfId = botIdFor(platform, adapterId);
+    if (!legacy_mod::idMatches(limit.users, uid) || !legacy_mod::idMatches(limit.groups, isPrivate ? "0" : gid)) return false;
+    if (!limit.dicePolicy.empty() && limit.dicePolicy != "ignore" && (selfId.empty() || uid != selfId)) {
+        const bool bot = diceLookup_ && diceLookup_(uid, platform, adapterId);
+        if (bot != (limit.dicePolicy == "only")) return false;
+    }
+    auto variablesMatch = [&](const auto& conditions, const std::string& scope, bool user) {
+        for (const auto& [rawKey, condition] : conditions) {
+            const auto key = !rawKey.empty() && rawKey.front() == '&' ? resolveAmp(rawKey.substr(1)) : rawKey;
+            const auto actual = user && key == "trust" ? json(trust)
+                : legacy_mod::storedValue(confGet(scope, key), confHas(scope, key));
+            if (!legacy_mod::matches(actual, condition)) return false;
+        }
+        return true;
+    };
+    if (!variablesMatch(limit.userVariables, "u:" + uid, true)) return false;
+    // Original group variables do not apply to private messages.
+    if (!isPrivate && !gid.empty() && !variablesMatch(limit.groupVariables, "g:" + gid, false)) return false;
+    for (const auto& [rawKey, condition] : limit.selfVariables) {
+        const auto key = !rawKey.empty() && rawKey.front() == '&' ? resolveAmp(rawKey.substr(1)) : rawKey;
+        json actual = selfId.empty() ? json() : legacy_mod::storedValue(confGet("u:" + selfId, key), confHas("u:" + selfId, key));
+        if (actual.is_null()) {
+            // SelfData uses a filename stem followed by dotted JSON fields. Never read host config/secrets.
+            auto dot = key.rfind('.');
+            while (dot != std::string::npos) {
+                const auto stem = key.substr(0, dot);
+                if (stem.find_first_of("/\\:") != std::string::npos || stem == "." || stem == "..") break;
+                const auto path = selfDataPath(stem);
+                std::error_code ec;
+                const auto size = fs::file_size(path, ec);
+                if (!ec && size <= 4 * 1024 * 1024 && dnx_safeUnder(path, fs::path("data/self_data"))) {
+                    std::ifstream input(path, std::ios::binary);
+                    json value = json::parse(input, nullptr, false);
+                    if (!value.is_discarded()) {
+                        for (const auto& field : legacy_mod::split(key.substr(dot + 1), '.')) {
+                            if (!value.is_object() || !value.contains(field)) { value = nullptr; break; }
+                            value = json(value.at(field));
+                        }
+                        actual = std::move(value);
+                        break;
+                    }
+                }
+                if (dot == 0) break;
+                dot = key.rfind('.', dot - 1);
+            }
+        }
+        if (selfId.empty() && actual.is_null()) return false;
+        if (!legacy_mod::matches(actual, condition)) return false;
+    }
+    return true;
+}
+
+std::string LuaPluginManager::limitScopeKey(int scope, const std::string& uid, const std::string& gid,
+                                           bool isPrivate, const std::string& platform, const std::string& adapterId) const {
+    const auto kind = static_cast<legacy_mod::LimitScope>(scope);
+    if (kind == legacy_mod::LimitScope::Global) return "global";
+    if (kind == legacy_mod::LimitScope::User) return json::array({"user", platform, uid}).dump();
+    return json::array({isPrivate ? "private" : "group", platform, adapterId, isPrivate ? uid : gid}).dump();
+}
+
+bool LuaPluginManager::consumeLimits(const ReplyRule& rule, const std::string& uid, const std::string& gid,
+                                     bool isPrivate, const std::string& platform, const std::string& adapterId,
+                                     std::string& notice, std::vector<std::string>& locks, bool& busy) {
+    if (!rule.limits) return true;
+    const auto& limit = *rule.limits;
+    auto keyFor = [&](const legacy_mod::CounterLimit& counter) {
+        return json::array({limitScopeKey(static_cast<int>(counter.scope), uid, gid, isPrivate, platform, adapterId),
+                            counter.name.empty() ? rule.name : counter.name}).dump();
+    };
+    for (const auto& counter : limit.locks) {
+        const auto key = keyFor(counter);
+        if (activeLegacyLocks_.count(key)) busy = true;
+        locks.push_back(key);
+    }
+    if (busy) return false;
+    const auto now = nowSeconds();
+    const auto day = utils::formatTimeInTimezone(now, "%Y%m%d");
+    std::vector<std::tuple<std::string, std::string, std::string>> writes;
+    auto number = [&](const std::string& scope, const std::string& key) -> long long {
+        try { return std::stoll(confGet(scope, key)); } catch (...) { return 0; }
+    };
+    for (const auto& counter : limit.cooldowns) {
+        if (counter.amount <= 0) continue;
+        const auto key = keyFor(counter);
+        const auto until = number("legacy:cd", key);
+        if (until > now) { notice = limit.cooldownNotice; return false; }
+        writes.emplace_back("legacy:cd", key, std::to_string(now + counter.amount));
+    }
+    for (const auto& counter : limit.daily) {
+        const auto key = keyFor(counter);
+        const auto count = number("legacy:today:" + day, key);
+        if (count >= counter.amount) { notice = limit.dailyNotice; return false; }
+        writes.emplace_back("legacy:today:" + day, key, std::to_string(count + 1));
+    }
+    if (!writes.empty() && !confSetBatch(writes)) {
+        DICE_LOG_ERROR("模组「{}」回复「{}」的限额写入失败，已拒绝执行。", rule.modName, rule.name);
+        return false;
+    }
+    for (const auto& key : locks) activeLegacyLocks_.insert(key);
+    return true;
+}
+
+static thread_local int dnx_lockReplayDepth = 0;
+static thread_local std::string dnx_queuedRuleKey;
+
+void LuaPluginManager::releaseLegacyLocks(const std::vector<std::string>& locks) {
+    for (const auto& key : locks) activeLegacyLocks_.erase(key);
+    if (queuedDispatches_.empty() || lockDrainScheduled_) return;
+    lockDrainScheduled_ = true;
+    const uint64_t generation = runtimeGeneration_;
+    if (!postCallback(0.001, [generation](LuaPluginManager& owner) { owner.drainLegacyLocks(generation); }))
+        lockDrainScheduled_ = false;
+}
+
+void LuaPluginManager::drainLegacyLocks(uint64_t generation) {
+    std::unique_lock<ScriptMutex> guard(mutex_);
+    if (!state_ || generation != runtimeGeneration_) return;
+    lockDrainScheduled_ = false;
+    for (size_t i = 0, count = queuedDispatches_.size(); i < count; ++i) {
+        auto task = std::move(queuedDispatches_.front()); queuedDispatches_.pop_front();
+        if (task.generation != generation) continue;
+        bool blocked = false;
+        for (const auto& key : task.locks) if (activeLegacyLocks_.count(key)) { blocked = true; break; }
+        if (blocked) { queuedDispatches_.push_back(std::move(task)); continue; }
+        ProcessingScope processing(std::move(task.context));
+        DispatchResult result;
+        {
+            struct ReplayScope {
+                int depth; std::string key;
+                ~ReplayScope() { dnx_lockReplayDepth = depth; dnx_queuedRuleKey = std::move(key); }
+            } replay{std::exchange(dnx_lockReplayDepth, task.depth), std::exchange(dnx_queuedRuleKey, task.ruleKey)};
+            const int trust = trustLookup_ ? trustLookup_(task.uid, task.gid, task.platform, task.adapterId, task.isPrivate) : task.trust;
+            if (trust < 0) continue;
+            result = dispatch(task.text, task.uid, task.gid, task.nick, task.card, task.isPrivate, trust, task.platform, task.adapterId);
+        }
+        const auto send = asyncReply_;
+        const auto scopedSend = scopedAsyncReply_;
+        // Do not invoke host transport while holding the runtime lock.
+        if (!result.reply.empty() && (send || scopedSend)) {
+            guard.unlock();
+            try { if (scopedSend) scopedSend(task.platform, task.adapterId, result.reply, task.gid, task.uid); else send(task.platform, task.gid, task.uid, result.reply); }
+            catch (const std::exception& ex) { DICE_LOG_ERROR("Lua 排队回复发送失败：{}", ex.what()); }
+            guard.lock();
+            if (generation != runtimeGeneration_) return;
+        }
     }
 }
 
@@ -3333,24 +3824,37 @@ void LuaPluginManager::resumeCoroutine(int threadRef) {
         pendingCoroutines_.erase(it);
         return;
     }
+    if (suspendedMods_.count(pending.modName)
+        || (groupGate_ && !pending.gid.empty() && !groupGate_(pending.platform, pending.gid, "lua:" + pending.modName, pending.adapterId))
+        || (trustLookup_ && !pending.uid.empty() && trustLookup_(pending.uid, pending.gid, pending.platform, pending.adapterId, pending.gid.empty()) < 0)) {
+        releaseLegacyLocks(pending.locks);
+        luaL_unref(state_, LUA_REGISTRYINDEX, pending.messageRef);
+        luaL_unref(state_, LUA_REGISTRYINDEX, threadRef);
+        pendingCoroutines_.erase(it); return;
+    }
     lua_rawgeti(state_, LUA_REGISTRYINDEX, threadRef);
     lua_State* coroutine = lua_tothread(state_, -1);
     lua_pop(state_, 1);
     if (!coroutine) {
+        releaseLegacyLocks(pending.locks);
         luaL_unref(state_, LUA_REGISTRYINDEX, pending.messageRef);
         luaL_unref(state_, LUA_REGISTRYINDEX, threadRef);
         pendingCoroutines_.erase(it);
         return;
     }
     lua_rawgeti(state_, LUA_REGISTRYINDEX, pending.messageRef);
+    if (pending.event) { lua_pushvalue(state_, -1); lua_setglobal(state_, "event"); }
     lua_setglobal(state_, "msg");
     const std::string oldPlatform = activePlatform_;
+    const std::string oldAdapter = activeAdapter_;
     const std::string oldDir = loadingModDir_;
     activePlatform_ = pending.platform;
+    activeAdapter_ = pending.adapterId;
     loadingModDir_ = pending.modDir;
     int resultCount = 0;
     const int status = dnx_resume(coroutine, state_, 0, &resultCount, true);
     activePlatform_ = oldPlatform;
+    activeAdapter_ = oldAdapter;
     loadingModDir_ = oldDir;
     if (status == LUA_YIELD) {
         const double delay = yieldedDelaySeconds(coroutine, resultCount);
@@ -3359,72 +3863,60 @@ void LuaPluginManager::resumeCoroutine(int threadRef) {
     }
     std::string reply;
     std::string error;
-    if (status == LUA_OK) reply = finishCoroutine(pending, coroutine, resultCount);
+    if (status == LUA_OK) { if (!pending.event) reply = finishCoroutine(pending, coroutine, resultCount); }
     else error = dnx_normalizeLuaText(dnx_coroutineError(coroutine));
     if (ScriptExecution::expired()) suspendedMods_.insert(pending.modName);
     const std::string platform = pending.platform;
+    const std::string adapterId = pending.adapterId;
     const std::string gid = pending.gid;
     const std::string uid = pending.uid;
     const std::string ruleName = pending.ruleName;
+    releaseLegacyLocks(pending.locks);
     luaL_unref(state_, LUA_REGISTRYINDEX, pending.messageRef);
     luaL_unref(state_, LUA_REGISTRYINDEX, threadRef);
     pendingCoroutines_.erase(it);
     const auto sender = asyncReply_;
+    const auto scopedSender = scopedAsyncReply_;
     lock.unlock();
     if (!error.empty()) {
         DICE_LOG_ERROR("[lua] async reply '{}' failed: {}", ruleName, error);
         return;
     }
-    if (!reply.empty() && sender) {
+    if (!reply.empty() && (sender || scopedSender)) {
         auto complete = activeProcessingContext;
         complete.result = "延时处理完成，生成 1 条回复";
         ProcessingScope completedScope(std::move(complete));
-        try { sender(platform, gid, uid, reply); }
+        try { if (scopedSender) scopedSender(platform, adapterId, reply, gid, uid); else sender(platform, gid, uid, reply); }
         catch (const std::exception& e) { DICE_LOG_ERROR("[lua] async reply host callback failed: {}", e.what()); }
         catch (...) { DICE_LOG_ERROR("[lua] async reply host callback failed"); }
     }
 }
-static bool dnx_replyVarsMatch(const LuaPluginManager& manager,
-                               const std::map<std::string, std::string>& expected,
-                               const std::string& scope, int trust = -1) {
-    for (const auto& [key, wantRaw] : expected) {
-        const bool isTrust = key == "trust" && trust >= 0;
-        const bool exists = isTrust || manager.confHas(scope, key);
-        const std::string got = isTrust ? std::to_string(trust) : manager.confGet(scope, key);
-        auto want = nlohmann::json::parse(wantRaw, nullptr, false);
-        if (want.is_discarded()) return false;
-        std::string op = "equal";
-        if (want.is_object()) {
-            bool supported = false;
-            for (const char* candidate : {"equal", "neq", "at_least", "at_most", "more", "less"}) {
-                if (!want.contains(candidate)) continue;
-                op = candidate;
-                auto operand = want.at(candidate);
-                want = std::move(operand);
-                supported = true;
-                break;
+static std::string dnx_pickInlineReply(const std::string& raw) {
+    const auto cards = json::parse(raw, nullptr, false);
+    if (!cards.is_array() || cards.empty() || cards.size() > 10000) return {};
+    std::vector<std::pair<std::string, double>> choices;
+    std::vector<double> weights;
+    for (const auto& card : cards) {
+        if (!card.is_string()) return {}; // data only; never interpret actions inside an array
+        auto text = card.get<std::string>();
+        double weight = 1;
+        if (text.rfind("::", 0) == 0) {
+            const auto end = text.find("::", 2);
+            if (end != std::string::npos) {
+                const auto number = json::parse(text.substr(2, end - 2), nullptr, false);
+                if (number.is_number()) {
+                    weight = number.get<double>();
+                    if (!std::isfinite(weight) || weight < 0 || weight > 1000000000) return {};
+                    text.erase(0, end + 2);
+                }
             }
-            if (!supported) return false;
         }
-        const auto actual = nlohmann::json::parse(got, nullptr, false);
-        bool equal = false;
-        // DiceAttrVar truthiness: zero and strings are true; nil and boolean false are false.
-        if (want.is_boolean()) equal = (exists && got != "false") == want.get<bool>();
-        else if (want.is_null()) equal = !exists;
-        else if (want.is_string()) equal = exists && got == want.get<std::string>();
-        else if (want.is_number()) equal = exists && actual.is_number() && actual == want;
-        if (op == "equal") { if (!equal) return false; }
-        else if (op == "neq") { if (equal) return false; }
-        else {
-            if (!exists || !actual.is_number() || !want.is_number()) return false;
-            const double a = actual.get<double>(), b = want.get<double>();
-            if (op == "at_least" && !(a >= b)) return false;
-            if (op == "at_most" && !(a <= b)) return false;
-            if (op == "more" && !(a > b)) return false;
-            if (op == "less" && !(a < b)) return false;
-        }
+        choices.emplace_back(std::move(text), weight); weights.push_back(weight);
     }
-    return true;
+    if (std::all_of(weights.begin(), weights.end(), [](double n) { return n == 0; })) return {};
+    static thread_local std::mt19937_64 random{std::random_device{}()};
+    const auto index = std::discrete_distribution<size_t>(weights.begin(), weights.end())(random);
+    return choices[index].first;
 }
 
 bool LuaPluginManager::hasCommandTrigger(
@@ -3433,6 +3925,7 @@ bool LuaPluginManager::hasCommandTrigger(
         int trust, const std::string& platform, const std::string& adapterId) {
     std::lock_guard<ScriptMutex> lk(mutex_);
     if (!state_ || text.empty() || replyRules_.empty()) return false;
+    const auto foldedText = legacy_mod::lower(text);
     std::map<std::string, std::string> vars = {
         {"uid", uid}, {"user", uid}, {"gid", gid}, {"grp", gid},
         {"platform", platform}, {"nick", nick}, {"card", groupCard}, {"pc", nick}, {"self", selfName_},
@@ -3440,17 +3933,14 @@ bool LuaPluginManager::hasCommandTrigger(
     };
     for (const auto& rule : replyRules_) {
         if (suspendedMods_.count(rule.modName)) continue;
-        if (rule.groupOnly && (isPrivate || gid.empty())) continue;
-        if (rule.trustAtLeast > 0 && trust < rule.trustAtLeast) continue;
         if (groupGate_ && !gid.empty() && !groupGate_(platform, gid, "lua:" + rule.modName, adapterId)) continue;
         if ((rule.requiresGame || !rule.requiredRule.empty())
             && (gid.empty() || !ruleGate_ || !ruleGate_(platform, gid, uid, rule.requiredRule, adapterId))) continue;
-        if (!dnx_replyVarsMatch(*this, rule.userVarEquals, "u:" + uid, trust)) continue;
-        if (!gid.empty() && !dnx_replyVarsMatch(*this, rule.groupVarEquals, "g:" + gid)) continue;
+        if (!matchesLimits(rule, uid, gid, isPrivate, trust, platform, adapterId)) continue;
         for (const auto& pat : rule.matchPatterns)
-            if (formatTemplate(pat, vars) == text) return true;
+            if (rule.legacySourceFile.empty() ? legacy_mod::lower(formatTemplate(pat, vars)) == foldedText : formatTemplate(pat, vars) == text) return true;
         for (const auto& pat : rule.prefixPatterns)
-            if (formatTemplate(pat, vars) == text) return true;
+            if (rule.legacySourceFile.empty() ? legacy_mod::lower(formatTemplate(pat, vars)) == foldedText : formatTemplate(pat, vars) == text) return true;
     }
     return false;
 }
@@ -3460,39 +3950,60 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         const std::string& nick, const std::string& groupCard, bool isPrivate, int trust, const std::string& platform, const std::string& adapterId) {
     std::lock_guard<ScriptMutex> lk(mutex_);
     DispatchResult res;
-    if (!state_ || replyRules_.empty()) return res;
+    if (!state_) return res;
+    // eventMsg can synchronously re-enter dispatch. Its temporary global msg
+    // must not replace the outer message used by closures or final rendering.
+    lua_getglobal(state_, "msg");
+    const int previousMessage = luaL_ref(state_, LUA_REGISTRYINDEX);
+    struct RestoreMessage {
+        lua_State*& current;
+        const std::atomic<uint64_t>& generation;
+        lua_State* savedState;
+        uint64_t savedGeneration;
+        int reference;
+        ~RestoreMessage() {
+            if (current != savedState || generation != savedGeneration) return;
+            lua_rawgeti(current, LUA_REGISTRYINDEX, reference);
+            lua_setglobal(current, "msg");
+            luaL_unref(current, LUA_REGISTRYINDEX, reference);
+        }
+    } restoreMessage{state_, runtimeGeneration_, state_, runtimeGeneration_, previousMessage};
+    const auto foldedText = legacy_mod::lower(text);
 
     std::map<std::string, std::string> base = {
         {"uid", uid}, {"user", uid}, {"gid", gid}, {"grp", gid},
         {"platform", platform}, {"nick", nick}, {"card", groupCard}, {"pc", nick}, {"self", selfName_},
         {"fromMsg", text}, {"fromUser", uid}, {"fromGroup", gid},
     };
+    struct Candidate { ReplyRule* rule; int kind; size_t prefixLength; std::string suffix; };
+    std::vector<Candidate> candidates;
     for (auto& rule : replyRules_) {
+        const auto ruleKey = json::array({rule.modName, rule.name}).dump();
+        if (!dnx_queuedRuleKey.empty() && ruleKey != dnx_queuedRuleKey) continue;
         if (suspendedMods_.count(rule.modName)) continue;
-        ScriptFaultScope fault(suspendedMods_, rule.modName);
-        if (rule.groupOnly && (isPrivate || gid.empty())) continue;
-        if (rule.trustAtLeast > 0 && trust < rule.trustAtLeast) continue;   // 权限门槛
         if (groupGate_ && !gid.empty() && !groupGate_(platform, gid, "lua:" + rule.modName, adapterId)) continue;  // 分群停用
         if ((rule.requiresGame || !rule.requiredRule.empty())
             && (gid.empty() || !ruleGate_ || !ruleGate_(platform, gid, uid, rule.requiredRule, adapterId))) continue;
-        if (!dnx_replyVarsMatch(*this, rule.userVarEquals, "u:" + uid, trust)) continue;
-        if (!gid.empty() && !dnx_replyVarsMatch(*this, rule.groupVarEquals, "g:" + gid)) continue;
-        bool hit = false; std::string suffix;
+        if (!matchesLimits(rule, uid, gid, isPrivate, trust, platform, adapterId)) continue;
+        const bool directoryRule = rule.legacySourceFile.empty();
+        bool hit = false; std::string suffix; int kind = 0; size_t prefixLength = 0;
         for (auto& pat : rule.matchPatterns)
-            if (formatTemplate(pat, base) == text) { hit = true; break; }
-        if (!hit) for (auto& pat : rule.prefixPatterns) {
+            if (directoryRule ? legacy_mod::lower(formatTemplate(pat, base)) == foldedText : formatTemplate(pat, base) == text) { hit = true; break; }
+        if (!hit) { kind = 1; for (auto& pat : rule.prefixPatterns) {
             std::string p = formatTemplate(pat, base);
-            if (!p.empty() && text.rfind(p, 0) == 0) {   // startsWith
+            if (!p.empty() && (directoryRule ? foldedText.rfind(legacy_mod::lower(p), 0) == 0 : text.rfind(p, 0) == 0) && p.size() > prefixLength) {
                 hit = true;
                 size_t s = p.size(); while (s < text.size() && text[s] == ' ') ++s;   // 跳过前缀后空格
-                suffix = text.substr(s); break;
+                prefixLength = p.size(); suffix = text.substr(s);
             }
         }
-        if (!hit) for (auto& pat : rule.searchPatterns) {
-            std::string p = formatTemplate(pat, base);
-            if (!p.empty() && text.find(p) != std::string::npos) { hit = true; break; }   // 包含
         }
-        if (!hit && text.size() <= 400) for (const auto& p : rule.regexPatterns) {
+        if (!hit) { kind = 2; for (auto& pat : rule.searchPatterns) {
+            std::string p = formatTemplate(pat, base);
+            if (!p.empty() && (directoryRule ? foldedText.find(legacy_mod::lower(p)) != std::string::npos : text.find(p) != std::string::npos)) { hit = true; break; }
+        }
+        }
+        if (!hit && text.size() <= 400) { kind = 3; for (const auto& p : rule.regexPatterns) {
             if (p.empty()) continue;
             try {
                 const auto match = boundedRegex(p, text, RegexMode::Full);
@@ -3505,29 +4016,55 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
                 DICE_LOG_WARN("[lua] reply '{}:{}' invalid Regex '{}': {}", rule.modName, rule.name, p, ex.what());
             }
         }
-        if (!hit) continue;
-        base["suffix"] = suffix;
-        // 冷却：cd:<rule>:<uid|grp>。命中但在冷却内 → 静默（matched 但空回复）。
-        long now = (long)std::time(nullptr);
-        auto cooled = [&](int cd, const std::string& scopeKey) {
-            if (cd <= 0) return false;
-            long last = 0; std::string v = confGet("cd:" + rule.name, scopeKey);
-            if (!v.empty()) { try { last = std::stol(v); } catch (...) {} }
-            return (now - last) < cd;
-        };
-        if (cooled(rule.cdUser, "u:" + uid) || (!gid.empty() && cooled(rule.cdGrp, "g:" + gid))) {
-            DICE_LOG_DEBUG("插件「{}」回复「{}」命中冷却，本次不执行、不回复。", rule.modName, rule.name);
-            res.matched = true; return res;
         }
+        if (hit) candidates.push_back({&rule, kind, prefixLength, std::move(suffix)});
+    }
+    std::stable_sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+        const bool ag = a.rule->requiresGame || !a.rule->requiredRule.empty();
+        const bool bg = b.rule->requiresGame || !b.rule->requiredRule.empty();
+        if (ag != bg) return ag;
+        if (ag && a.rule->requiredRule.size() != b.rule->requiredRule.size()) return a.rule->requiredRule.size() > b.rule->requiredRule.size();
+        if (a.kind != b.kind) return a.kind < b.kind;
+        if (a.kind == 1 && a.prefixLength != b.prefixLength) return a.prefixLength > b.prefixLength;
+        const bool ad = a.rule->legacySourceFile.empty(), bd = b.rule->legacySourceFile.empty();
+        if (ad != bd) return ad;
+        return ad ? a.rule > b.rule : false; // directory mods: last-loaded same trigger wins
+    });
+    static thread_local std::mt19937_64 random{std::random_device{}()};
+    for (const auto& candidate : candidates) {
+        auto& rule = *candidate.rule;
+        const auto& suffix = candidate.suffix;
+        ScriptFaultScope fault(suspendedMods_, rule.modName);
+        if (dnx_queuedRuleKey.empty() && rule.limits && rule.limits->probability > 0
+            && std::uniform_int_distribution<int>(1, 100)(random) > rule.limits->probability) continue;
+        base["suffix"] = suffix;
         const auto source = loggingSource(rule.modName, rule.name);
         ProcessingScope logScope(source, text);
         res.sources = {source};
-
-        if (!rule.staticEcho.empty()) {
+        std::string notice; std::vector<std::string> locks; bool busy = false;
+        if (!consumeLimits(rule, uid, gid, isPrivate, platform, adapterId, notice, locks, busy)) {
             res.matched = true;
-            res.reply = dnx_normalizeLuaText(formatTemplate(rule.staticEcho, base));
-            if (rule.cdUser > 0) confSet("cd:" + rule.name, "u:" + uid, std::to_string(now));
-            if (rule.cdGrp > 0 && !gid.empty()) confSet("cd:" + rule.name, "g:" + gid, std::to_string(now));
+            if (busy && scheduler_ && (asyncReply_ || scopedAsyncReply_) && queuedDispatches_.size() < 256 && dnx_lockReplayDepth < 16) {
+                QueuedDispatch task;
+                task.text = text; task.uid = uid; task.gid = gid; task.nick = nick; task.card = groupCard;
+                task.platform = platform; task.adapterId = adapterId; task.isPrivate = isPrivate; task.trust = trust;
+                task.ruleKey = json::array({rule.modName, rule.name}).dump();
+                task.depth = dnx_lockReplayDepth + 1; task.generation = runtimeGeneration_;
+                task.locks = std::move(locks); task.context = activeProcessingContext;
+                queuedDispatches_.push_back(std::move(task));
+                res.pending = true;
+            } else if (busy) {
+                res.failed = true;
+                DICE_LOG_WARN("模组「{}」回复「{}」的同步锁等待队列已满或不可用，本次拒绝执行。", rule.modName, rule.name);
+            }
+            res.reply = dnx_normalizeLuaText(formatTemplate(notice, base));
+            return res;
+        }
+        LimitLease lease{*this, std::move(locks)};
+        if (rule.staticEchoDefined || !rule.echoDeckJson.empty()) {
+            res.matched = true;
+            const auto raw = rule.staticEchoDefined ? rule.staticEcho : dnx_pickInlineReply(rule.echoDeckJson);
+            res.reply = dnx_normalizeLuaText(formatTemplate(raw, base));
             return res;
         }
 
@@ -3549,12 +4086,13 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         } else lua_pop(state_, 1);
         lua_setglobal(state_, "msg");
 
-        // 运行 echo：函数 ref 或 {lua="name"} 脚本。含 sleepTime 的旧式
-        // msg_order 函数放到协程；普通插件继续走原同步路径，避免改变既有语义。
+        // echo 函数、脚本与旧 msg_order 共用可挂起协程；没有调度器的离线
+        // 调用保持同步，不会创建后台线程或执行尚未授权的旧回调。
         loadingModDir_ = rule.modDir;
         int sbase = lua_gettop(state_);
         const std::string previousPlatform = activePlatform_;
-        activePlatform_ = platform;
+        const std::string previousAdapter = activeAdapter_;
+        activePlatform_ = platform; activeAdapter_ = adapterId;
         bool callOk = false;
         bool usedCoroutine = false;
         std::string callError;
@@ -3579,17 +4117,22 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
                 }
             }
         }
+        if (callError.empty() && !rule.echoScript.empty()) {
+            const auto script = resolveScript(rule.echoScript, rule.modDir);
+            const int status = !script.empty() ? dnx_loadfile(state_, script)
+                : luaL_loadbufferx(state_, rule.echoScript.data(), rule.echoScript.size(), rule.name.c_str(), "t");
+            if (status != LUA_OK) callError = dnx_normalizeLuaText(argStr(state_, -1));
+            else { dnx_isolateScriptChunk(state_); legacyCallableReady = true; }
+        }
+        const int argumentCount = rule.echoScript.empty() && rule.echoTakesMessage ? 1 : 0;
         if (!callError.empty()) {
             // The common error path below logs and restores the stack.
-        } else if (!rule.echoScript.empty()) {
-            std::string erel = rule.echoScript; for (auto& c : erel) if (c == '.') c = '/';
-            fs::path sp = fs::path(rule.modDir) / "script" / (erel + ".lua");
-            callOk = (dnx_dofile(state_, sp) == LUA_OK);
-        } else if (rule.maySleep && scheduler_) {
+        } else if (scheduler_) {
             if (pendingCoroutines_.size() >= 256) {
                 DICE_LOG_WARN("[lua] suspended coroutine limit reached; refusing reply '{}'", rule.name);
                 lua_settop(state_, sbase);
                 activePlatform_ = previousPlatform;
+                activeAdapter_ = previousAdapter;
                 loadingModDir_.clear();
                 res.matched = true;
                 res.reply = "Lua 插件等待中的任务过多，请稍后重试。";
@@ -3604,31 +4147,34 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
             if (!legacyCallableReady)
                 lua_rawgeti(state_, LUA_REGISTRYINDEX, rule.echoRef);
             lua_xmove(state_, coroutine, 1);
-            lua_rawgeti(state_, LUA_REGISTRYINDEX, messageRef);
-            lua_xmove(state_, coroutine, 1);
+            if (argumentCount) {
+                lua_rawgeti(state_, LUA_REGISTRYINDEX, messageRef);
+                lua_xmove(state_, coroutine, 1);
+            }
             int resultCount = 0;
-            const int status = dnx_resume(coroutine, state_, 1, &resultCount, true);
+            const int status = dnx_resume(coroutine, state_, argumentCount, &resultCount, true);
             if (status == LUA_YIELD) {
                 PendingCoroutine pending;
                 pending.generation = runtimeGeneration_;
                 pending.threadRef = threadRef;
                 pending.messageRef = messageRef;
                 pending.ruleName = rule.name; pending.modName = rule.modName; pending.modDir = rule.modDir;
-                pending.platform = platform; pending.gid = gid; pending.uid = uid;
+                pending.platform = platform; pending.adapterId = adapterId; pending.gid = gid; pending.uid = uid;
                 pending.vars = base;
                 pending.logContext = activeProcessingContext;
+                pending.locks = lease.keys; lease.retain = true;
                 pendingCoroutines_[threadRef] = std::move(pending);
                 const double delay = yieldedDelaySeconds(coroutine, resultCount);
                 scheduleCoroutineResume(threadRef, delay);
                 lua_rawgeti(state_, LUA_REGISTRYINDEX, messageRef);
                 lua_setglobal(state_, "msg");
                 activePlatform_ = previousPlatform;
+                activeAdapter_ = previousAdapter;
                 loadingModDir_.clear();
                 lua_settop(state_, sbase);
                 res.matched = true;
-                res.pending = true;
-                if (rule.cdUser > 0) confSet("cd:" + rule.name, "u:" + uid, std::to_string(now));
-                if (rule.cdGrp > 0 && !gid.empty()) confSet("cd:" + rule.name, "g:" + gid, std::to_string(now));
+                res.pending = pendingCoroutines_.count(threadRef) != 0;
+                res.failed = !res.pending;
                 return res;
             }
             if (status == LUA_OK) {
@@ -3645,10 +4191,11 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         } else {
             if (!legacyCallableReady)
                 lua_rawgeti(state_, LUA_REGISTRYINDEX, rule.echoRef);
-            lua_getglobal(state_, "msg");
-            callOk = (dnx_pcall(state_, 1, LUA_MULTRET) == LUA_OK);
+            if (argumentCount) lua_getglobal(state_, "msg");
+            callOk = (dnx_pcall(state_, argumentCount, LUA_MULTRET) == LUA_OK);
         }
         activePlatform_ = previousPlatform;
+        activeAdapter_ = previousAdapter;
         loadingModDir_.clear();
         if (!callOk) {
             res.failed = true;
@@ -3679,8 +4226,6 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         res.reply = dnx_normalizeLuaText(formatTemplate(tmpl, vars));
         if (!res.failed && !res.pending && res.reply.empty())
             logProcessingResult(source, "处理完成，没有返回文本回复", activeProcessingContext.trigger);
-        if (rule.cdUser > 0) confSet("cd:" + rule.name, "u:" + uid, std::to_string(now));
-        if (rule.cdGrp > 0 && !gid.empty()) confSet("cd:" + rule.name, "g:" + gid, std::to_string(now));
         return res;
     }
     return res;

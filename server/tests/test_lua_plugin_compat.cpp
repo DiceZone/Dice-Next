@@ -1,7 +1,12 @@
 #include "test_framework.h"
 #include "test_watchdog.h"
+#include "legacy_corpus_guard.h"
 #include "../src/core/mod/lua_plugin_manager.h"
 #include "../src/common/legacy_conf_value.h"
+#include "../src/common/legacy_mod_limit.h"
+#include "../src/common/session_deck.h"
+#include "../src/core/mod/legacy_log_context.h"
+#include "../src/common/utils.h"
 
 #include <chrono>
 #include <clocale>
@@ -285,14 +290,14 @@ TEST(LuaPluginCompat, UnsupportedLegacyActionsAreVisibleAndNeverRunPartialFallba
 [reply.javascript]
 keyword.match = "legacyjs"
 echo.js = "old.js"
-echo = "must not run a partial fallback"
+echo.lua = "must not run a partial fallback"
 [reply.unsupported_condition]
 keyword.match = "unsafe"
 limit.unknown = true
 echo = "must not run without its condition"
 )TOML");
     writeText(mod / "event" / "mixed.lua", R"LUA(
-event = { mixed = { trigger = { cycle = 10, hook = "message" }, action = { lua = "never" } } }
+event = { mixed = { trigger = { cycle = 10, hook = "WordCensored" }, action = { lua = "never" } } }
 )LUA");
     LuaPluginManager manager;
     ASSERT_TRUE(manager.init());
@@ -731,6 +736,216 @@ echo = "must-not-run"
     ASSERT_FALSE(run("restricted").matched);
 }
 
+TEST(LuaPluginCompat, DirectoryScriptGlobalsArePerInvocationButNestedScriptsShareContext) {
+    TempWorkspace workspace("dice_script_env_");
+    fs::create_directories("data/mod/test/reply"); fs::create_directories("data/mod/test/script");
+    writeText("data/mod/test/reply/main.lua", R"LUA(
+msg_reply.first={keyword={Match="first"},echo={lua="entry"}}
+msg_reply.other={keyword={Match="other"},echo={lua="other"}}
+msg_reply.inline={keyword={Match="inline"},echo={lua="scratch=(scratch or 0)+1;return tostring(scratch)"}}
+)LUA");
+    writeText("data/mod/test/script/entry.lua", R"LUA(
+scratch=(scratch or 0)+1
+loadLua('helper')
+assert(helperRan==1 and helperFunction()=='nested')
+return tostring(scratch)..':'..msg.uid
+)LUA");
+    writeText("data/mod/test/script/helper.lua", "helperRan=(helperRan or 0)+1;function helperFunction()return 'nested'end");
+    writeText("data/mod/test/script/other.lua", "return tostring(scratch==nil and helperRan==nil and helperFunction==nil)");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"),1);
+    auto run=[&](const std::string& text,const std::string& uid="1") {
+        return manager.dispatch(text,uid,"2","N","",false).reply;
+    };
+    ASSERT_EQ(run("first"),std::string("1:1"));
+    ASSERT_EQ(run("first","3"),std::string("1:3"));
+    ASSERT_EQ(run("other"),std::string("true"));
+    ASSERT_EQ(run("inline"),std::string("1"));
+    ASSERT_EQ(run("inline"),std::string("1"));
+    ASSERT_TRUE(manager.eval("assert(scratch==nil and helperRan==nil and helperFunction==nil)"));
+}
+
+TEST(LuaPluginCompat, DirectoryScriptEventsAndSuspendedRepliesKeepSeparateContexts) {
+    TempWorkspace workspace("dice_script_async_env_");
+    fs::create_directories("data/mod/test/reply"); fs::create_directories("data/mod/test/script");
+    fs::create_directories("data/mod/test/event");
+    writeText("data/mod/test/reply/main.lua", "msg_reply.wait={keyword={Match='wait'},echo={lua='wait'}}");
+    writeText("data/mod/test/script/wait.lua", R"LUA(
+scratch=(scratch or 0)+1; who=msg.uid
+sleepTime(10)
+return tostring(scratch)..':'..who..':'..msg.uid
+)LUA");
+    writeText("data/mod/test/event/main.lua", "event.add={trigger={hook='FriendAdd'},action={lua='hook'}}");
+    writeText("data/mod/test/script/hook.lua", R"LUA(
+scratch=(scratch or 0)+1
+event.privateCounter=scratch
+event.sameContext=(event==msg)
+)LUA");
+    LuaPluginManager manager; std::vector<std::function<void()>> callbacks; std::vector<std::string> replies;
+    manager.setScheduler([&](double,auto callback){callbacks.push_back(std::move(callback));});
+    manager.setAsyncReply([&](const auto&,const auto&,const auto&,const auto& text){replies.push_back(text);});
+    ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"),1);
+    ASSERT_TRUE(manager.dispatch("wait","1","2","N","",false).pending);
+    ASSERT_TRUE(manager.dispatch("wait","3","2","N","",false).pending);
+    for (int i=0;i<2;++i) {
+        nlohmann::json context={{"uid","5"},{"gid","2"}}; manager.dispatchHook("FriendAdd",context);
+        ASSERT_EQ(context["privateCounter"],1); ASSERT_EQ(context["sameContext"],true);
+    }
+    ASSERT_EQ(callbacks.size(),size_t(2));
+    callbacks[1](); callbacks[0]();
+    ASSERT_EQ(replies.size(),size_t(2));
+    ASSERT_EQ(replies[0],std::string("1:3:3")); ASSERT_EQ(replies[1],std::string("1:1:1"));
+}
+
+TEST(LuaPluginCompat, ReentrantEventMsgDispatchRestoresOuterMessageForTemplateRendering) {
+    TempWorkspace workspace("dice_reentrant_message_");
+    fs::create_directories("data/mod/test/reply"); fs::create_directories("data/mod/test/script");
+    writeText("data/mod/test/reply/main.lua", R"LUA(
+msg_reply.file={keyword={Match='outer-file'},echo={lua='outer'}}
+msg_reply.func={keyword={Match='outer-func'},echo=function()
+ msg.value=msg.nick;eventMsg('inner','8','9');return '{nick}:{value}:{uid}'
+end}
+msg_reply.inner={keyword={Match='inner'},echo=function()
+ msg.value='inner-value';return '{nick}:{value}:{uid}'
+end}
+)LUA");
+    writeText("data/mod/test/script/outer.lua", "msg.value=msg.nick;eventMsg('inner','8','9');return '{nick}:{value}:{uid}'");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"),1);
+    std::vector<std::string> innerReplies;
+    manager.setEventMsg([&](const auto& text,const auto& gid,const auto& uid) {
+        innerReplies.push_back(manager.dispatch(text,uid,gid,"Inner","",false).reply);
+    });
+    ASSERT_TRUE(manager.eval("msg={marker='host'}"));
+    ASSERT_EQ(manager.dispatch("outer-file","1","2","Outer1","",false).reply,std::string("Outer1:Outer1:1"));
+    ASSERT_EQ(manager.dispatch("outer-func","3","2","Outer3","",false).reply,std::string("Outer3:Outer3:3"));
+    ASSERT_EQ(innerReplies.size(),size_t(2));
+    for(const auto& reply:innerReplies) ASSERT_EQ(reply,std::string("Inner:inner-value:9"));
+    ASSERT_TRUE(manager.eval("assert(msg.marker=='host')"));
+}
+
+TEST(LuaPluginCompat, SpeechCaseAliasesChoicesAndOverridesMatchLegacyDice) {
+    TempWorkspace workspace("dice_speech_compat_");
+    fs::create_directories("data/mod/first/speech");
+    fs::create_directories("data/mod/second/speech");
+    writeText("data/mod/first/descriptor.json", R"JSON({"speech":{
+      "Reply_Spells_List":"spell:{INV}","Array":["a:{nick}","b:{nick}"],
+      "Empty":[],"EmptyText":"","Invalid":["not-active",{}],"Alias":"&REPLY_SPELLS_LIST"
+    }})JSON");
+    writeText("data/mod/first/speech/words.yaml", R"YAML(
+yamlChoices: ["y:{NICK}", "z:{nick}"]
+CHINESE词条: "中文:{Nick}"
+loopA: "&LOOPB"
+loopB: "{LOOPA}"
+yamlEmpty: []
+yamlInvalid: [ok, {nested: not-a-text}]
+)YAML");
+    writeText("data/mod/second/descriptor.json", R"JSON({"speech":{"reply_SPELLS_list":"overridden:{inv}"}})JSON");
+    writeText("data/mod/second/speech/words.yaml", "Reply_Spells_List: 'yaml-override:{inv}'\n");
+    writeText("data/mod_order.json", R"(["first","second"])");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir("data/mod"),2);
+    const std::map<std::string,std::string> vars{{"inv","Torch"},{"nick","Tester"}};
+    ASSERT_EQ(manager.formatTemplate("{reply_spells_LIST}",vars),std::string("yaml-override:Torch"));
+    ASSERT_EQ(manager.formatTemplate("{ALIAS}",vars),std::string("yaml-override:Torch"));
+    ASSERT_EQ(manager.formatTemplate("{chinese词条}",vars),std::string("中文:Tester"));
+    ASSERT_EQ(manager.formatTemplate("{Empty}{EmptyText}{Invalid}{yamlEmpty}{yamlInvalid}{LoopA}",vars),std::string());
+    ASSERT_EQ(manager.formatTemplate("{NICK}",{{"NICK","Exact"},{"nick","fallback"}}),std::string("Exact"));
+    std::set<std::string> jsonChoices, yamlChoices;
+    for (int i=0;i<256;++i) {
+        jsonChoices.insert(manager.formatTemplate("{ARRAY}",vars));
+        yamlChoices.insert(manager.formatTemplate("{YAMLCHOICES}",vars));
+    }
+    ASSERT_TRUE((jsonChoices == std::set<std::string>{"a:Tester","b:Tester"}));
+    ASSERT_TRUE((yamlChoices == std::set<std::string>{"y:Tester","z:Tester"}));
+    ASSERT_TRUE(manager.setModEnabled("second",false));
+    ASSERT_EQ(manager.reload(),2);
+    ASSERT_EQ(manager.formatTemplate("{alias}",vars),std::string("spell:Torch"));
+}
+
+TEST(LuaPluginCompat, LegacyNamedScriptsIgnoreCaseAndRespectGlobalOverrideOrder) {
+    TempWorkspace workspace("dice_script_names_");
+    fs::create_directories("data/mod/first/reply"); fs::create_directories("data/mod/first/script/Tools");
+    fs::create_directories("data/mod/second/script/tools");
+    writeText("data/mod/first/reply/rules.lua", "msg_reply.test={keyword={Match='named'},echo={lua='entry'}}");
+    writeText("data/mod/first/script/entry.lua", "return loadLua('TOOLS.PING')");
+    writeText("data/mod/first/script/Tools/Ping.lua", "return 'first'");
+    writeText("data/mod/second/script/tools/pING.lua", "return 'second'");
+    writeText("data/mod_order.json", R"(["first","second"])");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"),2);
+    ASSERT_EQ(manager.dispatch("named","1","2","N","",false).reply,std::string("second"));
+    ASSERT_EQ(manager.resolveScript("tOoLs.PiNg.LUA","data/mod/first").filename().string(),std::string("pING.lua"));
+    ASSERT_TRUE(manager.resolveScript("../escape","data/mod/first").empty());
+    ASSERT_TRUE(manager.resolveScript("C:/outside","data/mod/first").empty());
+    ASSERT_TRUE(manager.setModEnabled("second",false)); ASSERT_EQ(manager.reload(),2);
+    ASSERT_EQ(manager.dispatch("named","1","2","N","",false).reply,std::string("first"));
+}
+
+TEST(LuaPluginCompat, LegacyInitScriptsExposePackageNamesAndKeepExplicitInitAliases) {
+    TempWorkspace workspace("dice_script_packages_");
+    fs::create_directories("data/mod/test/script/ToolBox/Nested");
+    writeText("data/mod/test/script/ToolBox/init.lua", "return 'package'");
+    writeText("data/mod/test/script/ToolBox/Nested/init.lua", "return 'nested'");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"),1);
+    const auto package = manager.resolveScript("TOOLBOX","data/mod/test");
+    ASSERT_TRUE(!package.empty());
+    ASSERT_EQ(manager.resolveScript("toolbox.init","data/mod/test"),package);
+    ASSERT_EQ(manager.resolveScript("ToOlBoX/NeStEd","data/mod/test").filename().string(),std::string("init.lua"));
+    ASSERT_TRUE(manager.eval("assert(loadLua('toolbox')=='package' and loadLua('toolbox.nested')=='nested')"));
+}
+
+TEST(LuaPluginCompat, LegacyHelpNamesAliasesAndListOverridesUseOneGlobalNamespace) {
+    TempWorkspace workspace("dice_help_names_");
+    fs::create_directories("data/mod/first"); fs::create_directories("data/mod/second");
+    writeText("data/mod/first/descriptor.json", R"JSON({"helpdoc":{
+      "Topic":"first:{nick}","Alias":"&tOpIc","Chain":"&ALIAS",
+      "loop1":"&loop2","loop2":"&loop1"
+    }})JSON");
+    writeText("data/mod/second/descriptor.json", R"JSON({"helpdoc":{"tOPIC":"second:{NICK}","External":"&cHaIn"}})JSON");
+    writeText("data/mod_order.json", R"(["first","second"])");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"),2);
+    const std::map<std::string,std::string> vars{{"nick","Tester"}};
+    ASSERT_EQ(manager.formatTemplate("{HELP:topic}",vars),std::string("second:Tester"));
+    ASSERT_EQ(manager.formatTemplate("{help:CHAIN}",vars),std::string("second:Tester"));
+    ASSERT_EQ(manager.formatTemplate("{help:External}",vars),std::string("second:Tester"));
+    auto entries = manager.helpEntries();
+    size_t topics = 0; std::string alias, external, loop;
+    for(const auto& entry:entries) {
+        if(legacy_mod::lower(entry.topic)=="topic") { ++topics; ASSERT_EQ(entry.mod,std::string("second")); }
+        if(entry.topic=="Alias") alias=entry.text;
+        if(entry.topic=="External") external=entry.text;
+        if(entry.topic=="loop1") loop=entry.text;
+    }
+    ASSERT_EQ(topics,size_t(1)); ASSERT_EQ(alias,std::string("second:{NICK}"));
+    ASSERT_EQ(external,std::string("second:{NICK}")); ASSERT_TRUE(loop.empty());
+    ASSERT_TRUE(manager.setModEnabled("second",false)); ASSERT_EQ(manager.reload(),2);
+    ASSERT_EQ(manager.formatTemplate("{help:alias}",vars),std::string("first:Tester"));
+}
+
+TEST(LuaPluginCompat, LegacyHelpTemplatesResolveTheirOwnNamespaceWithBoundedExpansion) {
+    TempWorkspace workspace("dice_help_templates_");
+    fs::create_directories("data/mod/test");
+    writeText("data/mod/test/descriptor.json", R"JSON({
+      "helpdoc":{"Topic":"old","TOPIC":"new","Index":"{NICK}/{topic}/{fromSpeech}/{Self}",
+        "Nick":"must-not-replace-user","Alias":"&TOPIC","ContextAlias":"&NICK",
+        "loop":"{loop}","many":"{many}{many}{many}{many}{many}{many}{many}{many}{many}{many}"},
+      "speech":{"fromSpeech":"{alias}/{sample:fixed|fixed}","TOPIC":"speech-not-help"}
+    })JSON");
+    LuaPluginManager manager; manager.setSelfName("Maid"); ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir("data/mod"),1);
+    const std::map<std::string,std::string> vars{{"nick","Tester"}};
+    ASSERT_EQ(manager.formatTemplate("{help:INDEX}",vars),std::string("Tester/new/new/fixed/Maid"));
+    ASSERT_EQ(manager.formatHelpTemplate("{INDEX}",vars),std::string("Tester/new/new/fixed/Maid"));
+    ASSERT_EQ(manager.formatHelpTemplate("&contextAlias",vars),std::string("Tester"));
+    ASSERT_EQ(manager.formatHelpTopic("contextALIAS",vars),std::string("Tester"));
+    ASSERT_EQ(manager.formatHelpTopic("Index",vars),std::string("Tester/new/new/fixed/Maid"));
+    ASSERT_EQ(manager.formatTemplate("{topic}",vars),std::string("speech-not-help"));
+    ASSERT_EQ(manager.formatTemplate("{SeLf}",vars),std::string("Maid"));
+    TestWatchdog watchdog(std::chrono::seconds(10));
+    ASSERT_TRUE(manager.formatHelpTemplate("{loop}",vars).empty());
+    ASSERT_TRUE(manager.formatHelpTemplate("{many}",vars).empty());
+    ASSERT_TRUE(manager.formatHelpTemplate(std::string(4*1024*1024+1,'x'),vars).empty());
+    ASSERT_EQ(manager.formatHelpTemplate("ready:{nick}",vars),std::string("ready:Tester"));
+}
+
 TEST(LuaPluginCompat, MixedDescriptorOrderAndReplyOverrideSurviveReload) {
     TempWorkspace workspace("dice_next_lua_mod_order_");
     const fs::path root = workspace.root() / "data" / "mod";
@@ -993,6 +1208,535 @@ end
 #endif
 }
 
+TEST(LuaPluginCompat, FullTomlMultilineQuotedTablesInlineDeckAndEmptyReplies) {
+    TempWorkspace workspace("dice_mod_full_toml_");
+    const auto mod = workspace.root() / "data/mod/full";
+    fs::create_directories(mod / "reply/nested");
+    writeText(mod / "reply/nested/rules.toml", R"TOML(
+[reply."quoted.entry"]
+keyword = { Match = ["multi", "also"] }
+echo = '''first #, literal
+second {nick} {sample:yes|{sample:yes|yes}}'''
+[reply.empty]
+keyword.Match = "empty"
+echo = ""
+[reply.deck]
+keyword.Match = "deck"
+echo = ["::0::never", "::3::picked {nick} {sample:ok|ok}"]
+[reply.inline]
+keyword.Match = "inline"
+echo.lua = "return 'inline-result'"
+)TOML");
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    auto run = [&](const std::string& text) { return manager.dispatch(text, "u", "g", "Tester", "", false); };
+    ASSERT_EQ(run("multi").reply, std::string("first #, literal\nsecond Tester yes"));
+    ASSERT_EQ(run("MULTI").reply, run("multi").reply);
+    ASSERT_EQ(run("also").reply, run("multi").reply);
+    ASSERT_TRUE(run("empty").matched); ASSERT_TRUE(run("empty").reply.empty());
+    for (int n = 0; n < 20; ++n) ASSERT_EQ(run("deck").reply, std::string("picked Tester ok"));
+    ASSERT_EQ(run("inline").reply, std::string("inline-result"));
+    ASSERT_TRUE(manager.mods()[0].compatibilityWarnings.empty());
+}
+
+TEST(LuaPluginCompat, LimitsKeepTypedValuesIdsSelfVariablesAndDicePolicies) {
+    TempWorkspace workspace("dice_mod_typed_limits_");
+    const auto mod = workspace.root() / "data/mod/limits";
+    fs::create_directories(mod / "reply"); fs::create_directories("data/self_data");
+    writeText(mod / "reply/rules.lua", R"LUA(
+msg_reply.typed = { keyword={Match="typed"}, limit={user_var={text="false", zero=true, score={more=1,at_most=3}}}, echo="typed-ok" }
+msg_reply.ids = { keyword={Match="ids"}, limit={user_id={nor={"bad"}},grp_id={"g"}}, echo="ids-ok" }
+msg_reply.self = { keyword={Match="self"}, limit={self_var={health={at_least=3},["service.ready"]=true}}, echo="self-ok" }
+msg_reply.bots = { keyword={Match="bots"}, limit={dicemaid="only"}, echo="bot-ok" }
+msg_reply.people = { keyword={Match="people"}, limit={dicemaid="off"}, echo="human-ok" }
+msg_reply.unknown = { keyword={Match="unknown"}, limit={user_var={score={magical=1}}}, echo="never" }
+msg_reply.raw = { keyword={Match="raw"},limit="prob:100;user_id:!bad;grp_id:g;user_var:score=2+&text=false;lock:shared@user",echo="raw-ok" }
+)LUA");
+    writeText("data/self_data/service.json", R"({"ready":true})");
+    LuaPluginManager manager; manager.setBotId("self");
+    manager.setDiceLookup([](const auto& uid, const auto&, const auto&) { return uid == "bot"; });
+    ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    ASSERT_TRUE(manager.eval("assert(require('Set')==Set and require('Actor')==Actor and require('GameTable')==GameTable and require('SelfData')==getSelfData)"));
+    manager.confSet("u:u", "text", legacy_conf::encode("false"));
+    manager.confSet("u:u", "zero", "0"); manager.confSet("u:u", "score", "2");
+    manager.confSet("u:self", "health", "3");
+    auto run = [&](const std::string& text, const std::string& uid = "u", const std::string& gid = "g") {
+        return manager.dispatch(text, uid, gid, "Tester", "", gid.empty(), 0, "onebot", "adapter");
+    };
+    ASSERT_EQ(run("typed").reply, std::string("typed-ok"));
+    ASSERT_EQ(run("ids").reply, std::string("ids-ok")); ASSERT_FALSE(run("ids", "bad").matched);
+    ASSERT_FALSE(run("ids", "u", "other").matched); ASSERT_FALSE(run("ids", "u", "").matched);
+    ASSERT_EQ(run("self").reply, std::string("self-ok"));
+    manager.confSet("u:self", "health", "2"); ASSERT_FALSE(run("self").matched);
+    ASSERT_FALSE(run("bots").matched); ASSERT_TRUE(run("bots", "bot").matched);
+    ASSERT_TRUE(run("people").matched); ASSERT_FALSE(run("people", "bot").matched);
+    ASSERT_FALSE(run("unknown").matched);
+    // String-form false means a boolean truth check, so the authored string "false" is truthy.
+    ASSERT_FALSE(run("raw").matched);
+    manager.confSet("u:u", "text", "false"); ASSERT_TRUE(run("raw").matched);
+    ASSERT_TRUE(!manager.mods()[0].compatibilityWarnings.empty());
+}
+
+TEST(LuaPluginCompat, SharedCooldownAndDailyLimitsAreAtomicPersistentAndScoped) {
+    TempWorkspace workspace("dice_mod_counters_");
+    const auto mod = workspace.root() / "data/mod/counters"; fs::create_directories(mod / "reply");
+    writeText(mod / "reply/rules.toml", R"TOML(
+[reply.limited]
+keyword.Match = "limited"
+limit = "cd:10&@echo=cooling;today:2&@echo=daily"
+echo = "ok"
+[reply.first]
+keyword.Match = "first"
+limit.cd.global.shared = 20
+echo = "first"
+[reply.second]
+keyword.Match = "second"
+limit.cd = { global={shared=20}, echo="shared" }
+echo = "second"
+)TOML");
+    std::time_t now = 1704067200;
+    {
+        LuaPluginManager manager; manager.setClock([&] { return now; });
+        ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"), 1);
+        auto run = [&](const std::string& text, const std::string& user = "u", const std::string& group = "g") {
+            return manager.dispatch(text, user, group, "N", "", false, 0, "p", "a");
+        };
+        ASSERT_EQ(run("limited").reply, std::string("ok"));
+        ASSERT_EQ(run("limited", "other").reply, std::string("cooling")); // scalar CD is shared by chat
+        ASSERT_EQ(run("limited", "u", "other").reply, std::string("ok"));
+        now += 11; ASSERT_EQ(run("limited").reply, std::string("ok"));
+        now += 11; ASSERT_EQ(run("limited").reply, std::string("daily"));
+        ASSERT_EQ(run("first").reply, std::string("first"));
+        ASSERT_EQ(run("second", "v", "different").reply, std::string("shared"));
+    }
+    LuaPluginManager reloaded; reloaded.setClock([&] { return now; });
+    ASSERT_TRUE(reloaded.init()); ASSERT_EQ(reloaded.loadDir("data/mod"), 1);
+    ASSERT_EQ(reloaded.dispatch("limited", "u", "g", "N", "", false, 0, "p", "a").reply, std::string("daily"));
+    now += 86400;
+    ASSERT_EQ(reloaded.dispatch("limited", "u", "g", "N", "", false, 0, "p", "a").reply, std::string("ok"));
+}
+
+TEST(LuaPluginCompat, LocksQueueWithoutBlockingAndSurviveCoroutineSleepOnlyUntilReload) {
+    TempWorkspace workspace("dice_mod_locks_");
+    const auto mod = workspace.root() / "data/mod/locks"; fs::create_directories(mod / "reply");
+    writeText(mod / "reply/rules.lua", R"LUA(
+msg_reply.wait = {keyword={Match="wait"},limit={lock={chat="shared"}},echo=function(m)
+ setUserConf(m.uid,"started",getUserConf(m.uid,"started",0)+1)
+ sleepTime(10)
+ return "done:"..m.uid
+end}
+)LUA");
+    std::vector<std::function<void()>> callbacks;
+    std::vector<std::string> replies;
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    manager.setScheduler([&](double, auto callback) { callbacks.push_back(std::move(callback)); });
+    manager.setAsyncReply([&](const auto&, const auto&, const auto&, const auto& text) { replies.push_back(text); });
+    ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    const auto first = manager.dispatch("wait", "u", "g", "N", "", false);
+    ASSERT_TRUE(first.pending); ASSERT_EQ(manager.confGet("u:u", "started"), std::string("1"));
+    ASSERT_TRUE(manager.dispatch("wait", "v", "g", "N", "", false).pending);
+    ASSERT_FALSE(manager.confHas("u:v", "started"));
+    auto fire = [&] { auto callback = std::move(callbacks.front()); callbacks.erase(callbacks.begin()); callback(); };
+    fire(); ASSERT_EQ(replies.size(), size_t(1)); ASSERT_EQ(replies[0], std::string("done:u"));
+    fire(); ASSERT_EQ(manager.confGet("u:v", "started"), std::string("1"));
+    ASSERT_EQ(callbacks.size(), size_t(1));
+    ASSERT_EQ(manager.reload(), 1); fire(); ASSERT_EQ(replies.size(), size_t(1));
+}
+
+TEST(LuaPluginCompat, NestedModsResourcesAndGlobalScriptsRespectDisabledParents) {
+    TempWorkspace workspace("dice_mod_nested_");
+    const auto parent = workspace.root() / "data/mod/parent";
+    const auto child = parent / "child"; const auto later = workspace.root() / "data/mod/zlate";
+    fs::create_directories(parent / "script/ns"); fs::create_directories(child / "reply/deep");
+    fs::create_directories(later / "script/ns");
+    writeText(parent / "descriptor.json", R"({"title":"Parent"})");
+    writeText(child / "descriptor.json", R"({"title":"Child"})");
+    writeText(child / "reply/deep/rule.lua", R"(msg_reply.child={keyword={Match="child"},echo=function()return loadLua("ns.shared")end})");
+    writeText(parent / "script/ns/shared.lua", "return 'parent'");
+    writeText(later / "script/ns/shared.lua", "return 'last'");
+    writeText(child / "resource.lua", "error('never auto-execute a resource')");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"), 3);
+    ASSERT_EQ(manager.dispatch("child", "u", "g", "N", "", false).reply, std::string("last"));
+    ASSERT_TRUE(manager.setModEnabled("zlate", false)); ASSERT_EQ(manager.reload(), 3);
+    ASSERT_EQ(manager.dispatch("child", "u", "g", "N", "", false).reply, std::string("parent"));
+    ASSERT_TRUE(manager.setModEnabled("parent", false)); ASSERT_EQ(manager.reload(), 3);
+    ASSERT_FALSE(manager.dispatch("child", "u", "g", "N", "", false).matched);
+    ASSERT_FALSE(manager.setModEnabled("parent.child", true));
+    ASSERT_FALSE(manager.deleteMod("../")); ASSERT_FALSE(manager.setModEnabled("missing", false));
+    ASSERT_TRUE(manager.setModEnabled("parent", true)); ASSERT_EQ(manager.reload(), 3);
+    ASSERT_TRUE(manager.dispatch("child", "u", "g", "N", "", false).matched);
+    ASSERT_TRUE(manager.deleteMod("parent.child")); ASSERT_EQ(manager.reload(), 2);
+    ASSERT_TRUE(fs::is_directory(parent));
+    writeText("data/plugin/parent.lua", "msg_order={dup='run'};function run() return 'single' end");
+    ASSERT_EQ(manager.reload(), 3);
+    ASSERT_EQ(manager.dispatch("dup", "u", "g", "N", "", false).reply, std::string("single"));
+    ASSERT_TRUE(manager.deleteMod("parent@plugin")); ASSERT_TRUE(fs::is_directory(parent));
+    ASSERT_FALSE(fs::exists("data/plugin/parent.lua"));
+}
+
+TEST(LuaPluginCompat, TriggerPriorityIsGlobalMatchThenLongestPrefixThenSearchThenRegex) {
+    TempWorkspace workspace("dice_mod_priority_");
+    const auto mod = workspace.root() / "data/mod/priority"; fs::create_directories(mod / "reply");
+    writeText(mod / "reply/rules.toml", R"TOML(
+[reply.a]
+keyword.Regex = ".*"
+echo = "regex"
+[reply.b]
+keyword.Search = "abc"
+echo = "search"
+[reply.c]
+keyword.Prefix = "a"
+echo = "short"
+[reply.d]
+keyword.Prefix = ["ab", "abc"]
+echo = "long:{suffix}"
+[reply.e]
+keyword.Match = "abcdef"
+echo = "exact"
+[reply.f]
+keyword.Match = "duplicate"
+echo = "earlier"
+[reply.z]
+keyword.Match = "duplicate"
+echo = "later"
+)TOML");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    auto run = [&](const std::string& text) { return manager.dispatch(text, "u", "g", "N", "", false).reply; };
+    ASSERT_EQ(run("abcdef"), std::string("exact")); ASSERT_EQ(run("abc xyz"), std::string("long:xyz"));
+    ASSERT_EQ(run("abZZ"), std::string("long:ZZ")); ASSERT_EQ(run("xabc"), std::string("search"));
+    ASSERT_EQ(run("Z"), std::string("regex"));
+    ASSERT_EQ(run("DUPLICATE"), std::string("later"));
+}
+
+TEST(LuaPluginCompat, RuleManualsInheritWithoutCollisionsAndTapesRemainGroupGated) {
+    TempWorkspace workspace("dice_mod_rulebook_");
+    const auto mod = workspace.root() / "data/mod/books";
+    fs::create_directories(mod / "rulebook/nested"); fs::create_directories(mod / "script");
+    writeText(mod / "rulebook/root.yaml", "rule: COC\nmanual:\n  Parent: root\n  Same: root-same\n");
+    writeText(mod / "rulebook/nested/child.yaml", "rule: COC-7\nmanual:\n  Child: child\n  Same: child-same\ntape:\n  scene:\n    lua: scene\n  unsafe:\n    js: never\n");
+    writeText(mod / "rulebook/other.yaml", "rule: DND\nmanual:\n  Same: dnd-same\n");
+    writeText(mod / "script/scene.lua", "event.blocked = true; event.msg_reply = event:format('scene:{nick}')");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    ASSERT_EQ(manager.ruleManual("Same", "COC-7").value_or(""), std::string("child-same"));
+    ASSERT_EQ(manager.ruleManual("Parent", "COC-7").value_or(""), std::string("root"));
+    ASSERT_EQ(manager.ruleManual("Child", "COC").value_or(""), std::string("child"));
+    ASSERT_EQ(manager.ruleManual("DND:Same", "COC").value_or(""), std::string("dnd-same"));
+    ASSERT_TRUE(manager.ruleManual("Same").value_or("").find("dnd-same") != std::string::npos);
+    ASSERT_EQ(manager.formatTemplate("{help:COC-7:Same}", {}), std::string("child-same"));
+    nlohmann::json context = {{"uid","u"},{"gid","g"},{"nick","N"}};
+    auto tape = manager.dispatchTape("COC-7", "scene", context);
+    ASSERT_TRUE(tape.matched); ASSERT_EQ(tape.reply, std::string("scene:N"));
+    manager.setGroupGate([](const auto&, const auto&, const auto&, const auto&) { return false; });
+    context = {{"uid","u"},{"gid","g"},{"nick","N"}};
+    ASSERT_FALSE(manager.dispatchTape("COC-7", "scene", context).matched);
+    ASSERT_FALSE(manager.dispatchTape("COC-7", "unsafe", context).matched);
+}
+
+TEST(LuaPluginCompat, ClockStartupAndDayHooksUseServerTimeAndYieldSafely) {
+    TempWorkspace workspace("dice_mod_clock_");
+    struct TimezoneGuard { int previous = utils::timezoneOffsetMinutes(); ~TimezoneGuard() { utils::setTimezoneOffset(previous); } } timezone;
+    utils::setTimezoneOffset(0);
+    const auto mod = workspace.root() / "data/mod/clock"; fs::create_directories(mod / "event");
+    writeText(mod / "event/events.lua", R"LUA(
+event.start = {trigger={hook="StartUp"},action={lua=function()setUserConf("u","start",getUserConf("u","start",0)+1)end}}
+event.endday = {trigger={hook="DayEnd"},action={lua=function()setUserConf("u","oldyear",event.year)end}}
+event.newday = {trigger={hook="DayNew"},action={lua=function()setUserConf("u","newyear",event.year)end}}
+event.clock = {trigger={clock={{hour=0,minute=0},{hour=12,minute=30}}},action={lua=function()
+ setUserConf("u","clock",event.hour); sleepTime(5); setUserConf("u","resumed",true)
+end}}
+)LUA");
+    std::time_t now = 1704067199; // 2023-12-31 23:59:59 UTC
+    struct Timer { double seconds; std::function<void()> callback; };
+    std::vector<Timer> timers;
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); manager.setClock([&] { return now; });
+    manager.setScheduler([&](double seconds, auto callback) { timers.push_back({seconds, std::move(callback)}); });
+    ASSERT_EQ(manager.loadDir("data/mod"), 1); ASSERT_EQ(manager.mods()[0].events, 4);
+    manager.startEventHooks(); manager.startEventHooks();
+    auto fireShortest = [&] {
+        auto it = std::min_element(timers.begin(), timers.end(), [](const auto& a, const auto& b) { return a.seconds < b.seconds; });
+        auto callback = std::move(it->callback); timers.erase(it); callback();
+    };
+    fireShortest(); ASSERT_EQ(manager.confGet("u:u", "start"), std::string("1"));
+    ++now; fireShortest();
+    ASSERT_EQ(manager.confGet("u:u", "oldyear"), std::string("2023"));
+    ASSERT_EQ(manager.confGet("u:u", "newyear"), std::string("2024"));
+    ASSERT_EQ(manager.confGet("u:u", "clock"), std::string("0"));
+    ASSERT_FALSE(manager.confHas("u:u", "resumed")); fireShortest();
+    ASSERT_EQ(manager.confGet("u:u", "resumed"), std::string("true"));
+    auto stale = timers.front().callback;
+    ASSERT_EQ(manager.reload(), 1); const auto count = timers.size(); stale(); ASSERT_EQ(timers.size(), count);
+    ASSERT_EQ(manager.confGet("u:u", "start"), std::string("1")); // reload is not a host startup
+}
+
+TEST(LuaPluginCompat, UnicodeNestedResourcesAndLuaActionFunctionsKeepTheirCallingConvention) {
+    TempWorkspace workspace("dice_mod_unicode_");
+    const auto mod = workspace.root() / "data/mod" / utf8Path(u8"父") / utf8Path(u8"子");
+    fs::create_directories(mod / "reply"); fs::create_directories(mod / "script" / utf8Path(u8"命名"));
+    writeText(mod / "reply/rule.lua", R"LUA(
+msg_reply.action={keyword={mAtCh="中文"},echo={lua=function(...)
+ assert(select('#',...)==0);return loadLua("命名.助手")
+end}}
+)LUA");
+    writeText(mod / "script" / utf8Path(u8"命名") / utf8Path(u8"助手.lua"), "return 'unicode-ok'");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    ASSERT_EQ(manager.dispatch("中文", "u", "g", "N", "", false).reply, std::string("unicode-ok"));
+}
+
+TEST(LuaPluginCompat, SchedulerFailureDoesNotLeakTheLegacyLock) {
+    TempWorkspace workspace("dice_mod_scheduler_failure_");
+    const auto mod = workspace.root() / "data/mod/failure"; fs::create_directories(mod / "reply");
+    writeText(mod / "reply/rule.lua", R"LUA(
+msg_reply.wait={keyword={Match="wait"},limit={lock={chat="shared"}},echo=function()sleepTime(10);return 'never'end}
+msg_reply.ok={keyword={Match="ok"},limit={lock={chat="shared"}},echo="ok"}
+)LUA");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    manager.setScheduler([](double, auto) { throw std::runtime_error("synthetic scheduler stopped"); });
+    ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    const auto failed = manager.dispatch("wait", "u", "g", "N", "", false);
+    ASSERT_TRUE(failed.failed); ASSERT_FALSE(failed.pending);
+    ASSERT_EQ(manager.dispatch("ok", "u", "g", "N", "", false).reply, std::string("ok"));
+}
+
+TEST(LuaPluginCompat, HookFailuresAreVisibleAndCannotUndoAnotherHooksRejection) {
+    TempWorkspace workspace("dice_mod_hook_failure_");
+    const auto mod = workspace.root() / "data/mod/hooks"; fs::create_directories(mod / "event");
+    writeText(mod / "event/events.lua", R"LUA(
+event.bad={trigger={hook="GroupRequest"},action={lua=function()error("synthetic hook failure")end}}
+event.first={trigger={hook="FriendRequest"},action={lua=function()event.blocked=true;event.approval=false end}}
+event.last={trigger={hook="FriendRequest"},action={lua=function()event.blocked=true;event.approval=true end}}
+event.log={trigger={hook="LogEnd"},action={lua=function()event.blocked=true end}}
+)LUA");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    nlohmann::json context = nlohmann::json::object();
+    ASSERT_FALSE(manager.dispatchHook("GroupRequest", context)); ASSERT_TRUE(context["@dice_event_failed"] == true);
+    context = nlohmann::json::object(); ASSERT_TRUE(manager.dispatchHook("FriendRequest", context)); ASSERT_TRUE(context["approval"] == false);
+    ASSERT_TRUE(manager.hasHook("LogEnd")); context = nlohmann::json::object(); ASSERT_TRUE(manager.dispatchHook("LogEnd", context));
+}
+
+TEST(LuaPluginCompat, EventAndDelayedRepliesKeepTheTriggeringAdapter) {
+    TempWorkspace workspace("dice_mod_account_");
+    const auto mod = workspace.root() / "data/mod/account";
+    fs::create_directories(mod / "reply"); fs::create_directories(mod / "event");
+    writeText(mod / "reply/rule.lua", R"LUA(msg_reply.wait={keyword={Match="wait"},echo=function(m)
+ sendMsg("early",m.gid,m.uid);sleepTime(10);sendMsg("late",m.gid,m.uid);return "done"
+end})LUA");
+    writeText(mod / "event/rule.lua", R"LUA(event.add={trigger={hook="FriendAdd"},action={lua=function()sendMsg("event",event.gid,event.uid)end}})LUA");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    std::vector<std::function<void()>> callbacks;
+    std::vector<std::string> sent;
+    manager.setScheduler([&](double, auto callback) { callbacks.push_back(std::move(callback)); });
+    auto sender = [&](const auto& platform, const auto& adapter, const auto& text, const auto&, const auto&) { sent.push_back(platform + ":" + adapter + ":" + text); };
+    manager.setScopedSender(sender); manager.setScopedAsyncReply(sender);
+    ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    ASSERT_TRUE(manager.dispatch("wait", "u", "g", "N", "", false, 0, "p", "second").pending);
+    ASSERT_EQ(sent[0], std::string("p:second:early")); callbacks.front()();
+    ASSERT_EQ(sent[1], std::string("p:second:late")); ASSERT_EQ(sent[2], std::string("p:second:done"));
+    nlohmann::json context = {{"platform","p"},{"adapterId","second"},{"uid","u"},{"gid","g"}};
+    manager.dispatchHook("FriendAdd", context); ASSERT_EQ(sent[3], std::string("p:second:event"));
+}
+
+TEST(LuaPluginCompat, DelayedCallbacksAfterDestructionAreHarmless) {
+    TempWorkspace workspace("dice_mod_lifetime_");
+    const auto mod = workspace.root() / "data/mod/lifetime";
+    fs::create_directories(mod / "event");
+    writeText(mod / "event/timer.lua", "event.timer={trigger={cycle=10},action={lua=function()setUserConf('u','tick',1)end}} ");
+    std::vector<std::function<void()>> callbacks;
+    {
+        LuaPluginManager manager; ASSERT_TRUE(manager.init());
+        manager.setScheduler([&](double, auto callback) { callbacks.push_back(std::move(callback)); });
+        ASSERT_EQ(manager.loadDir("data/mod"), 1); ASSERT_EQ(callbacks.size(), size_t(1));
+    }
+    const auto count = callbacks.size(); for (const auto& callback : callbacks) callback();
+    ASSERT_EQ(callbacks.size(), count);
+}
+
+TEST(LuaPluginCompat, EventDefaultsParticipateInHostGatesAndKeepTheirAccount) {
+    TempWorkspace workspace("dice_mod_event_defaults_");
+    const auto mod = workspace.root() / "data/mod/defaults";
+    fs::create_directories(mod / "event");
+    writeText(mod / "event/events.lua", R"LUA(
+event.target={uid="u",gid="g",platform="p",adapterId="account",trigger={cycle=60},
+ action={lua=function()sendMsg("target",event.gid,event.uid)end}}
+event.notice={uid="default-user",gid="default-group",platform="default-platform",adapterId="default-account",
+ trigger={hook="FriendAdd"},action={lua=function()sendMsg("notice",event.gid,event.uid)end}}
+)LUA");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    std::vector<std::function<void()>> callbacks;
+    manager.setScheduler([&](double, auto callback) { callbacks.push_back(std::move(callback)); });
+    bool enabled = false; std::vector<std::string> gates, sent;
+    manager.setGroupGate([&](const auto& p, const auto& g, const auto&, const auto& a) {
+        gates.push_back(p + ":" + a + ":" + g); return enabled;
+    });
+    manager.setScopedSender([&](const auto& p, const auto& a, const auto& text, const auto& g, const auto& u) {
+        sent.push_back(p + ":" + a + ":" + g + ":" + u + ":" + text);
+    });
+    ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    ASSERT_TRUE(sent.empty()); ASSERT_EQ(gates.back(), std::string("p:account:g"));
+    enabled = true; auto callback = std::move(callbacks.front()); callbacks.erase(callbacks.begin()); callback();
+    ASSERT_EQ(sent.size(), size_t(1)); ASSERT_EQ(sent[0], std::string("p:account:g:u:target"));
+    nlohmann::json context = {{"uid","native-user"},{"gid","native-group"},{"platform","native-p"},{"adapterId","native-a"}};
+    manager.dispatchHook("FriendAdd", context);
+    ASSERT_EQ(gates.back(), std::string("native-p:native-a:native-group"));
+    ASSERT_EQ(sent.back(), std::string("native-p:native-a:native-group:native-user:notice"));
+}
+
+TEST(LuaPluginCompat, TextTapesCannotReuseAReplyToBypassTheGroupGate) {
+    TempWorkspace workspace("dice_mod_text_tape_");
+    const auto mod = workspace.root() / "data/mod/text"; fs::create_directories(mod / "rulebook");
+    writeText(mod / "rulebook/book.yaml", "rule: TEST\ntape:\n  scene:\n    text: hello\n");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    nlohmann::json context = {{"uid","u"},{"gid","g"}};
+    auto result = manager.dispatchTape("TEST", "scene", context);
+    ASSERT_TRUE(result.matched); ASSERT_EQ(result.reply, std::string("hello"));
+    manager.setGroupGate([](const auto&, const auto&, const auto&, const auto&) { return false; });
+    result = manager.dispatchTape("TEST", "scene", context);
+    ASSERT_FALSE(result.matched); ASSERT_TRUE(result.reply.empty());
+}
+
+TEST(LuaPluginCompat, AccountSelfIdentityAndSelfLimitsFollowImmediateEventAndDelayedContexts) {
+    TempWorkspace workspace("dice_mod_self_identity_");
+    const auto mod = workspace.root() / "data/mod/identity";
+    fs::create_directories(mod / "reply"); fs::create_directories(mod / "event");
+    writeText(mod / "reply/identity.lua", R"LUA(
+msg_reply.who={keyword={match="who"},echo=function()return getDiceQQ()end}
+msg_reply.wait={keyword={match="wait"},echo=function()
+ local before=getDiceQQ(); sleepTime(1); return before.."/"..getDiceQQ()
+end}
+msg_reply.a={keyword={match="gate"},limit={self_var={token={equal="A"}}},echo="account-A"}
+msg_reply.b={keyword={match="gate"},limit={self_var={token={equal="B"}}},echo="account-B"}
+msg_reply.absent={keyword={match="absent"},limit={self_var={missing=false}},echo="known-account"}
+)LUA");
+    writeText(mod / "event/event.lua", R"LUA(
+event.identity={trigger={hook="FriendAdd"},action={lua=function()setUserConf("observer","event-self",getDiceQQ())end}}
+)LUA");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init()); manager.setBotId("global");
+    std::map<std::string, std::string> identities = {{"a","bot-a"},{"b","bot-b"}};
+    manager.setSelfIdLookup([&](const std::string& p, const std::string& a) {
+        return p == "p" && identities.count(a) ? identities.at(a) : std::string();
+    });
+    std::vector<std::function<void()>> callbacks; std::vector<std::string> replies;
+    manager.setScheduler([&](double, auto callback) { callbacks.push_back(std::move(callback)); });
+    manager.setScopedAsyncReply([&](const auto&, const auto& a, const auto& text, const auto&, const auto&) { replies.push_back(a + ":" + text); });
+    manager.confSet("u:global", "token", "A"); manager.confSet("u:bot-a", "token", "A"); manager.confSet("u:bot-b", "token", "B");
+    ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    auto run = [&](const std::string& text, const std::string& account) { return manager.dispatch(text,"u","g","N","",false,0,"p",account); };
+    ASSERT_EQ(run("who","a").reply, std::string("bot-a")); ASSERT_EQ(run("who","b").reply, std::string("bot-b"));
+    ASSERT_EQ(run("gate","a").reply, std::string("account-A")); ASSERT_EQ(run("gate","b").reply, std::string("account-B"));
+    ASSERT_FALSE(run("gate","unknown").matched); ASSERT_FALSE(run("absent","unknown").matched);
+    ASSERT_EQ(run("absent","a").reply, std::string("known-account"));
+    ASSERT_TRUE(run("wait","a").pending); ASSERT_TRUE(run("wait","b").pending);
+    ASSERT_EQ(callbacks.size(), size_t(2));
+    ASSERT_EQ(manager.botId(), std::string("global"));
+    while (!callbacks.empty()) { auto callback = std::move(callbacks.back()); callbacks.pop_back(); callback(); }
+    ASSERT_EQ(replies[0], std::string("b:bot-b/bot-b")); ASSERT_EQ(replies[1], std::string("a:bot-a/bot-a"));
+    identities["a"].clear(); ASSERT_EQ(run("who","a").reply, std::string()); ASSERT_FALSE(run("gate","a").matched);
+    nlohmann::json context = {{"uid","u"},{"platform","p"},{"adapterId","b"}};
+    manager.dispatchHook("FriendAdd", context);
+    ASSERT_EQ(manager.confGet("u:observer","event-self"), std::string("bot-b"));
+    ASSERT_EQ(manager.botId(), std::string("global"));
+}
+
+TEST(LuaPluginCompat, ThreeArgumentDeckCallsKeepTheirChatAndSourceAccount) {
+    TempWorkspace workspace("dice_mod_scoped_deck_");
+    const auto mod = workspace.root() / "data/mod/cards"; fs::create_directories(mod / "reply");
+    writeText(mod / "reply/card.lua", R"LUA(
+msg_reply.card={keyword={match="cards"},echo=function(msg)
+ return drawDeck(msg.gid,msg.uid,"X").."|"..drawDeck("X").."|"..drawDeck(0,22,"X")
+end}
+)LUA");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    manager.setScopedDeckDraw([](const auto& p, const auto& a, const auto& g, const auto& u, const auto& name) {
+        return p+":"+a+":"+g+":"+u+":"+name;
+    });
+    ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    ASSERT_EQ(manager.dispatch("cards","11","33","N","",false,0,"p","a").reply,
+        std::string("p:a:33:11:X|p:a:::X|p:a::22:X"));
+    ASSERT_EQ(manager.dispatch("cards","11","","N","",true,0,"p","b").reply,
+        std::string("p:b::11:X|p:b:::X|p:b::22:X"));
+}
+
+TEST(LuaPluginCompat, LogEndOldFilenameAndContextFieldsReachLua) {
+    TempWorkspace workspace("dice_mod_log_fields_");
+    const auto mod = workspace.root() / "data/mod/log"; fs::create_directories(mod / "event");
+    writeText(mod / "event/log.lua", R"LUA(
+event.log={trigger={hook="LogEnd"},action={lua=function()
+ assert(event.log_file=="export.txt");assert(event.log_name=="Name");assert(event.log_count==3)
+ assert(event.fromUser=="u");assert(event.fromGroup=="g");assert(getDiceQQ()=="bot-b")
+ event.blocked=true;setUserConf("u","last-log",event.log_file)
+end}}
+)LUA");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    manager.setSelfIdLookup([](const auto&, const auto& a) { return a == "b" ? std::string("bot-b") : std::string(); });
+    ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    Message source; source.senderId="u"; source.targetId="g"; source.platform="p"; source.adapterId="b";
+    auto context=legacy_log::context(source,1,"Name",fs::path("data/logs/export.txt"),3,123);
+    ASSERT_TRUE(manager.dispatchHook("LogEnd", context));
+    ASSERT_EQ(manager.confGet("u:u","last-log"), std::string("export.txt"));
+}
+
+TEST(LuaPluginCompat, SessionDeckStorageKeepsSpentCardsAcrossReloadAndDatabaseReopen) {
+    TempWorkspace workspace("dice_mod_deck_persistence_");
+    {
+        LuaPluginManager manager; ASSERT_TRUE(manager.init());
+        auto decks=nlohmann::json::parse(R"({"X":{"meta":["spent","left"],"idxs":[1,0],"size":1}})");
+        ASSERT_TRUE(manager.confSetBatch({{"game:2000","__session","shared"},{"game:session:shared","__decks",decks.dump()}}));
+        std::mt19937_64 rng(1); ASSERT_EQ(session_deck::draw(decks["X"],rng).text,std::string("left"));
+        ASSERT_TRUE(manager.confSetBatch({{"game:session:shared","__decks",decks.dump()}}));
+        manager.reload();
+        ASSERT_EQ(nlohmann::json::parse(manager.confGet("game:session:shared","__decks"))["X"]["size"],0);
+    }
+    LuaPluginManager reopened; ASSERT_TRUE(reopened.init());
+    auto decks=nlohmann::json::parse(reopened.confGet("game:session:shared","__decks"));
+    ASSERT_EQ(decks["X"]["size"],0); ASSERT_EQ(reopened.confGet("game:2000","__session"),std::string("shared"));
+    std::mt19937_64 rng(1); ASSERT_TRUE(session_deck::draw(decks["X"],rng).empty);
+}
+
+TEST(LuaPluginCompat, ScopedDeckHostExceptionsCannotEscapeTheLuaBoundary) {
+    TempWorkspace workspace("dice_mod_deck_host_failure_");
+    const auto mod=workspace.root()/"data/mod/deck"; fs::create_directories(mod/"reply");
+    writeText(mod/"reply/cards.lua",R"LUA(
+msg_reply.card={keyword={match="card"},echo=function()
+ local card,error=drawDeck(22,11,"X"); assert(card==nil);assert(error~=nil);return "caught"
+end}
+)LUA");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    manager.setScopedDeckDraw([](const auto&,const auto&,const auto&,const auto&,const auto&) -> std::string {
+        throw std::runtime_error("synthetic deck failure");
+    });
+    ASSERT_EQ(manager.loadDir("data/mod"),1);
+    ASSERT_EQ(manager.dispatch("card","11","22","N","",false,0,"p","a").reply,std::string("caught"));
+    ASSERT_TRUE(manager.eval("assert(type(getDiceQQ())=='string')"));
+}
+
+TEST(LuaPluginCompat, AuditedCorpusFixtureRestrictsHostAccess) {
+    TempWorkspace workspace("dice_corpus_guard_");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    std::string error;
+    ASSERT_TRUE(test::constrainAuditedCorpus(manager, workspace.root(), &error));
+    ASSERT_TRUE(manager.eval(R"LUA(
+      assert(not pcall(os.execute, 'echo forbidden'))
+      assert(not pcall(io.popen, 'echo forbidden'))
+      assert(not pcall(require, 'socket'))
+      assert(not pcall(package.loadlib, 'outside.dll', '*'))
+      assert(debug.getregistry == nil and debug.getupvalue == nil)
+      assert(io.open('../outside.txt', 'w') == nil)
+      assert(io.open('C:/Windows/win.ini', 'r') == nil)
+      assert(io.open('//server/share/file', 'r') == nil)
+      assert(io.open('data/file.txt:stream', 'w') == nil)
+      assert(io.open('data/NUL', 'w') == nil)
+      assert(os.remove('../outside.txt') == nil)
+      assert(os.rename('data/a', '../outside.txt') == nil)
+      assert(not mkDirs('../outside-dir'))
+      local file = assert(io.open('./data/allowed.txt', 'w'))
+      file:write('fixture'); file:close()
+      file = assert(io.open('data/allowed.txt', 'r'))
+      assert(file:read('*a') == 'fixture'); file:close()
+      assert(require('json').decode('{"n":7}').n == 7)
+      assert(assert(load('return 7'))() == 7)
+      assert(load(string.dump(function() return 7 end)) == nil)
+    )LUA", &error));
+}
+
 TEST(LuaPluginCompat, ExternalLegacyResourceCorpusWhenProvided) {
     const char* entryValue = std::getenv("DICENEXT_LEGACY_RESOURCE_PLUGIN");
     if (!entryValue || !*entryValue) return;  // CI uses the self-contained fixture above.
@@ -1005,13 +1749,8 @@ TEST(LuaPluginCompat, ExternalLegacyResourceCorpusWhenProvided) {
 
     TempWorkspace workspace("dice_next_lua_resource_corpus_");
     const fs::path pluginDir = workspace.root() / "data" / "plugin";
-    std::error_code ec;
-    fs::copy_file(sourceEntry, pluginDir / "ResourceSearchEngine.lua",
-                  fs::copy_options::overwrite_existing, ec);
-    ASSERT_FALSE(static_cast<bool>(ec));
-    fs::copy(sourceData, pluginDir / "QQBot",
-             fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-    ASSERT_FALSE(static_cast<bool>(ec));
+    test::copyAuditedCorpus(sourceEntry, pluginDir / "ResourceSearchEngine.lua");
+    test::copyAuditedCorpus(sourceData, pluginDir / "QQBot");
 
 #ifdef _WIN32
     // main.cpp runs the CRT in UTF-8 mode. Switch only after std::filesystem has
@@ -1023,6 +1762,9 @@ TEST(LuaPluginCompat, ExternalLegacyResourceCorpusWhenProvided) {
 
     LuaPluginManager manager;
     ASSERT_TRUE(manager.init());
+    std::string error;
+    ASSERT_TRUE(test::constrainAuditedCorpus(manager, workspace.root(), &error));
+    TestWatchdog watchdog(std::chrono::seconds(90));
     ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 1);
     const auto result = manager.dispatch(
         ".专长 星质形 ASTRAL_AQUAN", "10001", "20002", "Tester", "", false, 0, "onebot");
@@ -1061,16 +1803,9 @@ TEST(LuaPluginCompat, ExternalLegacyFortuneCorpusWhenProvided) {
 
     TempWorkspace workspace("dice_next_lua_corpus_");
     const fs::path pluginDir = workspace.root() / "data" / "plugin";
-    std::error_code ec;
-    fs::copy(sourceDir, pluginDir / utf8Path(u8"求签"),
-             fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-    ASSERT_FALSE(static_cast<bool>(ec));
-    fs::copy_file(sourceEntry, pluginDir / utf8Path(u8"求签3.0.lua"),
-                  fs::copy_options::overwrite_existing, ec);
-    ASSERT_FALSE(static_cast<bool>(ec));
-    fs::copy_file(sourceNews, pluginDir / "DailyNews-fixed.lua",
-                  fs::copy_options::overwrite_existing, ec);
-    ASSERT_FALSE(static_cast<bool>(ec));
+    test::copyAuditedCorpus(sourceDir, pluginDir / utf8Path(u8"求签"));
+    test::copyAuditedCorpus(sourceEntry, pluginDir / utf8Path(u8"求签3.0.lua"));
+    test::copyAuditedCorpus(sourceNews, pluginDir / "DailyNews-fixed.lua");
 
     LuaPluginManager manager;
     std::vector<std::string> scheduledMessages;
@@ -1085,6 +1820,9 @@ TEST(LuaPluginCompat, ExternalLegacyFortuneCorpusWhenProvided) {
             std::to_string(++dailyFetchCalls) + ".png\"}}";
     });
     ASSERT_TRUE(manager.init());
+    std::string error;
+    ASSERT_TRUE(test::constrainAuditedCorpus(manager, workspace.root(), &error));
+    TestWatchdog watchdog(std::chrono::seconds(30));
     ASSERT_EQ(manager.loadDir((workspace.root() / "data" / "mod").string()), 2);
     ASSERT_EQ(dailyFetchCalls, 1);
 
@@ -1112,4 +1850,79 @@ TEST(LuaPluginCompat, ExternalLegacyFortuneCorpusWhenProvided) {
     ASSERT_TRUE(scheduledMessages[1].find(
         "https://img.example/actual-daily-3.png") != std::string::npos);
     ASSERT_EQ(dailyFetchCalls, 3);
+}
+
+TEST(LuaPluginCompat, ExternalOfficialInventoryCorpusWhenProvided) {
+    const char* root = std::getenv("DICENEXT_LEGACY_OFFICIAL_MOD_ROOT");
+    if (!root || !*root) return;
+    TempWorkspace workspace("dice_inventory_corpus_");
+    test::copyAuditedCorpus(fs::path(root) / "PC_Inventory", workspace.root() / "data/mod/PC_Inventory");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    std::string error;
+    ASSERT_TRUE(test::constrainAuditedCorpus(manager, workspace.root(), &error));
+    std::time_t now = 200000;
+    manager.setClock([&] { return now; });
+    ASSERT_EQ(manager.loadDir("data/mod"),1);
+    auto run = [&](const std::string& command) {
+        now += 11; // Respect, rather than remove, the original per-user cooldown.
+        auto result = manager.dispatch(command,"10001","20002","Tester","",false,0,"onebot","account-a");
+        if (!result.matched || result.reply.empty()) throw std::runtime_error("empty corpus reply: " + command);
+        return result.reply;
+    };
+    ASSERT_TRUE(run("放入背包 绳索").find("绳索") != std::string::npos);
+    ASSERT_TRUE(run("查看背包").find("绳索") != std::string::npos);
+    ASSERT_TRUE(run("放入背包 火把").find("火把") != std::string::npos);
+    ASSERT_TRUE(run("移出背包 绳索").find("移出") != std::string::npos);
+    const auto rest = run("查看背包");
+    ASSERT_TRUE(rest.find("火把") != std::string::npos);
+    ASSERT_TRUE(rest.find("绳索") == std::string::npos);
+    ASSERT_TRUE(manager.eval("local inv=getPlayerCardAttr('10001','20002','_Inventory'); assert(#inv==1 and inv[1].name=='火把')", &error));
+}
+
+TEST(LuaPluginCompat, ExternalOfficialSlotsCorpusWhenProvided) {
+    const char* root = std::getenv("DICENEXT_LEGACY_OFFICIAL_MOD_ROOT");
+    if (!root || !*root) return;
+    TempWorkspace workspace("dice_slots_corpus_");
+    test::copyAuditedCorpus(fs::path(root) / "PC_Slots", workspace.root() / "data/mod/PC_Slots");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    std::string error;
+    ASSERT_TRUE(test::constrainAuditedCorpus(manager, workspace.root(), &error));
+    std::time_t now = 200000;
+    manager.setClock([&] { return now; });
+    ASSERT_EQ(manager.loadDir("data/mod"),1);
+    auto run = [&](const std::string& command) {
+        now += 11;
+        auto result = manager.dispatch(command,"10001","20002","Tester","",false,0,"onebot","account-a");
+        if (!result.matched || result.reply.empty()) throw std::runtime_error("empty corpus reply: " + command);
+        return result.reply;
+    };
+    ASSERT_TRUE(run("物品+绳索*2+火把*3").find("0->2") != std::string::npos);
+    ASSERT_TRUE(run("物品-绳索").find("2->1") != std::string::npos);
+    ASSERT_TRUE(run("查看物品").find("火把*3") != std::string::npos);
+    ASSERT_TRUE(run("状态+中毒^2").find("中毒^2") != std::string::npos);
+    ASSERT_TRUE(run("状态-中毒").find("中毒") != std::string::npos);
+    ASSERT_TRUE(run("更新状态 中毒=轻度中毒").find("轻度中毒") != std::string::npos);
+    ASSERT_TRUE(run("查看状态").find("轻度中毒") != std::string::npos);
+    ASSERT_TRUE(run("法术+光亮术+治疗术").find("治疗术") != std::string::npos);
+    run("法术-光亮术");
+    const auto spells = run("查看法术");
+    ASSERT_TRUE(spells.find("治疗术") != std::string::npos);
+    ASSERT_TRUE(spells.find("光亮术") == std::string::npos);
+    ASSERT_TRUE(run("专长+警觉+灵巧").find("灵巧") != std::string::npos);
+    run("专长-警觉");
+    ASSERT_TRUE(run("查看专长").find("灵巧") != std::string::npos);
+    ASSERT_TRUE(run("新建笔记 调查=抵达钟楼").find("抵达钟楼") != std::string::npos);
+    ASSERT_TRUE(run("更新笔记 调查=发现密室").find("发现密室") != std::string::npos);
+    const auto journal = run("查看笔记 调查");
+    ASSERT_TRUE(journal.find("抵达钟楼") != std::string::npos);
+    ASSERT_TRUE(journal.find("发现密室") != std::string::npos);
+    ASSERT_TRUE(run("查看笔记").find("发现密室") != std::string::npos); // Nested loadLua.
+    run("删除笔记 调查");
+    ASSERT_TRUE(run("查看笔记").find("空空") != std::string::npos);
+    run("清空物品"); run("清空状态"); run("清空法术"); run("清空专长");
+    ASSERT_TRUE(manager.eval(R"LUA(
+      for _, name in ipairs({'_Inventory','_Status','_Spells','_Feats','_Journal'}) do
+        assert(next(getPlayerCardAttr('10001','20002',name)) == nil, name)
+      end
+    )LUA", &error));
 }

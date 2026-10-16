@@ -52,6 +52,7 @@
 #include "core/causal/counter_store.h"
 #include "core/mod/js_plugin_manager.h"
 #include "core/mod/lua_plugin_manager.h"
+#include "core/mod/legacy_log_context.h"
 #include "core/deck/deck_file_utils.h"
 #include "i18n/i18n.h"
 #include "i18n/locale_resolver.h"
@@ -269,7 +270,7 @@ static bool pluginCommandMatches(dice::JsPluginManager& jsMod,
     const std::string nick = msg.senderName.empty() ? msg.senderId : msg.senderName;
     const std::string card = msg.extra.is_object()
         ? msg.extra.value("card", std::string()) : std::string();
-    const int trust = cmdRouter.jsPrivilegeLevel(msg) >= 70 ? 4 : 0;
+    const int trust = cmdRouter.legacyTrustLevel(msg);
     return luaMod.hasCommandTrigger(w, msg.senderId, gid, nick, card,
                                     isPrivate, trust, msg.platform, msg.adapterId)
         || luaMod.hasCommandTrigger("." + w, msg.senderId, gid, nick, card,
@@ -859,6 +860,19 @@ static int realMain(int argc, char* argv[]) {
     });
     auto luaCallbacks = std::make_shared<dice::BoundedExecutor>();
     luaMod.setScheduler(pluginScheduler(luaCallbacks));
+    luaMod.setDiceLookup([&cmdRouter](const std::string& user, const std::string&, const std::string&) { return cmdRouter.isDiceBot(user); });
+    luaMod.setTrustLookup([&cmdRouter](const std::string& user, const std::string& group,
+                                     const std::string& platform, const std::string& adapter, bool privateMessage) {
+        dice::Message message;
+        message.senderId = user; message.targetId = group; message.platform = platform; message.adapterId = adapter;
+        message.type = privateMessage ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
+        if (cmdRouter.isBlocked(message) || cmdRouter.isGroupDisabled(message) || cmdRouter.isGroupLocked(message)) return -1;
+        return cmdRouter.legacyTrustLevel(message);
+    });
+    luaMod.setReplyTypeGate([&cmdRouter](const std::string& platform, const std::string& group, const std::string& type, const std::string& adapter) {
+        // Next's external mode deliberately disables built-ins only; preserve it.
+        return type != "reply" || !cmdRouter.isReplyDisabledFor(platform, group, adapter);
+    });
     luaMod.setRuleGate([&luaMod](const std::string&, const std::string& group,
                                  const std::string& user, const std::string& required,
                                  const std::string&) {
@@ -867,8 +881,17 @@ static int realMain(int argc, char* argv[]) {
         const std::string session = luaMod.confGet(scope, "__session");
         if (!session.empty()) scope = "game:session:" + session;
         if (luaMod.confGet(scope, "__name").empty()) return false;
+        nlohmann::json closed;
+        const auto closedRaw = luaMod.confGet(scope, "__closed");
+        if (!closedRaw.empty()) {
+            if (!dice::legacy_conf::decode(closedRaw, closed)) closed = nlohmann::json::parse(closedRaw, nullptr, false);
+            if (!closed.is_boolean() || closed != false) return false;
+        }
         auto containsUser = [&](const char* key) {
-            auto values = nlohmann::json::parse(luaMod.confGet(scope, key), nullptr, false);
+            const auto raw = luaMod.confGet(scope, key);
+            nlohmann::json values;
+            if (!dice::legacy_conf::decode(raw, values)) values = nlohmann::json::parse(raw, nullptr, false);
+            if (dice::legacy_conf::isSet(values)) values = nlohmann::json(values["values"]);
             if (!values.is_array()) return false;
             for (const auto& value : values) {
                 if (value.is_string() && value.get<std::string>() == user) return true;
@@ -897,6 +920,19 @@ static int realMain(int argc, char* argv[]) {
     });
     luaMod.setSelfName(configMgr.get<std::string>("dice/self_name", std::string("\xe9\xaa\xb0\xe5\xa8\x98")));
     luaMod.setBotId(configMgr.get<std::string>("dice/self_qq", std::string()));   // getDiceQQ()
+    luaMod.setSelfIdLookup([&adapterMgr](const std::string& platform, const std::string& adapterId) {
+        if (!adapterId.empty()) {
+            const auto adapter = adapterMgr.getAdapter(adapterId);
+            return adapter && (platform.empty() || adapter->platform() == platform) ? adapter->getLoginId() : std::string();
+        }
+        std::string identity;
+        bool found = false;
+        for (const auto& adapter : adapterMgr.allAdapters()) if (adapter && adapter->platform() == platform) {
+            if (found) return std::string(); // ambiguous account is not an identity
+            identity = adapter->getLoginId(); found = true;
+        }
+        return identity;
+    });
     jsMod.setSelfInfo(configMgr.get<std::string>("dice/self_qq", std::string()),
                       configMgr.get<std::string>("dice/self_name", std::string()));   // ctx.endPoint.userId/nickname
     // Lua getFavor/setFavor/addFavor/growFavor 直达内置好感度系统。
@@ -966,6 +1002,17 @@ static int realMain(int argc, char* argv[]) {
         [&luaMod](const std::string& scope, const std::string& key) { return luaMod.confGet(scope, key); },
         [&luaMod](const std::string& scope, const std::string& key, const std::string& val) { luaMod.confSet(scope, key, val); },
         [&luaMod](const std::string& scope) { return luaMod.confAllOf(scope); },
+        [&luaMod](const std::string& scope, const std::string& key, const std::string& val) {
+            return luaMod.confSetBatch({{scope, key, val}});
+        },
+    });
+    luaMod.setScopedDeckDraw([&cmdRouter](const std::string& platform, const std::string& adapterId,
+            const std::string& group, const std::string& user, const std::string& name) {
+        dice::Message message;
+        message.platform = platform; message.adapterId = adapterId;
+        message.senderId = user; message.targetId = group;
+        message.type = group.empty() ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
+        return cmdRouter.legacyDrawDeck(message, name);
     });
     // pc:rollDice(expr) 连接到掷骰引擎。
     luaMod.setRoller([&engine](const std::string& expr, int defaultFace) {
@@ -1019,34 +1066,29 @@ static int realMain(int argc, char* argv[]) {
         } catch (...) {}
         return {};
     });
-    // Lua 插件 sendMsg(text,gid,uid) → 优先发到该会话所属平台的适配器，找不到再回退首个已连。
-    luaMod.setSender([&adapterMgr, &cmdRouter, resolveChatPlatform](const std::string& text, const std::string& gid, const std::string& uid) {
-        const std::string plat = resolveChatPlatform(gid, uid);
-        auto send = [&](const dice::AdapterPtr& a) {
-            if (!gid.empty() && (cmdRouter.isGroupDisabledFor(a->platform(), gid, a->id())
-                || !cmdRouter.isPluginAllowedInGroup(a->platform(), gid, a->id()))) return;
-            if (!gid.empty()) a->sendGroupMessage(gid, text);
-            else if (!uid.empty()) a->sendPrivateMessage(uid, text);
-        };
-        if (!plat.empty())
-            for (auto& a : adapterMgr.allAdapters())
-                if (a->isConnected() && a->platform() == plat) { send(a); return; }
-        for (auto& a : adapterMgr.allAdapters())
-            if (a->isConnected()) { send(a); return; }
-    });    // sleepTime 协程结束后的 return 值发回原会话；优先保持触发平台。
-    luaMod.setAsyncReply([&adapterMgr, &cmdRouter](const std::string& platform, const std::string& gid,
-                                       const std::string& uid, const std::string& text) {
+    // Message/event/coroutine replies retain the triggering account. Do not
+    // silently switch platform or bot when that account is disconnected.
+    auto sendScopedLua = [&adapterMgr, &cmdRouter, resolveChatPlatform](
+            const std::string& platform, const std::string& adapterId, const std::string& text,
+            const std::string& gid, const std::string& uid) {
         auto send = [&](const dice::AdapterPtr& adapter) {
+            if (!adapter || !adapter->isConnected()) return;
             if (!gid.empty() && (cmdRouter.isGroupDisabledFor(adapter->platform(), gid, adapter->id())
                 || !cmdRouter.isPluginAllowedInGroup(adapter->platform(), gid, adapter->id()))) return;
             if (!gid.empty()) adapter->sendGroupMessage(gid, text);
             else if (!uid.empty()) adapter->sendPrivateMessage(uid, text);
         };
-        for (auto& adapter : adapterMgr.allAdapters())
-            if (adapter->isConnected() && adapter->platform() == platform) { send(adapter); return; }
-        for (auto& adapter : adapterMgr.allAdapters())
-            if (adapter->isConnected()) { send(adapter); return; }
-    });
+        if (!adapterId.empty()) {
+            auto adapter = adapterMgr.getAdapter(adapterId);
+            if (adapter && (platform.empty() || adapter->platform() == platform)) send(adapter);
+            return;
+        }
+        const auto resolved = platform.empty() ? resolveChatPlatform(gid, uid) : platform;
+        for (const auto& adapter : adapterMgr.allAdapters())
+            if (adapter->isConnected() && (resolved.empty() || adapter->platform() == resolved)) { send(adapter); return; }
+    };
+    luaMod.setScopedSender(sendScopedLua);
+    luaMod.setScopedAsyncReply(sendScopedLua);
     // ── 统一回复兜底链 ───────────────────────────────────────
     // JS插件指令 → Lua因果 → C++因果规则 → 自定义回复 → JS非指令钩子。
     // live 消息管线 / 戳一戳映射 / Lua eventMsg / 网页测试台四处共用。
@@ -1074,7 +1116,7 @@ static int realMain(int argc, char* argv[]) {
         }
         // Lua 模块的因果回复。
         if (reply.empty() && pluginsOn && luaMod.ready()) {
-            int trust = cmdRouter.jsPrivilegeLevel(m) >= 70 ? 4 : 0;   // master/信任≥4 → trust4
+            int trust = cmdRouter.legacyTrustLevel(m);
             auto lr = luaMod.dispatch(m.content, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform, m.adapterId);
             if (partial && (lr.failed || lr.pending)) *partial = true;
             // Legacy Lua modules often hard-code `.command` in msg_order or
@@ -1086,7 +1128,12 @@ static int realMain(int argc, char* argv[]) {
                 if (legacy != m.content)
                     lr = luaMod.dispatch(legacy, m.senderId, pv ? "" : m.targetId, nick, card, pv, trust, m.platform, m.adapterId);
             }
-            if (lr.matched && !lr.reply.empty()) { reply = lr.reply; replySrc = "plugin_command"; if (sources) *sources = lr.sources; }
+            if (lr.matched) {
+                replySrc = "plugin_command";
+                if (sources) *sources = lr.sources;
+                cmdRouter.markLegacyHandled(lr.sources, lr.failed || lr.pending);
+                return lr.reply; // includes deliberate silence, side effects and suspended replies
+            }
         }
         // C++ 因果规则（优先于普通自定义回复）。
         if (reply.empty() && repliesOn) {
@@ -1130,13 +1177,14 @@ static int realMain(int argc, char* argv[]) {
     // Lua 插件 eventMsg(text,gid,uid) 将 text 作为消息走完整回复管线。
     // 复用统一兜底链（内置指令→兜底链→applySelf→发送）。
     // 用线程局部深度计数防 eventMsg 递归风暴（eventMsg 的回复又触发 eventMsg）。
-    luaMod.setEventMsg([&adapterMgr, &cmdRouter, replyFallback, resolveChatPlatform](
+    luaMod.setEventMsg([&adapterMgr, &cmdRouter, &luaMod, replyFallback, resolveChatPlatform](
             const std::string& text, const std::string& gid, const std::string& uid) {
         static thread_local int depth = 0;
         if (depth >= 4) { DICE_LOG_INFO("eventMsg recursion capped at depth 4: '{}'", text); return; }
         struct Guard { int& d; Guard(int& x):d(x){ ++d; } ~Guard(){ --d; } } guard(depth);
         // 会话所属平台优先（多平台在线时别拿「第一个适配器」的平台冒充）。
-        std::string platform = resolveChatPlatform(gid, uid);
+        const auto sourceAdapter = luaMod.activeAdapter_;
+        std::string platform = luaMod.activePlatform_.empty() ? resolveChatPlatform(gid, uid) : luaMod.activePlatform_;
         if (platform.empty())
             for (auto& a : adapterMgr.allAdapters()) if (a->isConnected()) { platform = a->platform(); break; }
         dice::Message pm;
@@ -1145,11 +1193,13 @@ static int realMain(int argc, char* argv[]) {
         pm.senderName = cmdRouter.lookupNick(platform, uid);
         for (auto& a : adapterMgr.allAdapters()) {
             if (!a || !a->isConnected()) continue;
+            if (!sourceAdapter.empty() && a->id() != sourceAdapter) continue;
             if (!platform.empty() && a->platform() != platform) continue;
             pm.adapterId = a->id();
             pm.selfId = a->getLoginId();
             break;
         }
+        if (!sourceAdapter.empty() && pm.adapterId.empty()) return;
         if (cmdRouter.handleLegacyLuaNoticeEvent(text, platform, pm.adapterId)) return;
         pm.content = text; pm.rawContent = text; pm.displayContent = text;
         bool pv = gid.empty();
@@ -1169,6 +1219,7 @@ static int realMain(int argc, char* argv[]) {
             dice::activeProcessingContext.label() + "调用 eventMsg：" + text, "虚拟指令处理完成"});
         for (auto& a : adapterMgr.allAdapters()) {
             if (!a->isConnected()) continue;
+            if (!pm.adapterId.empty() && a->id() != pm.adapterId) continue;
             if (!platform.empty() && a->platform() != platform) continue;
             if (pv) a->sendPrivateMessage(uid, reply);
             else    a->sendGroupMessageCQ(gid, reply);
@@ -1182,6 +1233,59 @@ static int realMain(int argc, char* argv[]) {
     { std::vector<std::string> luaDirs, jsDirs; dice::CommandRouter::packPluginDirs(luaDirs, jsDirs); luaMod.setExtraDirs(luaDirs); }   // 规则包 lua 附加加载
     dice::crashdiag::setPhase("lua-mods");
     luaMod.loadDir("data/mod");   // 与 JS 规则插件共用 data/mod（Lua mod=目录，JS=文件）
+    auto legacyGameScope = [&luaMod](const dice::Message& message) {
+        std::string scope = "game:" + message.targetId;
+        const auto session = luaMod.confGet(scope, "__session");
+        if (!session.empty()) scope = "game:session:" + session;
+        return scope;
+    };
+    cmdRouter.setLegacyLogEndHook([&luaMod, &cmdRouter, &db](const dice::Message& message, int logId) {
+        if (!luaMod.hasHook("LogEnd") || !cmdRouter.groupFeatureEnabled(message, "plugin") || cmdRouter.isBlocked(message)
+            || cmdRouter.isGroupDisabled(message)) return false;
+        const std::filesystem::path directory("data/logs");
+        const auto file = directory / ("legacy-log-" + std::to_string(logId) + ".txt");
+        if (dice::legacy_model::linked("data") || dice::legacy_model::linked(directory) || dice::legacy_model::linked(file)) {
+            DICE_LOG_WARN("LogEnd 导出路径含链接，已跳过旧模组钩子。"); return false;
+        }
+        std::error_code error; std::filesystem::create_directories(directory, error);
+        if (error) return false;
+        // nullptr prevents this compatibility export from publishing local images.
+        const auto text = dice::logsvc::renderSealdice(db, logId, nullptr);
+        std::ofstream output(file, std::ios::binary | std::ios::trunc); output.write(text.data(), static_cast<std::streamsize>(text.size()));
+        if (!output) return false;
+        output.close();
+        auto* storage = db.getLogStorage();
+        if (!storage) return false;
+        const auto row = storage->get<dice::GameLogRow>(logId);
+        const auto count = storage->count<dice::GameLogMessageRow>(sqlite_orm::where(sqlite_orm::c(&dice::GameLogMessageRow::logId) == logId));
+        auto source = message;
+        if (source.selfId.empty()) source.selfId = luaMod.botIdFor(message.platform, message.adapterId);
+        auto context = dice::legacy_log::context(source, logId, row.name, file, count, std::time(nullptr));
+        return luaMod.dispatchHook("LogEnd", context);
+    });
+    cmdRouter.setLegacyRuleHelp([&luaMod, legacyGameScope](const std::string& topic, const dice::Message& message) {
+        return luaMod.ruleManual(topic, luaMod.confGet(legacyGameScope(message), "rule"));
+    });
+    cmdRouter.setLegacyMessageStage([&luaMod, &cmdRouter, legacyGameScope](const dice::Message& message) -> std::optional<std::string> {
+        const bool privateMessage = message.type == dice::MessageType::kPrivate;
+        const auto group = privateMessage ? std::string() : message.targetId;
+        nlohmann::json context = {{"platform", message.platform}, {"adapterId", message.adapterId}, {"uid", message.senderId},
+            {"gid", group}, {"nick", message.senderName}, {"fromMsg", message.content}, {"fromUser", message.senderId},
+            {"fromGroup", group}, {"msgid", message.id}, {"time", std::time(nullptr)}};
+        std::vector<dice::ProcessingSource> sources;
+        if (luaMod.dispatchHook("Message", context, &sources)) {
+            cmdRouter.rememberProcessingSources(std::move(sources));
+            return context.contains("msg_reply") && context["msg_reply"].is_string() ? context["msg_reply"].get<std::string>() : std::string();
+        }
+        const auto scope = legacyGameScope(message);
+        const auto tape = luaMod.confGet(scope, "tape"), rule = luaMod.confGet(scope, "rule");
+        if (!privateMessage && !tape.empty() && !rule.empty() && luaMod.ruleGate_
+            && luaMod.ruleGate_(message.platform, group, message.senderId, "", message.adapterId)) {
+            auto result = luaMod.dispatchTape(rule, tape, context);
+            if (result.matched) { cmdRouter.rememberProcessingSources(std::move(result.sources), result.failed); return result.reply; }
+        }
+        return std::nullopt;
+    });
     cmdRouter.setPluginCommandClaim([&jsMod, &luaMod, &cmdRouter](
             const dice::Message& message, const std::string& commandBody) {
         std::string word = commandBody;
@@ -1195,7 +1299,7 @@ static int realMain(int argc, char* argv[]) {
         const std::string nick = message.senderName.empty() ? message.senderId : message.senderName;
         const std::string card = message.extra.is_object()
             ? message.extra.value("card", std::string()) : std::string();
-        const int trust = cmdRouter.jsPrivilegeLevel(message) >= 70 ? 4 : 0;
+        const int trust = cmdRouter.legacyTrustLevel(message);
         return luaMod.hasCommandTrigger(word, message.senderId, gid, nick, card,
                                         isPrivate, trust, message.platform, message.adapterId)
             || luaMod.hasCommandTrigger("." + word, message.senderId, gid, nick, card,
@@ -1222,7 +1326,7 @@ static int realMain(int argc, char* argv[]) {
         const auto group = pv ? std::string() : message.targetId;
         const auto nick = message.senderName.empty() ? message.senderId : message.senderName;
         const auto card = message.extra.is_object() ? message.extra.value("card", std::string()) : std::string();
-        const int trust = cmdRouter.jsPrivilegeLevel(message) >= 70 ? 4 : 0;
+        const int trust = cmdRouter.legacyTrustLevel(message);
         if (!luaMod.hasCommandTrigger(word, message.senderId, group, nick, card, pv, trust, message.platform, message.adapterId) &&
             !luaMod.hasCommandTrigger("." + word, message.senderId, group, nick, card, pv, trust, message.platform, message.adapterId))
             return std::nullopt;
@@ -1317,11 +1421,24 @@ static int realMain(int argc, char* argv[]) {
 
     // 把 JS 插件 cmd.help + Lua mod descriptor.helpdoc 喂给 .help 帮助系统
     //（解耦：router 不直接依赖各引擎）。
-    cmdRouter.setHelpProvider([&jsMod, &luaMod]() {
+    cmdRouter.setHelpProvider([&jsMod]() {
         std::vector<std::pair<std::string, std::string>> v;
         for (auto& ch : jsMod.commandHelps()) if (!ch.help.empty()) v.push_back({ch.name, ch.help});
+        return v;
+    });
+    cmdRouter.setLegacyModHelpProvider([&luaMod]() {
+        std::vector<std::pair<std::string, std::string>> v;
         for (auto& h : luaMod.helpEntries()) if (!h.text.empty()) v.push_back({h.topic, h.text});
         return v;
+    }, [&luaMod](const std::string& topic, const dice::Message& message) {
+        const auto group = message.type == dice::MessageType::kPrivate ? std::string() : message.targetId;
+        const auto nick = message.senderName.empty() ? message.senderId : message.senderName;
+        const auto card = message.extra.is_object() && message.extra.contains("card") && message.extra["card"].is_string()
+            ? message.extra["card"].get<std::string>() : std::string();
+        return luaMod.formatHelpTopic(topic, {{"uid",message.senderId},{"user",message.senderId},
+            {"fromQQ",message.senderId},{"fromUser",message.senderId},{"gid",group},{"grp",group},
+            {"fromGroup",group},{"platform",message.platform},{"adapterId",message.adapterId},
+            {"nick",nick},{"pc",nick},{"card",card},{"fromMsg",message.content}});
     });
 
     // .plugin 指令的插件清单（lua mods + js 插件），与 /api/groups/plugins 同源。
@@ -1516,7 +1633,7 @@ static int realMain(int argc, char* argv[]) {
             }
         }
         processingPartial = processingPartial || commandHook.failed || commandHook.pending;
-        if (!reply.empty() && replySrc == "plugin_command") didCommand = true;
+        if (replySrc == "plugin_command") didCommand = true;
         // ── 先在消息线程消费本条消息的一次性路由状态 ─────────────
         // 回复投递可能转入 AI 后台线程，这些状态晚取会被下一条消息拿走/污染。
         std::string aiCat = (replySrc == "plugin" || replySrc == "plugin_command") ? "plugin"
@@ -1781,7 +1898,7 @@ static int realMain(int argc, char* argv[]) {
         // 阶段E：若命中某 NPC（名字/触发词），优先以该 NPC 身份回复（人设/模型覆盖）。
         // 触发判定留在消息线程（廉价），上下文/记忆检索/图像识别/生成/工具调用整段
         // 投给 AI 后台线程 —— 大模型再慢也不影响其他指令；完成后经 finishReply 发送。
-        if (reply.empty() && !disabled && !replyOff && !msg.fromSelf
+        if (reply.empty() && !cmdRouter.lastShortcutHandled() && !disabled && !replyOff && !msg.fromSelf
             && msg.type == dice::MessageType::kGroup && !msg.targetId.empty()
             && (dice::aichat::enabled(configMgr) || dice::ainpc::enabled(configMgr))
             && cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId, msg.adapterId)      // 本账号在本群的 AI 开关
@@ -1968,7 +2085,7 @@ static int realMain(int argc, char* argv[]) {
     });
 
     // Non-message events: 入群欢迎词、被加好友欢迎、加好友/加群条件自动同意。
-    adapterMgr.onEvent([&adapterMgr, &configMgr, &i18n, &localeResolver, &cmdRouter, &jsMod, &db, &replyManager, replyFallback](const dice::BotEvent& e) {
+    adapterMgr.onEvent([&adapterMgr, &configMgr, &i18n, &localeResolver, &cmdRouter, &jsMod, &luaMod, &db, &replyManager, replyFallback](const dice::BotEvent& e) {
         using ET = dice::EventType;
         const auto eventName = e.type == ET::kGroupIncrease ? "入群欢迎" : e.type == ET::kFriendAdd ? "好友欢迎"
             : e.type == ET::kFriendRequest ? "好友申请" : e.type == ET::kGroupRequest ? "入群申请"
@@ -1981,7 +2098,38 @@ static int realMain(int argc, char* argv[]) {
         eventContext.type = e.groupId.empty() ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
         eventContext.platform = e.platform; eventContext.adapterId = e.adapterId;
         eventContext.targetId = e.groupId;
+        eventContext.senderId = dice::eventTriggerUserId(e);
         if (jsMod.ready() && !cmdRouter.isGroupDisabled(eventContext)) jsMod.handleEvent(e);
+        auto runLegacyHook = [&](const std::string& hook, nlohmann::json* result = nullptr) {
+            if (cmdRouter.isBlocked(eventContext) || cmdRouter.isGroupDisabled(eventContext)
+                || !cmdRouter.groupFeatureEnabled(eventContext, "plugin")) return false;
+            nlohmann::json context = {{"platform", e.platform}, {"adapterId", e.adapterId}, {"uid", eventContext.senderId}, {"gid", e.groupId},
+                {"operator", e.operatorId}, {"selfId", e.selfId}, {"fromMsg", e.comment}, {"fromUser", eventContext.senderId},
+                {"fromGroup", e.groupId}, {"flag", e.flag}, {"subType", e.subType}, {"time", std::time(nullptr)}, {"extra", e.extra}};
+            const bool blocked = luaMod.dispatchHook(hook, context);
+            if (result) *result = std::move(context);
+            return blocked;
+        };
+        auto legacyRequestVeto = [&](bool friendRequest, bool policyAllowsApproval) {
+            nlohmann::json context;
+            const bool blocked = runLegacyHook(friendRequest ? "FriendRequest" : "GroupRequest", &context);
+            if (context.is_object() && context.contains("@dice_event_failed") && context["@dice_event_failed"] == true) {
+                DICE_LOG_WARN_M("Lua 插件", "旧模组审批钩子执行失败，本次申请保留人工处理。"); return true;
+            }
+            if (!blocked) return false;
+            const auto approval = context.value("approval", nlohmann::json());
+            const auto action = dice::legacyRequestAction(true, approval.is_boolean() ? std::optional<bool>(approval.get<bool>()) : std::nullopt, policyAllowsApproval);
+            if (action == dice::LegacyRequestAction::kReject) {
+                if (friendRequest) a->setFriendRequest(e.flag, false);
+                else a->setGroupRequest(e.flag, e.subType, false, "");
+                return true;
+            }
+            if (action == dice::LegacyRequestAction::kContinueHost) return false;
+            if (approval.is_boolean() && approval.get<bool>()) {
+                DICE_LOG_WARN_M("Lua 插件", "旧模组请求同意{}，但当前自动审批策略不允许；已保留人工处理。", friendRequest ? "好友申请" : "加群申请");
+            }
+            return true; // a mod may veto, never override a restrictive host policy
+        };
 
         nlohmann::json diceSettings = dice::scoped_settings::resolveSection(
             cfgAll, "dice", a->platform(), e.adapterId);
@@ -2073,6 +2221,7 @@ static int realMain(int argc, char* argv[]) {
                 } catch (...) {}
             }
             DICE_LOG_INFO_M("群管理", "事件： 群 {} 文件上传 {} by {}", e.groupId, f.value("name", std::string()), e.userId);
+            runLegacyHook("GroupUpload");
             return;
         }
         if (e.type == ET::kGroupRecall) {
@@ -2105,6 +2254,7 @@ static int realMain(int argc, char* argv[]) {
                 }
             } catch (...) {}
             DICE_LOG_INFO_M("群管理", "事件： 群 {} 消息 {} 已撤回：聊天记录标注，游戏日志移除 {} 条", e.groupId, mid, logRemoved);
+            runLegacyHook("GroupRecall");
             return;
         }
         if (e.type == ET::kGroupHistory) {
@@ -2279,6 +2429,7 @@ static int realMain(int argc, char* argv[]) {
                             "group_size_leave", joinedAdapter);
                     });
                 }
+                if (runLegacyHook("GroupAdd")) return;
                 std::string g = ev.value("group_joined", std::string());
                 if (g.empty()) g = i18n.tr(loc, "event.group_joined");
                 if (!g.empty()) a->sendGroupMessage(e.groupId, g);
@@ -2334,6 +2485,7 @@ static int realMain(int argc, char* argv[]) {
             }
             // 入群反馈开关。
             if (!diceFlag("listen_group_add", true)) return;
+            if (runLegacyHook("GroupWelcome")) return;
             // A member joined → send the group's .welcome text if configured.
             // welcome with delay + cooldown
             std::string welcome = cmdRouter.groupSettingValue(e.platform, e.groupId, "welcome", e.adapterId);
@@ -2424,6 +2576,7 @@ static int realMain(int argc, char* argv[]) {
                 }
 }
         } else if (e.type == ET::kGroupDecrease) {
+            runLegacyHook("GroupDecrease"); // observational; cannot suppress leave bookkeeping
             // B：骰娘被移出群（或自身退群回执）→ 标记已退群 + 通知骰主。
             if (!e.selfId.empty() && e.userId == e.selfId && !e.groupId.empty()) {
                 cmdRouter.setGroupSettingFor(e.platform, e.groupId, "left", "1", e.adapterId);
@@ -2435,6 +2588,7 @@ static int realMain(int argc, char* argv[]) {
         } else if (e.type == ET::kPoke) {
             // Poke is a unique event, never an artificial text keyword.
             if (e.selfId.empty() || e.userId != e.selfId) return;
+            if (runLegacyHook("Poke")) return;
             dice::Message pm;
             pm.platform = e.platform; pm.adapterId = e.adapterId; pm.selfId = e.selfId;
             pm.senderId = e.operatorId;
@@ -2485,6 +2639,7 @@ static int realMain(int argc, char* argv[]) {
         } else if (e.type == ET::kFriendAdd) {
             a->refreshGroupList();   // 同步刷新好友列表缓存（非好友邀请判定依赖它）
             if (!diceFlag("listen_friend_add", true)) return;       // 新好友事件开关
+            if (runLegacyHook("FriendAdd")) return;
             // B：新好友通过通知骰主。
             cmdRouter.notifyMasters(dice::notice::kImportant,
                 "\xe6\x96\xb0\xe5\xa5\xbd\xe5\x8f\x8b\xe5\xb7\xb2\xe6\xb7\xbb\xe5\x8a\xa0\xef\xbc\x9a" + userLabel(e.userId), "friend_add", e.adapterId);
@@ -2535,6 +2690,8 @@ static int realMain(int argc, char* argv[]) {
             const auto decision = dice::evaluateFriendRequest(
                 pol, e.comment, ev.value("friend_keyword", std::string()), usedInGroup,
                 cmdRouter.isUserWhitelisted(e.userId), cmdRouter.isUserBlacklisted(e.userId));
+            if (decision != dice::FriendRequestDecision::kReject
+                && legacyRequestVeto(true, decision == dice::FriendRequestDecision::kApprove)) return;
             if (decision == dice::FriendRequestDecision::kApprove) {
                 a->setFriendRequest(e.flag, true);
                 if (pol == "group_used")
@@ -2584,6 +2741,9 @@ static int realMain(int argc, char* argv[]) {
                 }
                 std::string pol = ev.value("group_invite_policy", std::string());
                 if (pol.empty()) pol = ev.value("auto_approve_group", false) ? "all" : "manual";
+                const bool hostApproves = pol == "all" || (pol == "whitelist"
+                    && (cmdRouter.isMasterUser(e.platform, e.userId) || cmdRouter.isUserWhitelisted(e.userId)));
+                if (pol != "reject" && legacyRequestVeto(false, hostApproves)) return;
                 if (pol == "all") {
                     a->setGroupRequest(e.flag, e.subType, true);
                     DICE_LOG_INFO_M("群管理", "事件： 群邀请自动通过(任意) group {}", e.groupId);
@@ -2600,6 +2760,10 @@ static int realMain(int argc, char* argv[]) {
                 // sub_type=add：有人申请加入机器人作为管理员的群。
                 // 优先看本群 .group auto pass 设置（all=全过 / 关键字=验证消息含关键字才过）。
                 std::string ap = cmdRouter.groupSettingValue(e.platform, e.groupId, "autoPass", e.adapterId);
+                const bool hostApproves = !ap.empty() ? ap == "all" || (!e.comment.empty() && e.comment.find(ap) != std::string::npos)
+                    : ev.value("auto_approve_group", false) && (ev.value("group_keyword", std::string()).empty()
+                        || e.comment.find(ev.value("group_keyword", std::string())) != std::string::npos);
+                if (legacyRequestVeto(false, hostApproves)) return;
                 if (!ap.empty()) {
                     if (ap == "all" || (!e.comment.empty() && e.comment.find(ap) != std::string::npos)) {
                         a->setGroupRequest(e.flag, e.subType, true);
@@ -3315,10 +3479,10 @@ static int realMain(int argc, char* argv[]) {
                     std::string replySrc = "builtin";   // 来源分类（同 live 管线）
                     if (reply.empty() && (!disabled || forcedByAt))
                         reply = replyFallback(msg, replySrc);   // 与 live 完全同链（含因果规则）
-                    if (!reply.empty() && replySrc == "plugin_command") didCommand = true;
+                    if (replySrc == "plugin_command") didCommand = true;
                     // 智能化阶段A：测试台也走 AI 对话（无其它回复+触发时），方便骰主预览。
                     // 测试台不读 chat.db 上下文（用空上下文），仅验证触发+生成+发送。
-                    if (reply.empty() && !disabled && (dice::aichat::enabled(configMgr) || dice::ainpc::enabled(configMgr))
+                    if (reply.empty() && !cmdRouter.lastShortcutHandled() && !disabled && (dice::aichat::enabled(configMgr) || dice::ainpc::enabled(configMgr))
                         && (msg.targetId.empty() || (cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId)
                             && cmdRouter.aiWhitelistOk(msg.platform, msg.targetId, true)))) {  // 开关 + AI 白名单
                         bool atMe = !msg.selfId.empty()
@@ -4223,8 +4387,9 @@ static int realMain(int argc, char* argv[]) {
     // Start adapters after the event loop is running (WebSocket needs an active
     // loop). Adapters were already registered above; start each exactly ONCE here
     // (double-starting reverse-WS recreates its TcpServer and crashes trantor).
-    app.getLoop()->runAfter(0.5, [&adapterMgr]() {
+    app.getLoop()->runAfter(0.5, [&adapterMgr, &luaMod]() {
         adapterMgr.startAll();
+        luaMod.startEventHooks();
     });
 
     // ── 聊天记录保留期清理（启动后 1 分钟 + 之后每 6 小时）──

@@ -3,6 +3,176 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-16: Named resources and native Mod help followup (local)
+
+- Three added cases failed before their fixes: case-varied named scripts picked
+  the first Mod instead of the last loaded override; a directory init.lua had no
+  callable package name; and uppercase HELP / mixed-case cross-Mod help aliases
+  returned no text. Lookup now follows the original case-insensitive namespaces
+  without changing stored UTF-8 paths or display names. Package-name aliases
+  retain Next's explicit foo.init spelling and existing path/link/disable checks.
+- The same merged help index now supplies listings and template references.
+  Aliases may cross Mods and chain, duplicate topics follow load order, disabled
+  overrides disappear on reload, and cycles cannot hang the catalog. Descriptor
+  key events retain declaration-order override semantics without the quadratic
+  object lookup cost of ordered_json for large query/help Mods.
+- Selected native .help entries and explicit/legacy reply help references use
+  the real Lua template implementation with message context. Catalog generation
+  remains raw and does not pre-render every entry. Router bridge tests retain
+  builtin/JS priority and scope filtering; the core executable uses a test
+  callback, while separate real-Lua tests verify case-folded help references,
+  message-first precedence, speech/sample recursion and context-sensitive aliases.
+- Template recursion is bounded by depth, reference work, result length and
+  cumulative intermediate bytes; adversarial fan-out and oversized inputs return
+  empty rather than allocate indefinitely, and a later valid render still works.
+  No unsafe language/runtime/permission boundary was relaxed.
+- Final stable-source Windows amd64 Release server and both test executables
+  built successfully. Full core regression passed **735 cases / 48885 assertions**;
+  full real-Lua regression with all four corpus entries active passed **58 cases /
+  612 assertions** (54 self-contained cases plus four external entries). With
+  external paths unset, the same executable passed **528 assertions**, with 58
+  registrations but four early-return corpus entries. The targeted native-help
+  case passed 11 assertions; it is part of the full core run, not extra coverage.
+- The documentation catalog passed all 902 editable keys in four languages and
+  VitePress built (existing large-chunk warning only). The 246 corpus source
+  files retained the preceding content/path digest; no original plugin was
+  modified. No live Dice service, real account delivery, commit, push or Release
+  was started. Linux/macOS verification remains outstanding. Earlier same-day
+  sections below are historical scopes, not the current final counts.
+
+## 2026-10-16: Audited external Mod/plugin corpus followup (local)
+
+- The complete Lua executable with all four optional external entries enabled
+  passed **54 cases / 571 assertions** (50 self-contained cases plus four
+  external entries), with no early-return corpus entries in that run. These
+  totals supersede, not add to, the earlier same-day Lua scope below.
+- External inputs: ResourceSearchEngine with its original cache/dictionaries;
+  the seven fortune decks, fortune entry and DailyNews-fixed; old official
+  PC_Inventory; and PC_Slots. Tested resource detail/reload, moved and mixed-
+  encoding cache paths, fortune dependencies, fresh news fetches, task output,
+  inventory edits/deletion, counted items, status rename, spells/feats, and
+  journal creation/update/detail/list/deletion, including nested loadLua.
+- A real PC_Slots run initially returned no text for `查看法术`. Original Dice!
+  uses case-insensitive speech dictionaries; Next's case-sensitive lookup was
+  wrong. Speech now folds ASCII keys at loading/lookup, preserves variable
+  precedence, recursively expands aliases and selects JSON/YAML array entries
+  uniformly. Empty arrays are safely empty and mixed invalid arrays are not
+  partially activated. Synthetic tests cover case-varied overrides/reload,
+  aliases, loops, Unicode keys, scalar/array variants and message variables.
+- Two new isolated regression cases failed before the script-environment fix:
+  a second directory invocation inherited temporary helper/counter globals;
+  an event inherited counter 3 from two suspended replies. File/text script
+  entrypoints now get their own environment, while nested loadLua shares that
+  invocation's environment and registered function closures retain Next's
+  existing captured-local behavior. Reverse-order continuation and synchronous
+  message/event context regressions now pass.
+- A third new regression reproduced nested eventMsg dispatch replacing the
+  outer message: `Outer1:Outer1:1` incorrectly became `Inner:inner-value:9`.
+  Dispatch now restores the previous global message on every return path, with
+  runtime-generation protection. File scripts and registered function closures
+  both render the correct outer message after the nested call.
+- Only audited text corpora were executed. Inputs are copied without links or
+  reparse points under bounded size/count limits. Test-only Lua guards restrict
+  files to the copied workspace and disable shell/process/native-library/default
+  IO/environment introspection; HTTP and outbound events are doubles. This is
+  defense in depth for these samples, NOT an OS sandbox for hostile code, and
+  does not relax or replace production permissions. No real network or adapter
+  send was performed. Corpus scripts/data are not vendored into the repository.
+- The supplied PC_Slots delete-item script parses `name` but uses undefined
+  `item`; this is a source-plugin bug, not justification to retain variable
+  pollution. Its supported `物品-名称` path is covered. The two overlapping
+  inventory Mods were tested separately, not installed as if their same-named
+  replies/scripts were independent. Platform-specific image-file existence,
+  actual news-service availability and real delivery remain outside this run.
+  Dispatch used synthetic numeric QQ IDs; source plugins that do arithmetic
+  on fromQQ are not certified for platforms with opaque OpenIDs.
+- Opt in with `DICENEXT_LEGACY_RESOURCE_PLUGIN` (ResourceSearchEngine.lua),
+  `DICENEXT_LEGACY_FORTUNE_PLUGIN` (the 求签 directory with its sibling entry
+  and DailyNews-fixed.lua), and `DICENEXT_LEGACY_OFFICIAL_MOD_ROOT` (containing
+  PC_Inventory and PC_Slots). The optional entries skip when paths are absent;
+  the final no-corpus run passed 487 assertions, with 54 registrations but only
+  50 self-contained cases exercising behavior. Do not present registration
+  counts as executed corpus coverage in that case.
+- Final Windows amd64 Release server and test executable builds passed; the
+  full core suite passed **734 cases / 48874 assertions**. This core run uses
+  its existing Lua bridge doubles; the separate complete real-Lua run above
+  verifies the runtime changes. The documentation catalog passed all 902 keys
+  in four languages and VitePress built (existing large-chunk warning only).
+  All 246 original corpus files retained their content hashes across the run.
+  Linux/macOS and real-account sends remain unverified. No listening server,
+  firewall change, commit, push or Release was performed.
+
+## 2026-10-16: Account identity, Session decks and LogEnd followup (local)
+
+- Final Windows amd64 Release server and both test executables built. The final
+  isolated suites passed **734 core cases / 48874 assertions** and **47 registered
+  Lua cases / 443 assertions**. Two Lua external-corpus entries were deliberately
+  not enabled, so **45 self-contained Lua cases** ran. No failed assertions.
+- Session-specific core filtering passed 10 cases / 106 assertions (a subset of
+  the full run, not additional coverage to add to its totals). Fixtures verify
+  original `meta/idxs/size` permutations, weighted copies, exhaustion/reset,
+  explicit public copying, unchanged group-temp replacement behavior, shared
+  Session areas, independent Sessions, source gates, atomic concurrent depletion,
+  checked-save failure without consumption and invalid-state rejection.
+- Migration fixtures retain original archives and activate only a fully valid
+  collection; default repeat import does not refill a depleted pool. Separate
+  real Lua SQLite tests preserve depletion across runtime reload and database
+  destruction/reopen. Native command fixtures use a storage bridge double; these
+  checks do not claim a live server end-to-end migration or adapter send.
+- Lua identity tests cover two adapters, self-variable gates, unscoped fallback,
+  unknown identities, native events and interleaved suspended continuations.
+  Three-argument draw calls keep platform/account/chat; host callback exceptions
+  are converted to Lua nil/error results, not allowed across the native boundary.
+- LogEnd tests pass the actual host-built context through Lua and distinguish
+  the real filename/path from a user-authored display title. Game-over regression
+  re-enters `.game new` from a hook after checking that the log is closed: the
+  game lock is not held. Completed-game hooks do not retain a mutable old Session.
+- Concurrent text/reference expansion and public-source reload are covered by a
+  bounded watchdog test. Session rendering runs outside the game/storage locks.
+  Four-language Session help/messages and both served documentation pages and
+  roadmaps were synchronized; catalog checks passed all 902 editable texts in
+  each language and VitePress built (large-chunk warning only).
+- MinGW C++20 syntax checking of the data-only Session header passed; this is
+  not Linux/macOS verification. WSL did not provide a usable local environment.
+  Real user plugins, real accounts and Linux/macOS runs remain outstanding.
+  No listening server, firewall change, commit, push or Release was performed.
+
+## 2026-10-15: Safe legacy Dice! Mod compatibility expansion (local)
+
+- Windows amd64 Release server, core test executable and Lua test executable
+  built successfully. Final isolated runs passed **721 core cases / 48749
+  assertions** and **42 registered Lua cases / 403 assertions**, with no failed
+  assertions. The Lua count includes two optional external-corpus entries that
+  return early when their opt-in environment paths are absent: **40 Lua cases
+  actually exercised self-contained fixtures**. No real user plugin was executed.
+- New fixtures cover full TOML multiline/quoted/inline declarations, empty and
+  weighted replies, typed false/zero/text/empty values, IDs, self/user/group
+  conditions, dice policies, persistent shared cooldown/day quotas, mixed Lua
+  counter tables and queued locks. Invalid conditions/actions remain fail-closed.
+- Clock/startup/day hooks use a simulated server clock. Tests cover coroutine
+  resume, scheduler failure, reload/destruction cancellation, event-default
+  admission and account preservation across immediate/event/delayed sends.
+  Native poke policy context uses the actor, not the bot recipient. Request
+  hooks cannot grant permission beyond the host and cannot undo another veto.
+- Nested/disabling/management fixtures cover namespaced scripts, Chinese paths,
+  last-loaded overrides, same-named directory/single-file IDs, rule-aware manuals,
+  game gates and text-tape reply reuse. Core integration checks protect recovery
+  commands, censor/disable/plugin gates and log closing before LogEnd publication.
+- Numeric model checks cover integer DSL preservation, explicit floating maths,
+  precedence, short circuit, ternary/default expressions, bounded parsing,
+  invalid/divide-by-zero/overflow rejection, XML data extraction and deterministic
+  enabled-mod priority. Arbitrary XML scripts are never evaluated.
+- The MIT toml++ 3.4.0 header is byte-for-byte identical to the reference copy
+  (SHA-256 `bc03fbb9e73e732c10f07308fde72e02e29f6e57ed37f36069baf890e51d5b62`).
+  It adds no vcpkg dependency. The documentation catalog and VitePress build
+  passed; VitePress reported only its existing large-chunk warning.
+- This is local verification, not a Release or Linux/macOS/live-adapter claim.
+  No listening server, firewall change, commit, push or publication was started.
+  Old JS/Python/bytecode, arbitrary XML code, unsafe policy hooks and remote
+  auto-install remain excluded. Next's single-selected-reply dispatch and
+  synchronous decision hooks are retained; see
+  [the compatibility scope](../../docs/legacy-mod-compatibility.md).
+
 ## 2026-10-12: Release Linux timeout and updater shutdown race
 
 - Release run 38234306582 compiled and packaged all five platforms, but Linux

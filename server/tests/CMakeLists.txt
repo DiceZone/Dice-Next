@@ -51,6 +51,7 @@ set(TEST_SOURCES
     test_legacy_clock_command.cpp
     test_legacy_command_arguments.cpp
     test_legacy_command_behaviour.cpp
+    test_legacy_model.cpp
     test_friend_approval_policy.cpp
     test_sensitive_word_filter.cpp
     test_builtin_decks.cpp
