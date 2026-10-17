@@ -47,14 +47,19 @@
 
 namespace dice::legacy2 {
 
-/// GBK (CP936) → UTF-8. Invalid input is a migration error, never invalid JSON.
+/// GBK → UTF-8. Invalid input is a migration error, never invalid JSON.
+///
+/// 按 GB18030 解码：它是 GBK 的超集，GBK 范围内的字节解出来完全一样，另外认得四字节序列。
+/// 旧版 Dice! 存下的群名、昵称里会有 emoji 这类四字节字符（2026-10-17 B03 46230 的群名
+/// 「弃约社会🛰️」），按 GBK 解会让整份群配置判为无法读取。
 inline std::string gbkToUtf8(const std::string& gbk) {
 #if defined(_WIN32)
     if (gbk.empty()) return gbk;
-    int wlen = MultiByteToWideChar(936, MB_ERR_INVALID_CHARS, gbk.data(), (int)gbk.size(), nullptr, 0);
+    constexpr UINT kGb18030 = 54936;
+    int wlen = MultiByteToWideChar(kGb18030, MB_ERR_INVALID_CHARS, gbk.data(), (int)gbk.size(), nullptr, 0);
     if (wlen <= 0) throw std::runtime_error("invalid GBK text in legacy data");
     std::wstring w(wlen, L'\0');
-    MultiByteToWideChar(936, MB_ERR_INVALID_CHARS, gbk.data(), (int)gbk.size(), w.data(), wlen);
+    MultiByteToWideChar(kGb18030, MB_ERR_INVALID_CHARS, gbk.data(), (int)gbk.size(), w.data(), wlen);
     int u8 = WideCharToMultiByte(65001, 0, w.data(), wlen, nullptr, 0, nullptr, nullptr);
     if (u8 <= 0) throw std::runtime_error("cannot encode legacy text as UTF-8");
     std::string out(u8, '\0');
@@ -62,7 +67,7 @@ inline std::string gbkToUtf8(const std::string& gbk) {
     return out;
 #elif defined(__APPLE__) || defined(__linux__)
     if (gbk.empty()) return gbk;
-    iconv_t converter = iconv_open("UTF-8", "GBK");
+    iconv_t converter = iconv_open("UTF-8", "GB18030");
     if (converter == reinterpret_cast<iconv_t>(-1)) throw std::runtime_error("GBK converter unavailable");
     std::string out(gbk.size() * 4 + 8, '\0');
     char* input = const_cast<char*>(gbk.data()); size_t inputLeft = gbk.size();

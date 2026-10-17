@@ -375,3 +375,23 @@ TEST(ReleaseMigration, RootMediaIsBackedUpAndRestoredWithoutLosingOldFormatCompa
     ASSERT_EQ(readFile("data/legacy_assets/deck/picture.png"),"deck");
     ASSERT_TRUE(backup::allowedArchivePath("image/test.png")); ASSERT_FALSE(backup::allowedArchivePath("image/../secret"));
 }
+
+
+// 2026-10-17 B03 46230：旧版 Dice! 群名里的 emoji 是 GB18030 四字节序列，按 GBK 解会让整份
+// ChatConf.dat 判为无法读取，40 个群的设置一个都没迁过来
+TEST(LegacyGbk, FourByteGb18030EmojiInGroupNamesDecodes) {
+    const std::string clover = "\xD3\xCE\xDF\xAE\xA1\xA2\xCC\xAB\xC9\xCF\xD5\xD5\xC9\xD5\xD6\xD0\xD2\xA9\xB2\xC4\xA1\xA2\x94\x39\xB6\x32";
+    ASSERT_EQ(dice::legacy2::gbkToUtf8(clover),
+              "\xE6\xB8\xB8\xE5\xBC\x8B\xE3\x80\x81\xE5\xA4\xAA\xE4\xB8\x8A\xE7\x85\xA7\xE7\x83\xA7\xE4\xB8\xAD\xE8\x8D\xAF\xE6\x9D\x90\xE3\x80\x81\xF0\x9F\x8D\x80");
+    const std::string satellite = "\xC6\xFA\xD4\xBC\xC9\xE7\xBB\xE1\x95\x30\x96\x36\x84\x31\x82\x35";
+    ASSERT_EQ(dice::legacy2::gbkToUtf8(satellite),
+              "\xE5\xBC\x83\xE7\xBA\xA6\xE7\xA4\xBE\xE4\xBC\x9A\xF0\x9F\x9B\xB0\xEF\xB8\x8F");
+}
+
+TEST(LegacyGbk, PlainGbkIsUnchangedAndGarbageStillFails) {
+    ASSERT_EQ(dice::legacy2::gbkToUtf8("\xD2\xD1\xC8\xEB\xC8\xBA"), "\xE5\xB7\xB2\xE5\x85\xA5\xE7\xBE\xA4");  // 已入群
+    ASSERT_EQ(dice::legacy2::gbkToUtf8("Room NO.9"), "Room NO.9");
+    bool threw = false;
+    try { dice::legacy2::gbkToUtf8(std::string("\xFF\xFF\xFF", 3)); } catch (const std::exception&) { threw = true; }
+    ASSERT_TRUE(threw);  // 布局探测仍然靠它拒绝错位读出的乱码
+}
