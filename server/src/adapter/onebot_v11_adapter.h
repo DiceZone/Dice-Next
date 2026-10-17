@@ -505,6 +505,9 @@ private:
     bool startReverseWs() {
         int port = 6700;
         try { port = std::stoi(endpoint_); } catch (...) { lastError_ = "Invalid port: " + endpoint_; return false; }
+        // 已经在监听就别再建一次：重建 TcpServer 会让旧的那个在别的线程上析构，
+        // trantor 直接中止进程（2026-10-17 BDC 托管开通时撞上过）。
+        if (revLoop_ && tcpServer_) return true;
         auto self = shared_from_this();
         revLoop_ = std::make_shared<trantor::EventLoopThread>();
         revLoop_->run();

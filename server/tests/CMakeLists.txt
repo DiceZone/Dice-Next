@@ -61,6 +61,7 @@ set(TEST_SOURCES
     test_qq_official_protocol.cpp
     test_identity_email.cpp
     test_milky_adapter.cpp
+    test_adapter_manager_start.cpp
 
     # Project source files needed by tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/causal/cooldown_manager.cpp

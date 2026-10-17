@@ -15,6 +15,8 @@
 #include <map>
 #include <mutex>
 #include <functional>
+#include <set>
+#include <vector>
 #include <ctime>
 
 namespace dice {
@@ -27,6 +29,13 @@ public:
 
     /// Register a built-in or loaded adapter instance
     void registerAdapter(AdapterPtr adapter) {
+        AdapterPtr replaced;
+        {
+            std::lock_guard lock(mutex_);
+            auto it = adapters_.find(adapter->id());
+            if (it != adapters_.end()) replaced = it->second;
+        }
+        if (replaced) forgetStarted(replaced.get());
         std::lock_guard lock(mutex_);
         adapter->attachDatabase(db_);
         adapters_[adapter->id()] = adapter;
@@ -60,7 +69,9 @@ public:
     bool startAdapter(const std::string& id) {
         auto a = getAdapter(id);
         if (!a) return false;
+        std::lock_guard startLock(startMutex_);
         if (a->start()) {
+            started_.insert(a.get());
             DICE_LOG_INFO("适配器「{}」启动请求已提交，连接结果由适配器报告。", a->name());
             return true;
         }
@@ -73,13 +84,26 @@ public:
         auto a = getAdapter(id);
         if (!a) return;
         a->stop();
+        forgetStarted(a.get());
         DICE_LOG_INFO("适配器「{}」已停止。", a->name());
     }
 
     /// Start all registered adapters
+    ///
+    /// 启动后 0.5 秒才跑这一趟。这半秒里管理接口可能已经建好并启动了适配器（BDC
+    /// 托管开通就在这个窗口里调 POST /api/adapters），再启动一次会重建反向 WS 的
+    /// TcpServer，trantor 直接中止进程。已经启动过的同一个适配器对象跳过。
     void startAll() {
-        for (auto& [id, a] : adapters_) {
+        std::vector<AdapterPtr> pending;
+        {
+            std::lock_guard lock(mutex_);
+            for (auto& [id, a] : adapters_) pending.push_back(a);
+        }
+        std::lock_guard startLock(startMutex_);
+        for (auto& a : pending) {
+            if (started_.count(a.get())) continue;
             if (a->start()) {
+                started_.insert(a.get());
                 DICE_LOG_INFO("适配器「{}」启动请求已提交，尚不代表平台已经连接。", a->name());
             } else {
                 DICE_LOG_ERROR("适配器「{}」启动失败：{}", a->name(), a->lastError());
@@ -90,18 +114,26 @@ public:
     /// Stop all adapters
     void stopAll() {
         for (auto& [id, a] : adapters_) a->stop();
+        {
+            std::lock_guard startLock(startMutex_);
+            started_.clear();
+        }
         DICE_LOG_INFO("所有适配器已停止。");
     }
 
     /// Unregister (remove) an adapter
     void unregisterAdapter(const std::string& id) {
-        std::lock_guard lock(mutex_);
-        auto it = adapters_.find(id);
-        if (it != adapters_.end()) {
-            if (it->second->isConnected()) it->second->stop();
+        AdapterPtr removed;
+        {
+            std::lock_guard lock(mutex_);
+            auto it = adapters_.find(id);
+            if (it == adapters_.end()) return;
+            removed = it->second;
+            if (removed->isConnected()) removed->stop();
             adapters_.erase(it);
-            DICE_LOG_INFO("适配器「{}」已移除。", id);
         }
+        forgetStarted(removed.get());
+        DICE_LOG_INFO("适配器「{}」已移除。", id);
     }
 
     // ─── Query ───────────────────────────────────────────────
@@ -410,6 +442,15 @@ private:
     std::vector<IAdapter::MessageCallback> messageHandlers_;
     std::vector<IAdapter::EventCallback> eventHandlers_;
     mutable std::mutex mutex_;
+    //: 由 startAdapter / startAll 启动过的适配器对象。按对象记而不是按 id：改配置会
+    //: 换一个新对象注册到同一个 id 上，新对象必须照常启动。
+    std::mutex startMutex_;
+    std::set<const IAdapter*> started_;
+
+    void forgetStarted(const IAdapter* adapter) {
+        std::lock_guard startLock(startMutex_);
+        started_.erase(adapter);
+    }
     std::map<std::string, std::string> lastActiveAt_;   // adapterId → UTC ISO（受 mutex_ 保护）
 };
 
