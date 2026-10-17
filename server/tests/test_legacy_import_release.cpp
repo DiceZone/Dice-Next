@@ -121,6 +121,23 @@ TEST(ReleaseMigration, LogsAppendAndDoNotCollideBetweenSourceRoots) {
     ASSERT_EQ(importLogs(f.db,"other",contexts,messages,{},&report),1);
     ASSERT_EQ(f.db.getLogStorage()->count<GameLogRow>(),2);
 }
+// 2026-10-17 B03：338 份日志里 3 份有残缺的 UTF-8 字节，以前整个日志阶段失败、一份都没导入
+TEST(ReleaseMigration, BrokenUtf8LogIsRepairedAndDoesNotSinkTheOthers) {
+    ReleaseImportFixture f;
+    f.file("old/user/log/20001_a.txt", "Alice(10001) 2026-08-01 12:00:00\nfine\n");
+    f.file("old/user/log/20001_b.txt", "Bob(10002) 2026-08-01 12:01:00\n\xEF\xBC\x9F)\r\n\xB8\xAA\xE5\xB0\x8F\n");
+    f.file("old/user/log/20001_c.txt", "no header at all\n");
+    std::map<std::string, LegacyLogContext> contexts; int messages = 0; ImportResult report;
+    ASSERT_EQ(importLogs(f.db, "old", contexts, messages, {}, &report), 2);
+    ASSERT_EQ(messages, 2);
+    bool repaired = false, headerless = false;
+    for (const auto& item : report.details) {
+        if (item.name == "20001_b.txt" && item.status == "success") repaired = true;
+        if (item.name == "20001_c.txt" && item.status == "failed") headerless = true;
+    }
+    ASSERT_TRUE(repaired);
+    ASSERT_TRUE(headerless);
+}
 TEST(ReleaseMigration, ExistingCardsAndOtherLocaleHelpArePreserved) {
     ReleaseImportFixture f; card("old/user/PlayerCards.RDconf");
     CharacterCardRow row; row.userId="10001"; row.name=""; row.attrs=R"({"力量":99})"; f.db.getCardStorage()->insert(row);

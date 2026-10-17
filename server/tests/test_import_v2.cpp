@@ -250,6 +250,57 @@ TEST(ImportCensorWords, ImportsLegacyLevelsAndEnablesFilter) {
     cleanupTempDir(root);
 }
 
+// ─── 旧格式容错 ───────────────────────────────────────────────
+
+// 2026-10-17 B03 实际碰到的两个社区牌堆：整行 // 作者注释 + 末尾多逗号；字符串里直接放 Tab
+TEST(LegacyLenientJson, CommentsTrailingCommasAndRawTabsBecomeValidJson) {
+    const std::string commented = "//众所周知\n//共收录2条\n{\"弱智吧\":[\n\"一\",\n\n\"二\",\n\n]\n}";
+    ASSERT_FALSE(validateDeckJson(commented).empty());
+    const auto fixed = json::parse(legacyLenientJson(commented));
+    ASSERT_EQ(fixed["弱智吧"].size(), size_t(2));
+    ASSERT_EQ(fixed["弱智吧"][1].get<std::string>(), "二");
+
+    const std::string tabs = "{\r\n\t\"_六级\": [\r\n\t\t\"六级1\\n\tabbreviation\xC2\xA0n.节略\t\",\r\n\t]\r\n}";
+    ASSERT_FALSE(validateDeckJson(tabs).empty());
+    const auto words = json::parse(legacyLenientJson(tabs));
+    ASSERT_EQ(words["_六级"][0].get<std::string>(), "六级1\n\tabbreviation\xC2\xA0n.节略\t");
+}
+
+TEST(LegacyLenientJson, LeavesSlashesAndCommasInsideStringsAlone) {
+    const std::string deck = R"({"网址":["https://example.com/a,]", "a // b"]})";
+    ASSERT_EQ(legacyLenientJson(deck), deck);
+}
+
+TEST(LegacyRepairUtf8, ReplacesOnlyTheBrokenBytes) {
+    // 实际日志：「？)」后换行，下一行开头残留一个汉字的尾字节 0xB8
+    const std::string broken = "\xEF\xBC\x9F)\r\n\xB8\xAA\xE5\xB0\x8F";
+    ASSERT_EQ(legacyRepairUtf8(broken), "\xEF\xBC\x9F)\r\n\xEF\xBF\xBD\xEF\xBF\xBD\xE5\xB0\x8F");
+    const std::string fine = "希亚(10001) 2026-08-01 12:00:00\n掷骰";
+    ASSERT_EQ(legacyRepairUtf8(fine), fine);
+    ASSERT_EQ(legacyRepairUtf8("\xE5\xB0"), "\xEF\xBF\xBD\xEF\xBF\xBD");  // 文件末尾被截断
+}
+
+TEST(ImportDecks, RepairableLegacyDeckIsImportedAndFlagged) {
+    fs::path root = makeTempDir("decks_lenient");
+    fs::create_directories(root / "PublicDeck");
+    {
+        std::ofstream f(root / "PublicDeck" / "commented.json", std::ios::binary);
+        f << "//作者注释\n{\"deck\":[\"a\",\"b\",]}";
+    }
+    fs::path origCwd = fs::current_path();
+    fs::current_path(root);
+    ImportOptions opts;
+    auto result = importDecks(root, opts);
+    const auto saved = json::parse(readFile(fs::path("data") / "decks" / "commented.json"));
+    fs::current_path(origCwd);
+
+    ASSERT_EQ(result.success, 1);
+    ASSERT_EQ(result.failed, 0);
+    ASSERT_TRUE(result.details[0].reason.find("已修正旧格式") != std::string::npos);
+    ASSERT_EQ(saved["deck"].size(), size_t(2));
+    cleanupTempDir(root);
+}
+
 // ─── importDecks Integration Tests (Filesystem) ───────────────
 // These tests create temporary directories and files.
 
@@ -493,7 +544,8 @@ TEST(ImportDecks, NonJsonFileSkipped) {
     cleanupTempDir(root);
 }
 
-TEST(ImportDecks, InvalidJsonFails) {
+// 旧版 Dice! 本来也读不了的牌堆：跳过并提示，不算迁移失败
+TEST(ImportDecks, InvalidJsonIsSkipped) {
     fs::path root = makeTempDir("decks_invalid");
 
     fs::create_directories(root / "PublicDeck");
@@ -511,14 +563,15 @@ TEST(ImportDecks, InvalidJsonFails) {
     fs::current_path(origCwd);
 
     ASSERT_EQ(result.success, 0);
-    ASSERT_EQ(result.failed, 1);
-    ASSERT_EQ(result.details[0].status, "failed");
+    ASSERT_EQ(result.failed, 0);
+    ASSERT_EQ(result.skipped, 1);
+    ASSERT_EQ(result.details[0].status, "skipped");
     EXPECT_FALSE(result.details[0].reason.empty());
 
     cleanupTempDir(root);
 }
 
-TEST(ImportDecks, NonObjectJsonFails) {
+TEST(ImportDecks, NonObjectJsonIsSkipped) {
     fs::path root = makeTempDir("decks_nonobj");
 
     fs::create_directories(root / "PublicDeck");
@@ -536,7 +589,8 @@ TEST(ImportDecks, NonObjectJsonFails) {
     fs::current_path(origCwd);
 
     ASSERT_EQ(result.success, 0);
-    ASSERT_EQ(result.failed, 1);
+    ASSERT_EQ(result.failed, 0);
+    ASSERT_EQ(result.skipped, 1);
 
     cleanupTempDir(root);
 }
@@ -666,8 +720,8 @@ TEST(ImportDecks, MultipleFilesMixedResults) {
     fs::current_path(origCwd);
 
     ASSERT_EQ(result.success, 2);
-    ASSERT_EQ(result.skipped, 1);  // notes.txt
-    ASSERT_EQ(result.failed, 1);   // bad.json
+    ASSERT_EQ(result.skipped, 2);  // notes.txt, bad.json
+    ASSERT_EQ(result.failed, 0);
     ASSERT_EQ((int)result.details.size(), 4);
 
     cleanupTempDir(root);

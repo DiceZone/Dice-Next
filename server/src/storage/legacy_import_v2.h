@@ -172,6 +172,77 @@ inline std::string readFile(const fs::path& p) {
     return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
+/// 旧版 Dice! 截断长消息时可能把一个字切成两半，日志里留下零星残缺的 UTF-8 字节；原样存进
+/// JSON 会在 dump() 时抛异常。每个残缺字节换成 U+FFFD，其余字节原样保留。
+inline std::string legacyRepairUtf8(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    const auto* s = reinterpret_cast<const unsigned char*>(text.data());
+    const size_t n = text.size();
+    size_t i = 0;
+    while (i < n) {
+        const unsigned char c = s[i];
+        if (c < 0x80) { out.push_back(static_cast<char>(c)); ++i; continue; }
+        size_t len = 0;
+        unsigned char lo = 0x80, hi = 0xBF;
+        if (c >= 0xC2 && c <= 0xDF) len = 2;
+        else if (c >= 0xE0 && c <= 0xEF) { len = 3; if (c == 0xE0) lo = 0xA0; else if (c == 0xED) hi = 0x9F; }
+        else if (c >= 0xF0 && c <= 0xF4) { len = 4; if (c == 0xF0) lo = 0x90; else if (c == 0xF4) hi = 0x8F; }
+        bool valid = len > 0 && i + len <= n;
+        for (size_t k = 1; valid && k < len; ++k) {
+            const unsigned char b = s[i + k];
+            if (b < (k == 1 ? lo : 0x80) || b > (k == 1 ? hi : 0xBF)) valid = false;
+        }
+        if (valid) { out.append(text, i, len); i += len; }
+        else { out += "\xEF\xBF\xBD"; ++i; }
+    }
+    return out;
+}
+
+/// 社区牌堆常见的非标准写法：整行 // 注释、数组或对象末尾多一个逗号、字符串里直接放 Tab 或
+/// 换行。去掉注释行和字符串外的多余逗号，把字符串里的裸控制字符转义；字符串内容不变。
+inline std::string legacyLenientJson(const std::string& text) {
+    std::string stripped;
+    stripped.reserve(text.size());
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(start, end - start);
+        const auto first = line.find_first_not_of(" \t\r");
+        if (first == std::string::npos || line.compare(first, 2, "//") != 0) {
+            stripped += line;
+            if (end < text.size()) stripped += '\n';
+        }
+        if (end >= text.size()) break;
+        start = end + 1;
+    }
+    std::string out;
+    out.reserve(stripped.size());
+    bool inString = false, escaped = false;
+    for (size_t i = 0; i < stripped.size(); ++i) {
+        const char ch = stripped[i];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (ch == '\\') escaped = true;
+            else if (ch == '"') inString = false;
+            else if (ch == '\t') { out += "\\t"; continue; }
+            else if (ch == '\n') { out += "\\n"; continue; }
+            else if (ch == '\r') { out += "\\r"; continue; }
+            out.push_back(ch);
+            continue;
+        }
+        if (ch == '"') inString = true;
+        else if (ch == ',') {
+            size_t next = i + 1;
+            while (next < stripped.size() && std::strchr(" \t\r\n", stripped[next]) && stripped[next] != '\0') ++next;
+            if (next < stripped.size() && (stripped[next] == ']' || stripped[next] == '}')) continue;
+        }
+        out.push_back(ch);
+    }
+    return out;
+}
+
 /// Select the same primary/backup order used by the old Dice! loader.  A
 /// migration must not report "0 imported" merely because the primary file is
 /// damaged while its automatic backup is intact.
@@ -1381,9 +1452,18 @@ inline ImportResult importDecks(const fs::path& root, const ImportOptions& opts 
         }
         std::string content = readFile(path);
         std::string validationError = validateDeckJson(content);
+        const bool jsonDeck = migration_resources::lowerExtension(path) == ".json";
+        bool repaired = false;
+        // 旧版 Dice! 用标准解析读牌堆，读不了就静默跳过。能修成合法 JSON 的照收；修不了的
+        // 跳过并提示，不让一个旧版本来就读不了的文件把整次迁移判成失败。
+        if (!validationError.empty() && jsonDeck) {
+            auto lenient = legacyLenientJson(content);
+            if (validateDeckJson(lenient).empty()) { content = std::move(lenient); validationError.clear(); repaired = true; }
+        }
         if (!validationError.empty()) {
-            legacyResourceDetail(result, name, migration_resources::lowerExtension(path) == ".json" ? "failed" : "skipped",
-                                 migration_resources::lowerExtension(path) == ".json" ? validationError : "not a legacy JSON deck"); return;
+            legacyResourceDetail(result, name, "skipped", jsonDeck
+                ? "旧版 Dice! 同样读不了这个牌堆（" + validationError + "）；原文件保留在迁移备份里"
+                : "not a legacy JSON deck"); return;
         }
         fs::path target = dst / migration_resources::fromUtf8(legacyDeckTargetName(root, path));
         bool exists = fs::exists(target, ec);
@@ -1402,6 +1482,7 @@ inline ImportResult importDecks(const fs::path& root, const ImportOptions& opts 
         if (error.empty()) {
             detail.status = "success";
             detail.reason = "destination: " + migration_resources::utf8(target);
+            if (repaired) detail.reason += "；已修正旧格式（注释、末尾逗号或字符串内的控制字符）";
             ++result.success;
         } else {
             detail.status = "failed";
@@ -1738,9 +1819,11 @@ inline int importLogs(Database& db, const fs::path& root,
         for (size_t i = 0; i < count; ++i) value.push_back({rows[i].sender, rows[i].userId, rows[i].createdAt, rows[i].content, rows[i].images});
         return migration_resources::hash(value.dump());
     };
-    migration_resources::walk(root, dir, [&](const fs::path& path) {
+    auto importOne = [&](const fs::path& path) {
         if (migration_resources::lowerExtension(path) != ".txt") return;
-        const auto file = migration_resources::utf8(path.filename()), text = readFile(path);
+        const auto file = migration_resources::utf8(path.filename());
+        const auto raw = readFile(path);
+        const auto text = legacyRepairUtf8(raw);
         const auto source = migration_resources::sourceIdentity(root, path);
         LegacyLogContext context;
         if (const auto it = contexts.find(file); it != contexts.end()) context = it->second;
@@ -1821,6 +1904,8 @@ inline int importLogs(Database& db, const fs::path& root,
             return true;
         });
         messages += static_cast<int>(parsed.size() - from); ++imported;
+        if (text != raw && diagnostics)
+            legacyResourceDetail(*diagnostics, file, "success", "已导入；残缺的 UTF-8 字节已替换为 U+FFFD");
         if (!existing && context.status == 0) {
             auto groups = context.groupIds; if (groups.empty()) groups.push_back(context.groupId);
             for (const auto& group : groups) {
@@ -1828,6 +1913,14 @@ inline int importLogs(Database& db, const fs::path& root,
                     upsertImportedGroupSetting(db, opts, group, "activeLogName", context.name);
                 else if (diagnostics) legacyResourceDetail(*diagnostics, file + "/" + group, "skipped", "保留已有活动日志");
             }
+        }
+    };
+    migration_resources::walk(root, dir, [&](const fs::path& path) {
+        // 一份日志读不了只记这一份，别让其余几百份跟着失败
+        try { importOne(path); }
+        catch (const std::exception& error) {
+            if (!diagnostics) throw;
+            legacyResourceDetail(*diagnostics, migration_resources::utf8(path.filename()), "failed", error.what());
         }
     }, [&](const auto& path, const auto& reason) {
         if (diagnostics) legacyResourceDetail(*diagnostics, migration_resources::utf8(path.filename()), "failed", reason);
