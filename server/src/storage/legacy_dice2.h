@@ -188,6 +188,10 @@ inline AttrVal readAttrVar(BReader& r, int depth = 0) {
         case 7:  v.kind = AttrVal::Kind::Int;  v.i = r.rLL(); break;              // ID
         case 21:                                                                   // Table
         case 22: { v.kind = AttrVal::Kind::Table; v.table = readAnysTableImpl(r, tag == 22, depth + 1); break; }
+        // GBTable：原版 AttrVar::Type 的枚举值是 5（Nil,Boolean,Integer,Number,GBString,GBTable,…），
+        // readb 走 AnysTable::readgb，键名是 GBK。2026-10-18 B03 46298 的 UserConf.dat 里有，
+        // 没认出来时整份用户数据（信任、昵称、好感等）都没导入。
+        case 5:  { v.kind = AttrVal::Kind::Table; v.table = readAnysTableImpl(r, true, depth + 1); break; }
         case 6:  { v.kind = AttrVal::Kind::Other; const auto len = r.rSize();
                    if (len >= (1ULL << 24)) throw std::runtime_error("invalid legacy function length");
                    v.payloadBytes = len; r.skip(static_cast<std::streamsize>(len)); break; }

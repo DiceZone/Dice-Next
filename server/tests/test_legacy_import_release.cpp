@@ -395,3 +395,31 @@ TEST(LegacyGbk, PlainGbkIsUnchangedAndGarbageStillFails) {
     try { dice::legacy2::gbkToUtf8(std::string("\xFF\xFF\xFF", 3)); } catch (const std::exception&) { threw = true; }
     ASSERT_TRUE(threw);  // 布局探测仍然靠它拒绝错位读出的乱码
 }
+
+
+// 2026-10-18 B03 46298：原版 GBTable 的类型值是 5，没认出来时整份 UserConf.dat 判为无法读取
+TEST(LegacyAttr, GbTableTagFiveIsReadWithGbkKeys) {
+    ReleaseImportFixture f;
+    // tag 5 + 1 个键「好感」(GBK BA C3 B8 D0) → tag 2 整数 50
+    const std::string bytes("\x05\x01\x00\x04\x00\xBA\xC3\xB8\xD0\x02\x32\x00\x00\x00", 14);
+    f.file("old/attr.bin", bytes);
+    dice::legacy2::BReader reader("old/attr.bin");
+    const auto value = dice::legacy2::readAttrVar(reader);
+    ASSERT_TRUE(value.kind == dice::legacy2::AttrVal::Kind::Table);
+    ASSERT_EQ(value.table.count("\xE5\xA5\xBD\xE6\x84\x9F"), size_t(1));
+    ASSERT_EQ(value.table.at("\xE5\xA5\xBD\xE6\x84\x9F").i, 50);
+}
+
+// 只读一次已导入日志：同一份源日志再导入不重复，追加的行照常补上，两个来源互不串
+TEST(ReleaseMigration, LogIndexIsReadOnceAndStaysConsistentWithinOneRun) {
+    ReleaseImportFixture f;
+    const std::string head = "Alice(10001) 2026-08-01 12:00:00\nfirst\n";
+    for (int i = 0; i < 30; ++i) f.file("old/user/log/2000" + std::to_string(i) + "_t.txt", head);
+    std::map<std::string, LegacyLogContext> contexts; int messages = 0; ImportResult report;
+    ASSERT_EQ(importLogs(f.db, "old", contexts, messages, {}, &report), 30);
+    ASSERT_EQ(importLogs(f.db, "old", contexts, messages, {}, &report), 0);
+    f.file("old/user/log/20000_t.txt", head + "Bob(10002) 2026-08-01 12:01:00\nsecond\n");
+    ASSERT_EQ(importLogs(f.db, "old", contexts, messages, {}, &report), 1);
+    ASSERT_EQ(f.db.getLogStorage()->count<GameLogRow>(), 30);
+    ASSERT_EQ(f.db.getLogStorage()->count<GameLogMessageRow>(), 31);
+}

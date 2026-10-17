@@ -1819,6 +1819,13 @@ inline int importLogs(Database& db, const fs::path& root,
         for (size_t i = 0; i < count; ++i) value.push_back({rows[i].sender, rows[i].userId, rows[i].createdAt, rows[i].content, rows[i].images});
         return migration_resources::hash(value.dump());
     };
+    // 每份日志都要找出它以前导入过的那条。以前每份都重读整张表、逐条解析 JSON，7592 份要
+    // 九分钟（2026-10-18 B03 46298），开通等不到就超时；现在只读一次，导入时同步更新。
+    std::vector<std::pair<GameLogRow, json>> knownLogs;
+    for (const auto& row : st->get_all<GameLogRow>()) {
+        auto value = json::parse(row.customRules, nullptr, false);
+        if (value.is_object()) knownLogs.emplace_back(row, std::move(value));
+    }
     auto importOne = [&](const fs::path& path) {
         if (migration_resources::lowerExtension(path) != ".txt") return;
         const auto file = migration_resources::utf8(path.filename());
@@ -1856,10 +1863,10 @@ inline int importLogs(Database& db, const fs::path& root,
         if (parsed.empty() && !text.empty()) throw std::runtime_error("旧日志没有可识别的消息头");
         std::optional<GameLogRow> existing;
         json meta;
-        for (const auto& row : st->get_all<GameLogRow>()) {
-            const auto value = json::parse(row.customRules, nullptr, false);
-            if (!value.is_object()) continue;
-            if (value.value("legacySourceKey", std::string()) == source) { existing = row; meta = value; break; }
+        size_t existingIndex = 0;
+        for (size_t i = 0; i < knownLogs.size(); ++i) {
+            const auto& [row, value] = knownLogs[i];
+            if (value.value("legacySourceKey", std::string()) == source) { existing = row; meta = value; existingIndex = i; break; }
             if (!value.contains("legacySourceKey") && value.value("legacySource", std::string()) == file) {
                 if (diagnostics) legacyResourceDetail(*diagnostics, file, "preserved", "已有同名旧导入日志缺少来源标识，需人工确认，未重复新增");
                 return;
@@ -1891,6 +1898,7 @@ inline int importLogs(Database& db, const fs::path& root,
         if (!context.gameCode.empty()) meta["gameCode"] = context.gameCode;
         if (!context.gameName.empty()) meta["gameName"] = context.gameName;
         int logId = existing ? existing->id : 0;
+        GameLogRow saved;
         st->transaction([&] {
             GameLogRow log;
             if (existing) log = *existing;
@@ -1901,8 +1909,11 @@ inline int importLogs(Database& db, const fs::path& root,
             log.customRules = meta.dump();
             if (existing) st->update(log); else logId = st->insert(log);
             for (size_t i = from; i < parsed.size(); ++i) { auto row = parsed[i]; row.logId = logId; st->insert(row); }
+            saved = log; saved.id = logId;
             return true;
         });
+        if (existing) knownLogs[existingIndex] = {saved, meta};
+        else knownLogs.emplace_back(saved, meta);
         messages += static_cast<int>(parsed.size() - from); ++imported;
         if (text != raw && diagnostics)
             legacyResourceDetail(*diagnostics, file, "success", "已导入；残缺的 UTF-8 字节已替换为 U+FFFD");
