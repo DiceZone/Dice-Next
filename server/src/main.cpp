@@ -2353,6 +2353,9 @@ static int realMain(int argc, char* argv[]) {
                         }
                     }
                 }
+                // 真的重新入群了：退群标记作废，自动发现照常认它（issue #54）
+                if (!cmdRouter.groupSettingValue(e.platform, e.groupId, dice::kLeaveRequestedAt, e.adapterId).empty())
+                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, dice::kLeaveRequestedAt, "", e.adapterId);
                 // 曾「删除记录」过的群重新加回来 → 清墓碑标记，否则群组管理
                 // 的自动发现会一直跳过它，刷不出这个群。
                 if (cmdRouter.groupSettingValue(e.platform, e.groupId, "__removed", e.adapterId) == "1") {

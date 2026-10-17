@@ -5439,6 +5439,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 gsSet(st, plat, gid, "__removed", "0");   // 清除墓碑，重新纳入管理
                 gsSet(st, plat, gid, "left", "0");        // 手动重加也清「已退群」状态
                 gsSet(st, plat, gid, "leaving", "0");
+                gsSet(st, plat, gid, kLeaveRequestedAt, "");
+                st->remove_all<GroupAccountSettingRow>(orm::where(
+                    orm::c(&GroupAccountSettingRow::groupId) == gid and
+                    orm::c(&GroupAccountSettingRow::key) == std::string(kLeaveRequestedAt)));
                 if (gsGet(st, plat, gid, "enabled").empty()) gsSet(st, plat, gid, "enabled", "1");
                 jsonReply(ok(J{{"platform",plat},{"groupId",gid}}), std::move(cb));
                 return;
@@ -5457,6 +5461,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     else if (plat == "discord" || plat == "kook")
                         gid = identity::BindingStore::instance().observeVirtual(db, plat, aid, endpoint, identity::Kind::Group);
                     if (gid.empty()) gid = endpoint;
+                    // issue #54：刚提出退群的群在列表缓存里还会留一阵，别把它当成仍在群里
+                    if (leaveRecentlyRequested(agsGet(st, aid, plat, gid, kLeaveRequestedAt))) continue;
                     publicGroups[gid] = endpoint;
                     agsSet(st, aid, plat, gid, endpoint, "__removed", "0");
                     agsSet(st, aid, plat, gid, endpoint, "left", "0");
@@ -5631,11 +5637,16 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             const std::string adapterId = j.value("adapterId", std::string());
             const std::string endpointId = j.value("endpointId", gid);
             if (req->method() == drogon::Delete) {
+                // 退群后紧接着删除记录时，平台列表里这个群还在；保留退群标记，否则下一次
+                // 自动发现会把刚删掉的群重建回来（issue #54）
+                const std::string leaveStamp = !adapterId.empty()
+                    ? agsGet(st, adapterId, plat, gid, kLeaveRequestedAt) : gsGet(st, plat, gid, kLeaveRequestedAt);
                 if (!adapterId.empty()) {
                     st->remove_all<GroupAccountSettingRow>(orm::where(
                         orm::c(&GroupAccountSettingRow::adapterId) == adapterId and
                         orm::c(&GroupAccountSettingRow::groupId) == gid));
                     agsSet(st, adapterId, plat, gid, endpointId, "__removed", "1");
+                    if (!leaveStamp.empty()) agsSet(st, adapterId, plat, gid, endpointId, kLeaveRequestedAt, leaveStamp);
                 } else {
                     st->remove_all<GroupSettingRow>(orm::where(
                         orm::c(&GroupSettingRow::platform) == plat and
@@ -5646,6 +5657,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         orm::c(&LocaleSettingRow::scope) == std::string("group") and
                         orm::c(&LocaleSettingRow::scopeKey) == plat + ":" + gid));
                     gsSet(st, plat, gid, "__removed", "1");
+                    if (!leaveStamp.empty()) gsSet(st, plat, gid, kLeaveRequestedAt, leaveStamp);
                 }
                 jsonReply(ok(nullptr), std::move(cb));
                 return;
@@ -5725,8 +5737,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 endpointId = group_management::requireLeaveEndpoint(*st, adapterId, plat, gid,
                     j.value("endpointId", std::string()));
                 a->leaveGroup(endpointId);
-                if (!adapterId.empty()) agsSet(st, adapterId, plat, gid, endpointId, "left", "1");
-                else gsSet(st, plat, gid, "left", "1");
+                if (!adapterId.empty()) {
+                    agsSet(st, adapterId, plat, gid, endpointId, "left", "1");
+                    agsSet(st, adapterId, plat, gid, endpointId, kLeaveRequestedAt, leaveRequestStamp());
+                } else {
+                    gsSet(st, plat, gid, "left", "1");
+                    gsSet(st, plat, gid, kLeaveRequestedAt, leaveRequestStamp());
+                }
             }
             else if (action == "message") a->sendGroupMessage(endpointId, j.value("text", ""));
             else { jsonReply(fail("unknown action"), std::move(cb)); return; }

@@ -7994,6 +7994,7 @@ private:
             if (a) a->leaveGroup(gid);
             setGroupSettingFor(plat, gid, "leaving", "0", aid);
             setGroupSettingFor(plat, gid, "left", "1", aid);
+            setGroupSettingFor(plat, gid, kLeaveRequestedAt, leaveRequestStamp(), aid);
             DICE_LOG_INFO(".dismiss：已退出群 {}（记录保留，状态=已退群）", gid);
             // B：指令退群通知骰主。
             dice::notice::notify(cfg_, adapters_, dice::notice::kImportant,
@@ -10766,6 +10767,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         Message lm; lm.platform = a->platform(); lm.targetId = gid; lm.type = MessageType::kGroup;
         if (!reason.empty()) a->sendGroupMessage(gid, applySelf(lm, reason));
         a->leaveGroup(gid);
+        setGroupSettingFor(a->platform(), gid, kLeaveRequestedAt, leaveRequestStamp(), a->id());
         // B：退群通知骰主（定时任务退群/不活跃自动退群/网页退群等都走这里）。
         dice::notice::notify(cfg_, adapters_, dice::notice::kImportant,
             "\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe7\xbe\xa4 " + gid

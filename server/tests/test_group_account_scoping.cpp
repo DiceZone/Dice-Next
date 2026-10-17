@@ -249,3 +249,28 @@ TEST(GroupManagement, LeaveRequiresTheExactAccountAndNativeGroupBinding) {
     ASSERT_EQ(accountGroupSetting(st, "adapterA", "onebot_v11", "9001", "left"), "0");
     ASSERT_EQ(accountGroupSetting(st, "adapterB", "onebot_v11", "9002", "enabled"), "1");
 }
+
+
+// ─── Issue #54：退群后自动发现不能把群「救回来」 ─────────────────────
+// 退群请求发出后，平台的群列表缓存里这个群还会留一阵。以前自动发现看到它就清掉刚写下的
+// 已退群/已删除标记，群又回到活跃列表，要再点一次清除记录。
+TEST(GroupLeave, RecentLeaveRequestIsNotTreatedAsStillJoined) {
+    const long long now = 1'800'000'000;
+    ASSERT_TRUE(leaveRecentlyRequested(std::to_string(now), now));
+    ASSERT_TRUE(leaveRecentlyRequested(std::to_string(now - kLeaveGraceSeconds + 1), now));
+    ASSERT_FALSE(leaveRecentlyRequested(std::to_string(now - kLeaveGraceSeconds), now));
+    ASSERT_FALSE(leaveRecentlyRequested("", now));
+    ASSERT_FALSE(leaveRecentlyRequested("not-a-time", now));
+    ASSERT_FALSE(leaveRecentlyRequested(std::to_string(now + 60), now));  // 时钟回拨不挡住重新发现
+}
+
+TEST(GroupLeave, LeaveStampIsScopedToTheLeavingAccount) {
+    auto db = makeDb();
+    auto& st = *db->getStorage();
+    seedDiscoveredGroup(*db, "adapterA", "5001", "5001");
+    seedDiscoveredGroup(*db, "adapterB", "5001", "5001");
+    setAccountGroupSetting(st, "adapterA", "onebot_v11", "5001", "5001", kLeaveRequestedAt, leaveRequestStamp());
+    ASSERT_TRUE(leaveRecentlyRequested(accountGroupSetting(st, "adapterA", "onebot_v11", "5001", kLeaveRequestedAt)));
+    // 同一个群的另一个骰娘账号没退群，照常被自动发现
+    ASSERT_FALSE(leaveRecentlyRequested(accountGroupSetting(st, "adapterB", "onebot_v11", "5001", kLeaveRequestedAt)));
+}

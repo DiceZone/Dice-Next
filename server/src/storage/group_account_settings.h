@@ -8,6 +8,7 @@
 
 #include "../storage/database.h"
 
+#include <ctime>
 #include <map>
 #include <string>
 
@@ -81,6 +82,25 @@ void syncAccountGroupPresence(Storage& st, const std::string& adapterId,
         const std::string leaving = accountGroupSetting(st, adapterId, platform, r.groupId, "leaving");
         if (left == "1" || removed == "1" || leaving == "1") continue;
         setAccountGroupSetting(st, adapterId, platform, r.groupId, r.endpointId, "left", "1");
+    }
+}
+
+/// 骰娘刚提出退群时，平台的群列表缓存里这个群还会留一阵（OneBot 退群本身延迟执行，列表
+/// 还要再刷新一次）。这段时间里自动发现不能把它当成「仍在群里」——那会清掉刚写下的已退群、
+/// 已删除标记，群又回到活跃列表（issue #54）。真重新入群时由入群事件清掉这个标记。
+inline constexpr const char* kLeaveRequestedAt = "__leaveRequestedAt";
+inline constexpr long long kLeaveGraceSeconds = 600;
+
+inline std::string leaveRequestStamp() { return std::to_string(static_cast<long long>(std::time(nullptr))); }
+
+inline bool leaveRecentlyRequested(const std::string& stamp,
+                                   long long now = static_cast<long long>(std::time(nullptr))) {
+    if (stamp.empty()) return false;
+    try {
+        const long long at = std::stoll(stamp);
+        return at <= now && now - at < kLeaveGraceSeconds;
+    } catch (...) {
+        return false;
     }
 }
 
