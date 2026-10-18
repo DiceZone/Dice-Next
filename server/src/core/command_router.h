@@ -7981,6 +7981,7 @@ private:
         // 指令退群 —— 普通状态先回退群宣言，再随机延时退群。彻底禁用时
         // 不应在群内产生任何可见回复，改为静默立即退群。
         setGroupSetting(msg, "leaving", "1");
+        setGroupSetting(msg, kLeaveRequestedAt, leaveRequestStamp());
         static thread_local std::mt19937 rng{std::random_device{}()};
         int delay = silent ? 0 : std::uniform_int_distribution<int>(10, 60)(rng);
         const std::string plat = msg.platform, gid = msg.targetId, aid = msg.adapterId;
@@ -10766,8 +10767,8 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         }
         Message lm; lm.platform = a->platform(); lm.targetId = gid; lm.type = MessageType::kGroup;
         if (!reason.empty()) a->sendGroupMessage(gid, applySelf(lm, reason));
-        a->leaveGroup(gid);
         setGroupSettingFor(a->platform(), gid, kLeaveRequestedAt, leaveRequestStamp(), a->id());
+        a->leaveGroup(gid);
         // B：退群通知骰主（定时任务退群/不活跃自动退群/网页退群等都走这里）。
         dice::notice::notify(cfg_, adapters_, dice::notice::kImportant,
             "\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe7\xbe\xa4 " + gid

@@ -2353,21 +2353,14 @@ static int realMain(int argc, char* argv[]) {
                         }
                     }
                 }
-                // 真的重新入群了：退群标记作废，自动发现照常认它（issue #54）
-                if (!cmdRouter.groupSettingValue(e.platform, e.groupId, dice::kLeaveRequestedAt, e.adapterId).empty())
-                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, dice::kLeaveRequestedAt, "", e.adapterId);
-                // 曾「删除记录」过的群重新加回来 → 清墓碑标记，否则群组管理
-                // 的自动发现会一直跳过它，刷不出这个群。
-                if (cmdRouter.groupSettingValue(e.platform, e.groupId, "__removed", e.adapterId) == "1") {
-                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "__removed", "0", e.adapterId);
+                const bool wasRemoved = cmdRouter.groupSettingValue(e.platform, e.groupId, "__removed", e.adapterId) == "1";
+                // A genuine rejoin, unlike cached lists/in-flight messages, may
+                // restore this account without reviving another bot's record.
+                dice::group_management::restoreRecord(*db.getStorage(), e.adapterId, e.platform, e.groupId,
+                    e.extra.value("__identity_native_target", e.groupId));
+                if (wasRemoved) {
                     cmdRouter.setGroupSettingFor(e.platform, e.groupId, "enabled", "1", e.adapterId);
                     DICE_LOG_INFO_M("群管理", "事件： 群 {} 重新加入，已清除移除标记（记录可重建）", e.groupId);
-                }
-                // 曾指令退群的群重新加回来 → 清「已退群/退群中」状态。
-                if (cmdRouter.groupSettingValue(e.platform, e.groupId, "left", e.adapterId) == "1" ||
-                    cmdRouter.groupSettingValue(e.platform, e.groupId, "leaving", e.adapterId) == "1") {
-                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "left", "0", e.adapterId);
-                    cmdRouter.setGroupSettingFor(e.platform, e.groupId, "leaving", "0", e.adapterId);
                 }
                 // 直接被拉进群（无邀请事件）时，operator 即邀请人
                 // 已有邀请人记录时不覆盖。

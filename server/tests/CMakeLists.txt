@@ -28,6 +28,7 @@ set(TEST_SOURCES
     test_import_v2.cpp
     test_legacy_import_release.cpp
     test_group_account_scoping.cpp
+    test_group_lifecycle.cpp
     test_master_delivery.cpp
     test_backup_service.cpp
     test_timezone.cpp

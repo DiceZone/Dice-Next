@@ -10,9 +10,17 @@
 
 #include <ctime>
 #include <map>
+#include <mutex>
 #include <string>
 
 namespace dice {
+
+// Serialize only group lifecycle transitions, not ordinary command processing.
+// A delayed inbound message must not interleave with deleting the account rows.
+inline std::recursive_mutex& groupPresenceMutex() {
+    static std::recursive_mutex mutex;
+    return mutex;
+}
 
 /// Read an account-scoped setting.  Falls back to the shared legacy row when
 /// this adapter has not observed the group yet, so pre-issue#7 data keeps
@@ -90,6 +98,21 @@ void syncAccountGroupPresence(Storage& st, const std::string& adapterId,
 /// 已删除标记，群又回到活跃列表（issue #54）。真重新入群时由入群事件清掉这个标记。
 inline constexpr const char* kLeaveRequestedAt = "__leaveRequestedAt";
 inline constexpr long long kLeaveGraceSeconds = 600;
+
+// An explicit leave intent is durable until a real join event or manual restore.
+// A cache entry (even after ten minutes) is not evidence of joining again.
+template <typename Storage>
+bool groupLeaveRequested(Storage& st, const std::string& adapterId,
+                         const std::string& platform, const std::string& groupId) {
+    return !accountGroupSetting(st, adapterId, platform, groupId, kLeaveRequestedAt).empty();
+}
+
+template <typename Storage>
+bool groupDiscoveryBlocked(Storage& st, const std::string& adapterId,
+                           const std::string& platform, const std::string& groupId) {
+    return groupLeaveRequested(st, adapterId, platform, groupId)
+        || accountGroupSetting(st, adapterId, platform, groupId, "__removed") == "1";
+}
 
 inline std::string leaveRequestStamp() { return std::to_string(static_cast<long long>(std::time(nullptr))); }
 

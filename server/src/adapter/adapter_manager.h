@@ -160,7 +160,10 @@ public:
         Message routed = msg;
         normalizeIdentity(routed);
         cacheOfficialNickname(routed);
-        ensureInboundGroup(routed);
+        if (!ensureInboundGroup(routed)) {
+            DICE_LOG_DEBUG_M("群管理", "忽略已请求退群账号的在途消息：适配器 {}，群 {}。", routed.adapterId, routed.targetId);
+            return;
+        }
         const auto adapter = getAdapter(routed.adapterId);
         const std::string adapterName = adapter ? adapter->name() : routed.adapterId;
         const bool privateMessage = routed.type == MessageType::kPrivate;
@@ -278,10 +281,12 @@ private:
             }
         } catch (...) {}
     }
-    void ensureInboundGroup(const Message& msg) {
-        if (msg.type != MessageType::kGroup || msg.targetId.empty()) return;
-        auto* st = db_.getStorage(); if (!st) return;
+    bool ensureInboundGroup(const Message& msg) {
+        if (msg.type != MessageType::kGroup || msg.targetId.empty()) return true;
+        auto* st = db_.getStorage(); if (!st) return true;
+        std::lock_guard lock(groupPresenceMutex());
         try {
+            if (groupLeaveRequested(*st, msg.adapterId, msg.platform, msg.targetId)) return false;
             // A message from the group proves that the bot is still present.
             // Restore a record hidden by a previous WebUI deletion; otherwise a
             // QQ Official group could remain invisible forever because that
@@ -345,6 +350,7 @@ private:
                 if (rows.empty()) { GroupSettingRow row; row.platform = msg.platform; row.groupId = msg.targetId; row.key = "enabled"; row.value = "1"; st->insert(row); }
             }
         } catch (...) {}
+        return true;
     }
     void normalizeIdentity(Message& msg) {
         using identity::BindingStore;
