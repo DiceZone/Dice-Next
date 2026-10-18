@@ -71,6 +71,53 @@ TEST(ReleaseMigration, CardsDecodeCurrentTypeInfoExpressionsAndNameFromGoodBacku
     ASSERT_EQ(cards.getValueByName("10001", "", "小数")->get<double>(), 1.75);
     ASSERT_EQ(f.db.getStorage()->get_all<UserSettingRow>()[0].groupId, "");
 }
+TEST(ReleaseMigration, ImportedDefaultPlaceholderUsesNnBeforeAndAfterUnbindingNamedCard) {
+    ReleaseImportFixture f;
+    {
+        std::ofstream out("old/user/PlayerCards.RDconf", std::ios::binary);
+        raw<int32_t>(out, 1); raw<int64_t>(out, 10001);
+        raw<int16_t>(out, 1); raw<int16_t>(out, 1); raw<uint16_t>(out, 0);
+        str(out, "Attr"); raw<int16_t>(out, 1);
+        str(out, "__Name"); utf(out, "角色卡");
+        str(out, "END"); raw<int16_t>(out, 1); raw<uint64_t>(out, 0); raw<uint16_t>(out, 0);
+    }
+    ImportResult report;
+    int users = 0;
+    ASSERT_EQ(importCards(f.db, "old/user", users, {}, &report), 1);
+    ASSERT_TRUE(f.i18n.load());
+    f.i18n.setOverride(Locale::kZhHans, "dice.roll.result", "{nick}|{res}");
+    DiceEngine engine(f.cfg);
+    LocaleResolver resolver(f.db, f.cfg);
+    CharacterCardStore cards(f.db);
+    CardDeck deck;
+    AdapterManager adapters(f.db);
+    CommandRouter router(f.db, f.cfg, engine, f.i18n, resolver, cards, deck, adapters);
+    Message msg;
+    msg.platform = "onebot_v11";
+    msg.adapterId = "placeholder-import-test";
+    msg.senderId = "10001";
+    msg.senderName = "平台昵称";
+    msg.selfId = "9000";
+    msg.targetId = "20001";
+    msg.type = MessageType::kGroup;
+    const auto run = [&](const std::string& command) {
+        msg.content = command;
+        return router.handleMessage(msg, Locale::kZhHans);
+    };
+    auto reply = run(".nn随春生");
+    ASSERT_EQ(reply, "已将「平台昵称」改称为「随春生」");
+    reply = run(".r d1");
+    ASSERT_EQ(reply, "<随春生>|D1=1");
+    reply = run(".st show");
+    ASSERT_EQ(reply, "<随春生> 没有可展示的人物卡属性，请用 .st 录入属性");
+    run(".pc new 随春生");
+    run(".pc untag");
+    ASSERT_EQ(cards.boundCard("10001", "20001"), "");
+    reply = run(".r d1");
+    ASSERT_EQ(reply, "<随春生>|D1=1");
+    ASSERT_EQ(cards.displayName("10001", ""), "角色卡");
+    ASSERT_TRUE(cards.cardExists("10001", "随春生"));
+}
 TEST(ReleaseMigration, CorruptBinaryIsNotCommittedAndRootReportIsNotFalseSuccess) {
     ReleaseImportFixture f; ReplyManager replies(f.db, f.cfg);
     const auto empty = runImport(f.db, f.cfg, f.i18n, replies, "old", nullptr, &f.lua); ASSERT_FALSE(empty["ok"].get<bool>());

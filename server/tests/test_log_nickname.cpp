@@ -116,6 +116,19 @@ TEST(LogNickname, TheNicknameSetByNnIsAlsoStoredClean) {
     ASSERT_TRUE(parsableByLogSite(rows.back().sender));
 }
 
+TEST(LogNickname, DefaultPlaceholderDoesNotHideNicknameInStoredMessages) {
+    NickFixture f;
+    f.cards.setValueByName("1000", "", "__Name", "角色卡");
+    f.run(".log new 默认卡昵称测试");
+    f.run(".nn随春生");
+    f.say("解绑后仍用设置的昵称");
+    const auto rows = f.messages();
+    ASSERT_FALSE(rows.empty());
+    ASSERT_EQ(rows.back().sender, "随春生");
+    ASSERT_TRUE(parsableByLogSite(rows.back().sender));
+    ASSERT_EQ(f.cards.displayName("1000", ""), "角色卡");
+}
+
 TEST(LogNickname, ChangingTheWrapSymbolsDoesNotLeakIntoStorage) {
     // 包裹符号是骰主可配置的。存储这一侧不该受它影响——换成任何符号，
     // 存进日志的都该是名字本身。

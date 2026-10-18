@@ -46,6 +46,7 @@ set(TEST_SOURCES
     test_command_prefix_policy.cpp
     test_command_shortcuts.cpp
     test_me_command.cpp
+    test_nickname_command.cpp
     test_log_bot_off.cpp
     test_log_nickname.cpp
     test_reply_manager.cpp

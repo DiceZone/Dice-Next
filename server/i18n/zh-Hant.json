@@ -304,7 +304,7 @@
     },
     "show": "{nick} 的人物卡：{detail}",
     "show_one": "{nick} 的 {attr}：{val}",
-    "empty": "{nick} 還沒有人物卡，先用 .st 錄入屬性吧",
+    "empty": "{nick} 沒有可顯示的人物卡屬性，請用 .st 錄入屬性",
     "attr_missing": "未找到屬性「{attr}」",
     "cleared": "已清空 {nick} 的人物卡",
     "attr_deleted": "已刪除 {nick} 的屬性「{attr}」",

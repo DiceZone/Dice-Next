@@ -298,7 +298,7 @@
     },
     "show": "{nick}'s character sheet: {detail}",
     "show_one": "{nick}'s {attr}: {val}",
-    "empty": "{nick} has no character sheet yet — set attributes with .st",
+    "empty": "{nick} has no character-sheet attributes to display — set attributes with .st",
     "attr_missing": "Attribute \"{attr}\" not found",
     "cleared": "Cleared {nick}'s character sheet",
     "attr_deleted": "Deleted {nick}'s attribute \"{attr}\"",

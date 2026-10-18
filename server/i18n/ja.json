@@ -299,7 +299,7 @@
     },
     "show": "{nick} のキャラクターシート: {detail}",
     "show_one": "{nick} の{attr}: {val}",
-    "empty": "{nick} はまだシートがありません — .st で能力値を設定してください",
+    "empty": "{nick} のシートには表示できる能力値がありません — .st で能力値を設定してください",
     "attr_missing": "能力値「{attr}」が見つかりません",
     "cleared": "{nick} のキャラクターシートをクリアしました",
     "attr_deleted": "{nick} の能力値「{attr}」を削除しました",

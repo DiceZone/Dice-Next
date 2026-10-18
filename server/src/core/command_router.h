@@ -12086,11 +12086,14 @@ private:
         return cfg_.get<std::string>("dice/nick_prefix", std::string("<")) + v
              + cfg_.get<std::string>("dice/nick_suffix", std::string(">"));
     }
-    /// 原始显示名（人物卡名 > .nn 昵称 > 群名片/QQ）。用于设名片、先攻名等「存储/比较」场景。
+    /// 原始显示名（非占位人物卡名 > .nn 昵称 > 群名片/QQ）。用于设名片、先攻名等「存储/比较」场景。
     std::string displayNameRaw(const Message& msg) const {
         std::string card = cards_.boundCard(msg.senderId, cardScope(msg));
         const auto cardDisplay = cards_.displayName(msg.senderId, card);
-        if (!cardDisplay.empty()) return cardDisplay;
+        // Legacy idx_pc treats "角色卡" as an unnamed placeholder, not a name.
+        // Imported default cards keep it in metadata even though their binding
+        // key is empty; it must not hide .nn after import or after .pc untag.
+        if (!cardDisplay.empty() && cardDisplay != "角色卡") return cardDisplay;
         std::string nn = getUserSetting(msg, "nick");
         if (!nn.empty()) return nn;                     // .nn 设置的昵称（覆盖）
         return resolveNickDisplay(msg);                 // 群名片 > QQ昵称 > QQ号（用户规范）
@@ -12326,8 +12329,9 @@ private:
         if (toLower(cmd).rfind("nn", 0) != 0) return std::nullopt;
         std::string name = trim(cmd.substr(2));
         std::string oldName = displayNameRaw(msg);   // 旧名用原始名，避免「<A>」双重包裹（新名 name 本就是原始输入）
-        // If a character card is bound, .nn renames THAT card (so the new name
-        // also shows everywhere the card name does, and they stay in sync).
+        // A nonempty binding identifies a named card, which .nn also renames.
+        // The default card's key is empty; do not rewrite its global metadata
+        // to set a local nickname. displayNameRaw ignores its legacy placeholder.
         std::string bound = cards_.boundCard(msg.senderId, cardScope(msg));
         if (name.empty()) {
             clearUserSetting(msg, "nick");
