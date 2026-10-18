@@ -1,6 +1,7 @@
 #include "config_manager.h"
 #include "../common/logger.h"
 #include "../common/utils.h"
+#include "../common/bot_message.h"
 #include "../platform/tray_settings.h"
 
 #include <nlohmann/json.hpp>
@@ -30,6 +31,7 @@ static json makeDefaultConfig() {
             {"command_prefix", "."},
             {"self_name", ""},                   // strSelfName: 自我介绍场合的名称（空=用登录昵称）
             {"self_call", ""},                   // strSelfCall: 回执自称，{self} 的重定向目标（空=用 self_name）
+            {"bot_msg", kDefaultBotMessage},     // .bot 三行固定信息之后的可编辑附加说明
             {"message_format", "traditional"},   // 出站消息表现形式：traditional / standard / visual
             {"save_log_images", false},
             {"image_send", {{"mode", "base64"}, {"host", ""}}},
@@ -167,6 +169,11 @@ static bool validateConfig(const json& value, std::string& error) {
     }
     if (value.contains("dice") && value["dice"].is_object()) {
         const auto& dice = value["dice"];
+        for (const char* key : {"bot_msg", "bot_header"}) {
+            if (dice.contains(key) && !dice[key].is_string()) {
+                error = std::string("dice.") + key + " 必须是字符串"; return false;
+            }
+        }
         if (dice.contains("tray_text")) {
             if (!dice["tray_text"].is_string()) { error = "dice.tray_text 必须是字符串"; return false; }
             std::string normalized;

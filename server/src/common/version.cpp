@@ -41,12 +41,23 @@ std::string platformDisplay(const std::string& p) {
     return p.empty() ? "Unknown" : p;
 }
 
-std::string botBanner(const std::string& platform) {
+std::string botBanner(const std::string& platform, const std::string& defaultLocale,
+                      const std::vector<std::string>& expressionEngines) {
     std::string num = std::to_string(buildNumber());
     while (num.size() < 3) num = "0" + num;   // zero-pad to 3 digits → (001)
-    return "Dice!Next By DiceZone/Shia Ver " + versionString() + "(" + num + ")\n[" +
+    const std::string author = defaultLocale == "zh" || defaultLocale.rfind("zh-", 0) == 0 || defaultLocale.rfind("zh_", 0) == 0
+        ? "希亚" : "ShiaNyaa";
+    std::string compatibility;
+    for (const auto& engine : expressionEngines) {
+        const std::string name = engine == "onedice" ? "OneDice V1" : engine == "dicescript" ? "DiceScript" : "";
+        if (name.empty()) continue;
+        if (!compatibility.empty()) compatibility += " & ";
+        compatibility += name;
+    }
+    compatibility = compatibility.empty() ? "Dice!Next Native" : compatibility + " Compatible";
+    return "Dice!Next By DiceZone/" + author + " Ver " + versionString() + "(" + num + ")\n[" +
            compilerString() + " " + buildTime() + " For Adapter/" +
-           platformDisplay(platform) + "]\nOneDice V1 Compatible";
+           platformDisplay(platform) + "]\n" + compatibility;
 }
 
 }  // namespace dice

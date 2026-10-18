@@ -48,6 +48,7 @@
 #include "../common/logger.h"
 #include "../common/markdown.h"
 #include "../common/version.h"
+#include "../common/bot_message.h"
 #include "../common/utils.h"
 #include "../platform/system_info.h"
 #include "../i18n/i18n.h"
@@ -4872,13 +4873,13 @@ private:
             const auto warning = updateGroupControl(loc, msg, "", false);
             return i18n_.tr(loc, "bot.off") + (warning.empty() ? "" : "\n" + warning);
         }
-        // 版本横幅，外加可配置的页眉/页脚（原版 strBotHeader / strBotMsg）。
+        // 三行系统信息固定置顶；原版 strBotHeader / strBotMsg 仅作为附加说明。
         // {self} 等占位符由 main.cpp 的 applySelf 统一在最终回复里替换。
-        std::string out;
-        std::string header = cfg_.get<std::string>("dice/bot_header", std::string());
-        std::string footer = cfg_.get<std::string>("dice/bot_msg", std::string());
-        if (!header.empty()) out += header + "\n";
-        out += botBanner(msg.platform);
+        std::string out = botBanner(msg.platform, cfg_.get<std::string>("i18n/default_locale", "zh-Hans"), expressionOrder(msg));
+        const auto settings = diceSettingsFor(msg);
+        const std::string header = settings.value("bot_header", std::string());
+        const std::string footer = settings.value("bot_msg", std::string(kDefaultBotMessage));
+        if (!header.empty()) out += "\n" + header;
         if (!footer.empty()) out += "\n" + footer;
         return out;
     }

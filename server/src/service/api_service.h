@@ -19,6 +19,7 @@
 #include "../common/markdown.h"
 #include "../common/reply_preview.h"
 #include "../common/version.h"
+#include "../common/bot_message.h"
 #include "../adapter/adapter_interface.h"
 #include "../adapter/adapter_manager.h"
 #include "../adapter/onebot_v11_adapter.h"
@@ -2812,6 +2813,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             {"allow_official_direct_bind", false},
             {"api_enabled", false}, {"api_timeout", 5},
             {"message_format", "traditional"},
+            {"bot_msg", kDefaultBotMessage}, {"bot_header", ""},
             {"save_log_images", false},
             {"image_send", J{{"mode", "base64"}, {"host", ""}}},
             {"image_host", J{{"mode", "none"}}},
@@ -2845,6 +2847,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 return mode == "none" || mode == "generic" || mode == "local";
             }
             if (key == "user_group") return value.is_string();
+            if (key == "bot_msg" || key == "bot_header")
+                return value.is_string() && value.get_ref<const std::string&>().size() <= 65536;
             if (key == "api_timeout") return value.is_number_integer() && value.get<int>() >= 1 && value.get<int>() <= 30;
             if (key == "chat_retention_days") return value.is_number_integer() && value.get<int>() >= 0 && value.get<int>() <= 3650;
             if (kDefaults.contains(key) && kDefaults[key].is_boolean()) return value.is_boolean();
@@ -2874,7 +2878,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             }
             return J{{"values", values}, {"scope", scope}, {"target", target}, {"platform", platform},
                      {"overrides", scope == "global" ? J::object() : scoped_settings::rawSection(all, scope, target, "dice")},
-                     {"sources", sources}};
+                     {"sources", sources}, {"default_locale", cfg.get<std::string>("i18n/default_locale", "zh-Hans")}};
         };
         try {
             if (req->method() == drogon::Get) {

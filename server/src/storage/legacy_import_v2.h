@@ -32,6 +32,7 @@
 #include "../common/legacy_conf_value.h"
 #include "../common/session_deck.h"
 #include "../common/legacy_reply_references.h"
+#include "../common/bot_message.h"
 #include "../core/reply/reply_definition.h"
 #include "../service/sensitive_word_filter.h"
 
@@ -842,6 +843,7 @@ inline std::string v2KeyFor(const std::string& ourKey) {
 // strSelfName 默认空=登录昵称，strSelfCall 默认 "&strSelfName"=同名）。DiceNext 把它们
 // 放在设置 dice/self_name、dice/self_call 里。给了 cfg 就迁进去；以前随其他认不得的键
 // 进了「无效文本」，迁完骰娘的自称就成了 QQ 昵称。
+// strBotMsg / strBotHeader 同样迁入正式设置；页眉只作为固定信息之后的附言。
 inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, int& orphans, json* details = nullptr,
                            const ImportOptions& opts = {}, ConfigManager* cfg = nullptr) {
     auto* st = db.getStorage();
@@ -849,7 +851,7 @@ inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, in
     std::string raw = readFile(confDir / "CustomMsg.json");
     if (raw.empty()) return 0;
     int imported = 0;
-    bool selfChanged = false;
+    bool settingsChanged = false;
     static const std::set<std::string> SKIP = {"Number", "str", "strHttpCode"};   // metadata, not text
     auto writeOv = [&](const char* loc, const std::string& key, const std::string& text) {
         auto rows = st->get_all<I18nOverrideRow>(
@@ -871,6 +873,24 @@ inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, in
             if (!val.is_string() || SKIP.count(origKey)) continue;
             std::string text = val.get<std::string>();
             if (text.empty()) continue;
+            if (cfg && (origKey == "strBotMsg" || origKey == "strBotHeader")) {
+                const bool footer = origKey == "strBotMsg";
+                const std::string path = footer ? "dice/bot_msg" : "dice/bot_header";
+                const std::string normalized = normalizeLegacyTemplate(origKey, text);
+                const std::string migrated = footer ? appendDefaultBotMessage(normalized) : normalized;
+                const auto current = cfg->get<std::string>(path, std::string());
+                if (current.empty() || (footer && current == kDefaultBotMessage)
+                    || current == migrated || opts.overwriteData) {
+                    cfg->set<std::string>(path, migrated); settingsChanged = true; ++imported;
+                    if (details) details->push_back({{"source", origKey}, {"target", path},
+                        {"status", "active"}, {"issues", json::array()}});
+                } else {
+                    writeOv("zh-Hans", "legacy." + origKey, text); ++orphans;
+                    if (details) details->push_back({{"source", origKey}, {"target", path}, {"status", "conflict"},
+                        {"issues", {"保留已有 BotMsg 附加说明；未授权覆盖数据"}}, {"original", text}});
+                }
+                continue;
+            }
             if (cfg && (origKey == "strSelfName" || origKey == "strSelfCall")) {
                 std::string name = text;
                 while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
@@ -883,7 +903,7 @@ inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, in
                     const std::string path = origKey == "strSelfName" ? "dice/self_name" : "dice/self_call";
                     const auto current = cfg->get<std::string>(path, std::string());
                     if (current.empty() || current == name || opts.overwriteData) {
-                        cfg->set<std::string>(path, name); selfChanged = true; ++imported;
+                        cfg->set<std::string>(path, name); settingsChanged = true; ++imported;
                         if (details) details->push_back({{"source", origKey}, {"target", path},
                             {"status", "active"}, {"issues", json::array()}});
                         continue;
@@ -929,7 +949,7 @@ inline int importCustomMsg(Database& db, I18n& i18n, const fs::path& confDir, in
             }
         }
     } catch (const std::exception&) { throw; }
-    if (selfChanged && !cfg->save()) throw std::runtime_error("无法保存迁入的骰娘自称");
+    if (settingsChanged && !cfg->save()) throw std::runtime_error("无法保存迁入的骰娘设置");
     return imported;
 }
 

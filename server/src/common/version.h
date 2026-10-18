@@ -5,6 +5,7 @@
 // rebuilt on every CMake build so the executable always embeds the build value.
 
 #include <string>
+#include <vector>
 
 namespace dice {
 
@@ -26,8 +27,13 @@ std::string compilerString();
 std::string platformDisplay(const std::string& platform);
 
 /// The full `.bot` banner, e.g.:
-///   Dice!Next By DiceZone/Shia Ver 3.0.0(001)
+///   Dice!Next By DiceZone/希亚 Ver 3.0.0(001)
 ///   [MSVC 19.44 2026-06-14 06:48:32 For Adapter/OnebotV11]
-std::string botBanner(const std::string& platform);
+///   OneDice V1 & DiceScript Compatible
+/// Locale is the persisted global reply default; engines are the actual
+/// expression order resolved for the receiving account, not branding settings.
+std::string botBanner(const std::string& platform,
+                      const std::string& defaultLocale = "zh-Hans",
+                      const std::vector<std::string>& expressionEngines = {"dicenext", "onedice", "dicescript"});
 
 }  // namespace dice
