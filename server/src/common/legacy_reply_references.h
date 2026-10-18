@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sample_template.h"
+#include "message_break.h"
 #include <algorithm>
 #include <cctype>
 #include <set>
@@ -35,7 +36,7 @@ inline bool variable(const std::string& token) {
         "self", "strSelfName", "strSelfCall", "selfId", "group", "date", "time", "at",
         "pc", "char", "attr", "dice_exp", "reason", "turn"
     };
-    return names.count(token) || (!token.empty() && token.front() == '$');
+    return message_break::isFormFeed(token) || names.count(token) || (!token.empty() && token.front() == '$');
 }
 inline bool explicitReference(const std::string& token) {
     for (const auto* prefix : {"roll:", "draw:", "deck:", "help:", "text:", "api:", "counter:", "sample:"})

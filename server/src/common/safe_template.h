@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sample_template.h"
+#include "message_break.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -15,7 +16,7 @@ namespace dice::safe_template {
 
 // Authored syntax only. No script execution, waits, mutations, file/network
 // access, or second parsing of substituted user data. Programs are cached.
-enum class Kind { literal, variable, reference, sample, exact, grade };
+enum class Kind { literal, variable, reference, sample, exact, grade, formFeed };
 struct Node {
     Kind kind = Kind::literal;
     std::string text;
@@ -82,7 +83,10 @@ inline std::vector<Node> compileNodes(std::string_view value, Program& program, 
         const auto body = value.substr(open + 1, close - open - 1);
         node.field = std::string(body);
         const auto colon = body.find(':');
-        if (colon == std::string_view::npos) program.variables.push_back(node.field);
+        if (colon == std::string_view::npos) {
+            if (message_break::isFormFeed(body)) node.kind = Kind::formFeed;
+            else program.variables.push_back(node.field);
+        }
         if (colon != std::string_view::npos) {
             const auto method = body.substr(0, colon), parameter = body.substr(colon + 1);
             if (method == "sample") {
@@ -143,6 +147,7 @@ inline std::string expand(const std::vector<Node>& nodes, const Args& args, cons
         if (!budget.nodes || !budget.bytes) break;
         --budget.nodes;
         if (node.kind == Kind::literal) { append(literal ? literal(node.text) : node.text); continue; }
+        if (node.kind == Kind::formFeed) { append("\f"); continue; }
         if (node.kind == Kind::variable) { append(node.text); continue; }
         if (node.kind == Kind::reference) {
             auto referenced = resolve ? resolve(node.field, depth + 1, budget) : std::nullopt;

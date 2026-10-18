@@ -49,6 +49,7 @@
 #include "../common/markdown.h"
 #include "../common/version.h"
 #include "../common/bot_message.h"
+#include "../common/message_break.h"
 #include "../common/utils.h"
 #include "../platform/system_info.h"
 #include "../i18n/i18n.h"
@@ -4879,8 +4880,8 @@ private:
         const auto settings = diceSettingsFor(msg);
         const std::string header = settings.value("bot_header", std::string());
         const std::string footer = settings.value("bot_msg", std::string(kDefaultBotMessage));
-        if (!header.empty()) out += "\n" + header;
-        if (!footer.empty()) out += "\n" + footer;
+        if (!header.empty()) out += "\n" + i18n_.previewWithReferences(loc, header, {});
+        if (!footer.empty()) out += "\n" + i18n_.previewWithReferences(loc, footer, {});
         return out;
     }
 
@@ -9734,6 +9735,7 @@ private:
     std::string resolveReplyToken(const Message& msg, const std::string& tok,
                                   const std::vector<std::string>& groups,
                                   CardDeck::ReferenceContext& deckReferences, bool escapedDeck, bool legacyReferences) {
+        if (message_break::isFormFeed(tok) && !escapedDeck) return "\f";
         // Random choice: {a|b|c}
         // Unexpanded sample syntax is escaped or malformed, not shorthand.
         if (tok.rfind("sample:", 0) == 0) return "{" + tok + "}";
@@ -11927,10 +11929,17 @@ public:
         return cfg_.get<bool>("dice/reply_segment_enabled", true);
     }
 
-    /// 把超长回复切成多段。平台参数用于豁免分段：QQ 官方机器人/Discord/KOOK
-    /// 的客户端对连续消息排序不稳定，一律整段发送。
+    /// 显式 FormFeed 始终分页；长消息自动分段仍遵守开关与平台豁免。
     std::vector<std::string> segmentReply(const std::string& text,
                                           const std::string& platform = {}) const {
+        if (text.find('\f') != std::string::npos) {
+            std::vector<std::string> segments;
+            for (const auto& page : message_break::split(text)) {
+                auto parts = segmentReply(page, platform);
+                segments.insert(segments.end(), parts.begin(), parts.end());
+            }
+            return segments;
+        }
         if (!replySegmentEnabled()) return {text};
         if (platform == "qq_official" || platform == "discord" || platform == "kook")
             return {text};

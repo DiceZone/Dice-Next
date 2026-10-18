@@ -6,6 +6,7 @@
 #include "common/legacy_conf_value.h"
 #include "common/legacy_mod_limit.h"
 #include "common/sample_template.h"
+#include "common/message_break.h"
 #include "common/legacy_model.h"
 #include "../../../third_party/tomlplusplus/toml.hpp"
 
@@ -3529,6 +3530,7 @@ std::string LuaPluginManager::valueOf(const std::string& key,
         }
         return "";
     }
+    if (message_break::isFormFeed(foldedKey)) return "\f";
     if (foldedKey == "self" || foldedKey == "strselfname" || foldedKey == "strselfnick" || foldedKey == "name") return selfName_;
     return "";   // 未知 → 空
 }

@@ -1075,8 +1075,10 @@ static int realMain(int argc, char* argv[]) {
             if (!adapter || !adapter->isConnected()) return;
             if (!gid.empty() && (cmdRouter.isGroupDisabledFor(adapter->platform(), gid, adapter->id())
                 || !cmdRouter.isPluginAllowedInGroup(adapter->platform(), gid, adapter->id()))) return;
-            if (!gid.empty()) adapter->sendGroupMessage(gid, text);
-            else if (!uid.empty()) adapter->sendPrivateMessage(uid, text);
+            for (const auto& page : dice::message_break::split(text)) {
+                if (!gid.empty()) adapter->sendGroupMessage(gid, page);
+                else if (!uid.empty()) adapter->sendPrivateMessage(uid, page);
+            }
         };
         if (!adapterId.empty()) {
             auto adapter = adapterMgr.getAdapter(adapterId);

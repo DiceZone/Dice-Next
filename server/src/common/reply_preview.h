@@ -1,5 +1,6 @@
 #pragma once
 #include "outbound_payload.h"
+#include "message_break.h"
 #include <stdexcept>
 
 namespace dice::outbound {
@@ -11,6 +12,22 @@ inline Json replyPreview(const std::string& text, ContentFormat format,
     const bool channel = platform == "qq_channel";
     if (!qq && platform != "kook" && platform != "discord" && platform != "plain")
         throw std::invalid_argument("unsupported preview platform");
+    if (text.find('\f') != std::string::npos) {
+        Json messages = Json::array(), actions = Json::array();
+        std::string rendered, plain;
+        bool markdown = false;
+        for (const auto& page : message_break::split(text)) {
+            auto preview = replyPreview(page, format, platform, style, forcePlain);
+            if (!messages.empty()) { rendered += '\f'; plain += '\f'; }
+            rendered += preview["text"].get<std::string>();
+            plain += preview["plain"].get<std::string>();
+            markdown = markdown || preview["markdown"].get<bool>();
+            for (const auto& action : preview["actions"]) actions.push_back(action);
+            messages.push_back(std::move(preview));
+        }
+        return {{"text", rendered}, {"plain", plain}, {"markdown", markdown},
+            {"payload", nullptr}, {"actions", actions}, {"messages", messages}};
+    }
     const bool rich = !forcePlain && style != PresentationStyle::kTraditional && !channel && platform != "plain";
     auto expanded = presentation::expandComponents(text, style, rich ? ContentFormat::kMarkdown : ContentFormat::kPlainText);
     if (expanded.usedMarkdown) format = ContentFormat::kMarkdown;

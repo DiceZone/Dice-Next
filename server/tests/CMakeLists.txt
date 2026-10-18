@@ -20,6 +20,7 @@ set(TEST_SOURCES
     test_help_entry_filter.cpp
     test_config_manager.cpp
     test_bot_info.cpp
+    test_message_break.cpp
     test_ai_settings.cpp
     test_persona_manager.cpp
     test_i18n_persona.cpp

@@ -1,5 +1,6 @@
 #include "card_deck.h"
 #include "../../common/logger.h"
+#include "../../common/message_break.h"
 
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -235,6 +236,9 @@ std::string CardDeck::expand(std::string expr, TempMap& temp, int depth) {
         if (!name.empty() && name[0] == '%') { back = true; name = name.substr(1); }
 
         const Deck* master = find(name);
+        if (!master && !back && message_break::isFormFeed(name)) {
+            expr.replace(lq, rq - lq + 1, "\f"); pos = lq + 1; continue;
+        }
         if (!master) {
             // 溯洄/OneDice 引用：{名} 不是牌堆 → 先试帮助词条(展开其内容)；再试 {%_1D3} 这类
             // 内联骰子/算式(去掉前导 % 和 _ 后求值)。都不行就原样保留。

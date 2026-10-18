@@ -77,6 +77,21 @@ private:
 
 }  // namespace
 
+TEST(LuaPluginCompat, FormFeedFormatsAsExplicitMessageBreakWithLegacyPrecedence) {
+    TempWorkspace workspace("dice_formfeed_compat_");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.formatTemplate("甲{FormFeed}乙", {}), std::string("甲\f乙"));
+    ASSERT_EQ(manager.formatTemplate("甲{FORMFEED}乙", {}), std::string("甲\f乙"));
+    ASSERT_EQ(manager.formatTemplate("{sample:甲{FormFeed}乙}", {}), std::string("甲\f乙"));
+    ASSERT_EQ(manager.formatTemplate(R"(甲\{FormFeed}乙)", {}), std::string(R"(甲\{FormFeed}乙)"));
+    ASSERT_EQ(manager.formatTemplate("{nick}", {{"nick", "甲{FormFeed}乙"}}), std::string("甲{FormFeed}乙"));
+    ASSERT_EQ(manager.formatTemplate("{FormFeed}", {{"formfeed", "context wins"}}), std::string("context wins"));
+    fs::create_directories("data/mod/page");
+    writeText("data/mod/page/descriptor.json", R"({"speech":{"FormFeed":"speech wins"}})");
+    ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    ASSERT_EQ(manager.formatTemplate("{FormFeed}", {}), std::string("speech wins"));
+}
+
 TEST(LuaPluginCompat, TypedMigratedConfigKeepsFalseDecimalEmptyTextAndTable) {
     TempWorkspace workspace("dice_typed_migration_");
     writeText("data/plugin/typed.lua", R"LUA(
