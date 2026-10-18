@@ -18,6 +18,8 @@ set(TEST_SOURCES
     test_counter_store.cpp
     test_causal_rule_manager.cpp
     test_help_entry_filter.cpp
+    test_help_catalog.cpp
+    test_lua_event_bridge.cpp
     test_config_manager.cpp
     test_bot_info.cpp
     test_message_break.cpp

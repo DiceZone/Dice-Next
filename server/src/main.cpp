@@ -31,6 +31,7 @@
 #include "service/heart_service.h"     // 心跳上报（heart.dice.zone）
 #include "service/cloudban_service.h"  // 云黑名单同步（cloudban.dice.zone）
 #include "service/backup_service.h"
+#include "service/lua_event_bridge.h"
 #include "platform/instance_guard.h"   // 必须在 tray_win.h(<windows.h>) 之前：先引 winsock2.h
 #include "platform/startup_guard.h"
 #ifndef _WIN32
@@ -1181,52 +1182,9 @@ static int realMain(int argc, char* argv[]) {
     // 用线程局部深度计数防 eventMsg 递归风暴（eventMsg 的回复又触发 eventMsg）。
     luaMod.setEventMsg([&adapterMgr, &cmdRouter, &luaMod, replyFallback, resolveChatPlatform](
             const std::string& text, const std::string& gid, const std::string& uid) {
-        static thread_local int depth = 0;
-        if (depth >= 4) { DICE_LOG_INFO("eventMsg recursion capped at depth 4: '{}'", text); return; }
-        struct Guard { int& d; Guard(int& x):d(x){ ++d; } ~Guard(){ --d; } } guard(depth);
-        // 会话所属平台优先（多平台在线时别拿「第一个适配器」的平台冒充）。
-        const auto sourceAdapter = luaMod.activeAdapter_;
-        std::string platform = luaMod.activePlatform_.empty() ? resolveChatPlatform(gid, uid) : luaMod.activePlatform_;
-        if (platform.empty())
-            for (auto& a : adapterMgr.allAdapters()) if (a->isConnected()) { platform = a->platform(); break; }
-        dice::Message pm;
-        pm.platform = platform;
-        pm.senderId = uid;
-        pm.senderName = cmdRouter.lookupNick(platform, uid);
-        for (auto& a : adapterMgr.allAdapters()) {
-            if (!a || !a->isConnected()) continue;
-            if (!sourceAdapter.empty() && a->id() != sourceAdapter) continue;
-            if (!platform.empty() && a->platform() != platform) continue;
-            pm.adapterId = a->id();
-            pm.selfId = a->getLoginId();
-            break;
-        }
-        if (!sourceAdapter.empty() && pm.adapterId.empty()) return;
-        if (cmdRouter.handleLegacyLuaNoticeEvent(text, platform, pm.adapterId)) return;
-        pm.content = text; pm.rawContent = text; pm.displayContent = text;
-        bool pv = gid.empty();
-        pm.type = pv ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
-        pm.targetId = pv ? uid : gid;
-        if (!pv && (cmdRouter.isGroupDisabled(pm) || !cmdRouter.groupFeatureEnabled(pm, "plugin"))) return;
-        std::string reply = cmdRouter.handleMessage(pm);
-        auto sources = cmdRouter.lastProcessingSources();
-        if (!reply.empty() && sources.empty()) sources = {{"内置指令", text.substr(0, text.find_first_of(" \t")), "", ""}};
-        if (reply.empty() && !cmdRouter.isGroupDisabled(pm)) {
-            std::string src;
-            reply = replyFallback(pm, src, &sources);
-        }
-        if (reply.empty()) return;
-        reply = cmdRouter.applySelf(pm, reply);
-        dice::ProcessingScope virtualSource(dice::ProcessingContext{sources,
-            dice::activeProcessingContext.label() + "调用 eventMsg：" + text, "虚拟指令处理完成"});
-        for (auto& a : adapterMgr.allAdapters()) {
-            if (!a->isConnected()) continue;
-            if (!pm.adapterId.empty() && a->id() != pm.adapterId) continue;
-            if (!platform.empty() && a->platform() != platform) continue;
-            if (pv) a->sendPrivateMessage(uid, reply);
-            else    a->sendGroupMessageCQ(gid, reply);
-            return;
-        }
+        const auto origin = luaMod.invocationOrigin();
+        dice::LuaPluginManager::VirtualEventScope virtualScope(luaMod);
+        dice::dispatchLegacyLuaEvent(adapterMgr, cmdRouter, origin, text, gid, uid, replyFallback, resolveChatPlatform);
     });
     // 插件分群启停（地基）：Lua mod 派发前问「该群是否启用此 mod」。
     luaMod.setGroupGate([&cmdRouter](const std::string& platform, const std::string& group, const std::string& pluginId, const std::string& adapterId) {
@@ -1345,6 +1303,7 @@ static int realMain(int argc, char* argv[]) {
             const std::string& adapterId, const std::string& platform,
             const std::string& targetType, const std::string& targetId,
             const std::string& command, std::string* error) -> bool {
+            dice::LuaPluginManager::VirtualEventScope scheduledScope(luaMod);
             dice::AdapterPtr adapter;
             if (!adapterId.empty()) {
                 auto candidate = adapterMgr.getAdapter(adapterId);
@@ -3428,6 +3387,7 @@ static int realMain(int argc, char* argv[]) {
                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
             nlohmann::json out;
             try {
+                dice::LuaPluginManager::VirtualEventScope previewScope(luaMod);
                 auto body = nlohmann::json::parse(req->getBody());
                 dice::Message msg;
                 msg.id         = "playground";

@@ -92,6 +92,50 @@ TEST(LuaPluginCompat, FormFeedFormatsAsExplicitMessageBreakWithLegacyPrecedence)
     ASSERT_EQ(manager.formatTemplate("{FormFeed}", {}), std::string("speech wins"));
 }
 
+TEST(LuaPluginCompat, EventOriginCannotBeRewrittenByLuaAndVirtualTaintSurvivesYield) {
+    TempWorkspace workspace("dice_lua_event_origin_");
+    writeText("data/plugin/event-origin.lua", R"LUA(
+msg_order={origin='run',wait='later',inner='inner',outer='outer'}
+function run(msg)
+ msg.gid='99999';msg.uid='22222'
+ eventMsg('.group '..msg.gid..' ban '..msg.uid..' 1',0,getDiceQQ())
+ return 'done'
+end
+function later(msg) sleepTime(1);eventMsg('delayed',0,getDiceQQ());return 'done' end
+function inner(msg) eventMsg('inner-event',0,getDiceQQ());return 'done' end
+function outer(msg) eventMsg('outer-event',0,getDiceQQ());return 'done' end
+)LUA");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    manager.setSelfIdLookup([](const auto&, const auto&) { return std::string("900001"); });
+    std::vector<std::function<void()>> callbacks; std::vector<LuaEventOrigin> origins;
+    manager.setScheduler([&](double, auto callback) { callbacks.push_back(std::move(callback)); });
+    manager.setScopedAsyncReply([](const auto&, const auto&, const auto&, const auto&, const auto&) {});
+    manager.setEventMsg([&](const auto& text, const auto&, const auto&) {
+        origins.push_back(manager.invocationOrigin());
+        if (text == "outer-event") {
+            LuaPluginManager::VirtualEventScope virtualScope(manager);
+            manager.dispatch("inner", "forged-user", "forged-group", "fake", "", false, 0, "onebot_v11", "account-a");
+        }
+    });
+    ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    ASSERT_TRUE(manager.dispatch("origin", "10001", "1108650419", "玩家", "", false, 0, "onebot_v11", "account-a").matched);
+    ASSERT_EQ(origins.size(), size_t(1)); ASSERT_EQ(origins[0].userId, "10001"); ASSERT_EQ(origins[0].groupId, "1108650419");
+    ASSERT_EQ(origins[0].adapterId, "account-a"); ASSERT_FALSE(origins[0].virtualEvent); ASSERT_EQ(origins[0].pluginId, "lua:event-origin");
+    manager.dispatch("outer", "10001", "1108650419", "玩家", "", false, 0, "onebot_v11", "account-a");
+    ASSERT_FALSE(origins[1].virtualEvent); ASSERT_TRUE(origins[2].virtualEvent);
+    ASSERT_EQ(manager.invocationOrigin().groupId, "");
+    {
+        LuaPluginManager::VirtualEventScope virtualScope(manager);
+        ASSERT_TRUE(manager.dispatch("wait", "10001", "1108650419", "玩家", "", false, 0, "onebot_v11", "account-a").pending);
+    }
+    ASSERT_EQ(callbacks.size(), size_t(1)); auto callback = std::move(callbacks.back()); callbacks.pop_back(); callback();
+    ASSERT_TRUE(origins.back().virtualEvent); ASSERT_EQ(origins.back().groupId, "1108650419");
+    ASSERT_TRUE(manager.dispatch("wait", "10001", "1108650419", "玩家", "", false, 0, "onebot_v11", "account-b").pending);
+    callback = std::move(callbacks.back()); callbacks.pop_back(); callback();
+    ASSERT_FALSE(origins.back().virtualEvent); ASSERT_EQ(origins.back().adapterId, "account-b");
+    ASSERT_EQ(manager.invocationOrigin().pluginId, "");
+}
+
 TEST(LuaPluginCompat, TypedMigratedConfigKeepsFalseDecimalEmptyTextAndTable) {
     TempWorkspace workspace("dice_typed_migration_");
     writeText("data/plugin/typed.lua", R"LUA(

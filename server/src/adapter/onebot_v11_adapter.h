@@ -1,5 +1,6 @@
 #pragma once
 #include "outbound_logging.h"
+#include "onebot_account_identity.h"
 
 #include "../core/identity/identity_binding.h"
 // ─── Dice!Next v3.0.0 — OneBot v11 Adapter ───────────────────
@@ -219,8 +220,8 @@ public:
 
     // ─── Platform Operations ─────────────────────────────────
 
-    std::string getLoginId() const override { return loginId_; }
-    std::string getLoginName() const override { return loginName_; }
+    std::string getLoginId() const override { return identity_.id(); }
+    std::string getLoginName() const override { return identity_.name(); }
 
     std::string getGroupName(const std::string& groupId) const override {
         return groupNames_.count(groupId) ? groupNames_.at(groupId) : groupId;
@@ -340,10 +341,11 @@ public:
     }
     void refreshMembers(const std::string& groupId) override {
         sendOneBotAction("get_group_member_list", {{"group_id", parseId(groupId)}}, "members:" + groupId);
-        if (!loginId_.empty())
+        const auto self = getLoginId();
+        if (!self.empty())
             sendOneBotAction("get_group_member_info",
-                {{"group_id", parseId(groupId)}, {"user_id", parseId(loginId_)}},
-                "role:" + groupId + ":" + loginId_);
+                {{"group_id", parseId(groupId)}, {"user_id", parseId(self)}},
+                "role:" + groupId + ":" + self);
     }
     int getGroupMemberCount(const std::string& groupId) const override {
         std::lock_guard<std::mutex> lk(dataMutex_);
@@ -356,10 +358,11 @@ public:
         return it != selfRole_.end() ? it->second : "";
     }
     void refreshSelfRole(const std::string& groupId) override {
-        if (loginId_.empty()) return;
+        const auto self = getLoginId();
+        if (self.empty()) return;
         sendOneBotAction("get_group_member_info",
-            {{"group_id", parseId(groupId)}, {"user_id", parseId(loginId_)}},
-            "role:" + groupId + ":" + loginId_);
+            {{"group_id", parseId(groupId)}, {"user_id", parseId(self)}},
+            "role:" + groupId + ":" + self);
     }
     json getMembers(const std::string& groupId) const override {
         std::lock_guard<std::mutex> lk(dataMutex_);
@@ -411,8 +414,10 @@ public:
                                       const std::vector<std::string>& nodes,
                                       ContentFormat format) override {
         if (nodes.empty()) return false;
-        std::string botName = loginName_.empty() ? std::string("\xe9\xaa\xb0\xe5\xa8\x98") : loginName_;  // 骰娘
-        std::string uin = loginId_.empty() ? std::string("10000") : loginId_;
+        std::string botName = getLoginName();
+        if (botName.empty()) botName = "\xe9\xaa\xb0\xe5\xa8\x98"; // 骰娘
+        std::string uin = getLoginId();
+        if (uin.empty()) uin = "10000";
         json messages = json::array();
         for (const auto& n : nodes) {
             const std::string plain = prepOutgoing(groupId, n, format);
@@ -489,7 +494,7 @@ private:
         DICE_LOG_INFO("OneBotV11「{}」开始连接协议端 {}。", name_, endpoint_);
         wsClient_->connectToServer(req, [self](drogon::ReqResult r, const drogon::HttpResponsePtr&, const drogon::WebSocketClientPtr&) {
             if (r != drogon::ReqResult::Ok) { self->connected_=false; self->lastError_="WS connect failed"; self->scheduleReconnect(); }
-            else { self->connected_=true; self->lastError_.clear();  self->timedOut_=false; DICE_LOG_INFO("OneBotV11「{}」WebSocket 连接已建立，正在读取登录资料。", self->name_); self->sendOneBotAction("get_login_info", json::object()); self->refreshGroupList(); self->startGroupRefreshTimer(); }
+            else { self->connected_=true; self->lastError_.clear();  self->timedOut_=false; DICE_LOG_INFO("OneBotV11「{}」WebSocket 连接已建立，正在读取登录资料。", self->name_); self->sendOneBotAction("get_login_info", json::object(), "login_info"); self->refreshGroupList(); self->startGroupRefreshTimer(); }
                     // after stable connection, reset reconnect counter
                     if (self->stabilityTimer_) self->stabilityTimer_.reset();
                     self->stabilityTimer_ = std::make_shared<trantor::TimerId>();
@@ -646,7 +651,7 @@ private:
             DICE_LOG_INFO("OneBotV11「{}」反向 WS 握手完成，正在同步账号资料。", name_);
             connected_ = true;
             revBuffer_.erase(0, pos + 4);   // drop the handshake, keep any trailing frame bytes
-            sendOneBotAction("get_login_info", json::object());
+            sendOneBotAction("get_login_info", json::object(), "login_info");
             refreshGroupList();
             startGroupRefreshTimer();
             // fall through to parse any frames that arrived glued to the handshake
@@ -751,6 +756,11 @@ private:
 
     void sendOneBotAction(const std::string& action, const json& params,
                           const std::string& echo = "") {
+        if ((action == "send_private_msg" && (!params.contains("user_id") || !OneBotAccountIdentity::validId(params["user_id"])))
+            || (action == "send_group_msg" && (!params.contains("group_id") || !OneBotAccountIdentity::validId(params["group_id"])))) {
+            DICE_LOG_WARN("OneBotV11「{}」发送目标无效，未提交平台请求 {}。", name_, action);
+            return;
+        }
         auto outgoing = prepareActionLog("OneBotV11「" + name_ + "」", action, params);
         if (!connected_) {
             if (outgoing) outgoing->failed("适配器尚未连接，没有提交平台");
@@ -802,6 +812,7 @@ private:
         const bool rawMode = s_rawEventLog.load();
         try {
             auto j = json::parse(raw);
+            identity_.observeEvent(j); // self_id is available even before login-info responses.
             // 详细模式：每个事件输出一条「完整可读解释」（取代原来截断到 200 字节
             // 的原始 JSON 转储——那个既不完整又不知所谓，尤其图片/复杂消息）。简洁模式下
             // 仍由后面的 收↩/事件 行处理（且静音心跳与接口成功响应）。
@@ -1063,7 +1074,7 @@ private:
                         BotEvent hv;
                         hv.type = EventType::kGroupHistory;
                         hv.platform = platform(); hv.adapterId = id_;
-                        hv.selfId = loginId_;
+                        hv.selfId = getLoginId();
                         hv.groupId = echo.substr(8);
                         hv.extra = json{{"messages", *msgs}};
                         DICE_LOG_INFO("OneBotV11「{}」已取得群 {} 的历史消息，共 {} 条。",
@@ -1075,7 +1086,7 @@ private:
                     std::lock_guard<std::mutex> lk(dataMutex_);
                     memberLists_[gid] = d;
                     for (auto& m : d)
-                        if (jsonField(m, "user_id") == loginId_) { selfRole_[gid] = m.value("role", "member"); break; }
+                        if (jsonField(m, "user_id") == getLoginId()) { selfRole_[gid] = m.value("role", "member"); break; }
                 } else if (echo.rfind("role:", 0) == 0 && d.is_object()) {
                     const std::string tail = echo.substr(5);
                     const std::string role = d.value("role", "member");
@@ -1087,21 +1098,19 @@ private:
                     } else {
                         const std::string gid = tail.substr(0, sep);
                         const std::string uid = tail.substr(sep + 1);
-                        if (uid == loginId_) selfRole_[gid] = role;
+                        if (uid == getLoginId()) selfRole_[gid] = role;
                         if (!gid.empty() && !uid.empty()) memberRoles_[gid + "\x1f" + uid] = role;
                     }
-                } else if (d.is_object()) {
-                    // get_login_info response
-                    if (d.contains("user_id")) loginId_ = std::to_string(d["user_id"].get<int64_t>());
-                    if (d.contains("nickname")) loginName_ = d["nickname"];
+                } else if (echo == "login_info" && !failed && d.is_object()) {
+                    // A stranger/member API object is not the bot's identity.
+                    identity_.observeLoginInfo(d);
                 }
             }
             // Handle lifecycle events
             else if (j.contains("meta_event_type")) {
                 auto meta = j["meta_event_type"].get<std::string>();
                 if (meta == "lifecycle") {
-                    loginId_ = std::to_string(j.value("self_id", 0LL));
-                    DICE_LOG_DEBUG("OneBotV11「{}」收到生命周期事件：机器人账号 {}。", name_, loginId_);
+                    DICE_LOG_DEBUG("OneBotV11「{}」收到生命周期事件：机器人账号 {}。", name_, getLoginId());
                 } else if (meta == "heartbeat") {
                     const auto status = j.value("status", json::object());
                     const auto online = status.contains("online") && status["online"].is_boolean()
@@ -1529,8 +1538,7 @@ private:
     std::string accessToken_;
     std::string mode_{"forward_ws"};  // forward_ws | reverse_ws | http
 
-    std::string loginId_;
-    std::string loginName_;
+    OneBotAccountIdentity identity_;
     std::atomic<bool> connected_{false};
     std::atomic<bool> stopping_{false};
     std::string lastError_;

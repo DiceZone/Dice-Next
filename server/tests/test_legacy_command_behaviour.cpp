@@ -802,6 +802,7 @@ TEST(LegacyReply, ExplicitHelpAndGlobalTextUseTheirOwnNamespaces) {
 
 TEST(LegacyHelp, SelectedModHelpUsesContextWithoutChangingExistingPrioritiesOrScope) {
     LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load()); // Exercise real builtin help, not missing-resource placeholder keys.
     int calls=0;
     f.router.setHelpProvider([] { return std::vector<std::pair<std::string,std::string>>{{"shared","JS help"}}; });
     f.router.setLegacyModHelpProvider([] { return std::vector<std::pair<std::string,std::string>>{

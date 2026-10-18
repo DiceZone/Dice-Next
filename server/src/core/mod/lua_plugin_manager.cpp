@@ -2815,6 +2815,7 @@ bool LuaPluginManager::runLegacyEvent(const LegacyCycleEvent& action, json& cont
     if (groupGate_ && !gid.empty() && !groupGate_(platform, gid, "lua:" + action.modName, adapter)) return false;
     const int trust = trustLookup_ && !uid.empty() ? trustLookup_(uid, gid, platform, adapter, gid.empty()) : 0;
     if (trust < 0) return false;
+    InvocationScope invocation(*this, platform, adapter, gid, uid, action.modName);
     ProcessingScope processing(loggingSource(action.modName, action.id), "Lua 事件「" + action.id + "」");
     values["id"] = action.id; values["mod"] = action.modName;
     if (!values.contains("time")) values["time"] = nowSeconds();
@@ -2858,6 +2859,7 @@ bool LuaPluginManager::runLegacyEvent(const LegacyCycleEvent& action, json& cont
                 task.generation = runtimeGeneration_; task.threadRef = reference; task.messageRef = contextRef; task.event = true;
                 task.ruleName = action.id; task.modName = action.modName; task.modDir = action.modDir;
                 task.platform = platform; task.adapterId = adapter; task.gid = gid; task.uid = uid; task.logContext = activeProcessingContext;
+                task.virtualEvent = invocationOrigin_.virtualEvent;
                 pendingCoroutines_[reference] = std::move(task); pending = true;
                 scheduleCoroutineResume(reference, yieldedDelaySeconds(coroutine, count));
                 if (!pendingCoroutines_.count(reference)) context["@dice_event_failed"] = true;
@@ -3776,6 +3778,7 @@ void LuaPluginManager::drainLegacyLocks(uint64_t generation) {
             } replay{std::exchange(dnx_lockReplayDepth, task.depth), std::exchange(dnx_queuedRuleKey, task.ruleKey)};
             const int trust = trustLookup_ ? trustLookup_(task.uid, task.gid, task.platform, task.adapterId, task.isPrivate) : task.trust;
             if (trust < 0) continue;
+            VirtualEventScope virtualScope(*this, task.virtualEvent);
             result = dispatch(task.text, task.uid, task.gid, task.nick, task.card, task.isPrivate, trust, task.platform, task.adapterId);
         }
         const auto send = asyncReply_;
@@ -3853,6 +3856,7 @@ void LuaPluginManager::resumeCoroutine(int threadRef) {
     activePlatform_ = pending.platform;
     activeAdapter_ = pending.adapterId;
     loadingModDir_ = pending.modDir;
+    InvocationScope invocation(*this, pending.platform, pending.adapterId, pending.gid, pending.uid, pending.modName, pending.virtualEvent);
     int resultCount = 0;
     const int status = dnx_resume(coroutine, state_, 0, &resultCount, true);
     activePlatform_ = oldPlatform;
@@ -4035,6 +4039,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
     static thread_local std::mt19937_64 random{std::random_device{}()};
     for (const auto& candidate : candidates) {
         auto& rule = *candidate.rule;
+        InvocationScope invocation(*this, platform, adapterId, gid, uid, rule.modName);
         const auto& suffix = candidate.suffix;
         ScriptFaultScope fault(suspendedMods_, rule.modName);
         if (dnx_queuedRuleKey.empty() && rule.limits && rule.limits->probability > 0
@@ -4053,6 +4058,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
                 task.ruleKey = json::array({rule.modName, rule.name}).dump();
                 task.depth = dnx_lockReplayDepth + 1; task.generation = runtimeGeneration_;
                 task.locks = std::move(locks); task.context = activeProcessingContext;
+                task.virtualEvent = invocationOrigin_.virtualEvent;
                 queuedDispatches_.push_back(std::move(task));
                 res.pending = true;
             } else if (busy) {
@@ -4164,6 +4170,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
                 pending.platform = platform; pending.adapterId = adapterId; pending.gid = gid; pending.uid = uid;
                 pending.vars = base;
                 pending.logContext = activeProcessingContext;
+                pending.virtualEvent = invocationOrigin_.virtualEvent;
                 pending.locks = lease.keys; lease.retain = true;
                 pendingCoroutines_[threadRef] = std::move(pending);
                 const double delay = yieldedDelaySeconds(coroutine, resultCount);

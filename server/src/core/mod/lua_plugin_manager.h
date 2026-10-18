@@ -1,6 +1,7 @@
 #pragma once
 #include "common/script_execution.h"
 #include "common/log_context.h"
+#include "common/legacy_lua_event.h"
 // ─── Dice!Next — Lua 插件子系统 ───────────────────────────────────
 // 嵌入 Lua，并提供模块目录与全局函数接口：
 //   data/mod/<模块名>/descriptor.json   模块元数据（title/ver/author/brief/helpdoc）
@@ -85,6 +86,16 @@ public:
         return botId_;
     }
     std::string botId() const { return botIdFor(activePlatform_, activeAdapter_); }
+    LuaEventOrigin invocationOrigin() const { return invocationOrigin_; }
+    class VirtualEventScope {
+    public:
+        explicit VirtualEventScope(LuaPluginManager& owner, bool enabled = true)
+            : owner_(owner), previous_(owner.inVirtualEvent_) { owner.inVirtualEvent_ = previous_ || enabled; }
+        ~VirtualEventScope() { owner_.inVirtualEvent_ = previous_; }
+        VirtualEventScope(const VirtualEventScope&) = delete;
+    private:
+        LuaPluginManager& owner_; bool previous_;
+    };
     // 对一条消息派发 msg_reply 因果回复：keyword 匹配 → echo() → 模板格式化。
     struct DispatchResult { bool matched = false; std::string reply; std::vector<ProcessingSource> sources; bool failed = false, pending = false; };
     ProcessingSource loggingSource(const std::string& mod, const std::string& entry = {}) const;
@@ -348,6 +359,20 @@ public:
     ExtraFn     askExtra_;    // 平台扩展查询（askExtra）
 
 private:
+    LuaEventOrigin invocationOrigin_;
+    // Host preview/event scopes may begin before the Lua mutex is acquired.
+    // Keep their marker local to the calling thread; continuations persist it.
+    inline static thread_local bool inVirtualEvent_ = false;
+    struct InvocationScope {
+        LuaPluginManager& owner; LuaEventOrigin previous;
+        InvocationScope(LuaPluginManager& manager, const std::string& platform, const std::string& adapter,
+                        const std::string& group, const std::string& user, const std::string& plugin, bool virtualEvent = false)
+            : owner(manager), previous(manager.invocationOrigin_) {
+            owner.invocationOrigin_ = {platform, adapter, group, user, "lua:" + plugin,
+                virtualEvent || owner.inVirtualEvent_ || previous.virtualEvent};
+        }
+        ~InvocationScope() { owner.invocationOrigin_ = std::move(previous); }
+    };
     struct CallbackState { std::recursive_mutex mutex; LuaPluginManager* owner = nullptr; };
     std::shared_ptr<CallbackState> callbackState_;
     ClockFn clock_;
@@ -405,6 +430,7 @@ private:
         uint64_t generation = 0;
         std::vector<std::string> locks;
         ProcessingContext context;
+        bool virtualEvent = false;
     };
     std::set<std::string> activeLegacyLocks_;
     std::deque<QueuedDispatch> queuedDispatches_;
@@ -449,6 +475,7 @@ private:
         ProcessingContext logContext;
         std::vector<std::string> locks;
         bool event = false;
+        bool virtualEvent = false;
     };
     void scheduleCoroutineResume(int threadRef, double delaySeconds);
     void resumeCoroutine(int threadRef);

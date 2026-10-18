@@ -1,5 +1,6 @@
 #pragma once
 #include "../common/legacy_conf_value.h"
+#include "../common/legacy_lua_event.h"
 #include "../common/legacy_model.h"
 #include "../common/session_deck.h"
 // ─── Dice!Next v3.0.0 — Command Router ───────────────────────
@@ -153,6 +154,39 @@ public:
         if (lower.rfind(sendPrefix, 0) == 0)
             return sendLegacyNotice(body.substr(std::char_traits<char>::length(sendPrefix)), adapterId);
         return false;
+    }
+    // Installed legacy plugins may request self-moderation for the actual
+    // triggering player. This never turns arbitrary eventMsg into an admin.
+    // Returned diagnostics stay local; they are not private-message replies.
+    std::string legacyLuaSelfBan(const LegacyLuaGroupBan& ban, const LuaEventOrigin& origin, const AdapterPtr& adapter) {
+        if (origin.virtualEvent || origin.pluginId.rfind("lua:", 0) != 0 || origin.groupId.empty()
+            || origin.adapterId.empty() || ban.groupId != origin.groupId || ban.userId != origin.userId)
+            return "仅允许真实群上下文中的插件对当前触发用户自禁言，不允许虚拟消息提权、跨群或更换目标。";
+        if (!positiveQQId(ban.groupId) || !positiveQQId(ban.userId) || ban.minutes < 0 || ban.minutes > 43200
+            || !adapter || !adapter->isConnected() || adapter->id() != origin.adapterId || adapter->platform() != origin.platform
+            || (origin.platform != "onebot_v11" && origin.platform != "milky") || !positiveQQId(adapter->getLoginId())
+            || adapter->getLoginId() == ban.userId)
+            return "来源账号、群号或目标用户无效，未提交禁言请求。";
+        Message context;
+        context.platform = origin.platform; context.adapterId = origin.adapterId; context.selfId = adapter->getLoginId();
+        context.type = MessageType::kGroup; context.targetId = origin.groupId; context.senderId = origin.userId;
+        if (isBlocked(context) || isGroupDisabled(context) || (silentGlobal(context) && !isMaster(context) && senderTrust(context) < 4)
+            || getGroupSetting(context, "__removed") == "1"
+            || getGroupSetting(context, "left") == "1"
+            || !isPluginEnabledInGroup(origin.platform, origin.groupId, origin.pluginId, origin.adapterId))
+            return "目标群或用户已禁用、列入黑名单，或该插件未在本群启用。";
+        const auto capabilities = adapter->capabilities();
+        if (!capabilities.is_object() || !capabilities.value("ban", false)) return "当前适配器不支持群禁言。";
+        const auto role = toLower(adapter->getSelfRole(ban.groupId));
+        if (role == "member") return "机器人在本群没有管理权限，无法执行禁言。";
+        if (role != "admin" && role != "owner" && role != "administrator" && role != "creator") {
+            adapter->refreshSelfRole(ban.groupId);
+            return "尚未确认机器人具有本群管理权限，已请求刷新权限缓存；请稍后重试。";
+        }
+        if (adapter->isGroupOwner(ban.groupId, ban.userId) || adapter->isGroupAdmin(ban.groupId, ban.userId))
+            return "目标用户是群主或群管理员，不能禁言。";
+        adapter->setGroupBan(ban.groupId, ban.userId, ban.minutes * 60);
+        return {};
     }
     /// 智能化阶段D（工具调用）：按发送者的人物卡读取一个属性值（含关联属性/衍生值回退）。
     /// 供 AI function-calling 的 get_attr 工具使用。无卡/无此属性返回 nullopt。
@@ -4358,17 +4392,6 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
     /// by the dashboard / .system stats. Same counter as s_cmdCount.
     static long commandCount() { return s_cmdCount.load(std::memory_order_relaxed); }
 
-    /// Known built-in help topics (used by .help <topic> and .helpdoc listing).
-    static const std::vector<std::string>& helpTopics() {
-        static const std::vector<std::string> t = {
-            "r", "rh", "ra", "rx", "rb", "rav", "ba", "bav", "sc", "st", "pc", "npc", "coc", "dnd", "ww", "dx", "rdx",
-            "en", "ti", "setcoc", "deck", "jrrp", "mrrp", "zrrp", "name",
-            "bot", "group", "ob", "send", "log", "nn", "set", "sleep", "lang", "favor", "hiy",
-            "setsn", "sn", "ri", "welcome", "dismiss", "rules", "plugin"
-        };
-        return t;
-    }
-
     // 插件帮助提供器（由 main.cpp 从 JsPluginManager 注入，返回 {指令名, 帮助文本}）。
     // CommandRouter 不直接依赖 JS 引擎，故用回调解耦。
     using HelpProviderFn = std::function<std::vector<std::pair<std::string, std::string>>()>;
@@ -4414,10 +4437,11 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         return false;
     }
 
-    // 一条帮助条目（合并自内置 i18n / 规则包 / 插件 / 文件四源）。
+    // 合并内置/自定义帮助词条、规则包、插件和文档。
     struct HelpEntry {
-        std::string key, content, source; // builtin | rule:<包> | plugin | file:<名>
+        std::string key, content, source; // builtin | custom | rule:<包> | plugin | file:<名> | helpdoc:<包>
         bool legacyMod = false; // Render only the selected entry, never the whole catalog.
+        std::string i18nKey; // Raw templates are rendered only after selection.
     };
 
     // data/help/*.md 用户自管帮助文档（第四源）。专用读写锁；启动期与 CRUD 后 loadHelpFiles。
@@ -4440,7 +4464,7 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
 
     // data/helpdoc/**/*.json 结构化帮助文档（海豹 SealDice 兼容 + 随包分发的规则速查）。
     // 格式 {mod, brief, helpdoc:{词条:内容}}（值以 & 开头=别名，一级解析）。xlsx 在打包时转 json。
-    struct HelpDocItem { std::string topic, content, pack; };
+    struct HelpDocItem { std::string topic, content, pack, rulePack; };
     static std::shared_mutex& helpDocLock() { static std::shared_mutex m; return m; }
     static std::vector<HelpDocItem>& helpDocs() { static std::vector<HelpDocItem> v; return v; }
     // 扫描某目录下所有 *.json helpdoc，追加进 helpDocs()。packPrefix 非空时给 pack 名加前缀
@@ -4467,7 +4491,7 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
                         auto a = raw.find(txt.substr(1));
                         if (a != raw.end()) txt = a->second;
                     }
-                    if (!k.empty() && !txt.empty()) { helpDocs().push_back({k, txt, pack}); ++added; }
+                    if (!k.empty() && !txt.empty()) { helpDocs().push_back({k, txt, pack, packPrefix}); ++added; }
                 }
             } catch (...) { DICE_LOG_WARN_EXCEPTION("loading help file " + u8str(it->path())); }
         }
@@ -4497,13 +4521,15 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         // scope 非空 = 搜索域锁定：内置指令帮助保留，其余只收来源匹配的（在「去重前」过滤，
         // 否则别的来源的同名词条会先占位、再被过滤掉，导致域内词条反而查不到）。
         std::unordered_set<std::string> seenKeys;
-        auto add = [&](const std::string& k, const std::string& c, const std::string& src, bool legacyMod = false) {
+        auto add = [&](const std::string& k, const std::string& c, const std::string& src, bool legacyMod = false,
+                       const std::string& i18nKey = "") {
+            if (k.empty() || c.empty()) return;
             if (!scope.empty() && src != "builtin" && !helpSourceMatches(src, scope)) return;
             if (!seenKeys.insert(toLower(k)).second) return;   // 已存在
-            v.push_back({k, c, src, legacyMod});
+            v.push_back({k, c, src, legacyMod, i18nKey});
         };
-        for (const auto& t : helpTopics())
-            add(t, i18n_.tr(loc, "help.topic." + t), "builtin");
+        for (const auto& text : i18n_.helpTemplates(loc, true))
+            add(text.key.substr(11), text.value, text.builtin ? "builtin" : "custom", false, text.key);
         {
             std::shared_lock<std::shared_mutex> lk(rulesLock());
             for (const auto& rp : rulePacks()) if (rp.enabled)
@@ -4665,9 +4691,9 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
     }
 
 private:
-    std::string renderSelectedHelp(const HelpEntry& entry, const Message& msg) const {
-        const auto text = entry.legacyMod && legacyModHelpRenderer_
-            ? legacyModHelpRenderer_(entry.key, msg) : entry.content;
+    std::string renderSelectedHelp(const HelpEntry& entry, const Message& msg, Locale loc) const {
+        const auto text = !entry.i18nKey.empty() ? i18n_.tr(loc, entry.i18nKey)
+            : entry.legacyMod && legacyModHelpRenderer_ ? legacyModHelpRenderer_(entry.key, msg) : entry.content;
         return expandHelpRefs(text, msg);
     }
     std::string handleHelp(Locale loc, const std::string& args, const Message& msg) {
@@ -4701,13 +4727,13 @@ private:
             if (!hasDoc) return i18n_.tr(loc, "helpdoc.scope.empty", {{"scope", scope}, {"topic", topic}});
         }
         // 精确命中（忽略大小写）任一来源。
-        for (auto& e : entries) if (toLower(e.key) == topic) return renderSelectedHelp(e, msg);
+        for (auto& e : entries) if (toLower(e.key) == topic) return renderSelectedHelp(e, msg, loc);
         // 模糊查找：唯一命中→显示；多个→列候选；无→未知。
         std::vector<std::string> keys; keys.reserve(entries.size());
         for (auto& e : entries) keys.push_back(e.key);
         auto hits = fuzzyFind(topic, keys);
         if (hits.size() == 1)
-            for (auto& e : entries) if (e.key == hits[0]) return renderSelectedHelp(e, msg);
+            for (auto& e : entries) if (e.key == hits[0]) return renderSelectedHelp(e, msg, loc);
         if (hits.size() > 1) {
             std::string list;
             for (auto& c : hits) { if (!list.empty()) list += " "; list += "." + c; }
@@ -9727,6 +9753,7 @@ private:
         for (const auto& entry : allHelp(Locale::kZhHans))
             if (toLower(trim(entry.key)) == toLower(trim(name)) && !entry.content.empty()) {
                 if (message && entry.legacyMod && legacyModHelpRenderer_) return legacyModHelpRenderer_(entry.key, *message);
+                if (!entry.i18nKey.empty()) return i18n_.tr(Locale::kZhHans, entry.i18nKey);
                 return entry.content;
             }
         return std::nullopt;

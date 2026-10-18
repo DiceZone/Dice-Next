@@ -3,6 +3,76 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-19: Legacy roulette self-moderation and invalid private targets (local)
+
+- The supplied roulette plugin calls `eventMsg('.group G ban U M', 0,
+  getDiceQQ())` after a hit. The old host treated this as a normal private
+  command and sent its permission receipt back to an empty/zero bot identity;
+  `.group ban` was also not implemented. A narrow compatibility bridge now
+  accepts only integer-minute self-moderation for the native invoking group,
+  player, plugin and account. It does not expose general `.group ban`, restore
+  arbitrary virtual administrator privileges or accept duration expressions.
+- Group disable/lock/removal, blacklist, global silence, plugin selection,
+  adapter support, verified bot role and protected group members are checked.
+  Zero minutes means unmute; the upper bound is 30 days. Unknown roles request
+  refresh and fail closed. Other virtual self-calls execute without receipts;
+  ordinary group/user events retain their previous reply path.
+- Native invocation provenance cannot be rewritten by Lua `msg` fields.
+  Virtual-origin markers survive nested events, waiting coroutines and queued
+  dispatches. WebUI test calls and scheduled virtual plugin commands cannot use
+  this bridge to acquire moderation privileges. Host markers are thread-local.
+- OneBot identity is established from valid inbound `self_id`, preserved across
+  missing/zero lifecycle fields and only updated by correlated login responses,
+  not arbitrary member/stranger API objects. The cache is synchronized; invalid
+  private/group sending targets are rejected locally before platform submission.
+- Focused native regressions passed **188 cases / 1,458 assertions**, including
+  seven new bridge/identity cases plus the prior help, command, migration,
+  nickname, weighted-template and FormFeed coverage. Real Lua tests passed
+  **60 registered cases / 557 assertions**, including the new provenance/yield
+  case; optional external-corpus cases remain conditional on their fixtures.
+- An unchanged copy of the supplied roulette file was exercised against the
+  production event bridge with an isolated database and fake adapter: valid
+  identity submitted one ban request, invalid identity and virtual escalation
+  submitted none, and all scenarios submitted zero receipt messages. The
+  source plugin was not changed or bundled into the repository.
+- Windows amd64 Release server/Lua targets and documentation build passed.
+  This was not a full-core, cross-platform or live-platform verification. No
+  real bot, listening server, actual ban, commit, push or Release was started.
+
+## 2026-10-19: Custom help library and source filters (local)
+
+- Historical `help.topic.*` overrides were retained in the database but omitted
+  from the fixed-topic help catalog, leaving them unclassified in the text
+  editor and unavailable to normal `.help` lookup. The catalog now enumerates
+  actual loaded help templates, including override-only custom topics and
+  previously omitted builtin topics. No data/schema rewrite or reimport is
+  required; raw text, locale, format and persona precedence are preserved.
+- Management browsing does not evaluate samples or persona templates. Runtime
+  help renders only the selected template; JS/Lua priority and lazy Mod help
+  rendering remain covered. Builtin overrides retain builtin provenance;
+  ASCII-case variants, empty entries and shadowed sources are handled
+  consistently. Embedded rule-pack documents retain their original scope name
+  while reporting rule-pack origin.
+- The library and source counts share a catalog, with category, exact-source
+  and search filters applied before paging. Tests include 20,010 plugin topics
+  plus a custom entry beyond the first page. The frontend routes standalone
+  global help out of unclassified text, preserves command/persona editing,
+  edits the displayed content locale and keeps explicit format metadata.
+  Versioned exports include help overrides in every language and custom files;
+  imports still accept the original file-only formats and validate before writes.
+- The focused Windows runner passed **181 cases / 1,403 assertions**, including
+  seven new help-library cases, existing visibility checks, legacy commands,
+  BotInfo, migration, group/nickname and weighted/sample/FormFeed regressions.
+  Changed i18n and affected test sources were freshly compiled; unchanged
+  production objects were reused. Real Lua help regression passed **2 cases /
+  26 assertions**. The existing Mod-priority test now loads real builtin bundles
+  instead of relying on missing-resource placeholder keys.
+- Windows amd64 Release server and real Lua test targets built successfully.
+  WebUI type checking/build and **294 tests passed**, with 2 optional live
+  production-renderer tests skipped (296 registered). Documentation build and
+  diff whitespace checks passed. This was not a full-core, cross-platform or
+  live-HTTP run; no real adapter, listener, commit, push or Release was started.
+
 ## 2026-10-18: Legacy FormFeed message breaks (local)
 
 - Original Dice! maps `{FormFeed}` to U+000C and splits the outbound message;

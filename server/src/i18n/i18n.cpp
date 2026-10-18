@@ -270,6 +270,38 @@ std::map<std::string, std::string> I18n::flatten(Locale loc) const {
     return out;
 }
 
+std::vector<I18n::HelpTemplate> I18n::helpTemplates(Locale loc, bool withPersona) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::map<std::string, HelpTemplate> entries;
+    auto merge = [&](const auto& source, Locale language, bool builtin, bool customized) {
+        const auto bundle = source.find(language);
+        if (bundle == source.end()) return;
+        for (const auto& [key, value] : bundle->second) {
+            if (key.rfind("help.topic.", 0) != 0 || key.size() <= 11) continue;
+            const bool hadDefault = entries.count(key) && entries.at(key).builtin;
+            entries[key] = {key, value.value, value.format, language, builtin || hadDefault, customized};
+        }
+    };
+    const int persona = scopedPersonaId_.value_or(activePersonaId_);
+    auto mergeLocale = [&](Locale language) {
+        merge(preparedBundles_, language, true, false);
+        merge(overrides_, language, false, true);
+        if (withPersona) {
+            const auto found = preparedPersonaBundles_.find(persona);
+            if (found != preparedPersonaBundles_.end()) merge(found->second, language, false, true);
+        }
+    };
+    if (loc != defaultLocale_) mergeLocale(defaultLocale_);
+    mergeLocale(loc);
+    std::vector<HelpTemplate> result;
+    result.reserve(entries.size());
+    for (auto& [key, entry] : entries) result.push_back(std::move(entry));
+    // Preserve builtin precedence even for override-only case variants such
+    // as help.topic.R. Both the runtime and management use ASCII-folded topics.
+    std::stable_partition(result.begin(), result.end(), [](const HelpTemplate& entry) { return entry.builtin; });
+    return result;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Lookup
 // ═══════════════════════════════════════════════════════════════

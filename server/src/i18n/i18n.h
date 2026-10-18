@@ -154,6 +154,18 @@ public:
     /// applied — the caller overlays them.
     std::map<std::string, std::string> flatten(Locale loc) const;
 
+    struct HelpTemplate {
+        std::string key, value;
+        ContentFormat format = ContentFormat::kPlainText;
+        Locale locale = Locale::kZhHans;
+        bool builtin = false;
+        bool customized = false;
+    };
+    /// Raw help templates, including override-only topics imported from Dice!.
+    /// Uses the same language/layer precedence as tr(), without evaluating
+    /// samples or templates while browsing. Management excludes persona layers.
+    std::vector<HelpTemplate> helpTemplates(Locale loc, bool withPersona = false) const;
+
     // ─── Persona layer (骰娘人格切换) ─────────────────
     // A "persona" is an overlay bundle on top of the editable global reply set:
     // persona(when enabled) -> user override -> default bundle -> key.

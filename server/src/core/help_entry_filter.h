@@ -11,7 +11,9 @@ public:
     explicit HelpEntryFilter(bool management) : management_(management) {}
     Decision add(const std::string& key, const std::string& content) {
         if (key.empty()) return {false, false};
-        const bool shadowed = !content.empty() && !seen_.insert(key).second;
+        std::string canonical = key;
+        for (auto& ch : canonical) if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+        const bool shadowed = !content.empty() && !seen_.insert(canonical).second;
         return {management_ || (!content.empty() && !shadowed), shadowed};
     }
 private:

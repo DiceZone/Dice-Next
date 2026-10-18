@@ -33,7 +33,7 @@
 #include "../core/mod/js_plugin_manager.h"
 #include "../core/mod/lua_plugin_manager.h"
 #include "../core/command_router.h"
-#include "../core/help_entry_filter.h"
+#include "../core/help_catalog.h"
 #include "../core/identity/identity_binding.h"
 #include "../platform/system_info.h"
 #include "../i18n/i18n.h"
@@ -3503,112 +3503,90 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         jsonReply(ok(J{{"packs", arr}}), std::move(cb));
     }, {drogon::Get});
 
-    // ── 帮助系统：聚合 内置 / 规则包 / 插件 三源帮助条目 ──────────
-    app.registerHandler("/api/help", [&i18n, &jsMod, &luaMod](Req req, CB&& cb) {
+    // Keep the paged library and source counters on one catalog. Historical
+    // help.topic overrides stay in their original locale/format, not lossy files.
+    auto helpCatalog = [&i18n, &jsMod, &luaMod](Locale loc, bool management) {
+        HelpCatalog catalog(management);
+        for (const auto& text : i18n.helpTemplates(loc, !management)) {
+            HelpDocumentEntry entry;
+            entry.key = text.key.substr(11); entry.content = management ? text.value : i18n.tr(loc, text.key);
+            entry.source = text.builtin ? "builtin" : "custom";
+            entry.i18nKey = text.key; entry.locale = localeToString(text.locale);
+            entry.format = contentFormatName(text.format);
+            entry.editable = true; entry.customized = text.customized;
+            catalog.add(std::move(entry));
+        }
+        { std::shared_lock<std::shared_mutex> lk(rulesLock());
+          for (const auto& p : CommandRouter::rulePacks()) if (p.enabled)
+            for (const auto& [k, c] : p.helpEntries) catalog.add({k, c, "rule:" + p.name}); }
+        for (const auto& ch : jsMod.commandHelps()) catalog.add({ch.name, ch.help, "plugin:" + ch.plugin});
+        for (const auto& h : luaMod.helpEntries()) catalog.add({h.topic, h.text, "lua:" + h.mod});
+        { std::shared_lock<std::shared_mutex> lk(CommandRouter::helpLock());
+          for (const auto& [k, c] : CommandRouter::helpFiles()) {
+              HelpDocumentEntry entry{k, c, "file:" + k}; entry.editable = true;
+              catalog.add(std::move(entry));
+          } }
+        { std::shared_lock<std::shared_mutex> lk(CommandRouter::helpDocLock());
+          for (const auto& h : CommandRouter::helpDocs()) {
+              HelpDocumentEntry entry{h.topic, h.content, "helpdoc:" + h.pack};
+              entry.kind = h.rulePack.empty() ? "helpdoc" : "rule";
+              catalog.add(std::move(entry));
+          } }
+        return catalog;
+    };
+    app.registerHandler("/api/help", [helpCatalog](Req req, CB&& cb) {
         std::string lang = req->getParameter("lang");
         if (lang.empty()) lang = "zh-Hans";
         Locale loc = localeFromString(lang);
-        // 服务端分页 + 搜索（Lua helpdoc 可达 2 万+ 条，全量回传会几十 MB/数秒）。
-        // 仅小写 ASCII A-Z（CJK 等高位字节保持精确，避免 locale 相关的 std::tolower 误伤多字节）。
-        auto aLow = [](unsigned char c) -> char { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c; };
-        std::string q = req->getParameter("q");
-        for (auto& ch : q) ch = aLow((unsigned char)ch);
-        std::string srcFilter = req->getParameter("source");   // 分组视图展开时只取某来源
+        // Search/category/source filters apply before server-side pagination.
         int page = 1, size = 50;
         try { if (!req->getParameter("page").empty()) { int v = std::stoi(req->getParameter("page")); page = v < 1 ? 1 : v; } } catch (...) {}
         try { if (!req->getParameter("size").empty()) { int v = std::stoi(req->getParameter("size")); size = v < 1 ? 1 : (v > 200 ? 200 : v); } } catch (...) {}
 
         const bool management = req->getParameter("management") == "1";
-        struct E { std::string key, content, source, i18nKey; bool editable, shadowed; };
-        std::vector<E> all;
-        dice::HelpEntryFilter visibility(management);
-        auto add = [&](const std::string& k, const std::string& c, const std::string& src,
-                       bool ed, const std::string& i18nKey) {
-            const auto decision = visibility.add(k, c);
-            if (!decision.include) return;
-            all.push_back({k, c, src, i18nKey, ed, decision.shadowed});
-        };
-        for (const auto& t : CommandRouter::helpTopics())
-            add(t, i18n.tr(loc, "help.topic." + t), "builtin", true, "help.topic." + t);
-        { std::shared_lock<std::shared_mutex> lk(rulesLock());
-          for (auto& p : CommandRouter::rulePacks()) { if (!p.enabled) continue;
-            for (auto& [k, c] : p.helpEntries) add(k, c, "rule:" + p.name, false, ""); } }
-        for (auto& ch : jsMod.commandHelps())
-            add(ch.name, ch.help, "plugin:" + ch.plugin, false, "");
-        for (auto& h : luaMod.helpEntries())   // 补 Lua mod descriptor.helpdoc
-            add(h.topic, h.text, "lua:" + h.mod, false, "");
-        { std::shared_lock<std::shared_mutex> lk(CommandRouter::helpLock());
-          for (auto& [k, c] : CommandRouter::helpFiles()) add(k, c, "file:" + k, true, ""); }
-        { std::shared_lock<std::shared_mutex> lk(CommandRouter::helpDocLock());   // 结构化帮助文档（海豹兼容+随包速查）
-          for (auto& h : CommandRouter::helpDocs()) add(h.topic, h.content, "helpdoc:" + h.pack, false, ""); }
-
-        // 大小写无关「包含」（不分配小写副本）。q 已是小写。
-        auto ciContains = [&aLow](const std::string& hay, const std::string& nl) {
-            if (nl.empty()) return true;
-            auto it = std::search(hay.begin(), hay.end(), nl.begin(), nl.end(),
-                [&aLow](char a, char b){ return aLow((unsigned char)a) == b; });
-            return it != hay.end();
-        };
-        std::vector<const E*> filtered;
-        for (auto& e : all)
-            if ((srcFilter.empty() || e.source == srcFilter)
-                && (q.empty() || ciContains(e.key, q) || ciContains(e.content, q))) filtered.push_back(&e);
-
-        int total = (int)filtered.size();
-        int start = (page - 1) * size;
+        const auto catalog = helpCatalog(loc, management);
+        const auto filtered = catalog.select(req->getParameter("q"), req->getParameter("kind"), req->getParameter("source"));
+        const size_t total = filtered.size();
+        const size_t start = size_t(page - 1) * size_t(size);
         J arr = J::array();
-        for (int i = start; i < start + size && i < total; ++i) {
-            const E& e = *filtered[(size_t)i];
-            J o{{"key", e.key}, {"content", e.content}, {"source", e.source}, {"editable", e.editable}};
+        for (size_t i = start; i < start + size_t(size) && i < total; ++i) {
+            const auto& e = *filtered[i];
+            J o{{"key", e.key}, {"content", e.content}, {"source", e.source}, {"kind", HelpCatalog::kindOf(e)},
+                {"editable", e.editable}, {"customized", e.customized}, {"format", e.format}};
             if (management) o["shadowed"] = e.shadowed;
-            if (!e.i18nKey.empty()) o["i18nKey"] = e.i18nKey;
+            if (!e.i18nKey.empty()) {
+                o["i18nKey"] = e.i18nKey;
+                // Editing/deleting inherited text targets its displayed locale,
+                // not the browser's language. The management UI shows this locale.
+                o["locale"] = e.locale;
+                o["contentLocale"] = e.locale;
+            }
             arr.push_back(std::move(o));
         }
         jsonReply(ok(J{{"entries", arr}, {"total", total}, {"page", page}, {"size", size}}), std::move(cb));
     }, {drogon::Get});
 
     // 帮助文档「按来源分组」视图：每个规则/插件/文件一组 + 条目数（前端展开看全部条目）。
-    app.registerHandler("/api/help/groups", [&i18n, &jsMod, &luaMod](Req req, CB&& cb) {
+    app.registerHandler("/api/help/groups", [helpCatalog](Req req, CB&& cb) {
         std::string lang = req->getParameter("lang"); if (lang.empty()) lang = "zh-Hans";
         Locale loc = localeFromString(lang);
-        auto aLow = [](unsigned char c) -> char { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c; };
-        std::string q = req->getParameter("q"); for (auto& ch : q) ch = aLow((unsigned char)ch);
         const bool management = req->getParameter("management") == "1";
-        struct E { std::string key, content, source; };
-        std::vector<E> all;
-        dice::HelpEntryFilter visibility(management);
-        auto add = [&](const std::string& k, const std::string& c, const std::string& src) {
-            if (!visibility.add(k, c).include) return;
-            all.push_back({k, c, src});
-        };
-        for (const auto& t : CommandRouter::helpTopics()) add(t, i18n.tr(loc, "help.topic." + t), "builtin");
-        { std::shared_lock<std::shared_mutex> lk(rulesLock());
-          for (auto& p : CommandRouter::rulePacks()) { if (!p.enabled) continue;
-            for (auto& [k, c] : p.helpEntries) add(k, c, "rule:" + p.name); } }
-        for (auto& ch : jsMod.commandHelps()) add(ch.name, ch.help, "plugin:" + ch.plugin);
-        for (auto& h : luaMod.helpEntries()) add(h.topic, h.text, "lua:" + h.mod);
-        { std::shared_lock<std::shared_mutex> lk(CommandRouter::helpLock());
-          for (auto& [k, c] : CommandRouter::helpFiles()) add(k, c, "file:" + k); }
-        { std::shared_lock<std::shared_mutex> lk(CommandRouter::helpDocLock());
-          for (auto& h : CommandRouter::helpDocs()) add(h.topic, h.content, "helpdoc:" + h.pack); }
-        auto ciContains = [&aLow](const std::string& hay, const std::string& nl) {
-            if (nl.empty()) return true;
-            auto it = std::search(hay.begin(), hay.end(), nl.begin(), nl.end(),
-                [&aLow](char a, char b){ return aLow((unsigned char)a) == b; });
-            return it != hay.end();
-        };
+        const auto catalog = helpCatalog(loc, management);
+        const auto all = catalog.select(req->getParameter("q"), req->getParameter("kind"));
         std::vector<std::pair<std::string, int>> groups;   // 保持首见顺序（builtin→rule→plugin→lua→file→helpdoc）
         std::unordered_map<std::string, size_t> idx;
+        std::unordered_map<std::string, std::string> sourceKinds;
         int total = 0;
-        for (auto& e : all) {
-            if (!q.empty() && !ciContains(e.key, q) && !ciContains(e.content, q)) continue;
+        for (const auto* entry : all) {
+            const auto& e = *entry;
+            sourceKinds[e.source] = HelpCatalog::kindOf(e);
             ++total;
             auto it = idx.find(e.source);
             if (it == idx.end()) { idx[e.source] = groups.size(); groups.push_back({e.source, 1}); }
             else ++groups[it->second].second;
         }
         J arr = J::array();
-        for (auto& [src, cnt] : groups) arr.push_back(J{{"source", src}, {"count", cnt}});
+        for (auto& [src, cnt] : groups) arr.push_back(J{{"source", src}, {"kind", sourceKinds[src]}, {"count", cnt}});
         jsonReply(ok(J{{"groups", arr}, {"total", total}, {"groupCount", (int)groups.size()}}), std::move(cb));
     }, {drogon::Get});
 
