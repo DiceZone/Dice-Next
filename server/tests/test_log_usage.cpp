@@ -88,3 +88,22 @@ TEST(LogUsage, CacheAddsOnlyNewMessagesAndRecountsAfterDelete) {
     ASSERT_EQ(usage[1].count, 3);
     ASSERT_TRUE(usage.find(3) == usage.end());
 }
+
+TEST(LogUsage, DatabasesUseWriteAheadLogging) {
+    LogDb t;
+    auto journalMode = [](sqlite3* db) {
+        sqlite3_stmt* stmt = nullptr;
+        std::string mode;
+        if (sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &stmt, nullptr) == SQLITE_OK
+            && sqlite3_step(stmt) == SQLITE_ROW)
+            mode = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        sqlite3_finalize(stmt);
+        return mode;
+    };
+    ASSERT_EQ(journalMode(t.raw()), std::string("wal"));
+    // 日志模式记录在库文件里：另开连接看到的主库同样是 WAL。
+    sqlite3* other = nullptr;
+    ASSERT_EQ(sqlite3_open((t.root / "dice.db").string().c_str(), &other), SQLITE_OK);
+    ASSERT_EQ(journalMode(other), std::string("wal"));
+    sqlite3_close(other);
+}

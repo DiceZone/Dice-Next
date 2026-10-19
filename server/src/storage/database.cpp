@@ -11,6 +11,14 @@ namespace dice {
 
 namespace {
 
+// WAL 让写事务只追加日志、不必每次同步整个库文件；NORMAL 在 WAL 下只在检查点时落盘，
+// 断电最多丢最近几个事务，不会损坏数据库。机械硬盘上每个写事务的耗时从约 100 毫秒降到毫秒级。
+void configureConnection(sqlite3* db) {
+    if (!db) return;
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
+                 nullptr, nullptr, nullptr);
+}
+
 struct IndexSpec { const char* name; const char* columns; };
 
 // 按查询条件补齐索引。表结构由 sqlite_orm 同步，索引在这里按名称检查后创建，
@@ -380,7 +388,7 @@ bool Database::open(const std::string& path) {
         );
 
         // Sync schema — create tables if they don't exist
-        storage_->on_open = [this](sqlite3* raw) { mainConnection_ = raw; };
+        storage_->on_open = [this](sqlite3* raw) { mainConnection_ = raw; configureConnection(raw); };
         storage_->sync_schema();
         storage_->open_forever();  // keep connection alive with WAL mode
         ensureIndexes(mainConnection_, "主数据库", {
@@ -428,7 +436,7 @@ bool Database::open(const std::string& path) {
                 )
             )
         );
-        logStorage_->on_open = [this](sqlite3* raw) { logConnection_ = raw; };
+        logStorage_->on_open = [this](sqlite3* raw) { logConnection_ = raw; configureConnection(raw); };
         logStorage_->sync_schema();
         logStorage_->open_forever();
         // 按日志查消息（计数、导出、列表统计）都以 log_id 过滤。
@@ -473,7 +481,7 @@ bool Database::open(const std::string& path) {
                 )
             )
         );
-        chatStorage_->on_open = [this](sqlite3* raw) { chatConnection_ = raw; };
+        chatStorage_->on_open = [this](sqlite3* raw) { chatConnection_ = raw; configureConnection(raw); };
         chatStorage_->sync_schema();
         chatStorage_->open_forever();
         ensureIndexes(chatConnection_, "聊天历史数据库", {
@@ -501,7 +509,7 @@ bool Database::open(const std::string& path) {
                 )
             )
         );
-        cardStorage_->on_open = [this](sqlite3* raw) { cardConnection_ = raw; };
+        cardStorage_->on_open = [this](sqlite3* raw) { cardConnection_ = raw; configureConnection(raw); };
         cardStorage_->sync_schema();
         cardStorage_->open_forever();
         ensureIndexes(cardConnection_, "人物卡数据库", {
