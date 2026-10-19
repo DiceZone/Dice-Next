@@ -5,8 +5,44 @@
 #include <sqlite3.h>
 #include <filesystem>
 #include <fstream>
+#include <vector>
 
 namespace dice {
+
+namespace {
+
+struct IndexSpec { const char* name; const char* columns; };
+
+// 按查询条件补齐索引。表结构由 sqlite_orm 同步，索引在这里按名称检查后创建，
+// 已存在的不会重复创建；大表首次建立需要一些时间，因此只在确有缺失时提示。
+void ensureIndexes(sqlite3* db, const char* label, std::initializer_list<IndexSpec> indexes) {
+    if (!db) return;
+    std::vector<const IndexSpec*> missing;
+    for (const auto& index : indexes) {
+        sqlite3_stmt* stmt = nullptr;
+        bool exists = false;
+        if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, index.name, -1, SQLITE_STATIC);
+            exists = sqlite3_step(stmt) == SQLITE_ROW;
+        }
+        sqlite3_finalize(stmt);
+        if (!exists) missing.push_back(&index);
+    }
+    if (missing.empty()) return;
+    DICE_LOG_INFO("正在为{}建立 {} 个查询索引，数据较多时需要一些时间。", label, missing.size());
+    for (const auto* index : missing) {
+        const std::string sql = std::string("CREATE INDEX IF NOT EXISTS ") + index->name + " ON " + index->columns;
+        char* error = nullptr;
+        if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &error) != SQLITE_OK) {
+            DICE_LOG_WARN("{}索引「{}」建立失败：{}", label, index->name, error ? error : "未知错误");
+            sqlite3_free(error);
+        }
+    }
+    DICE_LOG_INFO("{}查询索引已就绪。", label);
+}
+
+} // namespace
 
 // ─── Database Lifecycle ──────────────────────────────────────
 
@@ -344,8 +380,19 @@ bool Database::open(const std::string& path) {
         );
 
         // Sync schema — create tables if they don't exist
+        storage_->on_open = [this](sqlite3* raw) { mainConnection_ = raw; };
         storage_->sync_schema();
         storage_->open_forever();  // keep connection alive with WAL mode
+        ensureIndexes(mainConnection_, "主数据库", {
+            {"idx_group_settings_lookup", "group_settings(platform, group_id, key)"},
+            {"idx_group_account_settings_lookup", "group_account_settings(group_id, adapter_id, key)"},
+            {"idx_user_settings_lookup", "user_settings(user_id, group_id, key)"},
+            {"idx_player_profiles_user", "player_profiles(user_id, platform)"},
+            {"idx_roll_stats_user", "roll_stats(user_id)"},
+            {"idx_identities_public", "identities(public_id, kind)"},
+            {"idx_identity_endpoints_endpoint", "identity_endpoints(endpoint_id, adapter_type, kind)"},
+            {"idx_identity_endpoints_identity", "identity_endpoints(identity_id)"},
+        });
 
         DICE_LOG_INFO("主数据库「{}」已打开，共 {} 张表。", path,
             storage_->table_names().size());
@@ -381,8 +428,13 @@ bool Database::open(const std::string& path) {
                 )
             )
         );
+        logStorage_->on_open = [this](sqlite3* raw) { logConnection_ = raw; };
         logStorage_->sync_schema();
         logStorage_->open_forever();
+        // 按日志查消息（计数、导出、列表统计）都以 log_id 过滤。
+        ensureIndexes(logConnection_, "跑团日志数据库", {
+            {"idx_game_log_messages_log_id", "game_log_messages(log_id, id)"},
+        });
         DICE_LOG_INFO("跑团日志数据库「{}」已打开，共 {} 张表。", logDbPath_,
             logStorage_->table_names().size());
 
@@ -421,8 +473,15 @@ bool Database::open(const std::string& path) {
                 )
             )
         );
+        chatStorage_->on_open = [this](sqlite3* raw) { chatConnection_ = raw; };
         chatStorage_->sync_schema();
         chatStorage_->open_forever();
+        ensureIndexes(chatConnection_, "聊天历史数据库", {
+            {"idx_chat_messages_group", "chat_messages(platform, group_id, id)"},
+            {"idx_chat_messages_msg", "chat_messages(group_id, msg_id)"},
+            {"idx_chat_messages_time", "chat_messages(time)"},
+            {"idx_ai_memory_scope", "ai_memory(scope, scope_id, kind)"},
+        });
         DICE_LOG_INFO("聊天历史数据库「{}」已打开，共 {} 张表。", chatDbPath_,
             chatStorage_->table_names().size());
 
@@ -442,8 +501,12 @@ bool Database::open(const std::string& path) {
                 )
             )
         );
+        cardStorage_->on_open = [this](sqlite3* raw) { cardConnection_ = raw; };
         cardStorage_->sync_schema();
         cardStorage_->open_forever();
+        ensureIndexes(cardConnection_, "人物卡数据库", {
+            {"idx_character_cards_user", "character_cards(user_id, name)"},
+        });
 
         // One-time migration: if cards.db is empty but the legacy character_cards
         // table in the main DB has rows, move them over (then clear from main).

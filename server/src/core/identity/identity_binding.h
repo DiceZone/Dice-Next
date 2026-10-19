@@ -304,8 +304,7 @@ private:
             for (auto r : st->get_all<RollStatRow>(orm::where(orm::c(&RollStatRow::userId) == from))) { r.userId = to; st->update(r); }
             if (kind == Kind::Group) for (auto g : st->get_all<GroupSettingRow>(orm::where(orm::c(&GroupSettingRow::groupId) == from))) { g.groupId = to; st->update(g); }
             if (kind == Kind::Group) for (auto g : st->get_all<GroupAccountSettingRow>(orm::where(orm::c(&GroupAccountSettingRow::groupId) == from))) { g.groupId = to; st->update(g); }
-            if (auto* cards = db.getCardStorage()) for (auto c : cards->get_all<CharacterCardRow>()) { bool changed=false; if (kind == Kind::User && c.userId == from) { c.userId = to; changed=true; } if (kind == Kind::Group && c.groupId == from) { c.groupId = to; changed=true; } if (changed) cards->update(c); }
-            if (auto* chat = db.getChatStorage()) for (auto c : chat->get_all<ChatMsgRow>()) { bool changed=false; if (kind == Kind::User && c.userId == from) { c.userId = to; changed=true; } if (kind == Kind::Group && c.groupId == from) { c.groupId = to; changed=true; } if (changed) chat->update(c); }
+            remapSideStores(db, kind, from, to);
             st->remove<IdentityRow>(source.id);
         } catch (...) {}
     }
@@ -317,9 +316,27 @@ private:
             for (auto r : st->get_all<RollStatRow>(orm::where(orm::c(&RollStatRow::userId) == from))) { r.userId = to; st->update(r); }
             if (kind == Kind::Group) for (auto g : st->get_all<GroupSettingRow>(orm::where(orm::c(&GroupSettingRow::groupId) == from))) { g.groupId = to; st->update(g); }
             if (kind == Kind::Group) for (auto g : st->get_all<GroupAccountSettingRow>(orm::where(orm::c(&GroupAccountSettingRow::groupId) == from))) { g.groupId = to; st->update(g); }
-            if (auto* cards = db.getCardStorage()) for (auto c : cards->get_all<CharacterCardRow>()) { bool changed=false; if (kind == Kind::User && c.userId == from) { c.userId=to; changed=true; } if (kind == Kind::Group && c.groupId == from) { c.groupId=to; changed=true; } if (changed) cards->update(c); }
-            if (auto* chat = db.getChatStorage()) for (auto c : chat->get_all<ChatMsgRow>()) { bool changed=false; if (kind == Kind::User && c.userId == from) { c.userId=to; changed=true; } if (kind == Kind::Group && c.groupId == from) { c.groupId=to; changed=true; } if (changed) chat->update(c); }
+            remapSideStores(db, kind, from, to);
         } catch (...) {}
+    }
+    // 人物卡与聊天记录在独立数据库里，按条件直接改写，不逐行读入。
+    static void remapSideStores(Database& db, Kind kind, const std::string& from, const std::string& to) {
+        if (auto* cards = db.getCardStorage()) {
+            if (kind == Kind::User)
+                cards->update_all(orm::set(orm::c(&CharacterCardRow::userId) = to),
+                                  orm::where(orm::c(&CharacterCardRow::userId) == from));
+            else
+                cards->update_all(orm::set(orm::c(&CharacterCardRow::groupId) = to),
+                                  orm::where(orm::c(&CharacterCardRow::groupId) == from));
+        }
+        if (auto* chat = db.getChatStorage()) {
+            if (kind == Kind::User)
+                chat->update_all(orm::set(orm::c(&ChatMsgRow::userId) = to),
+                                 orm::where(orm::c(&ChatMsgRow::userId) == from));
+            else
+                chat->update_all(orm::set(orm::c(&ChatMsgRow::groupId) = to),
+                                 orm::where(orm::c(&ChatMsgRow::groupId) == from));
+        }
     }
     mutable std::mutex mu_;
     Database* database_ = nullptr;

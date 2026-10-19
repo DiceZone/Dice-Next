@@ -4440,21 +4440,20 @@ static int realMain(int argc, char* argv[]) {
             try {
                 const int64_t now = static_cast<int64_t>(std::time(nullptr));
                 const nlohmann::json all = configMgr.getAll();
-                std::map<std::string, int> retentionCache;
+                namespace orm = sqlite_orm;
                 int longestDays = 0; bool keepImagesForever = false;
-                for (const auto& row : cst->get_all<dice::ChatMsgRow>()) {
-                    const std::string cacheKey = row.platform + "\n" + row.adapterId;
-                    auto [it, inserted] = retentionCache.emplace(cacheKey, 7);
-                    if (inserted) {
-                        const auto settings = dice::scoped_settings::resolveSection(
-                            all, "dice", row.platform, row.adapterId);
-                        it->second = settings.value("chat_retention_days", 7);
-                    }
-                    const int days = it->second;
+                // 按平台与账号分别取保留期，在数据库内直接删除过期记录，不把聊天记录读入内存。
+                for (const auto& [platform, adapterId] : cst->select(orm::distinct(orm::columns(
+                         &dice::ChatMsgRow::platform, &dice::ChatMsgRow::adapterId)))) {
+                    const auto settings = dice::scoped_settings::resolveSection(all, "dice", platform, adapterId);
+                    const int days = settings.value("chat_retention_days", 7);
                     if (days <= 0) { keepImagesForever = true; continue; }
                     longestDays = (std::max)(longestDays, days);
-                    if (row.time > 0 && row.time < now - static_cast<int64_t>(days) * 86400)
-                        cst->remove<dice::ChatMsgRow>(row.id);
+                    cst->remove_all<dice::ChatMsgRow>(orm::where(
+                        orm::c(&dice::ChatMsgRow::platform) == platform
+                        and orm::c(&dice::ChatMsgRow::adapterId) == adapterId
+                        and orm::c(&dice::ChatMsgRow::time) > 0
+                        and orm::c(&dice::ChatMsgRow::time) < now - static_cast<int64_t>(days) * 86400));
                 }
                 if (!keepImagesForever && longestDays > 0)
                     dice::chatimg::pruneOld(now - static_cast<int64_t>(longestDays) * 86400);

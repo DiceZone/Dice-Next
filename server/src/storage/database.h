@@ -443,6 +443,9 @@ public:
     /// Get the transcript-log storage (separate logs.db). Returns nullptr if not open.
     auto* getLogStorage() { return logStorage_.get(); }
 
+    /// logs.db 的常驻连接，供需要在数据库内聚合的查询使用。未打开时为 nullptr。
+    sqlite3* getLogConnection() const { return logStorage_ ? logConnection_ : nullptr; }
+
     /// Get the character-card storage (separate cards.db). Returns nullptr if not open.
     auto* getCardStorage() { return cardStorage_.get(); }
 
@@ -848,6 +851,10 @@ private:
 
     std::unique_ptr<Storage> storage_;
     std::unique_ptr<LogStorage> logStorage_;
+    sqlite3* mainConnection_ = nullptr;
+    sqlite3* logConnection_ = nullptr;
+    sqlite3* chatConnection_ = nullptr;
+    sqlite3* cardConnection_ = nullptr;
     std::string logDbPath_;
     std::unique_ptr<CardStorage> cardStorage_;
     std::string cardDbPath_;
