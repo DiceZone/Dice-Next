@@ -79,6 +79,9 @@
 #include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
+#if defined(__linux__)
+#include <malloc.h>
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -4462,6 +4465,10 @@ static int realMain(int argc, char* argv[]) {
         app.getLoop()->runAfter(60.0, chatCleanup);
         app.getLoop()->runEvery(21600.0, chatCleanup);
     }
+#if defined(__GLIBC__)
+    // glibc 释放大块临时内存后不一定归还系统；定期整理，常驻内存才能在高峰过后回落。
+    app.getLoop()->runEvery(300.0, [] { malloc_trim(0); });
+#endif
 
     // ── 自动清理好友（N 天未在任何位置触发指令 → 删除好友）──
     // dice/friend_clean_days（0=关闭）。豁免：骰主/白名单(信任)用户/trustLevel>0。
