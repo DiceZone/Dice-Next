@@ -9,8 +9,11 @@ namespace dice::group_management {
 
 inline void discoverRecords(Database& db, AdapterManager& adapterMgr) {
     auto* st = db.getStorage();
+    // 每次打开页面最多补查这么多个群的机器人身份，大量群时分批完成，避免一次性压给协议端。
+    constexpr int kRoleLookupsPerPass = 100;
     for (const auto& adapter : adapterMgr.allAdapters()) {
         if (!adapter->isConnected()) continue;
+        int roleLookups = 0;
         const auto platform = adapter->platform(), adapterId = adapter->id();
         std::map<std::string, std::string> live;
         for (const auto& [endpoint, name] : adapter->getGroupList()) {
@@ -28,7 +31,10 @@ inline void discoverRecords(Database& db, AdapterManager& adapterMgr) {
             if (accountGroupSetting(*st, adapterId, platform, group, "enabled").empty())
                 setAccountGroupSetting(*st, adapterId, platform, group, endpoint, "enabled", "1");
             if (!name.empty() && name != endpoint) setSharedSetting(*st, platform, group, "name", name);
-            if (adapter->getSelfRole(endpoint).empty()) adapter->refreshSelfRole(endpoint);
+            if (roleLookups < kRoleLookupsPerPass && adapter->getSelfRole(endpoint).empty()) {
+                adapter->refreshSelfRole(endpoint);
+                ++roleLookups;
+            }
         }
         adapter->refreshGroupList();
         std::lock_guard lock(groupPresenceMutex());

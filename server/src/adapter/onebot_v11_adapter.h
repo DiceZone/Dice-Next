@@ -376,6 +376,13 @@ public:
     void refreshSelfRole(const std::string& groupId) override {
         const auto self = getLoginId();
         if (self.empty()) return;
+        {
+            // 协议端群列表可能残留已退出的群；查询失败后短期内不再重复请求。
+            std::lock_guard<std::mutex> lk(dataMutex_);
+            auto it = selfRoleMissingAt_.find(groupId);
+            if (it != selfRoleMissingAt_.end()
+                && std::chrono::steady_clock::now() - it->second < std::chrono::hours(6)) return;
+        }
         sendOneBotAction("get_group_member_info",
             {{"group_id", parseId(groupId)}, {"user_id", parseId(self)}},
             "role:" + groupId + ":" + self);
@@ -1036,7 +1043,22 @@ private:
                 }
                 // Surface FAILED API calls (e.g. set_group_ban/set_group_card rejected
                 // for lack of permission or bad params) — otherwise they fail silently.
-                if (failed && !outgoing) {
+                // 成员与角色查询只用于刷新缓存，失败（如机器人已不在该群）按调试信息记录。
+                const bool cacheLookup = echo.rfind("role:", 0) == 0 || echo.rfind("members:", 0) == 0;
+                if (failed && echo.rfind("role:", 0) == 0) {
+                    const std::string tail = echo.substr(5);
+                    const auto sep = tail.rfind(':');
+                    const std::string gid = sep == std::string::npos ? tail : tail.substr(0, sep);
+                    if (sep == std::string::npos || tail.substr(sep + 1) == getLoginId()) {
+                        std::lock_guard<std::mutex> lk(dataMutex_);
+                        selfRoleMissingAt_[gid] = std::chrono::steady_clock::now();
+                    }
+                }
+                if (failed && !outgoing && cacheLookup) {
+                    DICE_LOG_DEBUG("OneBotV11「{}」缓存查询未成功（错误码 {}）：{}", name_,
+                                   j.contains("retcode") ? j["retcode"].dump() : std::string("?"),
+                                   j.value("message", j.value("wording", std::string("平台未提供具体原因"))));
+                } else if (failed && !outgoing) {
                     DICE_LOG_WARN("OneBotV11「{}」接口操作未成功（错误码 {}）：{}", name_,
                                   j.contains("retcode") ? j["retcode"].dump() : std::string("?"),
                                   j.value("message", j.value("wording", std::string("平台未提供具体原因"))));
@@ -1118,7 +1140,7 @@ private:
                     } else {
                         const std::string gid = tail.substr(0, sep);
                         const std::string uid = tail.substr(sep + 1);
-                        if (uid == getLoginId()) selfRole_[gid] = role;
+                        if (uid == getLoginId()) { selfRole_[gid] = role; selfRoleMissingAt_.erase(gid); }
                         if (!gid.empty() && !uid.empty()) memberRoles_[gid + "\x1f" + uid] = role;
                     }
                 } else if (echo == "login_info" && !failed && d.is_object()) {
@@ -1605,6 +1627,7 @@ private:
     std::map<std::string, onebot_members::Snapshot> memberSnapshots_;
     std::map<std::string, std::string> memberRoles_;  // gid\x1fuid -> owner|admin|member
     std::map<std::string, std::chrono::steady_clock::time_point> roleRefreshAt_;  // 定向查角色限频
+    std::map<std::string, std::chrono::steady_clock::time_point> selfRoleMissingAt_;  // gid -> 查自身角色失败时间
 
     /// Cached role for one member: targeted lookup first, then the full member
     /// list (get_group_member_list) if it has already been fetched.
