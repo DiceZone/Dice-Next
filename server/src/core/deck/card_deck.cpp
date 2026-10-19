@@ -159,8 +159,7 @@ std::optional<std::string> CardDeck::drawFromDeck(const std::string& name) {
     ReferenceContext context; prepare(context);
     const auto it = context.catalog->find(lower(name));
     if (it == context.catalog->end()) return std::nullopt;
-    Deck working = it->second;
-    const auto text = drawCard(working, false, context, 0);
+    const auto text = drawShared(it->second, context, 0);
     return safe_template::materialize(text, {}, context.budget);
 }
 
@@ -182,44 +181,55 @@ std::string CardDeck::expandText(const std::string& text) {
     return safe_template::materialize(expand(text, context, 0), {}, context.budget);
 }
 
-std::string CardDeck::drawCard(Deck& deck, bool back, ReferenceContext& context, unsigned depth) {
-    if (deck.empty() || depth >= 32 || !context.budget.nodes || !context.budget.bytes) return "";
-
-    // Parse weights: "::N::card" → weight N; otherwise weight 1.
-    std::vector<std::string> cards;
-    std::vector<long long> cumulative;   // prefix sums of weights
-    long long total = 0;
-    std::vector<long long> weights;
-    for (const auto& s : deck) {
-        long long w = 1;
-        std::string card = s;
-        if (s.rfind("::", 0) == 0) {
-            size_t r = s.find("::", 2);
-            if (r != std::string::npos) {
-                try { long long n = std::stoll(s.substr(2, r - 2)); if (n > 0) { w = n; card = s.substr(r + 2); } }
-                catch (...) {}
-            }
+// "::N::card" → weight N and the offset of the card text; otherwise weight 1, whole text.
+static std::pair<long long, size_t> cardWeight(const std::string& s) {
+    if (s.rfind("::", 0) == 0) {
+        size_t r = s.find("::", 2);
+        if (r != std::string::npos) {
+            try { long long n = std::stoll(s.substr(2, r - 2)); if (n > 0) return {n, r + 2}; }
+            catch (...) {}
         }
-        cards.push_back(card);
-        weights.push_back(w);
-        if (w > (std::numeric_limits<long long>::max)() - total) return "";
+    }
+    return {1, 0};
+}
+
+// Weighted pick without copying card text: only the prefix sums are built.
+bool CardDeck::pickCard(const Deck& deck, size_t& idx, long long& weight) {
+    std::vector<long long> cumulative;
+    cumulative.reserve(deck.size());
+    long long total = 0;
+    for (const auto& s : deck) {
+        const long long w = cardWeight(s).first;
+        if (w > (std::numeric_limits<long long>::max)() - total) return false;
         total += w;
         cumulative.push_back(total);
     }
-    if (total <= 0) return "";
-
+    if (total <= 0) return false;
     std::uniform_int_distribution<long long> dist(0, total - 1);
     long long roll;
     { std::lock_guard<std::mutex> lock(mutex_); roll = dist(rng_); }
-    size_t idx = static_cast<size_t>(
+    idx = static_cast<size_t>(
         std::upper_bound(cumulative.begin(), cumulative.end(), roll) - cumulative.begin());
-    if (idx >= cards.size()) idx = cards.size() - 1;
+    if (idx >= deck.size()) idx = deck.size() - 1;
+    weight = cardWeight(deck[idx]).first;
+    return true;
+}
 
-    std::string chosen = cards[idx];
-    if (!back) {
-        if (weights[idx] <= 1) deck.erase(deck.begin() + idx);
-        else deck[idx] = "::" + std::to_string(weights[idx] - 1) + "::" + chosen;
-    }
+std::string CardDeck::drawShared(const Deck& deck, ReferenceContext& context, unsigned depth) {
+    if (deck.empty() || depth >= 32 || !context.budget.nodes || !context.budget.bytes) return "";
+    size_t idx = 0; long long weight = 0;
+    if (!pickCard(deck, idx, weight)) return "";
+    return expand(deck[idx].substr(cardWeight(deck[idx]).second), context, depth + 1);
+}
+
+std::string CardDeck::drawCard(Deck& deck, bool back, ReferenceContext& context, unsigned depth) {
+    if (back) return drawShared(deck, context, depth);
+    if (deck.empty() || depth >= 32 || !context.budget.nodes || !context.budget.bytes) return "";
+    size_t idx = 0; long long weight = 0;
+    if (!pickCard(deck, idx, weight)) return "";
+    std::string chosen = deck[idx].substr(cardWeight(deck[idx]).second);
+    if (weight <= 1) deck.erase(deck.begin() + idx);
+    else deck[idx] = "::" + std::to_string(weight - 1) + "::" + chosen;
     return expand(chosen, context, depth + 1);
 }
 
@@ -291,7 +301,7 @@ std::string CardDeck::expand(const std::string& expr, ReferenceContext& context,
         const bool back = !token.empty() && token.front() == '%';
         const auto name = back ? token.substr(1) : token;
         if (const auto found = context.catalog->find(lower(name)); found != context.catalog->end()) {
-            if (back) { Deck copy = found->second; return drawCard(copy, true, context, nested); }
+            if (back) return drawShared(found->second, context, nested);
             auto& cards = context.decks[lower(name)];
             if (cards.empty()) cards = found->second;
             return drawCard(cards, false, context, nested);

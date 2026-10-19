@@ -89,6 +89,9 @@ private:
     std::string expand(const std::string& expr, ReferenceContext& context, unsigned depth);
     /// Weighted random pick from @p deck; if !back, deplete the chosen entry.
     std::string drawCard(Deck& deck, bool back, ReferenceContext& context, unsigned depth);
+    /// Draw from a deck that is not depleted (put-back draws, one-off draws).
+    std::string drawShared(const Deck& deck, ReferenceContext& context, unsigned depth);
+    bool pickCard(const Deck& deck, size_t& idx, long long& weight);
 
     // Copy-on-write snapshots keep an entire render on one catalogue version,
     // without holding a deck mutex across host callbacks or template expansion.
