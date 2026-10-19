@@ -3,6 +3,32 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-19: macOS atomic shared-pointer build compatibility (local)
+
+- Release run 39204426328 failed in the [macOS arm64 compile job](https://github.com/DiceZone/Dice-Next/actions/runs/39204426328/job/117904252765).
+  Its Xcode 15.4 libc++ lacks the C++20 atomic shared-pointer specialization;
+  diagnostics name the deferred-reply state and both JS/Lua directory snapshots.
+  The same run passed Windows/Linux backend tests and all four other packages;
+  publication was correctly skipped, not partially declared successful.
+- Replaced these three specializations with shared_ptr atomic free functions,
+  already used elsewhere in the application. Atomic load/store/exchange retain
+  the previous sequentially consistent semantics, immutable snapshot ownership
+  and cancellation behavior; no unsynchronized pointer reads were introduced.
+  The compiler, minimum operating-system requirements and safety gates did not
+  change. The fix is based on main a1626de and retains intervening optimizations.
+- Added two CI source-compatibility checks, bringing the Release Python tests
+  to **33 passing tests**. A native regression repeats concurrent posting,
+  counting and cancellation 32 times, checking queue bounds and that canceled
+  callbacks cannot deliver. Existing JS runtime-lock and Lua directory/reload
+  regressions were rerun, not replaced by the source check.
+- Windows amd64 Release server, core and Lua test builds passed. Unfiltered
+  CTest passed in **164.55 seconds**: core **833 cases / 49,992 assertions** and
+  Lua **63 cases / 668 assertions**, zero failures. All four previously reviewed
+  external Lua corpora were enabled with the same guarded test doubles.
+- No local Apple SDK/macOS execution is claimed. The newly dispatched Release
+  must confirm macOS compilation and complete publication separately; the local
+  Windows and source checks do not establish that final result.
+
 ## 2026-10-19: Legacy conveniences final follow-up (full local regression)
 
 - Completed the seven audited convenience areas: bounded text functions and

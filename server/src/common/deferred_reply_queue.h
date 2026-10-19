@@ -47,7 +47,7 @@ public:
     DeferredReplyQueue& operator=(const DeferredReplyQueue&) = delete;
     bool post(unsigned milliseconds, size_t bytes, std::function<void()> callback) {
         if (!schedule_ || !callback || !milliseconds || milliseconds > 600000 || bytes > 16 * 1024 * 1024) return false;
-        const auto state = state_.load();
+        const auto state = std::atomic_load(&state_);
         if (!state) return false;
         auto ticket = std::make_shared<Ticket>();
         {
@@ -64,12 +64,14 @@ public:
         } catch (...) { return false; }
     }
     size_t pending() const {
-        const auto state = state_.load(); if (!state) return 0;
+        const auto state = std::atomic_load(&state_); if (!state) return 0;
         std::lock_guard lock(state->mutex); return state->count;
     }
-    void cancel() { if (const auto state = state_.exchange({})) state->active = false; }
+    void cancel() { if (const auto state = std::atomic_exchange(&state_, std::shared_ptr<State>{})) state->active = false; }
 private:
     Schedule schedule_;
-    std::atomic<std::shared_ptr<State>> state_{std::make_shared<State>()};
+    // Use shared_ptr atomic free functions: the Xcode 15.4 libc++ shipped with
+    // our macOS SDK does not implement the C++20 shared-pointer specialization.
+    std::shared_ptr<State> state_{std::make_shared<State>()};
 };
 } // namespace dice

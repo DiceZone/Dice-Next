@@ -328,13 +328,15 @@ private:
     Result dispatchMessageHook(const Message& msg, int privilege, const char* hook);
     static PluginMeta parseMeta(const std::string& src);
     struct DirectoryEntry { std::string file, command; };
-    std::atomic<std::shared_ptr<const std::vector<DirectoryEntry>>> directory_;
+    using DirectorySnapshot = std::shared_ptr<const std::vector<DirectoryEntry>>;
+    // Read/write only through shared_ptr atomic free functions (Xcode 15.4).
+    DirectorySnapshot directory_;
     std::atomic<uint64_t> runtimeGeneration_{0};
     void refreshDirectoryLocked();
     struct DirectoryRefresh {
         JsPluginManager& owner;
         ~DirectoryRefresh() noexcept {
-            try { owner.refreshDirectoryLocked(); } catch (...) { owner.directory_.store({}); }
+            try { owner.refreshDirectoryLocked(); } catch (...) { std::atomic_store(&owner.directory_, DirectorySnapshot{}); }
         }
     };
 

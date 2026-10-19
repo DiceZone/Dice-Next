@@ -1911,7 +1911,7 @@ void LuaPluginManager::freeRuntime() {
     std::lock_guard<ScriptMutex> lk(mutex_);
     ++runtimeGeneration_;                    // 让已经排队的续跑回调自动失效
     pendingCoroutines_.clear();
-    directoryRules_.store(std::make_shared<const std::vector<DirectoryRule>>());
+    std::atomic_store(&directoryRules_, std::make_shared<const std::vector<DirectoryRule>>());
     taskCalls_.clear();
     if (state_) { lua_close(state_); state_ = nullptr; allocatedBytes_ = 0; }
 }
@@ -2242,7 +2242,7 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
     suspendedMods_.clear();
     speech_.clear();
     replyRules_.clear();   // echo refs 随旧 state 关闭已失效
-    directoryRules_.store(std::make_shared<const std::vector<DirectoryRule>>());
+    std::atomic_store(&directoryRules_, std::make_shared<const std::vector<DirectoryRule>>());
     cycleEvents_.clear();  // 已排队回调靠 runtimeGeneration_ 自动失效
     ruleBooks_.clear(); scriptRegistry_.clear(); legacyHelp_.clear();
     activeLegacyLocks_.clear(); queuedDispatches_.clear(); lockDrainScheduled_ = false;
@@ -2445,7 +2445,7 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
     auto directory = std::make_shared<std::vector<DirectoryRule>>();
     for (const auto& rule : replyRules_) directory->push_back({rule.modName, rule.type, rule.requiredRule,
         rule.requiresGame, rule.matchPatterns, rule.prefixPatterns, rule.searchPatterns, rule.limits});
-    directoryRules_.store(directory);
+    std::atomic_store(&directoryRules_, DirectorySnapshot(std::move(directory)));
 
     // 与旧版 build() 一致：所有活动 mod 合并完再注册事件，避免同名事件被后载入
     // 模组覆盖时留下两套定时回调。首次注册会立即执行一次，然后按 cycle 重排。
@@ -3583,7 +3583,7 @@ bool LuaPluginManager::importUpload(const std::string& filename, const std::stri
 // ─── 阶段二：模板格式化 + reply 派发 ─────────────────────────────
 std::vector<std::string> LuaPluginManager::directoryTriggers(const LuaEventOrigin& origin, bool orders) const {
     std::vector<std::string> result;
-    const auto snapshot = directoryRules_.load();
+    const auto snapshot = std::atomic_load(&directoryRules_);
     const bool privateMessage = origin.groupId.empty();
     const int trust = trustLookup_ ? trustLookup_(origin.userId, origin.groupId, origin.platform, origin.adapterId, privateMessage) : 0;
     if (trust < 0) return result;

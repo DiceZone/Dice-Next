@@ -517,7 +517,9 @@ private:
         std::vector<std::string> matches, prefixes, searches;
         std::shared_ptr<const legacy_mod::Limits> limits;
     };
-    std::atomic<std::shared_ptr<const std::vector<DirectoryRule>>> directoryRules_{std::make_shared<const std::vector<DirectoryRule>>()};
+    using DirectorySnapshot = std::shared_ptr<const std::vector<DirectoryRule>>;
+    // Read/write only through shared_ptr atomic free functions (Xcode 15.4).
+    DirectorySnapshot directoryRules_{std::make_shared<const std::vector<DirectoryRule>>()};
     std::map<std::string, LegacyCycleEvent> cycleEvents_;
     std::map<std::string, LegacyTask> taskCalls_;
     std::unordered_map<int, PendingCoroutine> pendingCoroutines_;

@@ -3,6 +3,8 @@
 #include "common/legacy_deck_generator.h"
 #include "adapter/onebot_member_snapshot.h"
 #include "common/deferred_reply_queue.h"
+#include <future>
+#include <thread>
 
 using namespace dice;
 
@@ -101,6 +103,35 @@ TEST(LegacyTemplates, DeferredRepliesBoundMemoryCountAndCancelOnShutdown) {
     ASSERT_EQ(memory.pending(),size_t(0));
     DeferredReplyQueue broken([](double,std::function<void()>) { throw std::runtime_error("scheduler unavailable"); });
     ASSERT_FALSE(broken.post(10,1,[] {})); ASSERT_EQ(broken.pending(),size_t(0));
+}
+
+TEST(LegacyTemplates, DeferredReplySnapshotsStaySafeWhilePostingCountingAndCancelling) {
+    for (int round=0;round<32;++round) {
+        std::mutex mutex;
+        std::vector<std::function<void()>> callbacks;
+        DeferredReplyQueue queue([&](double,auto callback) {
+            std::lock_guard lock(mutex); callbacks.push_back(std::move(callback));
+        });
+        std::promise<void> start;
+        auto ready=start.get_future().share();
+        std::atomic<int> sent{0}; std::atomic<bool> invalidCount{false};
+        std::thread producer([&] {
+            ready.wait();
+            for (int i=0;i<512;++i) queue.post(10,1,[&] { ++sent; });
+        });
+        std::thread observer([&] {
+            ready.wait();
+            for (int i=0;i<512;++i) if (queue.pending()>256) invalidCount=true;
+        });
+        std::thread cancelling([&] { ready.wait(); queue.cancel(); });
+        start.set_value();
+        producer.join(); observer.join(); cancelling.join();
+        for (auto& callback : callbacks) callback();
+        ASSERT_FALSE(invalidCount.load());
+        ASSERT_EQ(sent.load(),0);
+        ASSERT_EQ(queue.pending(),size_t(0));
+        ASSERT_FALSE(queue.post(10,1,[] {}));
+    }
 }
 
 TEST(LegacyTemplates, DeferredRepliesCannotChangeAccountsOrOutlivePermissionSnapshots) {

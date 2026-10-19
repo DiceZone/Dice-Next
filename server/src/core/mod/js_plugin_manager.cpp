@@ -1176,7 +1176,7 @@ JsPluginManager::~JsPluginManager() { freeRuntime(); }
 
 void JsPluginManager::freeRuntime() {
     ++runtimeGeneration_;
-    directory_.store({});
+    std::atomic_store(&directory_, DirectorySnapshot{});
     if (ctx_) {
         for (auto& e : exts_) JS_FreeValue(ctx_, e.first);
         exts_.clear();
@@ -1959,7 +1959,7 @@ static JSValue directoryData(JSContext* ctx, JSValueConst object, JSAtom atom) {
 }
 
 void JsPluginManager::refreshDirectoryLocked() {
-    if (!ctx_) { directory_.store({}); return; }
+    if (!ctx_) { std::atomic_store(&directory_, DirectorySnapshot{}); return; }
     auto snapshot = std::make_shared<std::vector<DirectoryEntry>>();
     const JSAtom mapAtom = JS_NewAtom(ctx_, "cmdMap"), solveAtom = JS_NewAtom(ctx_, "solve");
     size_t visited = 0;
@@ -1993,12 +1993,12 @@ void JsPluginManager::refreshDirectoryLocked() {
         if (visited >= 8192) break;
     }
     JS_FreeAtom(ctx_, mapAtom); JS_FreeAtom(ctx_, solveAtom);
-    directory_.store(std::move(snapshot));
+    std::atomic_store(&directory_, DirectorySnapshot(std::move(snapshot)));
 }
 
 std::vector<std::string> JsPluginManager::directoryTriggers(const Message& message) const {
     std::set<std::string> commands;
-    const auto snapshot = directory_.load();
+    const auto snapshot = std::atomic_load(&directory_);
     if (!snapshot) return {};
     const auto group = message.type == MessageType::kPrivate ? std::string() : message.targetId;
     std::map<std::string,bool> allowed;
