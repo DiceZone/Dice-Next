@@ -19,6 +19,20 @@ function(dicenext_compile_parallelism target)
     endif()
 endfunction()
 
+# Standard and third-party headers shared by every test translation unit are
+# compiled once. Project headers are deliberately excluded (see the header).
+option(DICENEXT_PCH "Precompile shared standard and third-party headers for tests" ON)
+function(dicenext_precompile_headers target)
+    if(DICENEXT_PCH)
+        target_precompile_headers(${target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:CXX>:${PROJECT_SOURCE_DIR}/src/common/precompiled.h>")
+        # ccache can only reuse GCC precompiled-header compilations with this flag.
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_LAUNCHER MATCHES "ccache")
+            target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-fpch-preprocess>")
+        endif()
+    endif()
+endfunction()
+
 # ─── vcpkg Toolchain ─────────────────────────────────────────
 # Set CMAKE_TOOLCHAIN_FILE to vcpkg.cmake before configuring,
 # or use: cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake

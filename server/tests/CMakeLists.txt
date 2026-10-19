@@ -111,6 +111,7 @@ target_compile_definitions(dice-next-tests PRIVATE
     DICE_PRERELEASE=$<BOOL:${DICENEXT_PRERELEASE}>
 )
 dicenext_compile_parallelism(dice-next-tests)
+dicenext_precompile_headers(dice-next-tests)
 add_dependencies(dice-next-tests prepare_version)
 
 # Explicitly set the linker language (needed when sources are outside the dir)
@@ -169,10 +170,12 @@ target_link_libraries(dice-next-lua-tests PRIVATE
     spdlog::spdlog
     yaml-cpp::yaml-cpp
     unofficial::sqlite3::sqlite3
+    sqlite_orm::sqlite_orm
     ${LUA_LIBRARIES}
 )
 add_dependencies(dice-next-tests dice-next-lua-tests)
 dicenext_compile_parallelism(dice-next-lua-tests)
+dicenext_precompile_headers(dice-next-lua-tests)
 # MSVC needs /bigobj for large test files with many includes
 if(MSVC)
     target_compile_options(dice-next-tests PRIVATE /utf-8 /bigobj)
