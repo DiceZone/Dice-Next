@@ -610,6 +610,15 @@ inline bool applyPendingRestore(std::string& notice) {
             if (!copyTree("data", rollback / "data", copyError)) throw std::runtime_error(copyError);
             if (fs::exists("config")) copyTree("config", rollback / "config", copyError);
             if (rootMedia && !copyTree("image", rollback / "image", copyError)) throw std::runtime_error(copyError);
+            // 覆盖数据库文件前删掉它的 WAL 与共享内存文件：上次异常退出残留的 WAL
+            // 会被套用到恢复进来的数据库上，造成数据错乱。
+            if (fs::is_directory(stage / "data", ec))
+                for (const auto& entry : fs::recursive_directory_iterator(stage / "data", ec)) {
+                    if (!entry.is_regular_file(ec) || entry.path().extension() != ".db") continue;
+                    const auto target = fs::path("data") / fs::relative(entry.path(), stage / "data", ec);
+                    fs::remove(fs::path(target.string() + "-wal"), ec);
+                    fs::remove(fs::path(target.string() + "-shm"), ec);
+                }
             if (fs::exists(stage / "data") && !copyTree(stage / "data", "data", copyError)) throw std::runtime_error(copyError);
             if (fs::exists(stage / "config") && !copyTree(stage / "config", "config", copyError)) throw std::runtime_error(copyError);
             if (rootMedia && !copyTree(stage / "image", "image", copyError)) throw std::runtime_error(copyError);
