@@ -27,8 +27,9 @@ jobs:
     env:
       # Linux compiles through ccache; Windows (MSVC) cannot cache precompiled-
       # header compilations, so it relies on the precompiled header alone.
+      # No CCACHE_BASEDIR: it rewrites __FILE__ to relative paths, and tests
+      # locate server/i18n from __FILE__.
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_NOHASHDIR: 'true'
       CCACHE_COMPRESS: 'true'
       CCACHE_MAXSIZE: 1G
