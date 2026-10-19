@@ -692,13 +692,27 @@ static int realMain(int argc, char* argv[]) {
     });
     auto jsCallbacks = std::make_shared<dice::BoundedExecutor>();
     auto pluginScheduler = [](const std::shared_ptr<dice::BoundedExecutor>& worker) {
-        return [weak = std::weak_ptr<dice::BoundedExecutor>(worker)](double seconds, std::function<void()> callback) {
+        using Task = std::shared_ptr<std::function<void()>>;
+        auto post = std::make_shared<std::function<void(double, Task, unsigned)>>();
+        *post = [weak = std::weak_ptr<dice::BoundedExecutor>(worker),
+                 again = std::weak_ptr<std::function<void(double, Task, unsigned)>>(post)](
+                    double seconds, Task task, unsigned attempt) {
+            drogon::app().getLoop()->runAfter(seconds, [weak, again, task, attempt]() {
+                auto target = weak.lock();
+                if (!target) return;
+                const bool accepted = target->submit([again, task, attempt] {
+                    if (!dice::runPluginCallback(*task)) return;
+                    // 插件运行时正被其他任务占用：稍后重跑同一个回调。
+                    if (attempt == 10) DICE_LOG_WARN("[插件] 延时任务多次等待插件运行时空闲，将继续重试。");
+                    if (auto retry = again.lock()) (*retry)(dice::pluginBusyRetryDelay(attempt), task, attempt + 1);
+                });
+                if (!accepted) DICE_LOG_WARN("[plugin] background callback dropped: worker stopped or queue full");
+            });
+        };
+        return [post](double seconds, std::function<void()> callback) {
             if (!std::isfinite(seconds)) throw std::invalid_argument("plugin timer delay must be finite");
             seconds = std::clamp(seconds, 0.0, 7.0 * 24 * 3600);
-            drogon::app().getLoop()->runAfter(seconds, [weak, callback = std::move(callback)]() mutable {
-                if (auto target = weak.lock(); target && !target->submit(std::move(callback)))
-                    DICE_LOG_WARN("[plugin] background callback dropped: worker stopped or queue full");
-            });
+            (*post)(seconds, std::make_shared<std::function<void()>>(std::move(callback)), 0);
         };
     };
     jsMod.setScheduler(pluginScheduler(jsCallbacks));

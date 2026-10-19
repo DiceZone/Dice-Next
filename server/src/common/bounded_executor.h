@@ -1,5 +1,7 @@
 #pragma once
 #include "logger.h"
+#include "script_execution.h"
+#include <algorithm>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -52,4 +54,14 @@ private:
     bool stopped_ = false;
     std::thread worker_;
 };
+// 插件延时任务在开始执行脚本前遇到运行时被占用（ScriptBusy 且非嵌套）时尚无任何副作用，
+// 可以把同一个回调稍后整体重跑，而不是丢弃（丢弃会让 sleepTime 续跑、周期任务、
+// 定时器从此停止）。返回 true 表示需要重试；执行中途的忙碌照常向上抛出。
+inline bool runPluginCallback(const std::function<void()>& task) {
+    try { task(); return false; }
+    catch (const ScriptBusy& busy) { if (busy.nested()) throw; return true; }
+}
+inline double pluginBusyRetryDelay(unsigned attempt) {
+    return (std::min)(0.2 * static_cast<double>(1u << (std::min)(attempt, 5u)), 5.0);
+}
 } // namespace dice

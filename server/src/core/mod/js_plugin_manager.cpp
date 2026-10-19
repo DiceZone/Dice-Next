@@ -1079,7 +1079,8 @@ void JsPluginManager::wsConnect(JSContext* ctx, JSValue obj, const std::string& 
                 });
             });
             { std::lock_guard<std::mutex> lk2(sWsMutex); sWsConns[id] = client; }
-        } catch (const std::exception& e) { wsFire(id, "error", e.what()); }
+        } catch (const ScriptBusy& busy) { if (!busy.nested()) throw; wsFire(id, "error", busy.what()); }   // 尚未开始执行：稍后重试
+        catch (const std::exception& e) { wsFire(id, "error", e.what()); }
     });
 }
 

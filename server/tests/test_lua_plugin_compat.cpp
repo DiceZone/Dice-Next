@@ -7,6 +7,7 @@
 #include "../src/common/session_deck.h"
 #include "../src/core/mod/legacy_log_context.h"
 #include "../src/common/utils.h"
+#include "../src/common/bounded_executor.h"
 
 #include <chrono>
 #include <clocale>
@@ -15,6 +16,8 @@
 #include <fstream>
 #include <string>
 #include <functional>
+#include <future>
+#include <thread>
 #include <nlohmann/json.hpp>
 
 using namespace dice;
@@ -184,6 +187,41 @@ msg_reply.now={keyword={Match='now'},echo='immediate'}
     manager.dispatch("wait","player","group","reader","",false,0,"onebot_v11","A");
     ASSERT_EQ(callbacks.size(),size_t(1)); reply.clear(); manager.loadDir("data/mod");
     continuation=std::move(callbacks.back()); callbacks.pop_back(); continuation(); ASSERT_TRUE(reply.empty());
+}
+
+TEST(LuaPluginCompat, BusyRuntimeDefersDelayedContinuationInsteadOfDroppingIt) {
+    TempWorkspace workspace("dice_lua_busy_retry_");
+    writeText("data/plugin/busy.lua", R"LUA(
+msg_order={hold='hold',wait='later'}
+function hold(msg) eventMsg('hold',0,getDiceQQ()); return 'held' end
+function later(msg) sleepTime(1); return 'resumed' end
+)LUA");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    manager.setSelfIdLookup([](const auto&, const auto&) { return std::string("900001"); });
+    std::vector<std::function<void()>> callbacks; std::string reply;
+    manager.setScheduler([&](double, auto callback) { callbacks.push_back(std::move(callback)); });
+    manager.setScopedAsyncReply([&](const auto&, const auto&, const auto& text, const auto&, const auto&) { reply = text; });
+    std::promise<void> entered, release;
+    auto released = release.get_future().share();
+    manager.setEventMsg([&](const auto& text, const auto&, const auto&) {
+        if (text != "hold") return;
+        entered.set_value();
+        released.wait();
+    });
+    ASSERT_EQ(manager.loadDir("data/mod"), 1);
+    ASSERT_TRUE(manager.dispatch("wait", "10001", "1108650419", "玩家", "", false, 0, "onebot_v11", "account-a").pending);
+    ASSERT_EQ(callbacks.size(), size_t(1));
+
+    // 另一条线程的脚本正占用运行时：续跑尚未开始，应要求稍后重试，而不是丢弃。
+    std::thread holder([&] { manager.dispatch("hold", "10002", "1108650419", "玩家", "", false, 0, "onebot_v11", "account-a"); });
+    ASSERT_TRUE(entered.get_future().wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    ASSERT_TRUE(runPluginCallback(callbacks[0]));
+    ASSERT_TRUE(reply.empty());
+    release.set_value();
+    holder.join();
+
+    ASSERT_FALSE(runPluginCallback(callbacks[0]));
+    ASSERT_EQ(reply, "resumed");
 }
 
 TEST(LuaPluginCompat, EventOriginCannotBeRewrittenByLuaAndVirtualTaintSurvivesYield) {

@@ -8,11 +8,6 @@
 #include <string>
 
 namespace dice {
-class ScriptBusy : public std::runtime_error {
-public:
-    ScriptBusy() : std::runtime_error("插件运行时忙碌，请稍后重试") {}
-};
-
 // One budget covers the complete turn, including getters, Promise jobs and
 // nested host calls. Entering a second runtime must not renew the first budget.
 class ScriptExecution {
@@ -37,6 +32,15 @@ private:
     ScriptExecution* previous_;
     std::chrono::steady_clock::time_point deadline_;
     bool interrupted_ = false;
+};
+
+class ScriptBusy : public std::runtime_error {
+public:
+    ScriptBusy() : std::runtime_error("插件运行时忙碌，请稍后重试"), nested_(ScriptExecution::active()) {}
+    /// 抛出时本线程是否已在执行脚本。false 表示调用方还没开始执行任何脚本，可以整体重试。
+    bool nested() const { return nested_; }
+private:
+    bool nested_;
 };
 
 // BasicLockable, with bounded admission. In particular, four busy plugin API

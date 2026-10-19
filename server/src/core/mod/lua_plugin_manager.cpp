@@ -3803,6 +3803,10 @@ bool LuaPluginManager::postCallback(double delay, std::function<void(LuaPluginMa
             std::lock_guard<std::recursive_mutex> guard(state->mutex);
             if (state->owner) {
                 try { callback(*state->owner); }
+                catch (const ScriptBusy& busy) {   // 回调尚未开始执行：交给插件调度器稍后重试
+                    if (!busy.nested()) throw;
+                    DICE_LOG_ERROR("Lua 异步任务发生异常：{}", busy.what());
+                }
                 catch (const std::exception& ex) { DICE_LOG_ERROR("Lua 异步任务发生异常：{}", ex.what()); }
                 catch (...) { DICE_LOG_ERROR("Lua 异步任务发生未知异常。"); }
             }
