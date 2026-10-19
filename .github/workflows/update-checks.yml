@@ -63,6 +63,15 @@ jobs:
     needs: webui
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    env:
+      # Linux compiles through ccache; Windows (MSVC) cannot cache precompiled-
+      # header compilations, so it relies on the precompiled header alone.
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: 'true'
+      CCACHE_COMPRESS: 'true'
+      CCACHE_MAXSIZE: 1G
+      CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
     strategy:
       fail-fast: false
       matrix:
@@ -122,7 +131,15 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake git curl zip unzip tar pkg-config libssl-dev libsqlite3-dev
+          sudo apt-get install -y build-essential cmake git curl zip unzip tar pkg-config libssl-dev libsqlite3-dev ccache
+      - name: Restore compiler cache (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-tests-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-tests-${{ matrix.platform }}-
       - name: Prepare dependencies using the existing cache policy
         uses: ./main/.github/actions/setup-vcpkg
         with:
@@ -132,7 +149,12 @@ jobs:
         if: runner.os != 'Windows'
         working-directory: main
         run: |
-          cmake -S server -B server/${{ matrix.build_dir }} -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
+          cache=()
+          if [ "$RUNNER_OS" = Linux ]; then
+            cache=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+            ccache --zero-stats
+          fi
+          cmake -S server -B server/${{ matrix.build_dir }} -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed" "${cache[@]}"
       - name: Compile real core, manager and tests (Unix)
         if: runner.os != 'Windows'
         working-directory: main
@@ -142,6 +164,7 @@ jobs:
           # still agree when packaging; do not bypass the freshness check.
           cmake --build server/${{ matrix.build_dir }} --target dice-next-tests dice-next-launcher dice-next-update-test-core --parallel 2
           cmake --build server/${{ matrix.build_dir }} --target dice-next-server --parallel 2
+          if [ "$RUNNER_OS" = Linux ]; then ccache --show-stats; fi
       - name: Configure (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

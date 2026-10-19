@@ -24,6 +24,15 @@ jobs:
       contents: read
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    env:
+      # Linux compiles through ccache; Windows (MSVC) cannot cache precompiled-
+      # header compilations, so it relies on the precompiled header alone.
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: 'true'
+      CCACHE_COMPRESS: 'true'
+      CCACHE_MAXSIZE: 1G
+      CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
     strategy:
       fail-fast: false
       matrix:
@@ -61,7 +70,15 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake git curl zip unzip tar pkg-config libssl-dev libsqlite3-dev
+          sudo apt-get install -y build-essential cmake git curl zip unzip tar pkg-config libssl-dev libsqlite3-dev ccache
+      - name: Restore compiler cache (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-tests-linux-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-tests-linux-amd64-
       - name: Prepare dependencies
         uses: ./main/.github/actions/setup-vcpkg
         with:
@@ -78,7 +95,7 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: main
         run: |
-          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
+          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed" -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Compile tests (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -89,7 +106,10 @@ jobs:
       - name: Compile tests (Linux)
         if: runner.os == 'Linux'
         working-directory: main
-        run: cmake --build server/build --target dice-next-tests --parallel 2
+        run: |
+          ccache --zero-stats
+          cmake --build server/build --target dice-next-tests --parallel 2
+          ccache --show-stats
       - name: Run backend tests
         shell: bash
         working-directory: main
