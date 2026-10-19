@@ -2010,7 +2010,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             }
             opts.beforeImportBackup = migration_resources::utf8(beforeImport);
             std::vector<std::string> availableHelp;
-            for (const auto& entry : cmdRouter.allHelp(Locale::kZhHans)) if (!entry.content.empty()) availableHelp.push_back(entry.key);
+            availableHelp = cmdRouter.helpKeys(Locale::kZhHans);
             J report = legacyv2::runImport(db, cfg, i18n, replyMgr, dir, &cardDeck, &luaMod, opts, availableHelp);
             if (report.value("ok", false)) {
                 cmdRouter.reloadSensitiveWordRules();

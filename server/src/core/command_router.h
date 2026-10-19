@@ -4553,6 +4553,15 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         std::string i18nKey; // Raw templates are rendered only after selection.
         ContentFormat format = ContentFormat::kPlainText;
     };
+    struct HelpEntryView {
+        const std::string& key;
+        const std::string& content;
+        const std::string& source;
+        bool legacyMod;
+        const std::string& i18nKey;
+        ContentFormat format;
+        HelpEntry copy() const { return HelpEntry{key, content, source, legacyMod, i18nKey, format}; }
+    };
 
     // data/help/*.md 用户自管帮助文档（第四源）。专用读写锁；启动期与 CRUD 后 loadHelpFiles。
     static std::shared_mutex& helpLock() { static std::shared_mutex m; return m; }
@@ -4620,9 +4629,11 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
             }
     }
 
-    /// 汇总当前所有可用帮助条目（去重保序：内置 → 规则包 → 插件 → 文件）。
-    std::vector<HelpEntry> allHelp(Locale loc, const std::string& scope = "") const {
-        std::vector<HelpEntry> v;
+    /// 按顺序遍历当前所有可用帮助条目（去重保序：内置 → 规则包 → 插件 → 文件）。
+    /// 回调拿到的是条目本身的引用，不复制正文；返回 false 即停止遍历。
+    void visitHelp(Locale loc, const std::string& scope,
+                   const std::function<bool(const HelpEntryView&)>& visit) const {
+        bool stopped = false;
         // O(1) 去重：小写 key 哈希集（旧实现是 O(n²) 线性扫描，海量 mod helpdoc
         // 会让 .help 卡死/超时——真实查询类 mod 动辄上千词条）。
         // scope 非空 = 搜索域锁定：内置指令帮助保留，其余只收来源匹配的（在「去重前」过滤，
@@ -4630,35 +4641,59 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         std::unordered_set<std::string> seenKeys;
         auto add = [&](const std::string& k, const std::string& c, const std::string& src, bool legacyMod = false,
                        const std::string& i18nKey = "", ContentFormat format = ContentFormat::kPlainText) {
-            if (k.empty() || c.empty()) return;
+            if (stopped || k.empty() || c.empty()) return;
             if (!scope.empty() && src != "builtin" && !helpSourceMatches(src, scope)) return;
             if (!seenKeys.insert(toLower(k)).second) return;   // 已存在
-            v.push_back({k, c, src, legacyMod, i18nKey, format});
+            if (!visit(HelpEntryView{k, c, src, legacyMod, i18nKey, format})) stopped = true;
         };
         for (const auto& text : i18n_.helpTemplates(loc, true))
             add(text.key.substr(11), text.value, text.builtin ? "builtin" : "custom", false, text.key, text.format);
-        {
+        if (!stopped) {
             std::shared_lock<std::shared_mutex> lk(rulesLock());
             for (const auto& rp : rulePacks()) if (rp.enabled)
                 for (const auto& [k, c] : rp.helpEntries) add(k, c, "rule:" + rp.name);
         }
-        if (helpProvider_)
+        if (!stopped && helpProvider_)
             for (const auto& [k, c] : helpProvider_())
                 if (!c.empty()) add(k, c, "plugin");
-        if (legacyModHelpProvider_)
+        if (!stopped && legacyModHelpProvider_)
             for (const auto& [k, c] : legacyModHelpProvider_())
                 if (!c.empty()) add(k, c, "plugin", true);
-        {
+        if (!stopped) {
             std::shared_lock<std::shared_mutex> lk(helpLock());
             for (const auto& [k, c] : helpFiles())
                 if (!c.empty()) add(k, c, "file:" + k);
         }
-        {   // 结构化帮助文档（data/helpdoc，海豹兼容 + 随包速查）
+        if (!stopped) {   // 结构化帮助文档（data/helpdoc，海豹兼容 + 随包速查）
             std::shared_lock<std::shared_mutex> lk(helpDocLock());
             for (const auto& h : helpDocs())
                 if (!h.content.empty()) add(h.topic, h.content, "helpdoc:" + h.pack);
         }
+    }
+
+    /// 汇总当前所有可用帮助条目的副本（WebUI 列表等需要完整列表时使用）。
+    std::vector<HelpEntry> allHelp(Locale loc, const std::string& scope = "") const {
+        std::vector<HelpEntry> v;
+        visitHelp(loc, scope, [&](const HelpEntryView& e) { v.push_back(e.copy()); return true; });
         return v;
+    }
+
+    /// 只取条目名（列表、模糊查找、导入核对用），不复制正文。
+    std::vector<std::string> helpKeys(Locale loc, const std::string& scope = "") const {
+        std::vector<std::string> keys;
+        visitHelp(loc, scope, [&](const HelpEntryView& e) { keys.push_back(e.key); return true; });
+        return keys;
+    }
+
+    /// 按名称（不分大小写）查一个条目，命中即停。
+    std::optional<HelpEntry> findHelp(Locale loc, const std::string& lowerTopic, const std::string& scope = "") const {
+        std::optional<HelpEntry> found;
+        visitHelp(loc, scope, [&](const HelpEntryView& e) {
+            if (toLower(e.key) != lowerTopic) return true;
+            found = e.copy();
+            return false;
+        });
+        return found;
     }
 
     // 溯洄/OneDice 引用：查一个帮助词条的原始内容（供 {克苏鲁} 这类交叉引用 + 牌堆回调）。
@@ -4820,8 +4855,7 @@ private:
                     && (scope.empty() || helpSourceMatches("helpdoc:" + h.pack, scope)))
                     return HelpEntry{h.topic, h.content, "helpdoc:" + h.pack};
         }
-        for (const auto& entry : allHelp(loc, scope)) if (toLower(entry.key) == topic) return entry;
-        return std::nullopt;
+        return findHelp(loc, topic, scope);
     }
 
     std::string renderSelectedHelp(HelpEntry entry, const Message& msg, Locale loc) const {
@@ -4863,19 +4897,15 @@ private:
         if (auto entry = selectHelpExact(topic, msg, loc)) return renderSelectedHelp(*entry, msg, loc);
         // C#（搜索域）：本群锁定了搜索范围 → 在「构建时」就只收该来源(+内置)，过滤掉其它内容。
         std::string scope = getGroupSetting(msg, "helpScope");
-        auto entries = allHelp(loc, scope);
         if (!scope.empty()) {
-            bool hasDoc = false; for (auto& e : entries) if (e.source != "builtin") { hasDoc = true; break; }
+            bool hasDoc = false;
+            visitHelp(loc, scope, [&](const HelpEntryView& e) { hasDoc = e.source != "builtin"; return !hasDoc; });
             if (!hasDoc) return i18n_.tr(loc, "helpdoc.scope.empty", {{"scope", scope}, {"topic", topic}});
         }
-        // 精确命中（忽略大小写）任一来源。
-        for (auto& e : entries) if (toLower(e.key) == topic) return renderSelectedHelp(e, msg, loc);
-        // 模糊查找：唯一命中→显示；多个→列候选；无→未知。
-        std::vector<std::string> keys; keys.reserve(entries.size());
-        for (auto& e : entries) keys.push_back(e.key);
-        auto hits = fuzzyFind(topic, keys);
+        // 模糊查找：唯一命中→显示；多个→列候选；无→未知。（精确命中已在 selectHelpExact 处理）
+        auto hits = fuzzyFind(topic, helpKeys(loc, scope));
         if (hits.size() == 1)
-            for (auto& e : entries) if (e.key == hits[0]) return renderSelectedHelp(e, msg, loc);
+            if (auto entry = findHelp(loc, toLower(hits[0]), scope)) return renderSelectedHelp(*entry, msg, loc);
         if (hits.size() > 1) {
             std::string list;
             for (auto& c : hits) { if (!list.empty()) list += " "; list += "." + c; }
@@ -4962,7 +4992,7 @@ private:
         if (i18n_.tr(loc, "helpdoc.list", {}).find("{list}") == std::string::npos)
             return i18n_.tr(loc, "helpdoc.list", {});
         std::string list;
-        for (const auto& e : allHelp(loc)) { if (!list.empty()) list += " "; list += "." + e.key; }
+        for (const auto& key : helpKeys(loc)) { if (!list.empty()) list += " "; list += "." + key; }
         return i18n_.tr(loc, "helpdoc.list", {{"list", list}});
     }
 
@@ -9912,12 +9942,11 @@ private:
         if (auto content = helpEntryContent(name)) return content;
         const auto key = "help.topic." + name;
         if (i18n_.hasOverride(Locale::kZhHans, key)) return i18n_.tr(Locale::kZhHans, key);
-        for (const auto& entry : allHelp(Locale::kZhHans))
-            if (toLower(trim(entry.key)) == toLower(trim(name)) && !entry.content.empty()) {
-                if (message && entry.legacyMod && legacyModHelpRenderer_) return legacyModHelpRenderer_(entry.key, *message);
-                if (!entry.i18nKey.empty()) return i18n_.tr(Locale::kZhHans, entry.i18nKey);
-                return entry.content;
-            }
+        if (const auto entry = findHelp(Locale::kZhHans, toLower(trim(name)))) {
+            if (message && entry->legacyMod && legacyModHelpRenderer_) return legacyModHelpRenderer_(entry->key, *message);
+            if (!entry->i18nKey.empty()) return i18n_.tr(Locale::kZhHans, entry->i18nKey);
+            return entry->content;
+        }
         return std::nullopt;
     }
 
