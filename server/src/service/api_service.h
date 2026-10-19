@@ -50,6 +50,7 @@
 #include "ai_chat.h"        // 智能化阶段A：对话（默认提示词）
 #include "ai_memory.h"      // 智能化阶段B：记忆（摘要默认提示词）
 #include "ai_npc.h"         // 智能化阶段E：NPC 扮演
+#include "chat_persistence.h"
 #include "ai_vision.h"      // 多模态图像识别（默认提示词）
 #include "ai_vision_config.h"
 #include "notice_manager.h" // B：通知系统（全局开关变更推送）
@@ -2818,7 +2819,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             {"save_log_images", false},
             {"image_send", J{{"mode", "base64"}, {"host", ""}}},
             {"image_host", J{{"mode", "none"}}},
-            {"chat_retention_days", 7},
+            {"chat_retention_days", 7}, {"chat_persist", false},
             {"user_group", ""}, {"user_group_enforce", false}, {"user_group_invite", true},
         };
         auto platformForAccount = [st](const std::string& id) -> std::string {
@@ -5811,9 +5812,16 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Get, drogon::Post});
     // GET/POST /api/groups/{platform}/{groupId}/messages — simulated chat window.
     app.registerHandler("/api/groups/{1}/{2}/messages",
-        [&adapterMgr, &db](Req req, CB&& cb, const std::string& plat, const std::string& gid) {
+        [&adapterMgr, &db, &cfg, &cmdRouter](Req req, CB&& cb, const std::string& plat, const std::string& gid) {
         try {
             std::string key = plat + ":" + gid;
+            // 本群是否保存聊天记录：平台级设置、该平台任一账号的设置，或本群启用了 AI。
+            auto persisted = [&]() {
+                if (chat_persistence::enabledFor(cfg, cmdRouter, plat, std::string(), gid)) return true;
+                for (const auto& adapter : adapterMgr.allAdapters())
+                    if (adapter->platform() == plat && chat_persistence::configured(cfg, plat, adapter->id())) return true;
+                return false;
+            };
             if (req->method() == drogon::Post) {
                 DICE_LOG_INFO("Web simulated group chat: platform={}, group={}, bodySize={}", plat, gid, req->body().size());
                 auto j = J::parse(req->body(), nullptr, false);
@@ -5839,8 +5847,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 a->sendGroupMessage(targetId, text);
                 std::string me = a->getLoginName().empty() ? std::string("\xe9\xaa\xb0\xe5\xa8\x98") : a->getLoginName();  // 骰娘
                 GroupChatLog::instance().add(key, me, a->getLoginId(), text, true);
-                // 网页发送的消息也持久化。
-                if (auto* cst = db.getChatStorage()) {
+                // 保存聊天记录时，网页发送的消息也持久化。
+                if (auto* cst = chat_persistence::enabledFor(cfg, cmdRouter, plat, a->id(), gid)
+                        ? db.getChatStorage() : nullptr) {
                     try {
                         ChatMsgRow r; r.platform = plat; r.adapterId = a->id(); r.groupId = gid;
                         r.userId = a->getLoginId(); r.sender = me; r.content = text;
@@ -5850,9 +5859,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
                 jsonReply(ok(nullptr), std::move(cb));
             } else {
-                // 读持久化的 chat.db（重启不丢，含撤回标注），取最近 100 条按时间升序。
-                auto* cst = db.getChatStorage();
-                if (!cst) { jsonReply(ok(GroupChatLog::instance().recent(key, 60)), std::move(cb)); return; }
+                // 保存聊天记录时读 chat.db（重启不丢，含撤回标注），取最近 100 条按时间升序；
+                // 否则读内存里的近期消息。
+                auto* cst = persisted() ? db.getChatStorage() : nullptr;
+                if (!cst) { jsonReply(ok(GroupChatLog::instance().recent(key, 100)), std::move(cb)); return; }
                 J arr = J::array();
                 try {
                     auto rows = cst->get_all<ChatMsgRow>(

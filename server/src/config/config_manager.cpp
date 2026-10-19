@@ -37,6 +37,7 @@ static json makeDefaultConfig() {
             {"image_send", {{"mode", "base64"}, {"host", ""}}},
             {"image_host", {{"mode", "none"}}},
             {"chat_retention_days", 7},
+            {"chat_persist", false},             // 是否把群聊记录写入 chat.db（启用 AI 的群始终保存）
             {"friend_clean_days", 0},
             {"group_clear_limit", 20},
             {"max_group_size", 0},

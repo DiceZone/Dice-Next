@@ -25,6 +25,7 @@
 #include "service/ai_translate.h"      // AI 回复翻译（.lang 自定义语言）
 #include "service/ai_chat.h"           // 智能化阶段A：AI 对话回复
 #include "service/ai_memory.h"         // 智能化阶段B/C：群聊滚动摘要 + 长期事实记忆
+#include "service/chat_persistence.h"  // 聊天记录是否写入 chat.db
 #include "service/ai_tools.h"          // 智能化阶段D：AI 工具调用（掷骰/抽牌/查卡）
 #include "service/ai_npc.h"            // 智能化阶段E：NPC 扮演
 #include "service/ai_vision.h"         // 多模态图像识别
@@ -1771,7 +1772,8 @@ static int realMain(int argc, char* argv[]) {
                 if (botName.empty()) botName = "\xe9\xaa\xb0\xe5\xa8\x98";   // 骰娘
                 if (!reply.empty()) dice::GroupChatLog::instance().add(key, botName, msg.selfId, reply, true);
                 if (!broadcast.empty()) dice::GroupChatLog::instance().add(key, "\xF0\x9F\x93\xA2", msg.selfId, broadcast, true);
-                if (!reply.empty()) {
+                if (!reply.empty() && dice::chat_persistence::enabledFor(
+                        configMgr, cmdRouter, msg.platform, msg.adapterId, chatScope)) {
                     if (auto* cst = db.getChatStorage()) {
                         try {
                             dice::ChatMsgRow rout;
@@ -2031,10 +2033,12 @@ static int realMain(int argc, char* argv[]) {
                 : (msg.displayContent.empty() ? msg.content : msg.displayContent);
             dice::GroupChatLog::instance().add(key,
                 msg.senderName.empty() ? msg.senderId : msg.senderName, msg.senderId,
-                chatContent, false);
+                chatContent, false, msg.id);
             // 骰娘回复/广播的模拟聊天与 chat.db 写入移到 finishReply（定稿后）。
-            // 同步持久化到 chat.db（带 msgId，供撤回标注与保留期管理）。
-            if (auto* cst = db.getChatStorage()) {
+            // 保存聊天记录时同步持久化到 chat.db（带 msgId，供撤回标注与保留期管理）。
+            auto* chatStore = dice::chat_persistence::enabledFor(
+                configMgr, cmdRouter, msg.platform, msg.adapterId, chatScope) ? db.getChatStorage() : nullptr;
+            if (auto* cst = chatStore) {
                 try {
                     int64_t now = static_cast<int64_t>(std::time(nullptr));
                     dice::ChatMsgRow rin;
@@ -2270,7 +2274,8 @@ static int realMain(int argc, char* argv[]) {
             std::string who = e.userId.empty() ? "?" : e.userId;
             std::string key = e.platform + ":" + e.groupId;
             dice::GroupChatLog::instance().add(key, who, e.userId, line, false);
-            if (auto* cst = db.getChatStorage()) {
+            if (auto* cst = dice::chat_persistence::enabledFor(configMgr, cmdRouter, e.platform, e.adapterId, e.groupId)
+                    ? db.getChatStorage() : nullptr) {
                 try {
                     dice::ChatMsgRow r;
                     r.platform = e.platform; r.adapterId = e.adapterId; r.groupId = e.groupId; r.userId = e.userId;
@@ -2290,6 +2295,7 @@ static int realMain(int argc, char* argv[]) {
                 else if (e.extra.contains("message_id") && e.extra["message_id"].is_number_integer()) mid = std::to_string(e.extra["message_id"].get<int64_t>());
             } catch (...) {}
             if (mid.empty() || e.groupId.empty()) return;
+            dice::GroupChatLog::instance().markRecalled(e.platform + ":" + e.groupId, mid);
             int logRemoved = 0;
             if (auto* cst = db.getChatStorage()) try {
                 namespace orm = sqlite_orm;
@@ -2317,6 +2323,38 @@ static int realMain(int argc, char* argv[]) {
             return;
         }
         if (e.type == ET::kGroupHistory) {
+            if (!dice::chat_persistence::enabledFor(configMgr, cmdRouter, e.platform, e.adapterId, e.groupId)) {
+                // 未保存聊天记录：历史消息只载入模拟聊天的内存窗口（按时间排列、按消息号去重）。
+                int kept = 0;
+                const std::string key = e.platform + ":" + e.groupId;
+                if (e.extra.contains("messages") && e.extra["messages"].is_array()) {
+                    for (const auto& m : e.extra["messages"]) {
+                        if (!m.is_object()) continue;
+                        auto field = [&](const char* k) -> std::string {
+                            if (!m.contains(k) || m[k].is_null()) return "";
+                            if (m[k].is_string()) return m[k].get<std::string>();
+                            if (m[k].is_number_integer()) return std::to_string(m[k].get<int64_t>());
+                            return "";
+                        };
+                        const std::string uid = field("user_id");
+                        std::string sender;
+                        if (m.contains("sender") && m["sender"].is_object()) {
+                            sender = m["sender"].value("card", std::string());
+                            if (sender.empty()) sender = m["sender"].value("nickname", std::string());
+                        }
+                        std::string content = m.value("raw_message", std::string());
+                        if (content.empty() && m.contains("message") && m["message"].is_string())
+                            content = m["message"].get<std::string>();
+                        if (content.empty()) continue;
+                        const int64_t time = m.contains("time") && m["time"].is_number_integer() ? m["time"].get<int64_t>() : 0;
+                        dice::GroupChatLog::instance().addHistory(key, sender.empty() ? uid : sender, uid, content,
+                            !e.selfId.empty() && uid == e.selfId, field("message_id"), time);
+                        ++kept;
+                    }
+                }
+                DICE_LOG_INFO_M("群管理", "事件： 群 {} 历史消息载入模拟聊天 {} 条", e.groupId, kept);
+                return;
+            }
             auto* cst = db.getChatStorage();
             if (!cst) return;
             int added = 0;
