@@ -92,6 +92,100 @@ TEST(LuaPluginCompat, FormFeedFormatsAsExplicitMessageBreakWithLegacyPrecedence)
     ASSERT_EQ(manager.formatTemplate("{FormFeed}", {}), std::string("speech wins"));
 }
 
+TEST(LuaPluginCompat, SafeMacrosShareContextAndPreserveInsertedData) {
+    TempWorkspace fixture("dicenext-lua-context-");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.formatTemplate("{case:n?12=OK&else=NO}/{grade:n?0=LOW&10=HIGH}", {{"n","12"}}), "OK/HIGH");
+    ASSERT_EQ(manager.formatTemplate("{var:n={ran:4~4}}{n}/{len:n}", {}), "4/1");
+    ASSERT_EQ(manager.formatTemplate("{print:uid}/{print:uid=123}",{{"uid","123"},{"nick","reader"}}),"reader(123)/reader(123)");
+    std::string error;
+    ASSERT_TRUE(manager.eval(R"(
+local m = __dnx_wrap_msg({uid='12345',gid='98765',nick='reader'},7)
+m.temp = {count=12, flag=false}
+m.text = '{sample:NOT CODE}'
+assert(m:get('temp.count') == 12)
+assert(m:get('temp.flag',true) == false)
+assert(m:get('user.trust') == 7)
+assert(m:get('user.__id') == nil)
+assert(m:get('format') == nil)
+assert(m:format('{temp.count}/{temp.flag}/{user.trust}') == '12/false/7')
+assert(m:format('{var:copy={text}}{copy}') == '{sample:NOT CODE}')
+assert(m:format('{grade:temp.count?0=A&10=B}') == 'B')
+assert(m:format('{len:temp}/{len:temp.count}/{len:text}') == '2/0/17')
+m.set = Set.new({'a','b','a'})
+assert(m:format('{len:set}') == '2')
+m.hostile = setmetatable({one=1,two=2},{__len=function() error('must not call __len') end,
+  __pairs=function() error('must not call __pairs') end, __tostring=function() error('must not stringify') end})
+assert(m:format('{len:hostile}') == '2')
+__dnx_conf('game:98765','__name','test')
+m.game.pls:add('1');m.game.pls:add('2')
+assert(m:format('{len:game.pls}/{len:game.gms}') == '2/0')
+assert(m:format('{user.__id}') == '')
+assert(m:format('{len:user.__id}') == '0')
+assert(m:format('{var:user.trust=999}') == '')
+assert(m.user.trust == 7)
+)", &error));
+}
+
+TEST(LuaPluginCompat, DirectoryMetadataRespectsScopesWithoutConsumingLimits) {
+    TempWorkspace fixture("dicenext-lua-directory-");
+    std::filesystem::create_directories("data/mod/example/reply");
+    writeText("data/mod/example/descriptor.json", R"({"mod":"example"})");
+    writeText("data/mod/example/reply/keys.lua", R"(
+msg_reply.a = {keyword={Match='public-key'}, echo='ok', limit={today=1,cd=10}}
+msg_reply.typed = {keyword={Match='typed'}, echo=function(m) m.flag=false; m.nested={n=3}; return '{flag}/{nested.n}/{len:nested}/{len:flag}' end}
+msg_reply.b = {keyword={Prefix='.order'}, echo='ok'}
+msg_reply.c = {keyword={Match='private-key'}, echo='ok', limit={grp_id='other'}}
+msg_reply.d = {keyword={Match='variable-key'}, echo='ok', limit={user_var={hidden=true}}}
+)");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    manager.setGroupGate([](const auto&,const auto& group,const auto&,const auto&) { return group != "disabled"; });
+    ASSERT_TRUE(manager.loadDir("data/mod") > 0);
+    LuaEventOrigin origin{"onebot_v11","account","current","player","",false};
+    const auto keys = manager.directoryTriggers(origin, false);
+    ASSERT_TRUE(std::find(keys.begin(),keys.end(),"public-key") != keys.end());
+    ASSERT_TRUE(std::find(keys.begin(),keys.end(),"private-key") == keys.end());
+    ASSERT_TRUE(std::find(keys.begin(),keys.end(),"variable-key") == keys.end());
+    manager.confSet("u:player","hidden","true");
+    const auto allowed = manager.directoryTriggers(origin,false);
+    ASSERT_TRUE(std::find(allowed.begin(),allowed.end(),"variable-key") != allowed.end());
+    manager.confSet("u:player","hidden","false");
+    ASSERT_TRUE(manager.directoryTriggers(origin,true) == std::vector<std::string>({".order"}));
+    origin.groupId = "disabled"; ASSERT_TRUE(manager.directoryTriggers(origin,false).empty());
+    ASSERT_TRUE(manager.dispatch("public-key","player","current","reader","",false,0,"onebot_v11","account").matched);
+    ASSERT_EQ(manager.dispatch("typed","player","current","reader","",false,0,"onebot_v11","account").reply, "false/3/1/0");
+    std::filesystem::remove("data/mod/example/reply/keys.lua"); manager.loadDir("data/mod");
+    origin.groupId = "current"; ASSERT_TRUE(manager.directoryTriggers(origin,false).empty());
+}
+
+TEST(LuaPluginCompat, TemplateWaitYieldsWithoutBlockingAndReloadCancelsContinuation) {
+    TempWorkspace fixture("dicenext-lua-template-wait-");
+    std::filesystem::create_directories("data/mod/waits/reply");
+    writeText("data/mod/waits/descriptor.json", R"({"mod":"waits"})");
+    writeText("data/mod/waits/reply/wait.lua", R"(
+msg_reply.wait={keyword={Match='wait'},echo=function(m)
+  return m:format('{var:x={nick}}before{wait:10}{case:uid?player={wait:20}OK&else={wait:100}BAD}after/{x}')
+end}
+msg_reply.now={keyword={Match='now'},echo='immediate'}
+)");
+    LuaPluginManager manager; ASSERT_TRUE(manager.init());
+    std::vector<std::function<void()>> callbacks; std::vector<double> delays; std::string reply;
+    manager.setScheduler([&](double delay,auto callback) { delays.push_back(delay); callbacks.push_back(std::move(callback)); });
+    manager.setScopedAsyncReply([&](const auto& platform,const auto& account,const auto& text,const auto& group,const auto& user) {
+        if (platform=="onebot_v11" && account=="A" && group=="group" && user=="player") reply=text;
+    });
+    ASSERT_TRUE(manager.loadDir("data/mod")>0);
+    const auto result=manager.dispatch("wait","player","group","reader","",false,0,"onebot_v11","A");
+    ASSERT_TRUE(result.matched); ASSERT_TRUE(result.pending); ASSERT_TRUE(result.reply.empty());
+    ASSERT_EQ(callbacks.size(),size_t(1)); ASSERT_TRUE(std::abs(delays[0]-0.03)<0.000001);
+    ASSERT_EQ(manager.dispatch("now","other","elsewhere","other","",false,0,"onebot_v11","B").reply,"immediate");
+    auto continuation=std::move(callbacks.back()); callbacks.pop_back(); continuation();
+    ASSERT_EQ(reply,"beforeOKafter/reader");
+    manager.dispatch("wait","player","group","reader","",false,0,"onebot_v11","A");
+    ASSERT_EQ(callbacks.size(),size_t(1)); reply.clear(); manager.loadDir("data/mod");
+    continuation=std::move(callbacks.back()); callbacks.pop_back(); continuation(); ASSERT_TRUE(reply.empty());
+}
+
 TEST(LuaPluginCompat, EventOriginCannotBeRewrittenByLuaAndVirtualTaintSurvivesYield) {
     TempWorkspace workspace("dice_lua_event_origin_");
     writeText("data/plugin/event-origin.lua", R"LUA(

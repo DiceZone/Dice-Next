@@ -17,10 +17,15 @@
 #include <functional>
 #include <random>
 #include <mutex>
+#include <memory>
+#include "../../common/safe_template.h"
 
 namespace dice {
 
 class CardDeck {
+    using Deck = std::vector<std::string>;
+    using DeckMap = std::unordered_map<std::string, Deck>;
+    using TempMap = std::unordered_map<std::string, Deck>;
 public:
     CardDeck();
 
@@ -32,10 +37,7 @@ public:
     void setHelpLookup(std::function<std::optional<std::string>(const std::string&)> fn) { helpLookup_ = std::move(fn); }
 
     /// 把任意文本里的 {引用}/[骰子] 展开（供 .help 词条内容复用同一套展开语义）。
-    std::string expandText(const std::string& text) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        TempMap t; return expand(text, t, 0);
-    }
+    std::string expandText(const std::string& text);
 
     /// Load all *.json deck files from a directory. Returns number of decks loaded.
     int loadDir(const std::string& dir);
@@ -70,25 +72,27 @@ public:
     // One authored reply shares depletion state across its legacy references.
     // Keeping the context local prevents state leaking between users/messages.
     struct ReferenceContext {
-        std::unordered_map<std::string, std::vector<std::string>> decks;
+        TempMap decks;
+        safe_template::Budget budget;
+        std::shared_ptr<const DeckMap> catalog;
     };
     std::string expandReference(const std::string& token, ReferenceContext& context);
 
 private:
-    using Deck = std::vector<std::string>;
-    using TempMap = std::unordered_map<std::string, Deck>;
-
     static std::string lower(const std::string& s);
     const Deck* find(const std::string& name) const;
     void seedBuiltins();                       // caller holds mutex_ / construction
     int  loadDirLocked(const std::string& dir, bool bundled);  // caller holds mutex_
 
     /// Expand {…} references and [dice] in @p expr (recursive, depleting tempMap).
-    std::string expand(std::string expr, TempMap& temp, int depth);
+    void prepare(ReferenceContext& context) const;
+    std::string expand(const std::string& expr, ReferenceContext& context, unsigned depth);
     /// Weighted random pick from @p deck; if !back, deplete the chosen entry.
-    std::string drawCard(Deck& deck, bool back, TempMap& temp, int depth);
+    std::string drawCard(Deck& deck, bool back, ReferenceContext& context, unsigned depth);
 
-    std::unordered_map<std::string, Deck> decks_;   // keyed by lower(name)
+    // Copy-on-write snapshots keep an entire render on one catalogue version,
+    // without holding a deck mutex across host callbacks or template expansion.
+    std::shared_ptr<DeckMap> decks_ = std::make_shared<DeckMap>();
     std::unordered_map<std::string, SourceInfo> sourceFiles_;  // deck name → source
     std::function<long long(const std::string&)> diceEval_;
     std::function<std::optional<std::string>(const std::string&)> helpLookup_;

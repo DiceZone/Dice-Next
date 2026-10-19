@@ -1085,6 +1085,7 @@ void JsPluginManager::wsConnect(JSContext* ctx, JSValue obj, const std::string& 
 
 void JsPluginManager::wsFire(int64_t id, const char* evt, const std::string& data) {
     std::lock_guard<ScriptMutex> lk(mutex_);
+    DirectoryRefresh refresh{*this};
     if (!ctx_) return;
     auto it = wsObjs_.find(id);
     if (it == wsObjs_.end()) return;
@@ -1174,6 +1175,8 @@ static JSValue jsWebSocketCtor(JSContext* ctx, JSValueConst this_val, int argc, 
 JsPluginManager::~JsPluginManager() { freeRuntime(); }
 
 void JsPluginManager::freeRuntime() {
+    ++runtimeGeneration_;
+    directory_.store({});
     if (ctx_) {
         for (auto& e : exts_) JS_FreeValue(ctx_, e.first);
         exts_.clear();
@@ -1477,6 +1480,7 @@ int JsPluginManager::loadDir(const std::string& dir) {
 }
 
 int JsPluginManager::loadDirLocked(const std::string& dir) {
+    DirectoryRefresh refresh{*this};
     lastLoadErrors_ = 0;
     JS_UpdateStackTop(rt_);   // (re)load may run on a worker thread; re-baseline first
     dir_ = dir;   // remember for WebUI management (upload/toggle/delete + reload)
@@ -1636,6 +1640,7 @@ void JsPluginManager::clearTimer(int64_t id) {   // caller holds mutex_
 
 void JsPluginManager::fireTimer(int64_t id) {
     std::lock_guard<ScriptMutex> lk(mutex_);
+    DirectoryRefresh refresh{*this};
     auto it = timers_.find(id);
     if (it == timers_.end() || !ctx_) return;     // cleared, or runtime gone (reload)
     JS_UpdateStackTop(rt_);
@@ -1798,6 +1803,7 @@ int JsPluginManager::reload(const std::string& dir) {
 
 std::optional<std::string> JsPluginManager::evalString(const std::string& script) {
     std::lock_guard<ScriptMutex> lk(mutex_);
+    DirectoryRefresh refresh{*this};
     if (!ctx_) return std::nullopt;
     ProcessingScope logScope(ProcessingSource{"JS 脚本", "临时执行", "<card-template>", "求值"});
     JS_UpdateStackTop(rt_);
@@ -1936,6 +1942,73 @@ std::string JsPluginManager::dirForFile(const std::string& file) const {
             || fs::exists(fs::path(d) / (base + ".disabled"), ec)) return d;
     }
     return dir_.empty() ? std::string("data/plugins/js") : dir_;
+}
+
+// Descriptors of ordinary objects cannot execute accessors. Proxies are
+// deliberately omitted: even ownKeys/getOwnPropertyDescriptor can run JS.
+static JSValue directoryData(JSContext* ctx, JSValueConst object, JSAtom atom) {
+    if (!JS_IsObject(object) || JS_IsProxy(object)) return JS_UNDEFINED;
+    JSPropertyDescriptor descriptor{0,JS_UNDEFINED,JS_UNDEFINED,JS_UNDEFINED};
+    const int found = JS_GetOwnProperty(ctx, &descriptor, object, atom);
+    if (found < 0) JS_FreeValue(ctx, JS_GetException(ctx));
+    if (found != 1) return JS_UNDEFINED;
+    JSValue value = descriptor.value;
+    if (descriptor.flags & JS_PROP_GETSET) { JS_FreeValue(ctx, value); value = JS_UNDEFINED; }
+    JS_FreeValue(ctx, descriptor.getter); JS_FreeValue(ctx, descriptor.setter);
+    return value;
+}
+
+void JsPluginManager::refreshDirectoryLocked() {
+    if (!ctx_) { directory_.store({}); return; }
+    auto snapshot = std::make_shared<std::vector<DirectoryEntry>>();
+    const JSAtom mapAtom = JS_NewAtom(ctx_, "cmdMap"), solveAtom = JS_NewAtom(ctx_, "solve");
+    size_t visited = 0;
+    for (const auto& [extension, file] : exts_) {
+        if (suspendedFiles_.contains(file)) continue;
+        JSValue map = directoryData(ctx_, extension, mapAtom);
+        if (JS_IsObject(map) && !JS_IsProxy(map)) {
+            JSPropertyEnum* names = nullptr; uint32_t length = 0;
+            if (JS_GetOwnPropertyNames(ctx_, &names, &length, map, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+                for (uint32_t i = 0; i < length; ++i) {
+                    if (++visited <= 8192) {
+                        JSValue command = directoryData(ctx_, map, names[i].atom);
+                        JSValue solve = directoryData(ctx_, command, solveAtom);
+                        if (JS_IsFunction(ctx_, solve) && !JS_IsProxy(solve)) {
+                            const char* name = JS_AtomToCString(ctx_, names[i].atom);
+                            if (name) {
+                                const std::string text(name);
+                                if (!text.empty() && text.size() <= 128 && text.find_first_of("\r\n\t \x1f") == std::string::npos)
+                                    snapshot->push_back({file,text});
+                                JS_FreeCString(ctx_, name);
+                            }
+                        }
+                        JS_FreeValue(ctx_, solve); JS_FreeValue(ctx_, command);
+                    }
+                    JS_FreeAtom(ctx_, names[i].atom);
+                }
+                js_free(ctx_, names);
+            } else JS_FreeValue(ctx_, JS_GetException(ctx_));
+        }
+        JS_FreeValue(ctx_, map);
+        if (visited >= 8192) break;
+    }
+    JS_FreeAtom(ctx_, mapAtom); JS_FreeAtom(ctx_, solveAtom);
+    directory_.store(std::move(snapshot));
+}
+
+std::vector<std::string> JsPluginManager::directoryTriggers(const Message& message) const {
+    std::set<std::string> commands;
+    const auto snapshot = directory_.load();
+    if (!snapshot) return {};
+    const auto group = message.type == MessageType::kPrivate ? std::string() : message.targetId;
+    std::map<std::string,bool> allowed;
+    for (const auto& entry : *snapshot) {
+        if (!allowed.contains(entry.file)) allowed[entry.file] = !groupGate_ || group.empty() || entry.file.empty()
+            || groupGate_(message.platform, group, "js:" + entry.file, message.adapterId);
+        if (!allowed[entry.file]) continue;
+        commands.insert(entry.command);
+    }
+    return {commands.begin(),commands.end()};
 }
 
 std::vector<JsPluginManager::CmdHelp> JsPluginManager::commandHelps() const {
@@ -2378,6 +2451,7 @@ JsPluginManager::Result JsPluginManager::dispatchMessageHook(
         const Message& message, int privilege, const char* hook) {
     Result res;
     std::lock_guard<ScriptMutex> lk(mutex_);
+    DirectoryRefresh refresh{*this};
     if (!ctx_ || exts_.empty()) return res;
     JS_UpdateStackTop(rt_);
     JSValue jctx, jmsg;
@@ -2428,6 +2502,7 @@ void JsPluginManager::handleMessageSend(const Message& contextMessage,
                                         const Message& sentMessage,
                                         const std::string& flag, int privilege) {
     std::lock_guard<ScriptMutex> lk(mutex_);
+    DirectoryRefresh refresh{*this};
     if (!ctx_ || exts_.empty()) return;
     JS_UpdateStackTop(rt_);
 
@@ -2482,6 +2557,7 @@ JsPluginManager::Result JsPluginManager::handleCommandReceived(
     if (command.empty()) return res;
 
     std::lock_guard<ScriptMutex> lk(mutex_);
+    DirectoryRefresh refresh{*this};
     if (!ctx_ || exts_.empty()) return res;
     JS_UpdateStackTop(rt_);
     JSValue jctx, jmsg;
@@ -2567,6 +2643,7 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
         if (message.senderName.empty() && message.senderId == event.userId) message.senderName = extraId("user_name");
     }
     std::lock_guard<ScriptMutex> lk(mutex_);
+    DirectoryRefresh refresh{*this};
     if (!ctx_ || exts_.empty()) return;
     JS_UpdateStackTop(rt_);
     JSValue jctx, jmsg;
@@ -2645,6 +2722,7 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
     const std::string groupId = message.type == MessageType::kPrivate ? std::string() : message.targetId;
     Result res;
     std::lock_guard<ScriptMutex> lk(mutex_);
+    DirectoryRefresh refresh{*this};
     if (!ctx_) return res;
     // Re-baseline the stack-overflow check for THIS thread — live messages run on
     // the adapter thread, not the thread that created the runtime; without this

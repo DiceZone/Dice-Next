@@ -84,6 +84,63 @@ TEST(BundledDecks, DeckFilenamesStayInsideFlatJsonDirectory) {
     ASSERT_FALSE(isSafeJsonFilename("bad:name.json"));
 }
 
+TEST(BundledDecks, SafeTemplatesShareFunctionsAndNeverEvaluateInsertedData) {
+    dice::CardDeck decks;
+    int rolls = 0;
+    decks.setDiceEval([&](const std::string& expression) {
+        ++rolls;
+        if (expression == "1d6") return 6LL;
+        return 1LL;
+    });
+    const std::string nickname = "[1d100]{sample:INJECTED}{数字}";
+    dice::safe_template::ContextScope context([&](const std::string& key) -> std::optional<std::string> {
+        if (key == "nick") return nickname;
+        if (key == "print.uid=123") return "Alice(123)";
+        if (key == "uid") return "123";
+        if (key == "list_all_deck") {
+            // This intentionally re-enters the deck catalogue: rendering may
+            // never keep its mutex locked across host callbacks.
+            return std::to_string(decks.deckNames().size());
+        }
+        return std::nullopt;
+    }, [](const std::string& key) -> std::optional<size_t> {
+        return key == "game.pls" ? std::optional<size_t>(3) : std::nullopt;
+    });
+    TestWatchdog watchdog(std::chrono::seconds(20));
+    ASSERT_EQ(decks.expandText("{var:n={ran:7~7}}{n}/{case:n?7=OK&else=NO}/{grade:n?1=LOW&7=HIGH}"), "7/OK/HIGH");
+    ASSERT_EQ(decks.expandText("{len:game.pls}/{print:uid=123}/{at:}"), "3/Alice(123)/[CQ:at,qq=123]");
+    ASSERT_EQ(decks.expandText("{var:x?{nick}}/{x}"), nickname + "/" + nickname);
+    ASSERT_EQ(rolls, 0);
+    ASSERT_EQ(decks.expandText("[1d{ran:6~6}] [CQ:image,file=https://example.test/a.png]"), "6 [CQ:image,file=https://example.test/a.png]");
+    ASSERT_EQ(rolls, 1);
+    ASSERT_EQ(decks.expandText("{case:uid?123=chosen&else=[1d1]}"), "chosen");
+    ASSERT_EQ(rolls, 1);
+    ASSERT_EQ(decks.expandText(R"(\[1d1] \{ran:1~1} {wait:1}{js:1}{py:1})"), "[1d1] {ran:1~1} {js:1}{py:1}");
+    ASSERT_EQ(decks.expandText("{list_all_deck}"), "6");
+}
+
+TEST(BundledDecks, OneRenderKeepsSnapshotAndDepletionAcrossReferences) {
+    const auto root = fs::temp_directory_path() /
+        ("dicenext-deck-template-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code ec; fs::remove_all(path,ec); } } cleanup{root};
+    fs::create_directories(root);
+    { std::ofstream out(root / "test.json"); out << R"({"X":["A","B"],"recursive":["{recursive}{recursive}"],"FormFeed":["deck wins"]})"; }
+    dice::CardDeck decks; decks.loadDir(root.string());
+    const auto draws = decks.expandText("{X}/{X}");
+    ASSERT_TRUE(draws == "A/B" || draws == "B/A");
+    ASSERT_EQ(decks.expandText("{FormFeed}"), "deck wins");
+    dice::safe_template::ContextScope context([&](const std::string& key) -> std::optional<std::string> {
+        if (key != "nick") return std::nullopt;
+        decks.reload({}); return "reloaded";
+    });
+    TestWatchdog watchdog(std::chrono::seconds(20));
+    const auto snapshot = decks.expandText("{nick}/{X}");
+    ASSERT_TRUE(snapshot == "reloaded/A" || snapshot == "reloaded/B");
+    ASSERT_EQ(decks.expandText("{X}"), "{X}");
+    decks.loadDir(root.string());
+    ASSERT_TRUE(decks.expandText("{recursive}").size() < 131072);
+}
+
 TEST(BundledDecks, TextExpansionAndSourceReloadCanRunConcurrently) {
     TestWatchdog watchdog(std::chrono::seconds(20));
     dice::CardDeck decks;

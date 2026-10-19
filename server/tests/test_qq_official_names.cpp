@@ -74,6 +74,17 @@ TEST(OfficialNames, GroupAndPrivateMessagesPublishActualNames) {
     ASSERT_EQ(f.profile(f.messages.back().senderId).nickname, "私聊昵称");
 }
 
+TEST(OfficialNames, TemplateCacheLookupsNeverScheduleRequests) {
+    NameFixture f;
+    ASSERT_EQ(f.adapter->cachedUserName("unknown","unseen-group"), "");
+    ASSERT_EQ(f.adapter->cachedGroupName("unseen-group"), "");
+    ASSERT_TRUE(f.requests.empty());
+    f.group("member", "真实昵称");
+    const auto before = f.requests.size();
+    ASSERT_EQ(f.adapter->cachedUserName("member","group-A"), "真实昵称");
+    ASSERT_EQ(f.requests.size(), before);
+}
+
 TEST(OfficialNames, EmptyNullAndMalformedNamesRetainKnownNames) {
     NameFixture f;
     f.group("member", "真实名字");

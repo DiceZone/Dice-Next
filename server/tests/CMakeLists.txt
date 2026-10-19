@@ -19,6 +19,7 @@ set(TEST_SOURCES
     test_causal_rule_manager.cpp
     test_help_entry_filter.cpp
     test_help_catalog.cpp
+    test_legacy_templates.cpp
     test_lua_event_bridge.cpp
     test_config_manager.cpp
     test_bot_info.cpp

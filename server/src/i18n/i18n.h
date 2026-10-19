@@ -112,6 +112,7 @@ public:
     /// Replace every {name} in @p tmpl with args.at("name"). Public so callers
     /// can interpolate text that isn't itself a translation key (e.g. data tables).
     static std::string interpolate(const std::string& tmpl, const Args& args);
+    using TemplateContextScope = safe_template::ContextScope;
     /// Preview uses the same native weighted selection and nested sample renderer.
     static std::string previewTemplate(const std::string& value, const Args& args = {},
                                       ContentFormat format = ContentFormat::kPlainText);

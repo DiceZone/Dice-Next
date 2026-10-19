@@ -6,6 +6,7 @@
 
 #include "adapter_interface.h"
 #include "self_echo_filter.h"
+#include "onebot_member_snapshot.h" // Shared QQ member_id/nickname/card snapshot format.
 #include "../common/logger.h"
 #include "../common/subprocess.h"
 #include "../core/identity/identity_binding.h"
@@ -239,12 +240,18 @@ public:
         return it == groupNames_.end() ? groupId : it->second;
     }
     std::vector<std::string> getGroupMemberList(const std::string& groupId) const override {
-        std::vector<std::string> out;
         std::lock_guard<std::mutex> lk(cacheMutex_);
-        auto it = memberLists_.find(groupId);
-        if (it == memberLists_.end() || !it->second.is_array()) return out;
-        for (const auto& m : it->second) { auto uid = field(m, "user_id"); if (!uid.empty()) out.push_back(uid); }
-        return out;
+        const auto group = memberSnapshots_.find(groupId);
+        return group == memberSnapshots_.end() ? std::vector<std::string>() : group->second.ids;
+    }
+    std::string getUserName(const std::string& userId,const std::string& groupId = {}) const override {
+        std::lock_guard<std::mutex> lk(cacheMutex_);
+        if (const auto group = memberSnapshots_.find(groupId); group != memberSnapshots_.end()) {
+            const auto name = group->second.names.find(userId);
+            if (name != group->second.names.end() && !name->second.empty()) return name->second;
+        }
+        const auto name = friendNames_.find(userId);
+        return name == friendNames_.end() ? std::string() : name->second;
     }
     bool isGroupAdmin(const std::string& groupId, const std::string& userId) const override {
         auto role = memberRole(groupId, userId); return role == "admin" || role == "owner";
@@ -295,6 +302,7 @@ public:
             const json d = r.value("data", json::object());
             if (!apiOk(r) || !d.value("friends", json()).is_array()) return;
             std::lock_guard<std::mutex> lk(self->cacheMutex_); self->friendList_.clear();
+            self->friendNames_=onebot_members::snapshot(d["friends"]).names;
             for (const auto& f : d["friends"]) { auto id = field(f, "user_id"); if (!id.empty()) self->friendList_.push_back(id); }
         });
     }
@@ -303,6 +311,7 @@ public:
             const json d = r.value("data", json::object());
             if (!apiOk(r) || !d.value("members", json()).is_array()) return;
             std::lock_guard<std::mutex> lk(self->cacheMutex_); self->memberLists_[groupId] = d["members"];
+            self->memberSnapshots_[groupId]=onebot_members::snapshot(d["members"]);
             for (const auto& m : d["members"]) { auto uid = field(m, "user_id"); if (!uid.empty()) self->memberRoles_[groupId + "\x1f" + uid] = m.value("role", "member"); }
         });
         refreshSelfRole(groupId);
@@ -757,6 +766,8 @@ private:
     std::map<std::string, std::string> groupNames_, selfRoles_, memberRoles_;
     std::map<std::string, int> groupCounts_;
     std::map<std::string, json> memberLists_;
+    std::map<std::string,onebot_members::Snapshot> memberSnapshots_;
+    std::unordered_map<std::string,std::string> friendNames_;
     std::vector<std::string> friendList_;
 };
 

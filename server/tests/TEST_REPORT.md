@@ -3,6 +3,95 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-19: Legacy conveniences final follow-up (full local regression)
+
+- Completed the seven audited convenience areas: bounded text functions and
+  render-local assignments, shared case/grade selection, Lua message fields and
+  safe dot paths, scoped multi-level help aliases, resource directories, and
+  range/member session-deck generators. Lua len counts raw tables/Sets without
+  invoking length/iteration metamethods; native game.pls/gms counts also accept
+  numeric member IDs. Identity display uses the invoking account's names/cache,
+  not a different account or an on-demand network lookup.
+- File decks now share the bounded template evaluator and a copy-on-write
+  catalogue snapshot. Selected branches retain weights, depletion, media and
+  escaping; inserted nicknames/captures never become dice blocks or macros.
+  Catalogue reentry, reload during rendering and recursive decks are covered.
+  JS directories read immutable metadata without waiting on the runtime or
+  executing accessors/Proxy traps; Lua stored-variable conditions are checked
+  without consuming probabilities, cooldowns or daily quotas. Dynamic speech
+  keys and SelfData-file conditions remain conservatively omitted.
+- wait uses bounded asynchronous replies or yieldable Lua message coroutines,
+  never a formatting-thread sleep. Tests cover selected-branch accumulation,
+  opaque inserted controls, previews, memory/count limits, cancellation,
+  coroutine context and reload. Native deferred delivery also checks the exact
+  connection/account, permission snapshot, blacklist, group state and runtime
+  generations. Changed group plugin/reply/rule settings cancel prepared work;
+  shutdown cancels queued callbacks before host teardown. Existing migration
+  expectations now distinguish supported waits from still-preserved JS/Python.
+- Final Windows amd64 Release builds succeeded for the server, core tests, Lua
+  tests and standalone production preview. After the last source changes,
+  unfiltered CTest passed both executables in **135.53 seconds**: core **829
+  cases / 49,848 assertions**, Lua **63 cases / 668 assertions**, zero failures.
+  This supersedes, rather than adds to, the focused totals below.
+- All four external Lua corpus entries were actually enabled: ResourceSearchEngine,
+  fortune/DailyNews, official PC_Inventory and PC_Slots. Reviewed sources were
+  copied unchanged into guarded fixtures; HTTP, platform delivery and timers
+  use test doubles. This is not an operating-system sandbox for hostile Lua.
+- WebUI type checking and production build passed; **298 tests passed with zero
+  skips**, including the actual C++ preview for nested samples/references and
+  non-blocking waits. All four documentation locales linked **903 editable
+  texts** and the documentation production build passed. Release automation
+  Python tests passed **31/31**; Git diff checks passed in all three repositories.
+- No live bot/listening production server or real platform moderation/message
+  delivery was exercised. Linux/macOS compilation and real account delivery
+  remain separate CI/platform acceptance, not claims implied by these local
+  results. Arbitrary template scripts, virtual-message privilege escalation,
+  persistent template writes and host-secret traversal remain unsupported.
+
+## 2026-10-19: Safe legacy conveniences, contextual templates and generated decks (first focused pass)
+
+- Native replies and Lua speech now share bounded sample/case/grade plus
+  integer ran, UTF-8 text-byte len, expired, render-local var, validated at and
+  display-only print. Computed values use opaque slots until final substitution;
+  inserted nicknames, captures, fields and local values are never template code.
+  Markdown/code-span escaping, FormFeed escaping and reference budgets remain
+  covered. No script, blocking wait, persistent mutation or permission bypass
+  was added to the template evaluator. Assignment names cannot be dotted paths.
+- Lua message get/format/echo reads scalar fields and bounded public dot paths.
+  Internal fields/functions are denied, false is preserved in returned replies
+  and coroutine results, and formatting retains the invoking message rather than
+  reading an unrelated global context. Existing coroutine/reentry coverage was
+  rerun. Help aliases resolve only after topic selection, under locale/source/
+  scope precedence with bounded cycles; authored aliases remain in management
+  data. Custom-reply help references use that same selection path.
+- Public directories filter current account/group/user limits. Lua uses atomic
+  immutable trigger metadata; inspecting directories does not run scripts or
+  consume cooldown/daily/probability state. Variable-conditioned Lua entries are
+  conservatively omitted at this stage (the final follow-up adds pure stored
+  conditions and JS snapshots). Hidden decks and the installation-wide bot inventory
+  are not exposed, and output is capped at 200 entries / 32 KiB.
+- Session range/member generators preserve the existing .deck set semantics,
+  GM/admin/owner checks and transactional save protection. Ranges reject invalid
+  steps and overflow; member lookup stays on the current adapter. OneBot's
+  previous empty member-list implementation now reads its response cache using
+  a deduplicated ID vector and a name index, avoiding per-user network lookups
+  and quadratic JSON copies. Empty caches request a refresh and require retry.
+  Generated member cards are literal: weights/macros are not interpreted, and
+  CQ-action prefixes/page controls in nicknames are neutralized.
+- Final focused Windows native runner passed **225 cases / 1,670 assertions**,
+  including command/help/import/nickname/weighted-template/FormFeed regressions,
+  persona/Markdown/presentation tests and the new convenience checks. Relevant
+  production sources were rebuilt; unchanged support objects were reused.
+  Real Lua tests passed **62 cases / 655 assertions**, with all four opt-in
+  corpora actually enabled: ResourceSearchEngine, fortune/DailyNews, official
+  PC_Inventory and PC_Slots. Sources were copied unchanged into guarded fixtures;
+  network/transport/scheduling were test doubles, not live platform operations.
+- Windows amd64 Release server/Lua targets built successfully. WebUI type
+  checking, production build and **295 tests passed** (297 registered, 2 optional
+  live-renderer checks skipped); documentation build and diff checks passed.
+  This is not a full-core or cross-platform run. No real bot/listening server,
+  actual moderation/message delivery, commit, push or Release was started.
+
 ## 2026-10-19: Legacy roulette self-moderation and invalid private targets (local)
 
 - The supplied roulette plugin calls `eventMsg('.group G ban U M', 0,

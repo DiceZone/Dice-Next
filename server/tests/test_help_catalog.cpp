@@ -92,6 +92,56 @@ TEST(HelpLibrary, ActualBundleTopicsAndBuiltinOverridesKeepTheirOrigin) {
     ASSERT_EQ(f.run(".help info"), f.i18n.tr(Locale::kZhHans, "help.topic.info"));
 }
 
+TEST(HelpLibrary, CustomAliasesChainAcrossSourcesWithoutEscapingScopeOrLooping) {
+    HelpLibraryFixture f;
+    f.i18n.setOverride(Locale::kZhHans, "help.topic.入口", "&二级");
+    f.i18n.setOverride(Locale::kZhHans, "help.topic.二级", "&目标");
+    f.i18n.setOverride(Locale::kZhHans, "help.topic.目标", "你好 {uid}");
+    ASSERT_EQ(f.run(".help 入口"), "你好 help-reader");
+    ASSERT_EQ(f.router.renderReplyWithGroups(f.message, "{help:入口}", {}), "你好 help-reader");
+    f.i18n.setOverride(Locale::kZhHans, "help.topic.目标", "&入口");
+    ASSERT_FALSE(f.run(".help 入口").empty());
+    f.i18n.setOverride(Locale::kZhHans, "help.topic.二级", "&missing-exact-topic");
+    ASSERT_TRUE(f.run(".help 入口").find("missing-exact-topic") != std::string::npos);
+    setAccountGroupSetting(*f.db.getStorage(), f.message.adapterId, f.message.platform,
+        f.message.targetId, f.message.targetId, "helpScope", "restricted-source");
+    ASSERT_TRUE(f.run(".help 入口").find("你好") == std::string::npos);
+}
+
+TEST(HelpLibrary, ReplyMacrosAndHelpTreatInsertedContentAsData) {
+    HelpLibraryFixture f;
+    f.message.senderName = "{ran:9~9}";
+    f.i18n.setOverride(Locale::kZhHans, "help.topic.安全", "你好 {nick}");
+    ASSERT_EQ(f.run(".help 安全"), "你好 {ran:9~9}");
+    ASSERT_EQ(f.router.renderReplyWithGroups(f.message, "{var:n={ran:5~5}}{case:n?5=好&else=坏}:{n}", {}), "好:5");
+    ASSERT_EQ(f.router.renderReplyWithGroups(f.message, "{var:n={$1}}{n}", {"whole", "{ran:9~9}"}), "{ran:9~9}");
+}
+
+TEST(HelpLibrary, DynamicDeckDirectoriesAreScopedBoundedAndNotReparsed) {
+    HelpLibraryFixture f;
+    const auto source = f.root / "decks"; std::filesystem::create_directories(source);
+    { std::ofstream out(source / "cards.json"); out << R"({"公开牌堆":["a"],"_隐藏牌堆":["b"],"{ran:9~9}":["c"]})"; }
+    f.decks.loadDir(u8str(source));
+    f.i18n.setOverride(Locale::kZhHans, "help.topic.目录", "{list_all_deck}");
+    const auto result = f.run(".help 目录");
+    ASSERT_TRUE(result.find("公开牌堆") != std::string::npos);
+    ASSERT_TRUE(result.find("_隐藏牌堆") == std::string::npos);
+    ASSERT_TRUE(result.find("{ran:9~9}") != std::string::npos);
+    f.router.setTemplateDirectory([](const Message& message, bool orders) {
+        return std::vector<std::string>{message.adapterId + (orders ? "-order" : "-key")};
+    });
+    ASSERT_EQ(f.router.templateContextValue(f.message,"list_extern_order").value_or("MISSING"), "help-library-test-order");
+    ReplyManager replies(f.db, f.cfg);
+    ReplyRule rule; rule.matchType=MatchType::kKeyword; rule.matchContent="secret-key"; rule.replyContent="ok";
+    rule.channelScope="account"; rule.channelTarget="help-library-test";
+    rule.scopeMode="allow"; rule.scopeIds="help-group"; rule.scopeUsersMode="allow"; rule.scopeUsers="help-reader";
+    replies.addRule(rule);
+    ASSERT_TRUE(replies.directoryTriggers({"onebot_v11","help-group","help-reader","help-library-test"}, false) == std::vector<std::string>({"secret-key"}));
+    ASSERT_TRUE(replies.directoryTriggers({"onebot_v11","other","help-reader","help-library-test"}, false).empty());
+    ASSERT_TRUE(replies.directoryTriggers({"onebot_v11","help-group","other","help-library-test"}, false).empty());
+    ASSERT_TRUE(replies.directoryTriggers({"onebot_v11","help-group","help-reader","other"}, false).empty());
+}
+
 TEST(HelpLibrary, RawLanguageFormatEmptyAndPersonaLayersArePreserved) {
     HelpLibraryFixture f;
     const std::string key = "help.topic.library-locale-test";

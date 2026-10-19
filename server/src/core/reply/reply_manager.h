@@ -204,6 +204,19 @@ public:
      *        引用会悬空；调用方持有 shared_ptr 即安全）。
      */
     std::shared_ptr<const std::vector<ReplyRule>> listRules() const { return snapshot(); }
+    std::vector<std::string> directoryTriggers(const ReplyCtx& ctx, bool orders) const {
+        std::vector<std::string> result;
+        for (const auto& rule : *snapshot()) {
+            if (!rule.enabled || !scopeAllows(rule, ctx) || !userAllows(rule, ctx)) continue;
+            auto add = [&](MatchType type, const std::string& content) {
+                if (content.empty() || type == MatchType::kRegex) return;
+                if ((type == MatchType::kPrefix) == orders) result.push_back(content);
+            };
+            if (rule.conditions.empty()) add(rule.matchType, rule.matchContent);
+            else for (const auto& condition : rule.conditions) add(condition.type, condition.content);
+        }
+        return result;
+    }
 
 private:
     ReplyPick pickCandidates(std::vector<ReplyRule> candidates, const ReplyCtx& ctx,

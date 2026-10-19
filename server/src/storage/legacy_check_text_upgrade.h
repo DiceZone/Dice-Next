@@ -22,7 +22,8 @@ inline nlohmann::json checkTextDetail(const std::string& source, const std::stri
     std::set<std::string> knownReferences;
     for (const auto& [original, mapped] : msgKeyMap()) knownReferences.insert(mapped);
     // These are resolved by the normal reply formatter after interpolation.
-    allowed.insert({"self", "nick", "name", "qqnick", "card", "pcname", "qqnickw", "cardw", "pcnamew", "user", "group", "date", "time"});
+    allowed.insert({"self", "nick", "name", "qqnick", "card", "pcname", "qqnickw", "cardw", "pcnamew", "user", "group", "date", "time",
+        "uid", "gid", "selfId", "user.trust", "user.favor", "game.pls", "game.gms", "list_all_deck", "list_extern_deck", "list_reply_deck", "list_extern_order", "list_dice_sister"});
     bool preserved = false;
     std::vector<std::string> texts{text};
     const auto variants = weighted_templates::decode(text);
@@ -32,13 +33,15 @@ inline nlohmann::json checkTextDetail(const std::string& source, const std::stri
     }
     for (const auto& variant : texts) {
         const auto program = safe_template::compile(normalizeLegacyTemplate(source, variant));
+        auto variantAllowed = allowed;
+        variantAllowed.insert(program.locals.begin(), program.locals.end());
         preserved = preserved || !program.issues.empty();
         issues.insert(issues.end(), program.issues.begin(), program.issues.end());
         for (const auto& field : program.selectors)
-            if (std::find(variables.begin(), variables.end(), field) == variables.end())
+            if (!variantAllowed.count(field))
                 issues.push_back("unavailable condition field: " + field);
         for (const auto& field : program.variables)
-            if (!allowed.count(field)) issues.push_back("unavailable variable: " + field);
+            if (!variantAllowed.count(field)) issues.push_back("unavailable variable: " + field);
         for (const auto& reference : program.references) {
             if (reference == target) { preserved = true; issues.push_back("cyclic text reference: " + reference); }
             else if (!knownReferences.count(reference)) issues.push_back("unverified text reference: " + reference);

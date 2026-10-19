@@ -256,6 +256,12 @@ public:
     virtual void attachDatabase(Database&) {}
     /// Best known platform nickname; no invented fallback or synchronous I/O.
     virtual std::string getUserName(const std::string&, const std::string& = {}) const { return {}; }
+    /// Cache-only variants for template expansion. Adapters whose ordinary
+    /// getters schedule background refreshes must override these.
+    virtual std::string cachedUserName(const std::string& user, const std::string& group = {}) const {
+        return getUserName(user, group);
+    }
+    virtual std::string cachedGroupName(const std::string& group) const { return getGroupName(group); }
 
     /// Group management
     virtual std::string getGroupName(const std::string& groupId) const = 0;

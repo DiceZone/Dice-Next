@@ -1,5 +1,6 @@
 #include "common/logger.h"
 #include "common/bounded_executor.h"
+#include "common/deferred_reply_queue.h"
 #include "common/types.h"
 #include "common/errors.h"
 #include "common/utils.h"
@@ -859,6 +860,32 @@ static int realMain(int argc, char* argv[]) {
     luaMod.setHelpLookup([&cmdRouter](const std::string& topic) {
         return cmdRouter.helpEntryContent(topic);
     });
+    luaMod.setTemplateLookup([&cmdRouter, &adapterMgr](const std::string& key, const dice::LuaEventOrigin& origin) {
+        dice::Message message;
+        message.platform = origin.platform; message.adapterId = origin.adapterId;
+        message.senderId = origin.userId; message.targetId = origin.groupId;
+        message.type = origin.groupId.empty() ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
+        if (const auto adapter = adapterMgr.getAdapter(origin.adapterId)) message.selfId = adapter->getLoginId();
+        return cmdRouter.templateContextValue(message, key);
+    });
+    luaMod.setTemplateLength([&cmdRouter](const std::string& key, const dice::LuaEventOrigin& origin) {
+        dice::Message message;
+        message.platform = origin.platform; message.adapterId = origin.adapterId;
+        message.senderId = origin.userId; message.targetId = origin.groupId;
+        message.type = origin.groupId.empty() ? dice::MessageType::kPrivate : dice::MessageType::kGroup;
+        return cmdRouter.templateContextLength(message, key);
+    });
+    cmdRouter.setTemplateDirectory([&luaMod, &jsMod, &replyManager, &cmdRouter](const dice::Message& message, bool orders) {
+        const auto group = message.type == dice::MessageType::kPrivate ? std::string() : message.targetId;
+        auto result = replyManager.directoryTriggers({message.platform, group, message.senderId, message.adapterId}, orders);
+        if (cmdRouter.isPluginAllowedInGroup(message.platform, group, message.adapterId)) {
+            const auto legacy = luaMod.directoryTriggers({message.platform, message.adapterId, group, message.senderId, "", false}, orders);
+            result.insert(result.end(), legacy.begin(), legacy.end());
+            if (orders) for (const auto& command : jsMod.directoryTriggers(message))
+                result.push_back(cmdRouter.templateCommandTrigger(command));
+        }
+        return result;
+    });
     auto luaCallbacks = std::make_shared<dice::BoundedExecutor>();
     luaMod.setScheduler(pluginScheduler(luaCallbacks));
     luaMod.setDiceLookup([&cmdRouter](const std::string& user, const std::string&, const std::string&) { return cmdRouter.isDiceBot(user); });
@@ -1399,7 +1426,8 @@ static int realMain(int argc, char* argv[]) {
         return luaMod.formatHelpTopic(topic, {{"uid",message.senderId},{"user",message.senderId},
             {"fromQQ",message.senderId},{"fromUser",message.senderId},{"gid",group},{"grp",group},
             {"fromGroup",group},{"platform",message.platform},{"adapterId",message.adapterId},
-            {"nick",nick},{"pc",nick},{"card",card},{"fromMsg",message.content}});
+            {"nick",nick},{"pc",nick},{"card",card},{"fromMsg",message.content}},
+            dice::LuaEventOrigin{message.platform, message.adapterId, group, message.senderId, "", true});
     });
 
     // .plugin 指令的插件清单（lua mods + js 插件），与 /api/groups/plugins 同源。
@@ -1499,9 +1527,17 @@ static int realMain(int argc, char* argv[]) {
         };
     };
 
+    auto deferredCallbacks = std::make_shared<dice::BoundedExecutor>(256);
+    dice::DeferredReplyQueue deferredReplies(pluginScheduler(deferredCallbacks));
+
     // Wire: incoming messages → command router; if no command matched, fall back
     // to the custom-reply word library; then send via the originating adapter.
-    adapterMgr.onMessage([&adapterMgr, &cmdRouter, &jsMod, &luaMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, &i18n, replyFallback](const dice::Message& msg) {
+    adapterMgr.onMessage([&adapterMgr, &cmdRouter, &jsMod, &luaMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, &i18n, &deferredReplies, replyFallback](const dice::Message& msg) {
+        dice::safe_template::Delay requestedDelay;
+        dice::safe_template::DelayScope delayScope(&requestedDelay);
+        dice::I18n::TemplateContextScope templateScope(
+            [&](const std::string& key) { return cmdRouter.templateContextValue(msg, key); },
+            [&](const std::string& key) { return cmdRouter.templateContextLength(msg, key); });
         // Multi-bot群: a known dice bot always wins over @-as-argument and JS
         // plugin exceptions.  Otherwise retain the plugin @-argument exception.
         if (cmdRouter.mentionsOtherKnownDiceBot(msg) ||
@@ -2025,6 +2061,50 @@ static int realMain(int argc, char* argv[]) {
         // ── 投递回复 ── 需要 AI 后处理（润色/翻译命中覆盖范围）时走后台线程，
         // 消息线程立即空出来处理下一条；否则原地执行（无 AI 时零行为差异）。
         if (!reply.empty() || !broadcast.empty()) {
+            if (requestedDelay.milliseconds) {
+                const auto luaGeneration=luaMod.callbackGeneration(), jsGeneration=jsMod.callbackGeneration();
+                const bool alreadyDisabled=cmdRouter.isGroupDisabled(msg);
+                // A group can disable one plugin without reloading its VM.
+                // Conservatively cancel old prepared replies when these
+                // authority settings change; do not rerun the original command.
+                auto permissionsFor = [&cmdRouter, &configMgr](const dice::Message& context) {
+                    const auto group = context.type == dice::MessageType::kPrivate ? std::string() : context.targetId;
+                    const auto settings = dice::scoped_settings::resolveSection(
+                        configMgr.getAll(), "dice", context.platform, context.adapterId);
+                    return nlohmann::json{
+                        {"plugins", cmdRouter.isPluginAllowedInGroup(context.platform, group, context.adapterId)},
+                        {"pluginsOff", cmdRouter.disabledPluginsInGroup(context.platform, group, context.adapterId)},
+                        {"repliesOff", cmdRouter.isReplyDisabledFor(context.platform, group, context.adapterId)},
+                        {"rule", cmdRouter.getGroupSettingFor(context.platform, group, "ruleSystem", context.adapterId)},
+                        {"silent", settings.value("silent_global", false)},
+                        {"trust", cmdRouter.legacyTrustLevel(context)}
+                    }.dump();
+                };
+                const auto sourceAdapter=adapterMgr.getAdapter(msg.adapterId);
+                const dice::DeferredReplyAuthority authority{sourceAdapter,
+                    sourceAdapter ? sourceAdapter->getLoginId() : std::string(), permissionsFor(msg)};
+                size_t bytes=reply.size()+broadcast.size()+msg.content.size()+msg.rawContent.size()+msg.extra.dump().size();
+                bytes+=authority.account.size()+authority.permissions.size();
+                for (const auto& node : fwdNodes) bytes+=node.size();
+                const bool queued=deferredReplies.post(requestedDelay.milliseconds,bytes,
+                    [finishReply, &adapterMgr, &cmdRouter, &luaMod, &jsMod, luaGeneration, jsGeneration,
+                     alreadyDisabled, authority, permissionsFor, msg, reply, broadcast, aiCat, quoteId, fwdNodes, linkReplyOk, replyFormat] {
+                        const auto adapter=adapterMgr.getAdapter(msg.adapterId);
+                        if (!adapter || adapter->platform()!=msg.platform || !adapter->isConnected()
+                            || !authority.matches(adapter, adapter->getLoginId(), permissionsFor(msg))
+                            || cmdRouter.isBlocked(msg) || cmdRouter.isGroupLocked(msg)
+                            || (!alreadyDisabled && cmdRouter.isGroupDisabled(msg)
+                                && !(cmdRouter.listenAtWhenOff(msg) && dice::CommandRouter::isAtSelf(msg)))
+                            || luaGeneration!=luaMod.callbackGeneration() || jsGeneration!=jsMod.callbackGeneration()) {
+                            DICE_LOG_INFO_M("模板", "已取消延后回复：来源已停用、连接已失效、权限已变化或插件已重载。");
+                            return;
+                        }
+                        finishReply(msg,reply,broadcast,aiCat,quoteId,fwdNodes,linkReplyOk,replyFormat);
+                    });
+                if (queued) DICE_LOG_INFO_M("模板", "回复已加入异步等待队列，将在 {} 毫秒后投递。",requestedDelay.milliseconds);
+                else DICE_LOG_WARN_M("模板", "延后回复队列已满或调度失败，本次回复未发送。");
+                return;
+            }
             bool needBg = !msg.fromSelf && !reply.empty()
                 && ((dice::aipolish::enabled(configMgr) && dice::aipolish::covers(configMgr, aiCat))
                  || (dice::aitrans::enabled(configMgr) && dice::aitrans::covers(configMgr, aiCat)
@@ -4739,6 +4819,8 @@ static int realMain(int argc, char* argv[]) {
 
     // Drain the active (time-bounded) turn and discard queued plugin work before
     // closing the DB or destroying runtime/native bridge targets.
+    deferredReplies.cancel();
+    deferredCallbacks->stop();
     jsCallbacks->stop();
     luaCallbacks->stop();
     adapterMgr.stopAll();

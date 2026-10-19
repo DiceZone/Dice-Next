@@ -10,6 +10,10 @@
 // Standalone previews must neither mix logs into JSON stdout nor create a
 // production data/logs directory in the caller's working directory.
 namespace dice {
+bool shouldRecordLog(LogLevel) { return false; }
+std::string_view defaultLogModule(spdlog::source_loc) { return "preview"; }
+void writeLog(spdlog::source_loc, LogLevel, std::string_view, std::string_view) {}
+void writeLog(spdlog::source_loc, LogLevel, std::string_view, std::string_view, const nlohmann::json&) {}
 std::shared_ptr<spdlog::logger> getLogger() {
     static const auto logger = [] {
         auto value = std::make_shared<spdlog::logger>("preview", std::make_shared<spdlog::sinks::null_sink_mt>());

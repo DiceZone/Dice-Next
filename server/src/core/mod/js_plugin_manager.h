@@ -19,6 +19,8 @@
 #include <functional>
 #include <optional>
 #include <array>
+#include <atomic>
+#include <memory>
 #include "common/script_execution.h"
 #include "common/log_context.h"
 
@@ -90,6 +92,10 @@ public:
     // 枚举所有已注册指令的 help 文本（{插件名, 指令名, 帮助}），供帮助系统聚合。
     struct CmdHelp { std::string plugin, name, help; };
     std::vector<CmdHelp> commandHelps() const;
+    // Immutable command metadata only: no runtime lock, JS getters, solve(),
+    // timers or jobs are executed while rendering a resource directory.
+    std::vector<std::string> directoryTriggers(const Message& message) const;
+    uint64_t callbackGeneration() const { return runtimeGeneration_.load(); }
     // 比较两个版本号（点分数字，非数字段按字典序）；a<b 返回 <0。
     static int compareVersions(const std::string& a, const std::string& b);
 
@@ -321,6 +327,16 @@ private:
                                    JSValueConst jmsg, JSValueConst jargs);
     Result dispatchMessageHook(const Message& msg, int privilege, const char* hook);
     static PluginMeta parseMeta(const std::string& src);
+    struct DirectoryEntry { std::string file, command; };
+    std::atomic<std::shared_ptr<const std::vector<DirectoryEntry>>> directory_;
+    std::atomic<uint64_t> runtimeGeneration_{0};
+    void refreshDirectoryLocked();
+    struct DirectoryRefresh {
+        JsPluginManager& owner;
+        ~DirectoryRefresh() noexcept {
+            try { owner.refreshDirectoryLocked(); } catch (...) { owner.directory_.store({}); }
+        }
+    };
 
     JSRuntime* rt_ = nullptr;
     JSContext* ctx_ = nullptr;

@@ -525,15 +525,22 @@ std::string I18n::renderTemplate(const TemplateValue& source, const Args& args, 
     const ContentFormat outputFormat = usePreparedPlain
         ? ContentFormat::kPlainText : value.format;
     safe_template::Budget budget;
+    budget.read = safe_template::contextRead;
+    budget.length = safe_template::contextLength;
+    budget.delay = safe_template::contextDelay;
     const std::string tmpl = expandTemplate(value, args, outputFormat, owner, loc, 0, budget);
+    // Every evaluated variable is already an opaque slot. Keeping original
+    // argument names here would interpolate escaped literals a second time.
+    Args values;
+    for (const auto& [key, computed] : budget.values) values[key] = computed;
     noteOutboundFormat(outputFormat);
-    if (outputFormat != ContentFormat::kMarkdown || args.empty())
-        return interpolate(tmpl, args);
+    if (outputFormat != ContentFormat::kMarkdown || values.empty())
+        return interpolate(tmpl, values);
 
     // Markdown arguments normally need escaping, but doing so inside a code
     // span changes the visible text. Code-span placeholders stay literal.
     Args escaped;
-    for (const auto& [name, arg] : args) escaped[name] = markdown::escapeLiteral(arg);
+    for (const auto& [name, arg] : values) escaped[name] = markdown::escapeLiteral(arg);
 
     std::string out;
     out.reserve(tmpl.size() + 32);
@@ -554,7 +561,7 @@ std::string I18n::renderTemplate(const TemplateValue& source, const Args& args, 
         }
 
         std::string body = interpolate(
-            tmpl.substr(open + openingLength, close - open - openingLength), args);
+            tmpl.substr(open + openingLength, close - open - openingLength), values);
         const size_t delimiterLength = std::max(openingLength,
                                                 longestBacktickRun(body) + 1);
         const std::string delimiter(delimiterLength, '`');

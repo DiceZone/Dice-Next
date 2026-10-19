@@ -2,6 +2,7 @@
 #include "common/script_execution.h"
 #include "common/log_context.h"
 #include "common/legacy_lua_event.h"
+#include "common/safe_template.h"
 // ─── Dice!Next — Lua 插件子系统 ───────────────────────────────────
 // 嵌入 Lua，并提供模块目录与全局函数接口：
 //   data/mod/<模块名>/descriptor.json   模块元数据（title/ver/author/brief/helpdoc）
@@ -128,14 +129,22 @@ public:
     // 旧 Dice! 模板的 {help:主题}：先查当前 Mod 的 helpdoc，再交给核心帮助系统。
     using HelpLookupFn = std::function<std::optional<std::string>(const std::string& topic)>;
     void setHelpLookup(HelpLookupFn f) { helpLookup_ = std::move(f); }
+    using TemplateLookupFn = std::function<std::optional<std::string>(const std::string&, const LuaEventOrigin&)>;
+    void setTemplateLookup(TemplateLookupFn f) { templateLookup_ = std::move(f); }
+    using TemplateLengthFn = std::function<std::optional<size_t>(const std::string&, const LuaEventOrigin&)>;
+    void setTemplateLength(TemplateLengthFn f) { templateLength_ = std::move(f); }
     // 原版 fmt->format：把 {key} 递归解析为 speech 别名/嵌套模板 / msg 变量 / 全局。
     std::string formatTemplate(const std::string& text,
-                               const std::map<std::string, std::string>& vars, int depth = 0) const;
+                               const std::map<std::string, std::string>& vars, int depth = 0,
+                               safe_template::Read context = {}, safe_template::Length length = {},
+                               safe_template::Delay* delay = nullptr) const;
+    uint64_t callbackGeneration() const { return runtimeGeneration_.load(); }
     // Help references additionally see the merged Mod help namespace, as in Dice!.
     std::string formatHelpTemplate(const std::string& text,
                                    const std::map<std::string, std::string>& vars) const;
     std::string formatHelpTopic(const std::string& topic,
-                                const std::map<std::string, std::string>& vars) const;
+                                const std::map<std::string, std::string>& vars,
+                                const std::optional<LuaEventOrigin>& origin = std::nullopt) const;
     // &field（getUserConf 等）→ 经 speech 解析成实际字段名。
     std::string resolveAmp(const std::string& key) const;
 
@@ -169,6 +178,8 @@ public:
     //   kind="search"= 包含匹配（keyword.search）
     struct ModCommand { std::string trigger, kind; };
     std::vector<ModCommand> commandsOf(const std::string& modName) const;
+    // Immutable metadata only: safe to read while another formatter owns I18n.
+    std::vector<std::string> directoryTriggers(const LuaEventOrigin& origin, bool orders) const;
 
     // WebUI 管理：启停（重命名目录 ↔ <name>.disabled）/删除。返回是否成功。
     bool setModEnabled(const std::string& name, bool enabled);
@@ -385,7 +396,12 @@ private:
     int  loadDirLocked(const std::string& dir);
     void loadModReplies(LuaMod& mod);   // 载入 speech + reply(.lua/.toml) + event(.lua)
     void loadModFile(const std::filesystem::path& path, bool enabled);   // 单文件 Lua 插件（msg_order）
-    struct TemplateBudget { size_t steps = 10000, bytes = 32 * 1024 * 1024; bool exhausted = false; };
+    struct TemplateBudget {
+        size_t steps = 10000;
+        bool exhausted = false;
+        safe_template::Budget eval;
+        TemplateBudget() { eval.nodes = 10000; eval.bytes = 32 * 1024 * 1024; }
+    };
     std::string valueOf(const std::string& key, const std::map<std::string, std::string>& vars,
                         int depth, bool helpScope, TemplateBudget& budget) const;
     std::string formatTemplateImpl(const std::string& text, const std::map<std::string, std::string>& vars,
@@ -488,11 +504,20 @@ private:
     size_t allocatedBytes_ = 0;
     std::set<std::string> suspendedMods_;
     std::string dir_;
+    TemplateLookupFn templateLookup_;
+    TemplateLengthFn templateLength_;
     std::vector<std::string> extraDirs_;   // 规则包附加 mod 目录
     std::vector<LuaMod> mods_;
     // Original Dice! speech keys ignore ASCII case; scalar or uniform choices.
     std::map<std::string, std::vector<std::string>> speech_;
     std::vector<ReplyRule> replyRules_;
+    struct DirectoryRule {
+        std::string modName, type, requiredRule;
+        bool requiresGame = false;
+        std::vector<std::string> matches, prefixes, searches;
+        std::shared_ptr<const legacy_mod::Limits> limits;
+    };
+    std::atomic<std::shared_ptr<const std::vector<DirectoryRule>>> directoryRules_{std::make_shared<const std::vector<DirectoryRule>>()};
     std::map<std::string, LegacyCycleEvent> cycleEvents_;
     std::map<std::string, LegacyTask> taskCalls_;
     std::unordered_map<int, PendingCoroutine> pendingCoroutines_;

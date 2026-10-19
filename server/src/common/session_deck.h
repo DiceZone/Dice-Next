@@ -32,6 +32,9 @@ inline bool sizeValue(const Json& value, size_t maximum, size_t& result) {
     result = static_cast<size_t>(n); return true;
 }
 inline bool valid(const Json& deck, std::string& error) {
+    if (deck.is_object() && deck.contains("literal") && !deck["literal"].is_boolean()) {
+        error = "牌面 literal 标记无效"; return false;
+    }
     if (!deck.is_object() || !deck.contains("meta") || !deck["meta"].is_array()
         || !deck.contains("idxs") || !deck["idxs"].is_array() || !deck.contains("size")) {
         error = "牌堆缺少 meta / idxs / size"; return false;
@@ -75,15 +78,16 @@ inline bool decode(const std::string& raw, Json& collection, std::string& error)
     return validCollection(collection, error);
 }
 using Expand = std::function<std::string(const std::string&)>;
-inline Json create(const std::vector<std::string>& cards, const Expand& expandWeight, std::string& error) {
+inline Json create(const std::vector<std::string>& cards, const Expand& expandWeight, std::string& error, bool literal = false) {
     if (cards.empty() || cards.size() > maxCards) { error = "牌面数量无效"; return {}; }
     Json result = {{"meta", Json::array()}, {"idxs", Json::array()}, {"size", 0}};
+    if (literal) result["literal"] = true;
     size_t bytes = 0;
     for (auto card : cards) {
         bytes += card.size();
         if (card.size() > 32768 || bytes > maxBytes) { error = "牌堆文本过大"; return {}; }
         size_t copies = 1;
-        if (card.rfind("::", 0) == 0) {
+        if (!literal && card.rfind("::", 0) == 0) {
             const auto close = card.find("::", 2);
             if (close != std::string::npos) {
                 auto weight = card.substr(2, close - 2);

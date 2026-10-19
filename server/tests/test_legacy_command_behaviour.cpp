@@ -153,6 +153,26 @@ struct SessionDeckFixture : LegacyFixture {
 };
 } // namespace
 
+TEST(LegacyTemplateContext, SetCardinalityAndIdentityRespectCurrentAccount) {
+    SessionDeckFixture f; f.master();
+    ASSERT_EQ(f.router.templateIdentity(f.msg,"uid"), "玩家(1000)");
+    ASSERT_EQ(f.router.templateIdentity(f.msg,"gid"), "群(2000)");
+    ASSERT_EQ(f.router.templateIdentity(f.msg,"master"), "玩家(1000)");
+    f.cfg.set<json>("dice/masters",json::array({{{"platform","qq_official"},{"id","secret-other-platform"}}}));
+    ASSERT_EQ(f.router.templateIdentity(f.msg,"master"), "[无主]");
+    ASSERT_EQ(f.router.templateIdentity(f.msg,"self"), "骰娘(9000)");
+    ASSERT_EQ(f.router.templateIdentity(f.msg,"uid=123"), "用户[123]");
+    f.run(".game new typed");
+    f.conf[{f.scope(),"__pls"}] = "[10001,10002,\"10001\"]";
+    ASSERT_EQ(f.router.templateContextLength(f.msg,"game.pls").value_or(999), size_t(2));
+    ASSERT_EQ(f.router.renderReplyWithGroups(f.msg,"{len:game.pls}/{print:master}",{}), "2/[无主]");
+    f.i18n.setOverride(Locale::kZhHans,"dice.roll.result","{len:game.pls}/{print:self}/{var:n=2}{grade:n?0=LOW&2=HIGH}");
+    ASSERT_EQ(f.run(".r1d1"), "2/骰娘(9000)/HIGH");
+    f.msg.type = MessageType::kPrivate;
+    ASSERT_EQ(f.router.templateIdentity(f.msg,"gid"), "私聊");
+    ASSERT_EQ(f.router.templateContextLength(f.msg,"game.pls").value_or(999),size_t(0));
+}
+
 TEST(SessionDeckCommands, LuaAndNativeDrawsShareDepletionWithoutChangingGroupTempDecks) {
     SessionDeckFixture f;
     f.run(".game new first");
@@ -169,6 +189,63 @@ TEST(SessionDeckCommands, LuaAndNativeDrawsShareDepletionWithoutChangingGroupTem
     ASSERT_EQ(f.run(".draw X"), std::string("temporary"));
     ASSERT_EQ(f.run(".draw X"), std::string("temporary")); // existing with-replacement behavior
     ASSERT_EQ(f.router.legacyDrawDeck(f.msg,"X"), std::string("public"));
+}
+
+TEST(SessionDeckCommands, RangeGeneratorsKeepPermissionsAndExistingDefaults) {
+    SessionDeckFixture f;
+    f.run(".game new range-test");
+    ASSERT_EQ(f.run(".deck session range Numbers 1 5 2"), std::string("deck.session_created"));
+    ASSERT_TRUE(f.decks()["Numbers"]["literal"].get<bool>());
+    ASSERT_EQ(f.decks()["Numbers"]["size"].get<int>(), 3);
+    std::set<std::string> seen;
+    for (int i = 0; i < 3; ++i) seen.insert(f.run(".draw Numbers"));
+    ASSERT_TRUE(seen == std::set<std::string>({"1","3","5"}));
+    ASSERT_EQ(f.run(".draw Numbers"), "EMPTY:Numbers");
+    ASSERT_EQ(f.run(".deck session reset Numbers"), std::string("deck.session_reset"));
+    ASSERT_EQ(f.decks()["Numbers"]["size"].get<int>(), 3);
+    const auto before = f.decks();
+    ASSERT_TRUE(f.run(".deck session range Bad 1 9 0").starts_with("INVALID:"));
+    ASSERT_TRUE(f.run(".deck session members Missing").starts_with("INVALID:"));
+    ASSERT_TRUE(f.decks() == before);
+    f.msg.senderId = "other"; f.msg.extra = {{"role","member"}};
+    ASSERT_EQ(f.run(".deck session range Unauthorized 1 3"), "game.not_master");
+    ASSERT_TRUE(f.decks() == before);
+}
+
+TEST(SessionDeckCommands, MemberSnapshotsUseOnlyTheCurrentAccountAndKeepNamesLiteral) {
+    class MemberCacheAdapter final : public IAdapter {
+    public:
+        std::string id() const override { return "log-test"; }
+        std::string name() const override { return id(); }
+        std::string platform() const override { return "onebot_v11"; }
+        std::string version() const override { return "offline"; }
+        bool configure(const json&) override { return true; }
+        bool start() override { throw std::runtime_error("test adapters must never start"); }
+        void stop() override {}
+        bool isConnected() const override { return true; }
+        std::string lastError() const override { return {}; }
+        void sendMessage(const Message&) override {}
+        void sendReply(const Message&,const std::string&) override {}
+        void onMessage(MessageCallback) override {}
+        std::string getLoginId() const override { return "9000"; }
+        std::string getLoginName() const override { return "bot"; }
+        std::string getGroupName(const std::string&) const override { return "offline"; }
+        std::vector<std::string> getGroupMemberList(const std::string&) const override { return {"123","123"}; }
+        std::string getUserName(const std::string&, const std::string&) const override { throw std::runtime_error("must not request user refresh"); }
+        std::string cachedUserName(const std::string&, const std::string&) const override { return "::999999::{ran:9~9}[CQ:at,qq=all]"; }
+        bool isGroupAdmin(const std::string&,const std::string&) const override { return false; }
+        bool isGroupOwner(const std::string&,const std::string&) const override { return false; }
+        void setGroupKick(const std::string&,const std::string&) override {}
+        void setGroupBan(const std::string&,const std::string&,int) override {}
+    };
+    SessionDeckFixture f;
+    f.adapters.registerAdapter(std::make_shared<MemberCacheAdapter>());
+    f.run(".game new members-test");
+    ASSERT_EQ(f.run(".deck session members People"), std::string("deck.session_created"));
+    ASSERT_EQ(f.decks()["People"]["size"].get<int>(), 1);
+    ASSERT_EQ(f.run(".draw People"), "::999999::{ran:9~9}［CQ:at,qq=all](123)");
+    f.msg.adapterId = "missing-account";
+    ASSERT_TRUE(f.run(".deck session members Another").starts_with("INVALID:"));
 }
 
 TEST(SessionDeckCommands, SharedAreasShareAPoolAndDifferentSessionsRemainIndependent) {

@@ -710,6 +710,7 @@
     "session_state": "Session deck \"{name}\": {left} / {total} cards remaining",
     "session_full": "A Session can hold at most 10 private decks. Remove an unused deck first.",
     "session_deleted": "Deleted Session deck \"{name}\".",
+    "session_generators": ".deck session range <name> <start> <end> [positive step] // Create from integers; one bound means 0 to that bound, at most 10000 cards\n.deck session members <name> // Snapshot this group's cached members for the current account; retry after the cache is ready",
     "session_created": "Created or replaced Session deck \"{name}\". Use .draw {name} to draw without replacement.",
     "session_reset": "Reset Session deck \"{name}\"; all cards are available again."
   },

@@ -74,16 +74,23 @@ public:
         const auto user = nativeId(userId, identity::Kind::User);
         const auto cached = names_.user(appId_, user);
         if (!cached.empty()) return cached;
-        if (!groupId.empty()) refreshUserName(nativeId(groupId, identity::Kind::Group), user);
+        if (!groupId.empty()) refreshUserName(nativeId(groupId, identity::Kind::Group), nativeId(userId, identity::Kind::User));
+        return cachedUserName(userId, groupId); // A test transport may complete immediately.
+    }
+    std::string cachedUserName(const std::string& userId, const std::string& = {}) const override {
+        const auto user = nativeId(userId, identity::Kind::User);
+        const auto cached = names_.user(appId_, user);
+        if (!cached.empty()) return cached;
         if (db_ && db_->getStorage()) {
             try {
                 const auto publicId = identity::BindingStore::instance().publicForOfficial(*db_, appId_, user, identity::Kind::User);
+                if (publicId.empty()) return {};
                 const auto rows = db_->getStorage()->get_all<PlayerProfileRow>(orm::where(
                     orm::c(&PlayerProfileRow::platform) == platform() and orm::c(&PlayerProfileRow::userId) == publicId), orm::limit(1));
                 if (!rows.empty() && rows.front().nickname != "用户") return QQOfficialNameCache::name(rows.front().nickname, publicId);
             } catch (...) {}
         }
-        return names_.user(appId_, user); // A test transport may complete immediately.
+        return {};
     }
     // 这几个通用接口要求同步返回，而官方查询全是异步的：读缓存，并在后台
     // 按 TTL 刷新。群信息与群成员接口需要平台权限；失败保留已有名字，
@@ -91,10 +98,15 @@ public:
     std::string getGroupName(const std::string& groupId) const override {
         const std::string g = nativeId(groupId, identity::Kind::Group);
         refreshGroupMeta(g);
+        return cachedGroupName(groupId);
+    }
+    std::string cachedGroupName(const std::string& groupId) const override {
+        const std::string g = nativeId(groupId, identity::Kind::Group);
         auto cached = names_.group(appId_, g);
         if (cached.empty() && db_ && db_->getStorage()) {
             try {
                 const auto publicId = identity::BindingStore::instance().publicForOfficial(*db_, appId_, g, identity::Kind::Group);
+                if (publicId.empty()) return {};
                 const auto rows = db_->getStorage()->get_all<GroupSettingRow>(orm::where(
                     orm::c(&GroupSettingRow::platform) == platform() and orm::c(&GroupSettingRow::groupId) == publicId
                     and orm::c(&GroupSettingRow::key) == std::string("name")), orm::limit(1));

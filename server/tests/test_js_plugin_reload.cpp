@@ -11,6 +11,54 @@
 using namespace dice;
 namespace fs = std::filesystem;
 
+TEST(JsPluginManager, DirectoryMetadataIsScopedDynamicAndNeverExecutesAccessors) {
+    const auto root = fs::temp_directory_path() / ("dice_js_directory_" + newLogCorrelationId());
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code ec; fs::remove_all(path,ec); } } cleanup{root};
+    fs::create_directories(root);
+    { std::ofstream file(root / "catalog.js"); file << R"JS(
+globalThis.directoryReads=0;
+const ext = seal.ext.new('catalog','test','1');
+const command = seal.ext.newCmdItemInfo(); command.solve=()=>{directoryReads++;return seal.ext.newCmdExecuteResult(true)};
+ext.cmdMap.public=command;
+Object.defineProperty(ext.cmdMap,'hidden',{enumerable:true,get(){directoryReads++;throw new Error('directory must not read getters')}});
+ext.cmdMap.proxy=new Proxy({}, {getOwnPropertyDescriptor(){directoryReads++;throw new Error('proxy trap')}});
+seal.ext.register(ext);
+)JS"; }
+    JsPluginManager manager; ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir(root.string()),1);
+    manager.setGroupGate([](const auto& platform,const auto& group,const auto& plugin,const auto& account) {
+        return platform=="onebot_v11" && group=="allowed" && plugin=="js:catalog.js" && account=="A";
+    });
+    Message message; message.platform="onebot_v11"; message.adapterId="A"; message.targetId="allowed"; message.type=MessageType::kGroup;
+    ASSERT_TRUE(manager.directoryTriggers(message)==std::vector<std::string>({"public"}));
+    ASSERT_TRUE(manager.evalString("directoryReads")==std::optional<std::string>("0"));
+    message.adapterId="B"; ASSERT_TRUE(manager.directoryTriggers(message).empty());
+    message.adapterId="A"; message.targetId="blocked"; ASSERT_TRUE(manager.directoryTriggers(message).empty());
+    message.targetId="allowed";
+    ASSERT_TRUE(manager.evalString("seal.ext.find('catalog').cmdMap.later=seal.ext.find('catalog').cmdMap.public;'ok'"));
+    ASSERT_TRUE(manager.directoryTriggers(message)==std::vector<std::string>({"later","public"}));
+    ASSERT_TRUE(manager.evalString("delete seal.ext.find('catalog').cmdMap.public;'ok'"));
+    ASSERT_TRUE(manager.directoryTriggers(message)==std::vector<std::string>({"later"}));
+    ASSERT_TRUE(manager.evalString("directoryReads")==std::optional<std::string>("0"));
+    fs::remove(root / "catalog.js"); ASSERT_EQ(manager.reload(root.string()),0);
+    ASSERT_TRUE(manager.directoryTriggers(message).empty());
+}
+
+TEST(JsPluginManager, DirectoryReadsDoNotWaitForTheRuntimeLock) {
+    TestWatchdog watchdog(std::chrono::seconds(20));
+    JsPluginManager manager; ASSERT_TRUE(manager.init());
+    ASSERT_TRUE(manager.evalString("var e=seal.ext.new('test','test','1');var c=seal.ext.newCmdItemInfo();c.solve=()=>{};e.cmdMap.test=c;seal.ext.register(e);'ok'"));
+    std::promise<void> entered, release;
+    auto released=release.get_future();
+    manager.setDiceEval([&](const std::string&) { entered.set_value(); released.wait(); return "1"; });
+    auto executing=std::async(std::launch::async,[&] { return manager.evalString("seal.format({},'{1d1}')"); });
+    entered.get_future().wait();
+    Message message; message.type=MessageType::kPrivate;
+    const auto commands=manager.directoryTriggers(message);
+    release.set_value();
+    ASSERT_TRUE(executing.get().has_value());
+    ASSERT_TRUE(commands==std::vector<std::string>({"test"}));
+}
+
 TEST(JsPluginManager, ConsoleLevelsAndCommandTimerOriginsArePreserved) {
     const auto nonce = newLogCorrelationId();
     const auto root = fs::temp_directory_path() / ("dice_js_logs_" + nonce);

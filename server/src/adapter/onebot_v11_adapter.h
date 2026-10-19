@@ -1,6 +1,7 @@
 #pragma once
 #include "outbound_logging.h"
 #include "onebot_account_identity.h"
+#include "onebot_member_snapshot.h"
 
 #include "../core/identity/identity_binding.h"
 // ─── Dice!Next v3.0.0 — OneBot v11 Adapter ───────────────────
@@ -224,10 +225,25 @@ public:
     std::string getLoginName() const override { return identity_.name(); }
 
     std::string getGroupName(const std::string& groupId) const override {
+        std::lock_guard<std::mutex> lock(dataMutex_);
         return groupNames_.count(groupId) ? groupNames_.at(groupId) : groupId;
     }
 
-    std::vector<std::string> getGroupMemberList(const std::string&) const override { return {}; }
+    std::vector<std::string> getGroupMemberList(const std::string& groupId) const override {
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        const auto group = memberSnapshots_.find(groupId);
+        return group == memberSnapshots_.end() ? std::vector<std::string>() : group->second.ids;
+    }
+    std::string getUserName(const std::string& userId, const std::string& groupId = {}) const override {
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        const auto group = memberSnapshots_.find(groupId);
+        if (group != memberSnapshots_.end()) {
+            const auto user = group->second.names.find(userId);
+            if (user != group->second.names.end()) return user->second;
+        }
+        const auto friendName = friendNames_.find(userId);
+        return friendName == friendNames_.end() ? std::string() : friendName->second;
+    }
     bool isGroupAdmin(const std::string& groupId, const std::string& userId) const override {
         const std::string role = memberRole(groupId, userId);
         return role == "admin" || role == "owner";
@@ -1059,9 +1075,12 @@ private:
                         std::lock_guard<std::mutex> lk(dataMutex_);
                         friendCount_ = (int)d.size();
                         friendList_.clear();
+                        friendNames_.clear();
                         for (auto& f : d) {
                             std::string uid = jsonField(f, "user_id");
                             if (!uid.empty()) friendList_.push_back(uid);
+                            if (!uid.empty() && f.contains("nickname") && f["nickname"].is_string())
+                                friendNames_[uid]=f["nickname"].get<std::string>();
                         }
                         DICE_LOG_DEBUG("OneBotV11「{}」好友列表刷新完成：返回 {} 位好友，已更新本地缓存。", name_, d.size());
                     }
@@ -1085,6 +1104,7 @@ private:
                     std::string gid = echo.substr(8);
                     std::lock_guard<std::mutex> lk(dataMutex_);
                     memberLists_[gid] = d;
+                    memberSnapshots_[gid] = onebot_members::snapshot(d);
                     for (auto& m : d)
                         if (jsonField(m, "user_id") == getLoginId()) { selfRole_[gid] = m.value("role", "member"); break; }
                 } else if (echo.rfind("role:", 0) == 0 && d.is_object()) {
@@ -1579,8 +1599,10 @@ private:
     std::map<std::string, int> groupCount_;          // gid -> member count
     int friendCount_ = -1;                            // 好友数量（-1=未知/未同步）
     std::vector<std::string> friendList_;             // 好友 uid 列表（flist 同步）
+    std::unordered_map<std::string,std::string> friendNames_;
     std::map<std::string, std::string> selfRole_;    // gid -> owner|admin|member
     std::map<std::string, json> memberLists_;        // gid -> members array
+    std::map<std::string, onebot_members::Snapshot> memberSnapshots_;
     std::map<std::string, std::string> memberRoles_;  // gid\x1fuid -> owner|admin|member
     std::map<std::string, std::chrono::steady_clock::time_point> roleRefreshAt_;  // 定向查角色限频
 

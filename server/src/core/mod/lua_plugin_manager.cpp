@@ -5,6 +5,7 @@
 #include "common/bounded_regex.h"
 #include "common/legacy_conf_value.h"
 #include "common/legacy_mod_limit.h"
+#include "common/legacy_deck_generator.h"
 #include "common/sample_template.h"
 #include "common/message_break.h"
 #include "common/legacy_model.h"
@@ -1064,6 +1065,57 @@ static int l_askExtra(lua_State* L) {
 }
 
 // ── __dnx_fmt(text, uid, gid, nick)：msg:format 的模板桥（原版 fmt->format(msg, obj)）──
+static safe_template::Read dnx_messageReader(lua_State* L, int index) {
+    if (!lua_istable(L, index)) return {};
+    const int context = lua_absindex(L, index);
+    return [L, context](const std::string& key) -> std::optional<std::string> {
+        const int top = lua_gettop(L);
+        lua_getglobal(L, "__dnx_context_get");
+        lua_pushvalue(L, context);
+        lua_pushlstring(L, key.data(), key.size());
+        std::optional<std::string> result;
+        if (dnx_pcall(L, 2, 1) == LUA_OK) {
+            if (lua_isboolean(L, -1)) result = lua_toboolean(L, -1) ? "true" : "false";
+            else if (lua_isstring(L, -1)) result = dnx_normalizeLuaText(argStr(L, -1));
+        }
+        lua_settop(L, top);
+        return result;
+    };
+}
+
+static safe_template::Length dnx_messageLength(lua_State* L, int index) {
+    if (!lua_istable(L, index)) return {};
+    const int context = lua_absindex(L, index);
+    return [L, context](const std::string& key) -> std::optional<size_t> {
+        const int top = lua_gettop(L);
+        lua_getglobal(L, "__dnx_context_get"); lua_pushvalue(L, context);
+        lua_pushlstring(L, key.data(), key.size());
+        std::optional<size_t> length;
+        if (dnx_pcall(L, 2, 1) == LUA_OK && !lua_isnil(L, -1)) {
+            length = 0;
+            if (lua_type(L, -1) == LUA_TSTRING) length = lua_rawlen(L, -1);
+            else if (lua_istable(L, -1)) {
+                // Never call __len, __pairs, tostring or a plugin function just
+                // to inspect a collection. Sets expose only their cardinality.
+                if (lua_getmetatable(L, -1)) {
+                    lua_pushliteral(L, "__dnx_legacy_set"); lua_rawget(L, -2);
+                    const bool set = lua_toboolean(L, -1); lua_pop(L, 2);
+                    if (set) { lua_pushliteral(L, "__d"); lua_rawget(L, -2); }
+                }
+                if (lua_istable(L, -1)) {
+                    const int table = lua_absindex(L, -1);
+                    lua_pushnil(L);
+                    while (lua_next(L, table)) {
+                        lua_pop(L, 1);
+                        if (++*length > 100000) { length = 0; break; }
+                    }
+                }
+            }
+        }
+        lua_settop(L, top); return length;
+    };
+}
+
 static int l_formatTpl(lua_State* L) {
     auto* m = mgrOf(L);
     std::string text = argStr(L, 1);
@@ -1071,9 +1123,11 @@ static int l_formatTpl(lua_State* L) {
     std::map<std::string, std::string> vars;
     vars["uid"] = argStr(L, 2); vars["gid"] = argStr(L, 3); vars["nick"] = argStr(L, 4);
     vars["fromQQ"] = vars["uid"]; vars["fromGroup"] = vars["gid"];
-    std::string out = m->formatTemplate(text, vars);
+    safe_template::Delay delay;
+    std::string out = m->formatTemplate(text, vars, 0, dnx_messageReader(L, 5), dnx_messageLength(L, 5), &delay);
     lua_pushlstring(L, out.data(), out.size());
-    return 1;
+    lua_pushinteger(L,delay.milliseconds);
+    return 2;
 }
 
 // ── __dnx_conf(scope, key [, val])：通用配置读写（GameTable/团表 等 proxy 后端）──
@@ -1719,6 +1773,26 @@ do
   }
 
   -- ===== msg Context 化（原版 msg userdata：方法 echo/format/get/inc + 动态字段）=====
+  -- Only message-owned fields and the existing public proxies are traversed.
+  -- No _G, metatable internals, host settings or implicit SelfData lookup.
+  __dnx_context_get = function(t, key)
+    if type(t) ~= 'table' or type(key) ~= 'string' or #key == 0 or #key > 512 then return nil end
+    local parts = {}
+    for part in key:gmatch('[^.]+') do
+      if part:sub(1,2) == '__' or part:find('[%c]') then return nil end
+      parts[#parts+1] = part
+    end
+    if #parts == 0 or #parts > 16 or table.concat(parts,'.') ~= key then return nil end
+    local exact = rawget(t,key)
+    if exact ~= nil and type(exact) ~= 'function' then return exact end
+    local value = t
+    for _, part in ipairs(parts) do
+      if type(value) ~= 'table' then return nil end
+      value = value[part]
+      if type(value) == 'function' then return nil end
+    end
+    return value
+  end
   __dnx_wrap_msg = function(m, trust)
     local uidS = tostring(rawget(m,'uid') or '')
     local gidS = tostring(rawget(m,'gid') or '')
@@ -1730,13 +1804,21 @@ do
       echo = function(t, text, noFmt)
         if text == nil or text == '' then return end
         text = tostring(text)
-        if not noFmt then text = __dnx_fmt(text, uidS, gidS, rawget(t,'nick') or '') end
+        if not noFmt then
+          local delay
+          text,delay = __dnx_fmt(text, uidS, gidS, rawget(t,'nick') or '', t)
+          if delay and delay > 0 then sleepTime(delay) end
+        end
         sendMsg(text, gidS, uidS)
       end,
-      format = function(t, text) return __dnx_fmt(tostring(text or ''), uidS, gidS, rawget(t,'nick') or '') end,
+      format = function(t, text)
+        local formatted,delay = __dnx_fmt(tostring(text or ''), uidS, gidS, rawget(t,'nick') or '', t)
+        if delay and delay > 0 then sleepTime(delay) end
+        return formatted
+      end,
       get = function(t, key, def)
         if key == nil then return t end
-        local v = t[key]
+        local v = __dnx_context_get(t, key)
         if v == nil then return def end
         return v
       end,
@@ -1829,6 +1911,7 @@ void LuaPluginManager::freeRuntime() {
     std::lock_guard<ScriptMutex> lk(mutex_);
     ++runtimeGeneration_;                    // 让已经排队的续跑回调自动失效
     pendingCoroutines_.clear();
+    directoryRules_.store(std::make_shared<const std::vector<DirectoryRule>>());
     taskCalls_.clear();
     if (state_) { lua_close(state_); state_ = nullptr; allocatedBytes_ = 0; }
 }
@@ -2159,6 +2242,7 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
     suspendedMods_.clear();
     speech_.clear();
     replyRules_.clear();   // echo refs 随旧 state 关闭已失效
+    directoryRules_.store(std::make_shared<const std::vector<DirectoryRule>>());
     cycleEvents_.clear();  // 已排队回调靠 runtimeGeneration_ 自动失效
     ruleBooks_.clear(); scriptRegistry_.clear(); legacyHelp_.clear();
     activeLegacyLocks_.clear(); queuedDispatches_.clear(); lockDrainScheduled_ = false;
@@ -2358,6 +2442,10 @@ int LuaPluginManager::loadDirLocked(const std::string& dir) {
     // 原版消息链先调用 listen_game，再调用 listen_order。团规则不能被通用兜底抢先。
     std::stable_partition(replyRules_.begin(), replyRules_.end(),
         [](const ReplyRule& rule) { return rule.requiresGame || !rule.requiredRule.empty(); });
+    auto directory = std::make_shared<std::vector<DirectoryRule>>();
+    for (const auto& rule : replyRules_) directory->push_back({rule.modName, rule.type, rule.requiredRule,
+        rule.requiresGame, rule.matchPatterns, rule.prefixPatterns, rule.searchPatterns, rule.limits});
+    directoryRules_.store(directory);
 
     // 与旧版 build() 一致：所有活动 mod 合并完再注册事件，避免同名事件被后载入
     // 模组覆盖时留下两套定时回调。首次注册会立即执行一次，然后按 cycle 重排。
@@ -3493,6 +3581,49 @@ bool LuaPluginManager::importUpload(const std::string& filename, const std::stri
 }
 
 // ─── 阶段二：模板格式化 + reply 派发 ─────────────────────────────
+std::vector<std::string> LuaPluginManager::directoryTriggers(const LuaEventOrigin& origin, bool orders) const {
+    std::vector<std::string> result;
+    const auto snapshot = directoryRules_.load();
+    const bool privateMessage = origin.groupId.empty();
+    const int trust = trustLookup_ ? trustLookup_(origin.userId, origin.groupId, origin.platform, origin.adapterId, privateMessage) : 0;
+    if (trust < 0) return result;
+    for (const auto& rule : *snapshot) {
+        if (rule.type == "nor") continue;
+        if (!privateMessage && groupGate_ && !groupGate_(origin.platform, origin.groupId, "lua:" + rule.modName, origin.adapterId)) continue;
+        if (!privateMessage && replyTypeGate_ && !replyTypeGate_(origin.platform, origin.groupId, rule.type, origin.adapterId)) continue;
+        if ((rule.requiresGame || !rule.requiredRule.empty()) && (!ruleGate_ || !ruleGate_(origin.platform, origin.groupId, origin.userId, rule.requiredRule, origin.adapterId))) continue;
+        if (rule.limits) {
+            const auto& limit = *rule.limits;
+            if (!legacy_mod::idMatches(limit.users, origin.userId) || !legacy_mod::idMatches(limit.groups, origin.groupId)) continue;
+            const auto self = botIdFor(origin.platform, origin.adapterId);
+            if (!limit.dicePolicy.empty() && limit.dicePolicy != "ignore" && (self.empty() || origin.userId != self)) {
+                const bool bot = diceLookup_ && diceLookup_(origin.userId, origin.platform, origin.adapterId);
+                if (bot != (limit.dicePolicy == "only")) continue;
+            }
+            const auto variables = [&](const auto& conditions, const std::string& scope, bool user, bool selfOnly) {
+                for (const auto& [key, condition] : conditions) {
+                    // &speech keys and SelfData-file fallbacks need the runtime
+                    // or filesystem. Do not guess them while browsing metadata.
+                    if (key.empty() || key.front() == '&') return false;
+                    const bool exists = confHas(scope,key);
+                    if (selfOnly && (self.empty() || !exists)) return false;
+                    const auto actual = user && key == "trust" ? json(trust)
+                        : legacy_mod::storedValue(confGet(scope,key),exists);
+                    if (!legacy_mod::matches(actual,condition)) return false;
+                }
+                return true;
+            };
+            if (!variables(limit.userVariables,"u:" + origin.userId,true,false)
+                || (!privateMessage && !variables(limit.groupVariables,"g:" + origin.groupId,false,false))
+                || !variables(limit.selfVariables,"u:" + self,false,true)) continue;
+        }
+        const auto& items = orders ? rule.prefixes : rule.matches;
+        result.insert(result.end(), items.begin(), items.end());
+        if (!orders) result.insert(result.end(), rule.searches.begin(), rule.searches.end());
+    }
+    return result;
+}
+
 // 解析一个 {key}：msg 变量 > speech 词条(别名 &x / 递归展开 {…}) > 内置全局。
 std::string LuaPluginManager::valueOf(const std::string& key,
                                       const std::map<std::string, std::string>& vars, int depth,
@@ -3500,11 +3631,11 @@ std::string LuaPluginManager::valueOf(const std::string& key,
     if (depth > 24 || budget.exhausted) return "";
     if (budget.steps == 0) { budget.exhausted = true; return ""; }
     --budget.steps;
-    if (auto it = vars.find(key); it != vars.end()) return it->second;
+    if (auto it = vars.find(key); it != vars.end()) return safe_template::hold(it->second, budget.eval);
     // Keep Next's exact variable precedence, then provide the legacy dict_ci
     // lookup without changing user-authored field names or UTF-8 bytes.
     const auto foldedKey = legacy_mod::lower(key);
-    for (const auto& [name, value] : vars) if (legacy_mod::lower(name) == foldedKey) return value;
+    for (const auto& [name, value] : vars) if (legacy_mod::lower(name) == foldedKey) return safe_template::hold(value, budget.eval);
     if (helpScope) if (const auto help = legacyHelp_.find(key); help != legacyHelp_.end())
         return formatHelpTemplateImpl(help->second.text, vars, depth + 1, budget);
     if (auto it = speech_.find(foldedKey); it != speech_.end()) {
@@ -3533,29 +3664,72 @@ std::string LuaPluginManager::valueOf(const std::string& key,
         return "";
     }
     if (message_break::isFormFeed(foldedKey)) return "\f";
-    if (foldedKey == "self" || foldedKey == "strselfname" || foldedKey == "strselfnick" || foldedKey == "name") return selfName_;
+    if (foldedKey == "self" || foldedKey == "strselfname" || foldedKey == "strselfnick" || foldedKey == "name") return safe_template::hold(selfName_, budget.eval);
     return "";   // 未知 → 空
 }
 
+static std::optional<std::string> dnx_currentUserDisplay(const std::map<std::string,std::string>& vars, const std::string& key) {
+    const auto uid=vars.find("uid"), nick=vars.find("nick");
+    if ((key=="print.uid" || (uid!=vars.end() && key=="print.uid="+uid->second))
+        && uid!=vars.end() && nick!=vars.end() && !nick->second.empty())
+        return session_deck::memberLabel(nick->second)+"("+uid->second+")";
+    return std::nullopt;
+}
+
 std::string LuaPluginManager::formatTemplate(const std::string& text,
-                                             const std::map<std::string, std::string>& vars, int depth) const {
+                                             const std::map<std::string, std::string>& vars, int depth,
+                                             safe_template::Read context, safe_template::Length length,
+                                             safe_template::Delay* delay) const {
     std::lock_guard<ScriptMutex> lock(mutex_);
     TemplateBudget budget;
-    return formatTemplateImpl(text, vars, depth, false, budget);
+    budget.eval.delay = delay ? delay : safe_template::contextDelay;
+    budget.eval.contextLengthsOverrideArgs = static_cast<bool>(length);
+    budget.eval.length = [&, length](const std::string& key) -> std::optional<size_t> {
+        if (length) if (auto value = length(key)) return value;
+        return templateLength_ ? templateLength_(key, invocationOrigin()) : std::nullopt;
+    };
+    budget.eval.read = [&, context](const std::string& key) -> std::optional<std::string> {
+        if (context) if (auto value = context(key)) return value;
+        if (const auto display=dnx_currentUserDisplay(vars,key)) return display;
+        if (key == "selfId") return botIdFor(activePlatform_, activeAdapter_);
+        if (templateLookup_) return templateLookup_(key, invocationOrigin());
+        return std::nullopt;
+    };
+    const auto expanded = formatTemplateImpl(text, vars, depth, false, budget);
+    return budget.exhausted ? "" : safe_template::materialize(expanded, {}, budget.eval);
 }
 
 std::string LuaPluginManager::formatHelpTemplate(const std::string& text,
                                                 const std::map<std::string, std::string>& vars) const {
     std::lock_guard<ScriptMutex> lock(mutex_);
     TemplateBudget budget;
-    return formatHelpTemplateImpl(text, vars, 0, budget);
+    budget.eval.delay = safe_template::contextDelay;
+    budget.eval.length = [&](const std::string& key) -> std::optional<size_t> {
+        return templateLength_ ? templateLength_(key, invocationOrigin()) : std::nullopt;
+    };
+    budget.eval.read = [&](const std::string& key) -> std::optional<std::string> {
+        if (const auto display=dnx_currentUserDisplay(vars,key)) return display;
+        return templateLookup_ ? templateLookup_(key, invocationOrigin()) : std::nullopt;
+    };
+    const auto expanded = formatHelpTemplateImpl(text, vars, 0, budget);
+    return budget.exhausted ? "" : safe_template::materialize(expanded, {}, budget.eval);
 }
 
 std::string LuaPluginManager::formatHelpTopic(const std::string& topic,
-                                           const std::map<std::string, std::string>& vars) const {
+                                           const std::map<std::string, std::string>& vars,
+                                           const std::optional<LuaEventOrigin>& origin) const {
     std::lock_guard<ScriptMutex> lock(mutex_);
     TemplateBudget budget;
-    return valueOf("help:" + topic, vars, 0, false, budget);
+    budget.eval.delay = safe_template::contextDelay;
+    budget.eval.length = [&](const std::string& key) -> std::optional<size_t> {
+        return templateLength_ ? templateLength_(key, origin.value_or(invocationOrigin())) : std::nullopt;
+    };
+    budget.eval.read = [&](const std::string& key) -> std::optional<std::string> {
+        if (const auto display=dnx_currentUserDisplay(vars,key)) return display;
+        return templateLookup_ ? templateLookup_(key, origin.value_or(invocationOrigin())) : std::nullopt;
+    };
+    const auto expanded = valueOf("help:" + topic, vars, 0, false, budget);
+    return budget.exhausted ? "" : safe_template::materialize(expanded, {}, budget.eval);
 }
 
 std::string LuaPluginManager::formatHelpTemplateImpl(const std::string& text,
@@ -3570,29 +3744,29 @@ std::string LuaPluginManager::formatTemplateImpl(const std::string& text,
     if (depth > 24 || budget.exhausted) return "";
     constexpr size_t maxOutput = 4 * 1024 * 1024;
     if (text.size() > maxOutput) { budget.exhausted = true; return ""; }
-    const auto expanded = sample_template::expand(text);
-    if (expanded.size() > maxOutput) { budget.exhausted = true; return ""; }
-    std::string out; out.reserve(expanded.size() + 16);
-    const auto append = [&](std::string_view value) {
-        if (value.size() > budget.bytes || value.size() > maxOutput - out.size()) { budget.exhausted = true; return; }
-        budget.bytes -= value.size(); out.append(value.data(), value.size());
+    auto program = safe_template::compile(text);
+    // Lua's case-insensitive context/speech precedence also applies to this
+    // legacy builtin, unlike native authored control nodes.
+    const auto restoreLegacyControl = [&](auto&& self, std::vector<safe_template::Node>& nodes) -> void {
+        for (auto& node : nodes) {
+            if (node.kind == safe_template::Kind::formFeed) node.kind = safe_template::Kind::variable;
+            for (auto& branch : node.branches) self(self, branch);
+        }
     };
-    for (size_t i = 0; i < expanded.size();) {
-        if (expanded[i] == '{' && !sample_template::escaped(expanded, i)) {
-            size_t e = expanded.find('}', i + 1);
-            if (e == std::string::npos) { append(std::string_view(expanded).substr(i)); break; }
-            append(valueOf(expanded.substr(i + 1, e - i - 1), vars, depth + 1, helpScope, budget));
-            i = e + 1;
-        } else append(std::string_view(expanded).substr(i++, 1));
-        if (budget.exhausted) return "";
-    }
+    restoreLegacyControl(restoreLegacyControl, program.nodes);
+    const safe_template::Resolve named = [&](const std::string& key, unsigned nested, safe_template::Budget&) -> std::optional<std::string> {
+        return valueOf(key, vars, nested, helpScope, budget);
+    };
+    const auto out = safe_template::expand(program.nodes, vars, named, depth, budget.eval, {}, named);
+    if (!budget.eval.nodes || !budget.eval.bytes || out.size() > maxOutput) budget.exhausted = true;
     return budget.exhausted ? "" : out;
 }
 
 std::string LuaPluginManager::resolveAmp(const std::string& key) const {
     std::lock_guard<ScriptMutex> lk(mutex_);
     TemplateBudget budget;
-    return valueOf(key, {}, 0, false, budget);
+    const auto expanded = valueOf(key, {}, 0, false, budget);
+    return budget.exhausted ? "" : safe_template::materialize(expanded, {}, budget.eval);
 }
 
 double LuaPluginManager::yieldedDelaySeconds(lua_State* coroutine, int resultCount) {
@@ -3808,13 +3982,15 @@ std::string LuaPluginManager::finishCoroutine(PendingCoroutine& pending, lua_Sta
             lua_pushvalue(state_, -2);
             const std::string key = dnx_normalizeLuaText(argStr(state_, -1));
             lua_pop(state_, 1);
-            const std::string value = dnx_normalizeLuaText(argStr(state_, -1));
-            if (!key.empty()) pending.vars[key] = value;
+            if (!key.empty() && (lua_isstring(state_, -1) || lua_isboolean(state_, -1)))
+                pending.vars[key] = lua_isboolean(state_, -1) ? (lua_toboolean(state_, -1) ? "true" : "false")
+                    : dnx_normalizeLuaText(argStr(state_, -1));
             lua_pop(state_, 1);
         }
     }
+    const auto rendered = dnx_normalizeLuaText(formatTemplate(result, pending.vars, 0, dnx_messageReader(state_, -1), dnx_messageLength(state_, -1)));
     lua_pop(state_, 1);
-    return dnx_normalizeLuaText(formatTemplate(result, pending.vars));
+    return rendered;
 }
 
 void LuaPluginManager::resumeCoroutine(int threadRef) {
@@ -4224,15 +4400,15 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
             while (lua_next(state_, -2)) {
                 lua_pushvalue(state_, -2);                     // 复制 key
                 std::string k = dnx_normalizeLuaText(argStr(state_, -1)); lua_pop(state_, 1);
-                std::string v = dnx_normalizeLuaText(argStr(state_, -1));
-                if (!k.empty()) vars[k] = v;
+                if (!k.empty() && (lua_isstring(state_, -1) || lua_isboolean(state_, -1)))
+                    vars[k] = lua_isboolean(state_, -1) ? (lua_toboolean(state_, -1) ? "true" : "false")
+                        : dnx_normalizeLuaText(argStr(state_, -1));
                 lua_pop(state_, 1);
             }
         }
-        lua_pop(state_, 1);
-
         res.matched = true;
-        res.reply = dnx_normalizeLuaText(formatTemplate(tmpl, vars));
+        res.reply = dnx_normalizeLuaText(formatTemplate(tmpl, vars, 0, dnx_messageReader(state_, -1), dnx_messageLength(state_, -1)));
+        lua_pop(state_, 1);
         if (!res.failed && !res.pending && res.reply.empty())
             logProcessingResult(source, "处理完成，没有返回文本回复", activeProcessingContext.trigger);
         return res;

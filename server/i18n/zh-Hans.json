@@ -717,6 +717,7 @@
     "session_state": "团务牌堆「{name}」：剩余 {left} / {total} 张",
     "session_full": "本团最多保留 10 个私有牌堆，请先删除不需要的牌堆。",
     "session_deleted": "已删除团务牌堆「{name}」。",
+    "session_generators": ".deck session range <名称> <起点> <终点> [正步长] // 从整数范围创建；单个数字表示 0 至该数，最多 10000 张\n.deck session members <名称> // 从当前账号缓存的本群成员创建，保留昵称快照；缓存未就绪时请稍后重试",
     "session_created": "已创建或替换团务牌堆「{name}」，使用 .draw {name} 不放回抽取。",
     "session_reset": "已重置团务牌堆「{name}」，全部牌恢复可抽。"
   },

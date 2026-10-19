@@ -364,8 +364,10 @@ TEST(LegacyCheckText, SafeNestedMacrosReferencesEscapingAndNoUserCode) {
     ASSERT_EQ(I18n::previewTemplate("{sample:{case:loss?0=ZERO&else=LOSS}|ZERO}", {{"loss", "0"}}), "ZERO");
     const std::string inserted = "{case:loss?0=not-code&else=no}";
     ASSERT_EQ(I18n::previewTemplate("{nick}", {{"nick", inserted}, {"loss", "0"}}), inserted);
-    const std::string unsafe = "{js:throw 1}{wait:3000}{py:print(1)}";
+    const std::string unsafe = "{js:throw 1}{py:print(1)}";
     ASSERT_EQ(I18n::previewTemplate(unsafe), unsafe);
+    // Previews format a supported wait without blocking or executing scripts.
+    ASSERT_EQ(I18n::previewTemplate("{wait:3000}" + unsafe), unsafe);
     OutcomeFixture f; ASSERT_TRUE(f.i18n.load());
     f.set("dice.level.regular", "*literal*");
     ASSERT_EQ(f.i18n.previewWithReferences(Locale::kZhHans, "**{nick}** {strSuccess}", {{"nick", "A*B"}}, ContentFormat::kMarkdown),

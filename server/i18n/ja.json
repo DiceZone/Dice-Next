@@ -711,6 +711,7 @@
     "session_state": "セッションデッキ「{name}」：残り {left} / {total} 枚",
     "session_full": "専用デッキは1セッションにつき最大10個です。不要なデッキを削除してください。",
     "session_deleted": "セッションデッキ「{name}」を削除しました。",
+    "session_generators": ".deck session range <名前> <開始> <終了> [正の間隔] // 整数範囲から作成。数値1個の場合は0からその値まで、最大10000枚\n.deck session members <名前> // 現在のアカウントにキャッシュされたグループメンバーから作成。未取得の場合は後で再試行してください",
     "session_created": "セッションデッキ「{name}」を作成・置換しました。.draw {name} で戻さずに抽選します。",
     "session_reset": "セッションデッキ「{name}」の全カードを復元しました。"
   },

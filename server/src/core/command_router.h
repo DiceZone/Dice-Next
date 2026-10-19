@@ -3,6 +3,7 @@
 #include "../common/legacy_lua_event.h"
 #include "../common/legacy_model.h"
 #include "../common/session_deck.h"
+#include "../common/legacy_deck_generator.h"
 // ─── Dice!Next v3.0.0 — Command Router ───────────────────────
 // Routes incoming messages to dice engine, reply system, etc.
 // Faithfully implements original Dice! command set (.r .coc .dnd etc.)
@@ -277,6 +278,9 @@ public:
         const int messagePersona = preservedPersona ? *preservedPersona :
             personaMgr_ ? activePersonaFor(msg, true) : i18n_.getActivePersonaId();
         auto personaScope = i18n_.scopedPersona(messagePersona);
+        I18n::TemplateContextScope templateScope(
+            [&](const std::string& key) { return templateContextValue(msg, key); },
+            [&](const std::string& key) { return templateContextLength(msg, key); });
         shortcutPersona_ = messagePersona;
         detectDiceBot(msg);       // 被动识别其他骰子的 .bot 横幅回执（须紧跟探测）
         recordBotProbe(msg);      // 记录本群 .bot 探测时间，作为识别的时间窗
@@ -4400,6 +4404,111 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
     void setLegacyModHelpProvider(HelpProviderFn provider, LegacyHelpRenderFn render) {
         legacyModHelpProvider_ = std::move(provider); legacyModHelpRenderer_ = std::move(render);
     }
+    using TemplateDirectoryFn = std::function<std::vector<std::string>(const Message&, bool)>;
+    void setTemplateDirectory(TemplateDirectoryFn provider) { templateDirectory_ = std::move(provider); }
+    std::string templateCommandTrigger(std::string command) const {
+        for (const auto* prefix : {".", "。", "!", "！"}) {
+            const std::string text(prefix);
+            if (command.rfind(text, 0) == 0) { command.erase(0,text.size()); break; }
+        }
+        const auto prefixes = commandPrefixes();
+        return (prefixes.empty() ? "." : prefixes.front()) + command;
+    }
+
+    std::optional<size_t> templateContextLength(const Message& msg, const std::string& key) const {
+        if (key != "game.pls" && key != "game.gms") return std::nullopt;
+        if (msg.type == MessageType::kPrivate || gGet(msg, "__name").empty()) return size_t(0);
+        const auto values = gList(gGet(msg, key == "game.pls" ? "__pls" : "__gms"));
+        return std::set<std::string>(values.begin(), values.end()).size();
+    }
+
+    std::string templateIdentity(const Message& msg, const std::string& parameter) const {
+        const auto equals = parameter.find('=');
+        const auto field = parameter.substr(0, equals);
+        std::string id = equals == std::string::npos ? "" : parameter.substr(equals + 1);
+        if (!id.empty() && !safe_template::identityId(id) && !(field == "gid" && id == "0")) return {};
+        const auto adapter = adapters_.getAdapter(msg.adapterId);
+        // Never guess another account/platform from a matching numeric ID.
+        const bool currentAdapter = adapter && adapter->platform() == msg.platform;
+        if (field == "gid") {
+            if (id.empty()) id = msg.type == MessageType::kPrivate ? "" : msg.targetId;
+            if (id.empty() || id == "0") return "私聊";
+            const auto name = currentAdapter ? adapter->cachedGroupName(id) : std::string();
+            return name.empty() || name == id ? "群(" + id + ")" : "[" + session_deck::memberLabel(name) + "](" + id + ")";
+        }
+        if (field == "self") {
+            id = msg.selfId.empty() && currentAdapter ? adapter->getLoginId() : msg.selfId;
+            const auto name = session_deck::memberLabel(resolveSelfName(msg));
+            return id.empty() ? name : name + "(" + id + ")";
+        }
+        if (field == "master") {
+            id.clear();
+            for (const auto& master : masters()) {
+                if ((!master.platform.empty() && master.platform != msg.platform)
+                    || (!master.adapterId.empty() && master.adapterId != msg.adapterId)) continue;
+                id = master.id; break;
+            }
+            if (id.empty()) return "[无主]";
+        } else if (field != "uid") return {};
+        if (id.empty()) id = msg.senderId;
+        std::string name;
+        if (id == msg.senderId) name = resolveNickDisplay(msg);
+        if ((name.empty() || name == id || name == "用户") && currentAdapter)
+            name = adapter->cachedUserName(id, msg.type == MessageType::kPrivate ? "" : msg.targetId);
+        if (id == msg.selfId && name.empty()) name = resolveSelfName(msg);
+        return name.empty() || name == id ? "用户[" + id + "]" : session_deck::memberLabel(name) + "(" + id + ")";
+    }
+
+    // Display-only access to the current message. Never expose arbitrary
+    // settings, secrets, cross-user cards or writable host proxies.
+    std::optional<std::string> templateContextValue(const Message& msg, const std::string& key) const {
+        if (key == "uid" || key == "fromQQ" || key == "fromUser") return msg.senderId;
+        if (key == "gid" || key == "fromGroup") return msg.type == MessageType::kPrivate ? "" : msg.targetId;
+        if (key == "selfId") return msg.selfId;
+        if (key == "nick") return displayNameRaw(msg);
+        if (key == "pc") return displayNameRaw(msg);
+        if (key == "user.trust") return std::to_string(senderTrust(msg));
+        if (key == "user.favor") return std::to_string(getFavor(msg.platform, msg.senderId));
+        if (key.rfind("print.", 0) == 0) return templateIdentity(msg, key.substr(6));
+        if (key.rfind("char.", 0) == 0 && !cards_.cardLocked(msg.senderId, cardScope(msg), "r")) {
+            const auto value = cards_.getAttr(msg.senderId, cardScope(msg), key.substr(5));
+            if (value) return std::to_string(*value);
+        }
+        if (key.rfind("list_", 0) != 0) return std::nullopt;
+        std::set<std::string> names;
+        if (key == "list_all_deck" || key == "list_extern_deck") {
+            for (const auto& name : deck_.deckNames()) {
+                if (name.empty() || name.front() == '_') continue;
+                const auto source = deck_.getSourceInfo(name);
+                if (key == "list_extern_deck" && (!source || source->bundled)) continue;
+                names.insert(name);
+            }
+            if (key == "list_all_deck" && msg.type != MessageType::kPrivate) {
+                const auto temporary = getTempDecks(msg);
+                for (const auto& [name, unused] : temporary.items())
+                    if (!name.empty() && name.front() != '_') names.insert(name);
+            }
+        } else if (key == "list_extern_order" || key == "list_reply_deck") {
+            const bool orders = key == "list_extern_order";
+            if (templateDirectory_ && !isBlocked(msg) && !isGroupDisabled(msg) && !isGroupLocked(msg)
+                && (orders || !isReplyDisabledFor(msg.platform, msg.type == MessageType::kPrivate ? "" : msg.targetId, msg.adapterId)))
+                for (const auto& name : templateDirectory_(msg, orders)) if (!name.empty()) names.insert(name);
+        } else if (key == "list_dice_sister") {
+            // Ordinary users see only bots in the current group's cached member
+            // list, not the installation's global account/dice inventory.
+            if (msg.type != MessageType::kPrivate) if (const auto adapter = adapters_.getAdapter(msg.adapterId);
+                adapter && adapter->platform() == msg.platform)
+                for (const auto& id : adapter->getGroupMemberList(msg.targetId)) if (isDiceBot(id)) names.insert(id);
+        } else return std::nullopt;
+        std::string result;
+        size_t count = 0;
+        for (const auto& name : names) {
+            if (++count > 200 || result.size() + name.size() > 32768) { result += "\n…"; break; }
+            if (!result.empty()) result += '\n';
+            result += name;
+        }
+        return result;
+    }
     using ScopedHelpFn = std::function<std::optional<std::string>(const std::string&, const Message&)>;
     void setLegacyRuleHelp(ScopedHelpFn f) { legacyRuleHelp_ = std::move(f); }
 
@@ -4442,6 +4551,7 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         std::string key, content, source; // builtin | custom | rule:<包> | plugin | file:<名> | helpdoc:<包>
         bool legacyMod = false; // Render only the selected entry, never the whole catalog.
         std::string i18nKey; // Raw templates are rendered only after selection.
+        ContentFormat format = ContentFormat::kPlainText;
     };
 
     // data/help/*.md 用户自管帮助文档（第四源）。专用读写锁；启动期与 CRUD 后 loadHelpFiles。
@@ -4486,12 +4596,9 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
                 for (auto e = j["helpdoc"].begin(); e != j["helpdoc"].end(); ++e)
                     if (e.value().is_string()) raw[e.key()] = e.value().get<std::string>();
                 for (auto& [k, c] : raw) {
-                    std::string txt = c;
-                    if (!txt.empty() && txt[0] == '&') {   // 别名 &其他词条 → 取其内容（一级）
-                        auto a = raw.find(txt.substr(1));
-                        if (a != raw.end()) txt = a->second;
-                    }
-                    if (!k.empty() && !txt.empty()) { helpDocs().push_back({k, txt, pack, packPrefix}); ++added; }
+                    // Keep aliases authored and resolve only after selecting a
+                    // topic, so language, source scope and later edits apply.
+                    if (!k.empty() && !c.empty()) { helpDocs().push_back({k, c, pack, packPrefix}); ++added; }
                 }
             } catch (...) { DICE_LOG_WARN_EXCEPTION("loading help file " + u8str(it->path())); }
         }
@@ -4522,14 +4629,14 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         // 否则别的来源的同名词条会先占位、再被过滤掉，导致域内词条反而查不到）。
         std::unordered_set<std::string> seenKeys;
         auto add = [&](const std::string& k, const std::string& c, const std::string& src, bool legacyMod = false,
-                       const std::string& i18nKey = "") {
+                       const std::string& i18nKey = "", ContentFormat format = ContentFormat::kPlainText) {
             if (k.empty() || c.empty()) return;
             if (!scope.empty() && src != "builtin" && !helpSourceMatches(src, scope)) return;
             if (!seenKeys.insert(toLower(k)).second) return;   // 已存在
-            v.push_back({k, c, src, legacyMod, i18nKey});
+            v.push_back({k, c, src, legacyMod, i18nKey, format});
         };
         for (const auto& text : i18n_.helpTemplates(loc, true))
-            add(text.key.substr(11), text.value, text.builtin ? "builtin" : "custom", false, text.key);
+            add(text.key.substr(11), text.value, text.builtin ? "builtin" : "custom", false, text.key, text.format);
         {
             std::shared_lock<std::shared_mutex> lk(rulesLock());
             for (const auto& rp : rulePacks()) if (rp.enabled)
@@ -4559,8 +4666,15 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
         std::string n = toLower(trim(name));
         if (n.empty()) return std::nullopt;
         std::shared_lock<std::shared_mutex> lk(helpDocLock());
-        for (const auto& h : helpDocs())
-            if (!h.content.empty() && toLower(h.topic) == n) return h.content;
+        std::unordered_set<std::string> seen;
+        for (int depth = 0; depth < 16 && seen.insert(n).second; ++depth) {
+            const HelpDocItem* found = nullptr;
+            for (const auto& h : helpDocs())
+                if (!h.content.empty() && toLower(h.topic) == n) { found = &h; break; }
+            if (!found) return std::nullopt;
+            if (found->content.front() != '&') return found->content;
+            n = toLower(trim(found->content.substr(1)));
+        }
         return std::nullopt;
     }
     // 「像骰子/算式」：含数字且仅由 0-9 dD +-*/() 空格 kKhHlLxX 组成。
@@ -4691,10 +4805,48 @@ public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_servi
     }
 
 private:
-    std::string renderSelectedHelp(const HelpEntry& entry, const Message& msg, Locale loc) const {
-        const auto text = !entry.i18nKey.empty() ? i18n_.tr(loc, entry.i18nKey)
-            : entry.legacyMod && legacyModHelpRenderer_ ? legacyModHelpRenderer_(entry.key, msg) : entry.content;
-        return expandHelpRefs(text, msg);
+    std::optional<HelpEntry> selectHelpExact(const std::string& topic, const Message& msg, Locale loc) const {
+        const auto scope = getGroupSetting(msg, "helpScope");
+        if (auto rp = activeRulePack(msg); rp && (scope.empty() || helpSourceMatches("rule:" + rp->name, scope)))
+            for (const auto& [k, c] : rp->helpEntries) if (toLower(k) == topic && !c.empty())
+                return HelpEntry{k, c, "rule:" + rp->name};
+        if (scope.empty() && legacyRuleHelp_) if (auto text = legacyRuleHelp_(topic, msg))
+            return HelpEntry{topic, *text, "plugin"};
+        const auto preferred = helpdocDefaultSource(msg);
+        if (!preferred.empty()) {
+            std::shared_lock<std::shared_mutex> lock(helpDocLock());
+            for (const auto& h : helpDocs())
+                if (!h.content.empty() && toLower(h.topic) == topic && helpSourceMatches(h.pack, preferred)
+                    && (scope.empty() || helpSourceMatches("helpdoc:" + h.pack, scope)))
+                    return HelpEntry{h.topic, h.content, "helpdoc:" + h.pack};
+        }
+        for (const auto& entry : allHelp(loc, scope)) if (toLower(entry.key) == topic) return entry;
+        return std::nullopt;
+    }
+
+    std::string renderSelectedHelp(HelpEntry entry, const Message& msg, Locale loc) const {
+        I18n::TemplateContextScope templateScope(
+            [&](const std::string& key) { return templateContextValue(msg, key); },
+            [&](const std::string& key) { return templateContextLength(msg, key); });
+        std::unordered_set<std::string> seen;
+        for (int depth = 0; depth < 16; ++depth) {
+            const auto topic = toLower(trim(entry.key));
+            if (!seen.insert(topic).second) break;
+            // Detect only the authored alias. Interpolated user text must never
+            // become a new redirect or change which source is permitted.
+            if (entry.content.empty() || entry.content.front() != '&') {
+                if (entry.legacyMod && legacyModHelpRenderer_) return legacyModHelpRenderer_(entry.key, msg);
+                // Expand only authored legacy references before substituting
+                // message data; a nickname containing {1d6} is not a roll.
+                return i18n_.previewWithReferences(loc, expandHelpRefs(entry.content, msg), {}, entry.format);
+            }
+            const auto target = toLower(trim(stripPrefix(trim(entry.content.substr(1)))));
+            auto next = selectHelpExact(target, msg, loc);
+            if (!next) return i18n_.tr(loc, "help.unknown", {{"topic", target}});
+            entry = std::move(*next);
+        }
+        DICE_LOG_WARN("帮助别名存在循环或超过 16 层：{}", entry.key);
+        return i18n_.tr(loc, "help.unknown", {{"topic", entry.key}});
     }
     std::string handleHelp(Locale loc, const std::string& args, const Message& msg) {
         const std::string toggle = toLower(trim(args));
@@ -4708,17 +4860,7 @@ private:
         std::string topic = toLower(trim(args));
         if (topic.empty()) return i18n_.tr(loc, "help.main");
         topic = toLower(trim(stripPrefix(topic)));   // 容忍 ".help .r"
-        // 深化：本群激活的规则包，其同名帮助词条优先于内置/其它来源。
-        if (auto rp = activeRulePack(msg))
-            for (auto& [k, c] : rp->helpEntries) if (toLower(k) == topic) return expandHelpRefs(c, msg);
-        if (legacyRuleHelp_) if (auto text = legacyRuleHelp_(topic, msg)) return expandHelpRefs(*text, msg);
-        // 设了默认帮助来源 → 同名词条优先该来源（如 dnd5r 压过 dnd3r）。
-        if (std::string defSrc = helpdocDefaultSource(msg); !defSrc.empty()) {
-            std::shared_lock<std::shared_mutex> lk(helpDocLock());
-            for (const auto& h : helpDocs())
-                if (!h.content.empty() && toLower(h.topic) == topic && helpSourceMatches(h.pack, defSrc))
-                    return expandHelpRefs(h.content, msg);
-        }
+        if (auto entry = selectHelpExact(topic, msg, loc)) return renderSelectedHelp(*entry, msg, loc);
         // C#（搜索域）：本群锁定了搜索范围 → 在「构建时」就只收该来源(+内置)，过滤掉其它内容。
         std::string scope = getGroupSetting(msg, "helpScope");
         auto entries = allHelp(loc, scope);
@@ -8174,6 +8316,9 @@ public:
     std::string legacyDrawDeck(const Message& msg, const std::string& name) {
         if (name.empty() || isBlocked(msg) || isGroupDisabled(msg) || isGroupLocked(msg)
             || !groupFeatureEnabled(msg, "plugin")) return "";
+        I18n::TemplateContextScope templateScope(
+            [&](const std::string& key) { return templateContextValue(msg, key); },
+            [&](const std::string& key) { return templateContextLength(msg, key); });
         if (auto card = drawSessionDeck(msg, name, resolver_.resolve(msg))) return *card;
         return deck_.drawFromDeck(name).value_or("{" + name + "}");
     }
@@ -8231,6 +8376,7 @@ private:
     }
     std::optional<std::string> drawSessionDeck(const Message& msg, const std::string& name, Locale loc, int times = 1) {
         std::vector<std::string> cards;
+        bool literalCards = false;
         {
             // Conf callbacks only take the storage mutex, not the Lua VM mutex.
             // Keep rendering/help expansion outside this lock to avoid VM/core
@@ -8241,6 +8387,7 @@ private:
             if (!sessionDecks(msg, decks, error)) return i18n_.tr(loc, "deck.session_invalid", {{"reason", error}});
             const auto key = session_deck::findName(decks, name);
             if (key.empty()) return std::nullopt;
+            literalCards = decks[key].value("literal", false);
             static thread_local std::mt19937_64 random{std::random_device{}()};
             for (int i = 0; i < (std::clamp)(times, 1, 10); ++i) {
                 const auto result = session_deck::draw(decks[key], random);
@@ -8254,14 +8401,19 @@ private:
             if (!saveSessionDecks(msg, decks)) return i18n_.tr(loc, "deck.session_save_failed");
         }
         std::string text;
-        for (const auto& card : cards) { if (!text.empty()) text += '\n'; text += deck_.expandText(card); }
+        for (const auto& card : cards) { if (!text.empty()) text += '\n'; text += literalCards ? card : deck_.expandText(card); }
         return text;
     }
     static std::vector<std::string> gList(const std::string& j) {
         std::vector<std::string> v;
         auto a = nlohmann::json::parse(j.empty() ? "[]" : j, nullptr, false);
         if (legacy_conf::isSet(a)) a = json(a["values"]);
-        if (a.is_array()) for (auto& e : a) if (e.is_string()) v.push_back(e.get<std::string>());
+        if (a.is_array()) for (const auto& e : a) {
+            if (e.is_string()) v.push_back(e.get<std::string>());
+            // Lua's msg.uid is numeric. Set:add(msg.uid) therefore persists a
+            // JSON number, not a string; both must identify the same member.
+            else if (e.is_number_integer() || e.is_number_unsigned()) v.push_back(e.dump());
+        }
         return v;
     }
     static std::string gListDump(const std::vector<std::string>& v) {
@@ -9719,21 +9871,26 @@ public:
     /// Captured text is appended as data, never reparsed as a template.
     std::string renderReplyWithGroups(const Message& msg, const std::string& tmpl,
                                      const std::vector<std::string>& groups, bool legacyReferences = false) {
+        I18n::TemplateContextScope templateScope(
+            [&](const std::string& key) { return templateContextValue(msg, key); },
+            [&](const std::string& key) { return templateContextLength(msg, key); });
         // Pre-process legacy variable aliases ({pc}→{nick}, {char}→{nick}, etc.)
         // so that original-Dice! flavor texts work with DiceNext's variable system.
-        std::string processed = applyLegacyVarAliases(sample_template::expand(tmpl));
+        std::string processed = applyLegacyVarAliases(tmpl);
         CardDeck::ReferenceContext deckReferences;
-        std::string out; out.reserve(processed.size() + 32);
-        for (size_t i = 0; i < processed.size();) {
-            if (processed[i] == '{') {
-                size_t end = processed.find('}', i + 1);
-                if (end == std::string::npos) { out += processed[i++]; continue; }
-                out += resolveReplyToken(msg, processed.substr(i + 1, end - i - 1), groups,
-                    deckReferences, sample_template::escaped(processed, i), legacyReferences);
-                i = end + 1;
-            } else { out += processed[i++]; }
-        }
-        return out;
+        safe_template::Budget budget;
+        budget.length = [&](const std::string& key) { return templateContextLength(msg, key); };
+        budget.delay = safe_template::contextDelay;
+        budget.read = [&](const std::string& key) -> std::optional<std::string> {
+            if (key.find('.') != std::string::npos || key.rfind("list_", 0) == 0 || key == "uid" || key == "gid" || key == "selfId")
+                if (auto value = templateContextValue(msg, key)) return value;
+            return resolveReplyToken(msg, key, groups, deckReferences, false, legacyReferences);
+        };
+        const safe_template::Resolve reference = [&](const std::string& key, unsigned, safe_template::Budget& remaining) -> std::optional<std::string> {
+            return safe_template::hold(resolveReplyToken(msg, "text:" + key, groups, deckReferences, false, legacyReferences), remaining);
+        };
+        const auto expanded = safe_template::expand(safe_template::compile(processed).nodes, {}, reference, 0, budget);
+        return safe_template::materialize(expanded, {}, budget);
     }
 
 private:
@@ -9747,6 +9904,11 @@ private:
     }
 
     std::optional<std::string> replyHelpEntryContent(const std::string& name, const Message* message = nullptr) const {
+        if (message) {
+            const auto loc = resolver_.resolve(*message);
+            if (auto entry = selectHelpExact(toLower(trim(name)), *message, loc)) return renderSelectedHelp(*entry, *message, loc);
+            return std::nullopt;
+        }
         if (auto content = helpEntryContent(name)) return content;
         const auto key = "help.topic." + name;
         if (i18n_.hasOverride(Locale::kZhHans, key)) return i18n_.tr(Locale::kZhHans, key);
@@ -9822,7 +9984,7 @@ private:
         }
         if (tok.rfind("help:", 0) == 0) {
             if (escapedDeck) return "{" + tok + "}";
-            if (auto help = replyHelpEntryContent(tok.substr(5), &msg)) return expandHelpRefs(*help, msg);
+            if (auto help = replyHelpEntryContent(tok.substr(5), &msg)) return *help;
             return "{" + tok + "}";
         }
         if (tok.rfind("text:", 0) == 0) {
@@ -9853,7 +10015,7 @@ private:
             const std::string deckName = !tok.empty() && tok.front() == '%' ? tok.substr(1) : tok;
             if (legacyReferences && !escapedDeck && deck_.has(deckName)) return deck_.expandReference(tok, deckReferences);
             if (auto h = helpEntryContent(tok)) return expandHelpRefs(*h, msg);
-            if (legacyReferences) if (auto h = replyHelpEntryContent(tok, &msg)) return expandHelpRefs(*h, msg);
+            if (legacyReferences) if (auto h = replyHelpEntryContent(tok, &msg)) return *h;
             std::string dx = tok;
             while (!dx.empty() && (dx.front() == '%' || dx.front() == '_')) dx.erase(dx.begin());
             if (looksDiceExpr(dx)) { auto r = engine_.roll(dx); if (r.ok()) return std::to_string(r.modifiedTotal); }
@@ -11603,10 +11765,10 @@ private:
         if (msg.type != MessageType::kGroup) return i18n_.tr(loc, "deck.default_group_only");
         auto [verb, tail] = splitCommand(trim(args)); verb = toLower(verb);
         const bool listing = verb.empty() || verb == "list" || verb == "show" || verb == "rest";
-        const bool creating = verb == "new" || verb == "from" || verb == "set";
+        const bool creating = verb == "new" || verb == "from" || verb == "set" || verb == "range" || verb == "members";
         const bool removing = verb == "del" || verb == "rm";
         if (!listing && !creating && !removing && verb != "reset" && verb != "wash" && verb != "clr" && verb != "clear")
-            return i18n_.tr(loc, "deck.session_usage");
+            return i18n_.tr(loc, "deck.session_usage") + "\n" + i18n_.tr(loc, "deck.session_generators");
         std::string name = trim(tail), error; json created;
         if (creating) {
             {
@@ -11616,9 +11778,30 @@ private:
                     return i18n_.tr(loc, "game.not_master", {{"nick", displayName(msg)}});
             }
             auto parts = splitCommand(name); name = parts.first;
-            if (name.empty() || name.size() > 256 || parts.second.empty()) return i18n_.tr(loc, "deck.session_usage");
+            if (name.empty() || name.size() > 256 || (parts.second.empty() && verb != "members")
+                || (verb == "members" && !parts.second.empty())) return i18n_.tr(loc, "deck.session_usage") + "\n" + i18n_.tr(loc, "deck.session_generators");
             std::vector<std::string> cards;
-            if (verb == "new") cards = splitChoices(parts.second);
+            const bool literal = verb == "range" || verb == "members";
+            if (verb == "range") {
+                cards = session_deck::rangeCards(parts.second, error);
+                if (cards.empty()) return i18n_.tr(loc, "deck.session_invalid", {{"reason", error}});
+            } else if (verb == "members") {
+                const auto adapter = adapters_.getAdapter(msg.adapterId);
+                if (!adapter || adapter->platform() != msg.platform || !adapter->isConnected())
+                    return i18n_.tr(loc, "deck.session_invalid", {{"reason", "当前适配器账号不可用"}});
+                const auto members = adapter->getGroupMemberList(msg.targetId);
+                if (members.empty()) {
+                    adapter->refreshMembers(msg.targetId);
+                    return i18n_.tr(loc, "deck.session_invalid", {{"reason", "群成员缓存尚未就绪，已请求当前账号刷新，请稍后重试"}});
+                }
+                if (members.size() > session_deck::maxCards)
+                    return i18n_.tr(loc, "deck.session_invalid", {{"reason", "当前账号无法提供有效群成员列表，请待成员缓存就绪后重试"}});
+                std::set<std::string> seen;
+                for (const auto& member : members) if (!member.empty() && seen.insert(member).second) {
+                    const auto nick = adapter->cachedUserName(member, msg.targetId);
+                    cards.push_back(nick.empty() ? member : session_deck::memberLabel(nick) + "(" + member + ")");
+                }
+            } else if (verb == "new") cards = splitChoices(parts.second);
             else {
                 const auto source = trim(parts.second);
                 const auto snapshot = !source.empty() && source[0] != '_' ? deck_.entries(source) : std::nullopt;
@@ -11627,7 +11810,7 @@ private:
             }
             // This may expand a weight's [dice]/help references: no game/storage
             // lock may be held while invoking the public deck formatter.
-            created = session_deck::create(cards, [this](const auto& text) { return deck_.expandText(text); }, error);
+            created = session_deck::create(cards, [this](const auto& text) { return deck_.expandText(text); }, error, literal);
             if (!created.is_object()) return i18n_.tr(loc, "deck.session_invalid", {{"reason", error}});
         }
         std::lock_guard<std::mutex> lock(gameSessionMutex());
@@ -12496,6 +12679,7 @@ private:
     HelpProviderFn helpProvider_;
     HelpProviderFn legacyModHelpProvider_;
     LegacyHelpRenderFn legacyModHelpRenderer_;
+    TemplateDirectoryFn templateDirectory_;
     LegacyMessageStageFn legacyMessageStage_;
     LegacyLogEndFn legacyLogEndHook_;
     ScopedHelpFn legacyRuleHelp_;

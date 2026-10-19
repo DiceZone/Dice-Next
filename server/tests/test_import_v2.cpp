@@ -1169,9 +1169,16 @@ TEST(CustomMessageMigration, HistoricalUpgradeIsOnceNonDestructiveAndPreservesPe
         persona("legacy.strEnRoll", "{py:danger()}", 42);
         persona("legacy.strRollSkill", "old", 43); persona("dice.compat.check.prefix", "new", 43);
         const auto report = upgradeLegacyCheckTexts(db);
-        ASSERT_EQ(report["restored"].get<int>(), 3);
+        ASSERT_EQ(report["restored"].get<int>(), 4);
         ASSERT_EQ(report["conflicts"].get<int>(), 3);
-        ASSERT_EQ(report["preserved"].get<int>(), 2);
+        ASSERT_EQ(report["preserved"].get<int>(), 1);
+        // Non-blocking waits are supported, but Python remains preserved only.
+        const auto waiting = storage->get_all<I18nOverrideRow>(orm::where(
+            orm::c(&I18nOverrideRow::key) == "dice.compat.check.single.fumble"));
+        ASSERT_EQ(waiting.size(), size_t(1));
+        ASSERT_EQ(waiting[0].value, "{wait:100}");
+        ASSERT_EQ(storage->count<PersonaEntryRow>(orm::where(
+            orm::c(&PersonaEntryRow::key) == "dice.compat.growth.base")), 0);
         auto rows = storage->get_all<I18nOverrideRow>(orm::where(orm::c(&I18nOverrideRow::key) == "dice.compat.check.prefix"));
         ASSERT_EQ(rows.size(), size_t(1)); ASSERT_EQ(rows[0].value, "**{nick}**旧前缀："); ASSERT_EQ(rows[0].format, "markdown");
         ASSERT_EQ(storage->count<I18nOverrideRow>(orm::where(orm::c(&I18nOverrideRow::key) == "legacy.strRollSkill")), 1);
