@@ -17,7 +17,7 @@ void setSharedSetting(Storage& st, const std::string& platform, const std::strin
     if (rows.empty()) {
         GroupSettingRow row; row.platform = platform; row.groupId = groupId;
         row.key = key; row.value = value; st.insert(row);
-    } else { auto row = rows.front(); row.value = value; st.update(row); }
+    } else if (rows.front().value != value) { auto row = rows.front(); row.value = value; st.update(row); }
 }
 
 // Only a genuine join or an explicit administrator restore clears a leave intent.

@@ -62,7 +62,11 @@ void setAccountGroupSetting(Storage& st, const std::string& adapterId,
         r.endpointId = endpointId; r.key = key; r.value = value;
         st.insert(r);
     } else {
-        auto r = rows.front(); r.platform = platform;
+        auto r = rows.front();
+        // 群发现每次打开页面都会对所有群重写相同的值；值未变就不写，避免大量写事务逐个落盘。
+        if (r.platform == platform && r.value == value && (endpointId.empty() || r.endpointId == endpointId))
+            return;
+        r.platform = platform;
         if (!endpointId.empty()) r.endpointId = endpointId;
         r.value = value; st.update(r);
     }

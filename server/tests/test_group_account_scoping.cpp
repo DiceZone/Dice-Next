@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <type_traits>
 
 using namespace dice;
 
@@ -273,4 +274,40 @@ TEST(GroupLeave, LeaveStampIsScopedToTheLeavingAccount) {
     ASSERT_TRUE(leaveRecentlyRequested(accountGroupSetting(st, "adapterA", "onebot_v11", "5001", kLeaveRequestedAt)));
     // 同一个群的另一个骰娘账号没退群，照常被自动发现
     ASSERT_FALSE(leaveRecentlyRequested(accountGroupSetting(st, "adapterB", "onebot_v11", "5001", kLeaveRequestedAt)));
+}
+
+namespace {
+// 只记录写入次数的存储替身：验证值未变时不产生写事务。
+struct CountingStorage {
+    std::vector<GroupAccountSettingRow> accountRows;
+    std::vector<GroupSettingRow> sharedRows;
+    int inserts = 0, updates = 0;
+    template <typename T, typename... Args> std::vector<T> get_all(Args&&...) {
+        if constexpr (std::is_same_v<T, GroupAccountSettingRow>) return accountRows;
+        else return sharedRows;
+    }
+    int insert(const GroupAccountSettingRow& row) { ++inserts; accountRows.push_back(row); return inserts; }
+    int insert(const GroupSettingRow& row) { ++inserts; sharedRows.push_back(row); return inserts; }
+    void update(const GroupAccountSettingRow& row) { ++updates; accountRows.front() = row; }
+    void update(const GroupSettingRow& row) { ++updates; sharedRows.front() = row; }
+};
+}  // namespace
+
+TEST(GroupAccountScoping, UnchangedSettingsAreNotRewritten) {
+    CountingStorage st;
+    setAccountGroupSetting(st, "napcat", "onebot_v11", "1001", "1001", "left", "0");
+    ASSERT_EQ(st.inserts, 1);
+    setAccountGroupSetting(st, "napcat", "onebot_v11", "1001", "1001", "left", "0");
+    setAccountGroupSetting(st, "napcat", "onebot_v11", "1001", "", "left", "0");
+    ASSERT_EQ(st.updates, 0);
+    setAccountGroupSetting(st, "napcat", "onebot_v11", "1001", "1001", "left", "1");
+    ASSERT_EQ(st.updates, 1);
+    setAccountGroupSetting(st, "napcat", "onebot_v11", "1001", "2002", "left", "1");
+    ASSERT_EQ(st.updates, 2);
+
+    group_management::setSharedSetting(st, "onebot_v11", "1001", "name", "希亚的团");
+    group_management::setSharedSetting(st, "onebot_v11", "1001", "name", "希亚的团");
+    ASSERT_EQ(st.updates, 2);
+    group_management::setSharedSetting(st, "onebot_v11", "1001", "name", "新团名");
+    ASSERT_EQ(st.updates, 3);
 }
