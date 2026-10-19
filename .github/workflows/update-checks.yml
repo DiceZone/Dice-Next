@@ -170,7 +170,7 @@ jobs:
         shell: pwsh
         working-directory: main
         run: |
-          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DDICENEXT_MSVC_COMPILE_PROCESSES=2 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$env:VCPKG_ROOT/installed"
+          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DDICENEXT_MSVC_COMPILE_PROCESSES=4 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$env:VCPKG_ROOT/installed"
           if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
       - name: Compile regression tests (Windows)
         if: runner.os == 'Windows'
