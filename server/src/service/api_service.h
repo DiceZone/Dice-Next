@@ -43,6 +43,7 @@
 #include "group_list.h"
 #include "broadcast_manager.h"
 #include "log_service.h"
+#include "log_usage.h"
 #include "ai_gateway.h"     // AI 网关
 #include "ai_polish.h"      // 润色（默认提示词）
 #include "ai_translate.h"   // 翻译（默认提示词）
@@ -4116,30 +4117,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Put, drogon::Delete});
 
     // ── Sessions ──────────────────────────────────────────────
-    app.registerHandler("/api/logs", [lst](Req req, CB&& cb) {
+    auto logUsageCache = std::make_shared<log_usage::Cache>();
+    app.registerHandler("/api/logs", [lst, &db, logUsageCache](Req req, CB&& cb) {
         try {
             std::string gid = req->getParameter("groupId");
             auto rows = lst->get_all<GameLogRow>();
-            struct LogUsage {
-                int count = 0;
-                std::string lastAt;
-                std::uint64_t databaseBytes = 0;
-                std::uint64_t imageBytes = 0;
-            };
-            std::unordered_map<int, LogUsage> usage;
+            log_usage::UsageMap usage;
 
             // SQLite 无法精确拆分出单行占用页数；这里按该日志实际保存的字段字节数
             // 统计数据库内容，并与本地缓存图片的真实文件大小相加。这样既不会把
             // 整个 logs.db 的空闲页重复分摊，也能准确反映图片带来的主要磁盘占用。
-            for (const auto& message : lst->get_all<GameLogMessageRow>(
-                     orm::order_by(&GameLogMessageRow::id).asc())) {
-                auto& item = usage[message.logId];
-                ++item.count;
-                item.lastAt = message.createdAt;
-                item.databaseBytes += sizeof(message.id) + sizeof(message.logId)
-                    + message.messageId.size() + message.sender.size() + message.userId.size()
-                    + message.content.size() + message.createdAt.size() + message.images.size();
-            }
+            // 消息统计在数据库内聚合，大型日志库不会被整份读入内存。
+            if (auto* raw = db.getLogConnection()) logUsageCache->snapshot(raw, usage);
             namespace fs = std::filesystem;
             std::error_code imageEc;
             for (const char* dir : {"data/logs/images", "../data/logs/images"}) {
