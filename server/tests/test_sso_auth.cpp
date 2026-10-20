@@ -3,10 +3,13 @@
 #include "test_framework.h"
 #include "../src/service/sso_auth.h"
 #include "../src/service/web_auth.h"
+#include "../src/adapter/adapter_interface.h"
 
 #include <chrono>
 #include <filesystem>
+#include <atomic>
 #include <memory>
+#include <thread>
 
 using namespace dice;
 using json = nlohmann::json;
@@ -138,3 +141,37 @@ TEST(SsoAuth, SessionRolesAreReevaluatedFromCurrentConfiguration) {
         {{"id", "gh"}, {"enabled", false}, {"bindings", json::array({{{"sub", "abc"}}})}}})}});
     ASSERT_TRUE(sso::roleOf(oidcUser, cfg, router) == sso::Role::None);
 }
+
+TEST(SsoAuth, RestrictedTestSenderIsAlwaysTheLoggedInQq) {
+    Message msg;
+    msg.senderId = "99999";          // 骰主
+    msg.selfId = "10001";            // 试图让发送者等于骰娘自身
+    msg.targetId = "100001";
+    sso::bindTestSender(msg, "10001", false);
+    ASSERT_EQ(msg.senderId, std::string("10001"));
+    ASSERT_TRUE(msg.selfId.empty());
+    ASSERT_EQ(msg.targetId, std::string("100001"));
+    sso::bindTestSender(msg, "10001", true);
+    ASSERT_EQ(msg.targetId, std::string("10001"));
+}
+
+TEST(SsoAuth, BackgroundTaskStopsPromptlyOnDestruction) {
+    std::atomic<bool> ranPastWait{false};
+    const auto started = std::chrono::steady_clock::now();
+    {
+        sso::BackgroundTask task;
+        task.start([&](sso::BackgroundTask& self) {
+            if (!self.waitFor(std::chrono::seconds(60))) return;
+            ranPastWait = true;
+        });
+    }
+    ASSERT_FALSE(ranPastWait.load());
+    ASSERT_TRUE(std::chrono::steady_clock::now() - started < std::chrono::seconds(5));
+
+    sso::BackgroundTask quick;
+    std::atomic<bool> done{false};
+    quick.start([&](sso::BackgroundTask& self) { if (self.waitFor(std::chrono::milliseconds(10))) done = true; });
+    for (int i = 0; i < 200 && !done; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(done.load());
+}
+

@@ -3077,6 +3077,9 @@ static int realMain(int argc, char* argv[]) {
     app.setClientMaxBodySize(128 * 1024 * 1024);
     app.setClientMaxMemoryBodySize(128 * 1024 * 1024);
 
+    // 公寓托管实例自动启用第三方登录的后台任务。声明在 configMgr 之后：退出时先于它停止并结束。
+    dice::sso::BackgroundTask managedSsoSetup;
+
     // ── WebUI 登录鉴权 ───────────────────────────────────
     auto& webAuth = dice::WebAuth::instance();
     webAuth.configure(configMgr.get<std::string>("webui/password", ""),
@@ -3130,6 +3133,7 @@ static int realMain(int argc, char* argv[]) {
                     }
                     req->attributes()->insert("dn_role", std::string(dice::sso::roleName(role)));
                     req->attributes()->insert("dn_trust", trust);
+                    req->attributes()->insert("dn_qq", auth.identityOf(sessionToken).value("qq", std::string()));
                     next(); return;
                 }
                 auth.revoke(sessionToken);
@@ -3274,11 +3278,11 @@ static int realMain(int argc, char* argv[]) {
         dice::sso::registerRoutes(app, configMgr, cmdRouter, configPath, sessionCookieName, makeSsoCookie);
         // 公寓托管实例：以公开访问地址自动启用骰子之间账号登录（稍后执行，不拖慢启动）。
         if (const char* publicUrl = std::getenv("DICENEXT_PUBLIC_URL"); diceFlatsManaged && publicUrl && *publicUrl) {
-            std::thread([&configMgr, url = std::string(publicUrl)] {
-                std::this_thread::sleep_for(std::chrono::seconds(15));
+            managedSsoSetup.start([&configMgr, url = std::string(publicUrl)](dice::sso::BackgroundTask& task) {
+                if (!task.waitFor(std::chrono::seconds(15))) return;   // 进程正在退出
                 try { DICE_LOG_INFO("网页后台：骰子之间账号登录 {}", dice::sso::ensureManagedBdcLogin(configMgr, url)); }
                 catch (...) { DICE_LOG_EXCEPTION("managed BDC sign-in setup"); }
-            }).detach();
+            });
         }
         // 首次设置管理口令（仅空口令时可用；成功后自动登录）。
         app.registerHandler("/api/auth/setup",
@@ -3597,7 +3601,15 @@ static int realMain(int argc, char* argv[]) {
                 // Optional multi-bot targeting fields for testing.
                 msg.selfId = body.value("selfId", std::string(""));
                 msg.adapterId = body.value("adapterId", std::string(""));
-                if (body.contains("role")) msg.extra["role"] = body.value("role", std::string(""));
+                // 第三方登录的受限管理员只能以自己的 QQ 测试：指令会真实执行，不能借此冒充骰主或骰娘自身。
+                std::string panelRole, panelQQ;
+                try { panelRole = req->attributes()->get<std::string>("dn_role"); } catch (...) {}
+                try { panelQQ = req->attributes()->get<std::string>("dn_qq"); } catch (...) {}
+                if (panelRole == "admin") {
+                    if (panelQQ.empty()) throw std::invalid_argument("restricted");
+                    dice::sso::bindTestSender(msg, panelQQ, msg.type == dice::MessageType::kPrivate);
+                }
+                if (body.contains("role") && panelRole != "admin") msg.extra["role"] = body.value("role", std::string(""));
                 if (body.contains("card")) msg.extra["card"] = body.value("card", std::string(""));   // 测试台注入群名片，验证 {card}/{nick}
                 if (body.contains("atList") && body["atList"].is_array())
                     for (const auto& a : body["atList"])

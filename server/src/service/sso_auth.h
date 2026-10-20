@@ -18,11 +18,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
 #include <ctime>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -281,6 +284,58 @@ private:
     }
     std::mutex mutex_;
     std::map<std::string, Flow> flows_;
+};
+
+/// 受限管理员在「指令测试」里只能以自己的 QQ 发言：发送者固定为登录身份，不能冒充骰主，
+/// 也不能把自己设成骰娘自身（发送者等于 selfId 时按骰娘自身的最高权限处理）。
+template <typename Message>
+void bindTestSender(Message& msg, const std::string& qq, bool privateChat) {
+    msg.senderId = qq;
+    msg.selfId.clear();
+    if (privateChat) msg.targetId = qq;
+}
+
+/// 一次性后台任务：析构时通知停止并等待结束。声明在它引用的对象之后，就能保证
+/// 任务先于这些对象结束，进程退出时不会访问已经销毁的配置。
+class BackgroundTask {
+public:
+    BackgroundTask() = default;
+    BackgroundTask(const BackgroundTask&) = delete;
+    BackgroundTask& operator=(const BackgroundTask&) = delete;
+    ~BackgroundTask() { stop(); }
+
+    template <typename Fn>
+    void start(Fn&& fn) {
+        stop();
+        {
+            std::lock_guard lock(mutex_);
+            stopRequested_ = false;
+        }
+        thread_ = std::thread([this, fn = std::forward<Fn>(fn)]() mutable { fn(*this); });
+    }
+    /// 等待一段时间；期间收到停止请求则提前返回 false。
+    bool waitFor(std::chrono::milliseconds duration) {
+        std::unique_lock lock(mutex_);
+        return !changed_.wait_for(lock, duration, [this] { return stopRequested_; });
+    }
+    bool stopRequested() {
+        std::lock_guard lock(mutex_);
+        return stopRequested_;
+    }
+    void stop() {
+        {
+            std::lock_guard lock(mutex_);
+            stopRequested_ = true;
+        }
+        changed_.notify_all();
+        if (thread_.joinable() && thread_.get_id() != std::this_thread::get_id()) thread_.join();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool stopRequested_ = false;
+    std::thread thread_;
 };
 
 // ─── 会话权限 ────────────────────────────────────────────────────
