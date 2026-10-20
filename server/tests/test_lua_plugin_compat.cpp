@@ -80,6 +80,33 @@ private:
 
 }  // namespace
 
+TEST(LuaPluginCompat, IndexedConfigurationSnapshotSelectsOnlyRequestedSessionsAndFields) {
+    TempWorkspace workspace("dice_next_indexed_conf_");
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_TRUE(manager.confSetBatch({
+        {"game:index", "sessions", R"({"A":"one","B":"two","missing":"absent","bad":42})"},
+        {"game:session:one", "__name", "第一团"}, {"game:session:one", "__areas", "[\"100\"]"},
+        {"game:session:one", "__decks", "must not read large deck content"},
+        {"game:session:two", "__name", "第二团"},
+        {"game:session:orphan", "__name", "不在索引中"},
+        {"unrelated", "__name", "not a session"}
+    }));
+    const auto snapshot = manager.confIndexedSnapshot("game:index", "sessions", "game:session:", {"__name", "__areas"});
+    ASSERT_EQ(snapshot.size(), std::size_t(2));
+    ASSERT_EQ(snapshot["A"]["__name"], "第一团");
+    ASSERT_EQ(snapshot["A"]["__areas"], "[\"100\"]");
+    ASSERT_FALSE(snapshot["A"].contains("__decks"));
+    ASSERT_EQ(snapshot["B"].size(), std::size_t(1));
+    ASSERT_EQ(manager.confGet("game:session:one", "__decks"), std::string("must not read large deck content"));
+    ASSERT_TRUE(manager.confIndexedSnapshot("game:index", "sessions", "game:session:", {}).empty());
+    ASSERT_TRUE(manager.confIndexedSnapshot("game:index", "sessions", "game:session:", {"__name') OR 1=1 --"}).empty());
+    for (const std::string bad : {"[]", "broken", "42"}) {
+        manager.confSet("game:index", "sessions", bad);
+        ASSERT_TRUE(manager.confIndexedSnapshot("game:index", "sessions", "game:session:", {"__name"}).empty());
+    }
+}
+
 TEST(LuaPluginCompat, FormFeedFormatsAsExplicitMessageBreakWithLegacyPrecedence) {
     TempWorkspace workspace("dice_formfeed_compat_");
     LuaPluginManager manager; ASSERT_TRUE(manager.init());

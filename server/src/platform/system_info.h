@@ -4,11 +4,15 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <filesystem>
+#include <iosfwd>
+#include <optional>
 
 namespace dice::sysinfo {
 
-/// A mounted fixed disk / volume.
+/// The filesystem containing the instance's database (not folder size).
 struct DiskInfo {
+    std::string path;           // resolved data path used for the query
     std::string mount;          // e.g. "C:\\"
     std::string label;          // volume label (may be empty)
     std::string fs;             // filesystem, e.g. "NTFS"
@@ -33,13 +37,24 @@ struct SysInfo {
     int      memLoadPct  = 0;
     int      memSpeedMhz = 0;             // module speed (WMI; 0 = unknown)
     uint64_t procMemMB   = 0;             // this process's working set
-    // Disks (all fixed volumes)
+    // Zero or one filesystem: the volume containing the selected data path.
     std::vector<DiskInfo> disks;
 };
 
 /// Gather system info. On Windows samples CPU over a brief interval (~120ms).
 /// Static hardware details (CPU model, physical cores, RAM speed, disk models)
 /// are probed once and cached; only live load figures are re-sampled per call.
-SysInfo gather();
+SysInfo gather(const std::filesystem::path& dataPath = ".");
+
+/// Query only this existing file/directory's filesystem. Never fall back to an
+/// unrelated root/system disk on failure; symlinks are resolved before probing.
+std::optional<DiskInfo> diskForPath(const std::filesystem::path& dataPath);
+
+namespace detail {
+struct MountInfo { std::string mount, fs; };
+/// Longest component-prefix match in Linux mountinfo (including bind mounts).
+/// Kept platform-independent so mount escaping/container cases run on all CI OSes.
+MountInfo linuxMountForPath(std::istream& mountinfo, const std::string& absolutePath);
+}
 
 }  // namespace dice::sysinfo

@@ -3,6 +3,52 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-20: Data-volume selection and server-paged game sessions (local)
+
+- Dashboard storage now queries the filesystem containing `Database::path()`
+  (the primary database actually opened), not every mounted/fixed drive or a
+  hard-coded macOS root. Canonical paths follow symlinks; POSIX file bind mounts
+  query the file itself. Failed queries return no disk and an explicit UI
+  unavailable state, not a guessed system drive. The UI labels whole-volume
+  usage and exposes the selected data path; it does not claim folder size.
+- System-info regressions cover duplicate Linux mount devices, component-boundary
+  and longest-prefix selection, root overlays, file bind mounts, optional fields,
+  escaped spaces/backslashes/tabs, invalid paths and real Windows Unicode paths.
+  Eight registered cases produced **28 passing assertions** with MSVC; directory
+  symlink creation was unavailable on this host, so that conditional branch did
+  not execute. Linux/macOS mount parsing uses fixtures; no native execution on
+  those systems is claimed.
+- Game-session listing now reads four indexed configuration fields in one
+  query, combines active and historical session metadata inside SQLite, and
+  filters/sorts before SQL LIMIT/OFFSET. Count and page items share one SQL
+  statement; only page items are serialized for a paged response. No message or
+  image scan is performed. Materialized CTEs avoid repeated JSON projection;
+  group-name reads are bounded to requested IDs except global group-name search.
+- Seven game-session cases / **73 assertions** cover 2,507 sessions (2,100 active),
+  first/middle/last pages, stable global sorting, source deduplication, status
+  counts, global name/code/group/GM/player search, literal SQL metacharacters,
+  malformed metadata, integer overflow, deletion/page clamping, empty results
+  and the old no-page array contract. An SQLite authorizer forbids message-table
+  reads and all database writes during listing. First/middle/last queries took
+  about **46 ms combined** in one local in-memory fixture run, including response
+  assembly but not HTTP, platform lookups or the preceding configuration query;
+  this is not a deployment latency guarantee.
+- A real Lua-manager configuration-snapshot case adds **13 assertions** for index
+  scope, selected fields only, nonexistent/invalid entries, corrupted indexes,
+  literal key binding and unchanged source data. WebUI tests execute the real
+  hooks/page callbacks with deferred responses: 20 rendered cards for 2,507 total,
+  independent pages, server search/sort, retry, page clamping, stale responses,
+  unmount and stale operation-completion reloads. Frontend selects and pagination
+  remain shared styled components; these are deterministic component/hook tests,
+  not browser-layout or live-bot acceptance.
+- Windows amd64 Release server/core/Lua builds passed. Unfiltered native runs
+  passed **854 core cases / 50,129 assertions** and **65 Lua cases / 606 assertions**.
+  Optional external-plugin corpus environment variables were not enabled in this
+  run. BDC owner SSO is recorded as pending in the roadmap, not implemented.
+- WebUI **322 tests passed**, zero failures/skips; TypeScript lint and production
+  build passed. The existing large-bundle advisory remains non-fatal. These local
+  results do not establish cross-platform CI or Release publication success.
+
 ## 2026-10-19: macOS atomic shared-pointer build compatibility (local)
 
 - Release run 39204426328 failed in the [macOS arm64 compile job](https://github.com/DiceZone/Dice-Next/actions/runs/39204426328/job/117904252765).

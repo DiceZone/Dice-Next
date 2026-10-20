@@ -44,6 +44,7 @@
 #include "broadcast_manager.h"
 #include "log_service.h"
 #include "log_usage.h"
+#include "game_session_list.h"
 #include "ai_gateway.h"     // AI 网关
 #include "ai_polish.h"      // 润色（默认提示词）
 #include "ai_translate.h"   // 翻译（默认提示词）
@@ -400,12 +401,12 @@ static J replyToJson(const ReplyRuleRow& r) {
 
 // Host CPU / memory / disk snapshot for the dashboard server-info panel and the
 // live /api/system/sysinfo poll. Static hardware details are cached in gather().
-static J sysInfoJson() {
-    auto si = dice::sysinfo::gather();
+static J sysInfoJson(const std::string& databasePath) {
+    auto si = dice::sysinfo::gather(std::filesystem::u8path(databasePath));
     J disks = J::array();
     for (const auto& d : si.disks) {
         disks.push_back(J{
-            {"mount", d.mount}, {"label", d.label}, {"fs", d.fs}, {"model", d.model},
+            {"path", d.path}, {"mount", d.mount}, {"label", d.label}, {"fs", d.fs}, {"model", d.model},
             {"total_gb", d.totalGB}, {"used_gb", d.usedGB}, {"load", d.loadPct},
         });
     }
@@ -2362,8 +2363,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // ── Dashboard ─────────────────────────────────────────────
     // Live host metrics for the dashboard server-info curve (polled frequently).
-    app.registerHandler("/api/system/sysinfo", [](Req, CB&& cb) {
-        jsonReply(ok(sysInfoJson()), std::move(cb));
+    app.registerHandler("/api/system/sysinfo", [&db](Req, CB&& cb) {
+        jsonReply(ok(sysInfoJson(db.path())), std::move(cb));
     }, {drogon::Get});
 
     // 平台能力位：{platform: {kick,ban,poke,friends,...}}。前端按能力显示/隐藏
@@ -2375,7 +2376,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         jsonReply(ok(caps), std::move(cb));
     }, {drogon::Get});
 
-    app.registerHandler("/api/dashboard/stats", [st, lst, &adapterMgr](Req, CB&& cb) {
+    app.registerHandler("/api/dashboard/stats", [st, lst, &adapterMgr, &db](Req, CB&& cb) {
         try {
             int adapters = (int)st->count<AdapterRow>();
             int rules    = (int)st->count<ReplyRuleRow>();
@@ -2481,7 +2482,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 {"total_commands", static_cast<int>(CommandRouter::commandCount())},
                 {"total_rules", rules},
                 {"active_sessions", sessions},
-                {"system", sysInfoJson()},
+                {"system", sysInfoJson(db.path())},
                 {"recent_logs", readRecentLogs()}
             }), std::move(cb));
         } catch (const std::exception&) {
@@ -2494,7 +2495,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 {"total_commands", static_cast<int>(CommandRouter::commandCount())},
                 {"total_rules", (int)st->count<ReplyRuleRow>()},
                 {"active_sessions", (int)lst->count<GameLogRow>()},
-                {"system", sysInfoJson()},
+                {"system", sysInfoJson(db.path())},
                 {"recent_logs", J::array()}
             }), std::move(cb));
         }
@@ -4126,10 +4127,16 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         if (ids.empty()) return names;
         if (auto* st = db.getStorage()) {
             try {
-                for (const auto& row : st->get_all<GroupSettingRow>(
-                         orm::where(orm::c(&GroupSettingRow::key) == std::string("name"))))
-                    if (!row.value.empty() && row.value != row.groupId && ids.count(row.groupId))
-                        names.emplace(row.groupId, row.value);
+                // 当前页只查对应群名；分批限制绑定变量数量，不再枚举全部群设置。
+                std::vector<std::string> batch;
+                auto readBatch = [&] {
+                    for (const auto& row : st->get_all<GroupSettingRow>(orm::where(
+                             orm::c(&GroupSettingRow::key) == std::string("name") && orm::in(&GroupSettingRow::groupId, batch))))
+                        if (!row.value.empty() && row.value != row.groupId) names.emplace(row.groupId, row.value);
+                    batch.clear();
+                };
+                for (const auto& id : ids) { batch.push_back(id); if (batch.size() == 500) readBatch(); }
+                if (!batch.empty()) readBatch();
             } catch (...) {}
         }
         for (const auto& id : ids) {
@@ -4303,86 +4310,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
     // 跨群团务会话：进行中的会话从索引读取，已结团的会话从日志元数据恢复。
-    app.registerHandler("/api/game-sessions", [&luaMod, lst, groupNamesFor](Req, CB&& cb) {
+    app.registerHandler("/api/game-sessions", [&luaMod, &db, groupNamesFor](Req req, CB&& cb) {
         try {
-            auto index = J::parse(luaMod.confGet("game:index", "sessions"), nullptr, false);
-            J out = J::array();
-            if (!index.is_object()) index = J::object();
-            auto logs = lst->get_all<GameLogRow>();
-            J loggedGames = J::object();
-            for (const auto& log : logs) {
-                try {
-                    auto meta = J::parse(log.customRules, nullptr, false);
-                    if (!meta.is_object()) continue;
-                    std::string code = meta.value("gameCode", "");
-                    if (code.empty()) continue;
-                    if (!loggedGames.contains(code)) {
-                        loggedGames[code] = J{{"name", meta.value("gameName", "未命名团务")},
-                                              {"groups", J::array()}, {"gms", J::array()}, {"logCount", 0},
-                                              {"activeLogs", 0}, {"pausedLogs", 0}, {"endedLogs", 0},
-                                              {"createdAt", ""}};
-                    }
-                    auto& game = loggedGames[code];
-                    bool knownGroup = false;
-                    for (const auto& group : game["groups"]) if (group == log.groupId) { knownGroup = true; break; }
-                    if (!knownGroup) game["groups"].push_back(log.groupId);
-                    bool knownGm = false;
-                    for (const auto& gm : game["gms"]) if (gm == log.gmId) { knownGm = true; break; }
-                    if (!log.gmId.empty() && !knownGm) game["gms"].push_back(log.gmId);
-                    game["logCount"] = game.value("logCount", 0) + 1;
-                    if (game.value("createdAt", std::string()).empty() || log.createdAt < game.value("createdAt", std::string())) game["createdAt"] = log.createdAt;
-                    if (log.status == 0) game["activeLogs"] = game.value("activeLogs", 0) + 1;
-                    else if (log.status == 1) game["pausedLogs"] = game.value("pausedLogs", 0) + 1;
-                    else game["endedLogs"] = game.value("endedLogs", 0) + 1;
-                } catch (...) {}
-            }
-            for (auto it = index.begin(); it != index.end(); ++it) {
-                if (!it.value().is_string()) continue;
-                std::string code = it.key(), id = it.value().get<std::string>();
-                std::string scope = "game:session:" + id;
-                std::string name = luaMod.confGet(scope, "__name");
-                if (name.empty()) continue;
-                J areas = J::parse(luaMod.confGet(scope, "__areas"), nullptr, false);
-                if (!areas.is_array()) areas = J::array();
-                J gms = J::parse(luaMod.confGet(scope, "__gms"), nullptr, false);
-                if (!gms.is_array()) gms = J::array();
-                J players = J::parse(luaMod.confGet(scope, "__pls"), nullptr, false);
-                if (!players.is_array()) players = J::array();
-                int logCount = loggedGames.contains(code) ? loggedGames[code].value("logCount", 0) : 0;
-                int activeLogs = loggedGames.contains(code) ? loggedGames[code].value("activeLogs", 0) : 0;
-                int pausedLogs = loggedGames.contains(code) ? loggedGames[code].value("pausedLogs", 0) : 0;
-                int endedLogs = loggedGames.contains(code) ? loggedGames[code].value("endedLogs", 0) : 0;
-                std::string createdAt = loggedGames.contains(code) ? loggedGames[code].value("createdAt", "") : "";
-                out.push_back(J{{"code", code}, {"name", name}, {"groups", areas},
-                                {"gms", gms}, {"players", players}, {"createdAt", createdAt},
-                                {"logCount", logCount}, {"activeLogs", activeLogs}, {"pausedLogs", pausedLogs},
-                                {"endedLogs", endedLogs}, {"active", true}});
-                loggedGames.erase(code);
-            }
-            for (auto it = loggedGames.begin(); it != loggedGames.end(); ++it) {
-                out.push_back(J{{"code", it.key()}, {"name", it.value().value("name", "未命名团务")},
-                                {"groups", it.value()["groups"]}, {"logCount", it.value().value("logCount", 0)},
-                                {"gms", it.value()["gms"]}, {"players", J::array()},
-                                {"createdAt", it.value().value("createdAt", "")},
-                                {"activeLogs", it.value().value("activeLogs", 0)},
-                                {"pausedLogs", it.value().value("pausedLogs", 0)},
-                                {"endedLogs", it.value().value("endedLogs", 0)}, {"active", false}});
-            }
-            std::set<std::string> sessionGroups;
-            for (const auto& session : out)
-                for (const auto& group : session.value("groups", J::array()))
-                    if (group.is_string()) sessionGroups.insert(group.get<std::string>());
-            const auto names = groupNamesFor(sessionGroups);
-            for (auto& session : out) {
-                J groupNames = J::object();
-                for (const auto& group : session.value("groups", J::array()))
-                    if (group.is_string()) {
-                        const auto found = names.find(group.get<std::string>());
-                        if (found != names.end()) groupNames[found->first] = found->second;
-                    }
-                session["groupNames"] = groupNames;
-            }
-            jsonReply(ok(out), std::move(cb));
+            game_sessions::Options options;
+            options.paginated = !req->getParameter("page").empty();
+            options.page = game_sessions::integerParameter(req->getParameter("page"), 1);
+            options.size = game_sessions::integerParameter(req->getParameter("size"), 20);
+            options.query = utils::trim(req->getParameter("q"));
+            if (!req->getParameter("sort").empty()) options.sort = req->getParameter("sort");
+            options.direction = req->getParameter("dir");
+            const auto snapshot = luaMod.confIndexedSnapshot("game:index", "sessions", "game:session:",
+                {"__name", "__areas", "__gms", "__pls"});
+            jsonReply(ok(game_sessions::list(db.getLogConnection(), snapshot, options, groupNamesFor)), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
 

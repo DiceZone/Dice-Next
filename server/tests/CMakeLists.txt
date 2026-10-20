@@ -9,6 +9,7 @@ set(TEST_SOURCES
     test_main.cpp
     test_logger.cpp
     test_network_info.cpp
+    test_system_info.cpp
     test_runtime_reliability.cpp
     test_bounded_regex.cpp
     test_script_execution_windows_macros.cpp
@@ -17,6 +18,7 @@ set(TEST_SOURCES
     test_cooldown_manager.cpp
     test_counter_store.cpp
     test_log_usage.cpp
+    test_game_session_list.cpp
     test_chat_persistence.cpp
     test_causal_rule_manager.cpp
     test_help_entry_filter.cpp

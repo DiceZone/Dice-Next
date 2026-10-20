@@ -2048,6 +2048,41 @@ void LuaPluginManager::cardSave(const std::string& uid, const std::string& scope
     sqlite3_finalize(st);
 }
 
+nlohmann::json LuaPluginManager::confIndexedSnapshot(const std::string& indexScope,
+    const std::string& indexKey, const std::string& scopePrefix, const std::vector<std::string>& keys) const {
+    std::lock_guard<std::mutex> lk(confMutex_);
+    auto out = nlohmann::json::object();
+    if (!confDb_ || keys.empty()) return out;
+    std::string sql = R"sql(
+        SELECT entry.key, c.k, c.v FROM lua_conf AS idx,
+        json_each(CASE WHEN json_valid(idx.v) THEN
+            CASE WHEN json_type(idx.v)='object' THEN idx.v ELSE '{}' END ELSE '{}' END) AS entry
+        JOIN lua_conf AS c ON c.scope=(?3 || entry.value)
+        WHERE idx.scope=?1 AND idx.k=?2 AND entry.type='text' AND c.k IN (
+    )sql";
+    for (std::size_t i = 0; i < keys.size(); ++i) sql += i ? ",?" : "?";
+    sql += ")";
+    sqlite3_stmt* raw = nullptr;
+    if (sqlite3_prepare_v2(confDb_, sql.c_str(), -1, &raw, nullptr) != SQLITE_OK)
+        throw std::runtime_error(sqlite3_errmsg(confDb_));
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> stmt(raw, sqlite3_finalize);
+    sqlite3_bind_text(raw, 1, indexScope.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(raw, 2, indexKey.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(raw, 3, scopePrefix.c_str(), -1, SQLITE_TRANSIENT);
+    for (std::size_t i = 0; i < keys.size(); ++i)
+        sqlite3_bind_text(raw, static_cast<int>(i + 4), keys[i].c_str(), -1, SQLITE_TRANSIENT);
+    int rc;
+    while ((rc = sqlite3_step(raw)) == SQLITE_ROW) {
+        auto text = [&](int column) {
+            const auto* value = sqlite3_column_text(raw, column);
+            return value ? std::string(reinterpret_cast<const char*>(value)) : std::string();
+        };
+        out[text(0)][text(1)] = text(2);
+    }
+    if (rc != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(confDb_));
+    return out;
+}
+
 std::string LuaPluginManager::confGet(const std::string& scope, const std::string& key) const {
     std::lock_guard<std::mutex> lk(confMutex_);
     if (!confDb_) return "";

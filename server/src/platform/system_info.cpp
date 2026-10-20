@@ -4,6 +4,9 @@
 #include <map>
 #include <vector>
 #include <string>
+#include <fstream>
+#include <sstream>
+#include <mutex>
 
 // ─────────────────────────── Windows ───────────────────────────
 #if defined(_WIN32)
@@ -28,8 +31,9 @@ static std::string narrow(const wchar_t* w) {
     if (!w || !*w) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
     if (n <= 1) return {};
-    std::string s(static_cast<size_t>(n - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
+    std::string s(static_cast<size_t>(n), '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr) != n) return {};
+    s.pop_back();
     return s;
 }
 
@@ -155,6 +159,7 @@ const StaticHw& staticHw() {
 #include <sys/utsname.h>
 
 #if defined(__APPLE__)
+#include <sys/mount.h>
 #include <sys/sysctl.h>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
@@ -267,7 +272,103 @@ static uint64_t macProcessMemoryMB() {
 
 namespace dice::sysinfo {
 
-SysInfo gather() {
+namespace detail {
+namespace {
+std::string unescapeMount(const std::string& value) {
+    std::string result;
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '\\' && i + 3 < value.size()
+            && value[i + 1] >= '0' && value[i + 1] <= '7'
+            && value[i + 2] >= '0' && value[i + 2] <= '7'
+            && value[i + 3] >= '0' && value[i + 3] <= '7') {
+            const int c = (value[i + 1] - '0') * 64 + (value[i + 2] - '0') * 8 + value[i + 3] - '0';
+            if (c > 0 && c <= 255) { result += static_cast<char>(c); i += 3; continue; }
+        }
+        result += value[i];
+    }
+    return result;
+}
+}
+MountInfo linuxMountForPath(std::istream& mountinfo, const std::string& absolutePath) {
+    MountInfo best;
+    std::string line;
+    while (std::getline(mountinfo, line)) {
+        std::istringstream fields(line);
+        std::string id, parent, device, root, mount, options, field, fs;
+        if (!(fields >> id >> parent >> device >> root >> mount >> options)) continue;
+        while (fields >> field && field != "-") {}
+        if (field != "-" || !(fields >> fs)) continue;
+        mount = unescapeMount(mount);
+        if (mount.empty() || mount.front() != '/' || absolutePath.empty() || absolutePath.front() != '/') continue;
+        const bool matches = mount == "/" || absolutePath == mount
+            || (absolutePath.size() > mount.size() && absolutePath.compare(0, mount.size(), mount) == 0 && absolutePath[mount.size()] == '/');
+        if (matches && mount.size() >= best.mount.size()) best = {mount, fs};
+    }
+    return best;
+}
+}
+
+std::optional<DiskInfo> diskForPath(const std::filesystem::path& dataPath) {
+    namespace fs = std::filesystem;
+    if (dataPath.empty()) return std::nullopt;
+    std::error_code ec;
+    const auto resolved = fs::canonical(dataPath, ec);
+    if (ec) return std::nullopt;
+    const auto status = fs::status(resolved, ec);
+    if (ec || (!fs::is_regular_file(status) && !fs::is_directory(status))) return std::nullopt;
+
+    // POSIX accepts a file path and must keep it: a container can bind-mount a
+    // database file from a different filesystem than its parent directory.
+#if defined(_WIN32)
+    const auto probe = fs::is_directory(status) ? resolved : resolved.parent_path();
+#else
+    const auto& probe = resolved;
+#endif
+    const auto space = fs::space(probe, ec);
+    if (ec || space.capacity == 0 || space.capacity == static_cast<uintmax_t>(-1)
+        || space.free == static_cast<uintmax_t>(-1)) return std::nullopt;
+    DiskInfo disk;
+    const auto utf8 = resolved.u8string();
+    disk.path.assign(utf8.begin(), utf8.end());
+    // Used space excludes filesystem-reserved free blocks. 'available' is the
+    // writable space for the caller, not a measure of bytes already in use.
+    const auto used = space.capacity > space.free ? space.capacity - space.free : 0;
+    constexpr uint64_t gb = 1024ull * 1024ull * 1024ull;
+    disk.totalGB = space.capacity / gb;
+    disk.usedGB = used / gb;
+    disk.loadPct = static_cast<int>(100.0L * used / space.capacity);
+    // If mount metadata cannot be obtained, show the queried path, never '/'
+    // or a guessed drive letter which could describe a different filesystem.
+    disk.mount = disk.path;
+#if defined(_WIN32)
+    std::vector<wchar_t> mount(32768);
+    if (GetVolumePathNameW(probe.c_str(), mount.data(), static_cast<DWORD>(mount.size()))) {
+        disk.mount = narrow(mount.data());
+        wchar_t label[MAX_PATH + 1]{}, filesystem[64]{};
+        if (GetVolumeInformationW(mount.data(), label, MAX_PATH, nullptr, nullptr, nullptr, filesystem, 64)) {
+            disk.label = narrow(label); disk.fs = narrow(filesystem);
+        }
+        static std::mutex modelMutex;
+        static std::map<std::string, std::string> modelCache;
+        std::lock_guard<std::mutex> lock(modelMutex);
+        auto it = modelCache.find(disk.mount);
+        if (it == modelCache.end()) it = modelCache.emplace(disk.mount, volumeModel(mount.data())).first;
+        disk.model = it->second;
+    }
+#elif defined(__linux__)
+    std::ifstream mounts("/proc/self/mountinfo");
+    const auto mount = detail::linuxMountForPath(mounts, disk.path);
+    if (!mount.mount.empty()) { disk.mount = mount.mount; disk.fs = mount.fs; }
+#elif defined(__APPLE__)
+    struct statfs volume{};
+    if (statfs(resolved.c_str(), &volume) == 0) {
+        disk.mount = volume.f_mntonname; disk.fs = volume.f_fstypename;
+    }
+#endif
+    return disk;
+}
+
+SysInfo gather(const std::filesystem::path& dataPath) {
     SysInfo s;
     s.cpuCores = static_cast<int>(std::thread::hardware_concurrency());
 
@@ -298,27 +399,6 @@ SysInfo gather() {
     if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
         s.procMemMB = pmc.WorkingSetSize / (1024ull * 1024ull);
 
-    static std::map<std::string, std::string> modelCache;
-    wchar_t drives[512]; DWORD n = GetLogicalDriveStringsW(511, drives);
-    for (wchar_t* d = drives; *d && (d - drives) < (int)n; d += wcslen(d) + 1) {
-        if (GetDriveTypeW(d) != DRIVE_FIXED) continue;
-        DiskInfo di; di.mount = narrow(d);
-        ULARGE_INTEGER freeToCaller, total, totalFree;
-        if (!GetDiskFreeSpaceExW(d, &freeToCaller, &total, &totalFree) || total.QuadPart == 0) continue;
-        const double GB = 1024.0 * 1024.0 * 1024.0;
-        di.totalGB = static_cast<uint64_t>(total.QuadPart / GB);
-        uint64_t usedBytes = (total.QuadPart > totalFree.QuadPart) ? (total.QuadPart - totalFree.QuadPart) : 0;
-        di.usedGB = static_cast<uint64_t>(usedBytes / GB);
-        di.loadPct = static_cast<int>(100.0 * static_cast<double>(usedBytes) / static_cast<double>(total.QuadPart));
-        wchar_t label[MAX_PATH + 1] = {0}, fs[64] = {0};
-        if (GetVolumeInformationW(d, label, MAX_PATH, nullptr, nullptr, nullptr, fs, 64)) {
-            di.label = narrow(label); di.fs = narrow(fs);
-        }
-        auto it = modelCache.find(di.mount);
-        if (it == modelCache.end()) it = modelCache.emplace(di.mount, volumeModel(d)).first;
-        di.model = it->second;
-        s.disks.push_back(std::move(di));
-    }
 
 #elif defined(__linux__)
     auto osr = osRelease();
@@ -340,26 +420,8 @@ SysInfo gather() {
     }
     { std::ifstream f("/proc/self/statm"); long sz = 0, rss = 0; if (f >> sz >> rss) {
         long pageKB = sysconf(_SC_PAGESIZE) / 1024; s.procMemMB = (rss * pageKB) / 1024; } }
-    { std::ifstream f("/proc/mounts"); std::string dev, mnt, fstype, rest; std::set<std::string> seen;
-      while (f >> dev >> mnt >> fstype) {
-          std::getline(f, rest);
-          if (dev.rfind("/dev/", 0) != 0 || fstype == "squashfs") continue;
-          if (!seen.insert(mnt).second) continue;
-          struct statvfs vfs;
-          if (statvfs(mnt.c_str(), &vfs) != 0 || vfs.f_blocks == 0) continue;
-          const double GB = 1024.0 * 1024.0 * 1024.0;
-          uint64_t blk = vfs.f_frsize, total = static_cast<uint64_t>(vfs.f_blocks) * blk, freeb = static_cast<uint64_t>(vfs.f_bavail) * blk;
-          if (total == 0) continue;
-          DiskInfo di; di.mount = mnt; di.fs = fstype;
-          di.totalGB = static_cast<uint64_t>(total / GB);
-          uint64_t usedb = total > freeb ? total - freeb : 0;
-          di.usedGB = static_cast<uint64_t>(usedb / GB);
-          di.loadPct = static_cast<int>(100.0 * static_cast<double>(usedb) / static_cast<double>(total));
-          s.disks.push_back(std::move(di));
-      }
-    }
 
-#else   // generic POSIX (macOS / BSD): OS name + root disk usage
+#else   // generic POSIX (macOS / BSD)
     struct utsname un; if (uname(&un) == 0) s.os = un.sysname;
 #if defined(__APPLE__)
     s.osId = "macos";
@@ -389,16 +451,8 @@ SysInfo gather() {
 #else
     s.osId = "linux";
 #endif
-    { struct statvfs vfs; if (statvfs("/", &vfs) == 0 && vfs.f_blocks) {
-        const double GB = 1024.0 * 1024.0 * 1024.0;
-        uint64_t blk = vfs.f_frsize, total = static_cast<uint64_t>(vfs.f_blocks) * blk, freeb = static_cast<uint64_t>(vfs.f_bavail) * blk;
-        DiskInfo di; di.mount = "/"; di.totalGB = static_cast<uint64_t>(total / GB);
-        uint64_t usedb = total > freeb ? total - freeb : 0;
-        di.usedGB = static_cast<uint64_t>(usedb / GB);
-        di.loadPct = total ? static_cast<int>(100.0 * static_cast<double>(usedb) / static_cast<double>(total)) : 0;
-        s.disks.push_back(std::move(di));
-    } }
 #endif
+    if (auto disk = diskForPath(dataPath)) s.disks.push_back(std::move(*disk));
     return s;
 }
 

@@ -222,6 +222,9 @@ public:
     std::vector<std::pair<std::string, std::string>> confAllUsers(const std::string& key) const;
     // 枚举某作用域全部键值（玩家管理详情页查看/编辑该用户的插件变量）。
     std::vector<std::pair<std::string, std::string>> confAllOf(const std::string& scope) const;
+    // 只读取 JSON 索引所指向对象的指定字段；一次查询，避免列表逐条 confGet。
+    nlohmann::json confIndexedSnapshot(const std::string& indexScope, const std::string& indexKey,
+        const std::string& scopePrefix, const std::vector<std::string>& keys) const;
     // 人物卡（Lua mod 专用，JSON blob，可存嵌套结构如背包）。scope=gid。
     std::string cardLoad(const std::string& uid, const std::string& scope) const;   // JSON 对象串（无则"{}"）
     void        cardSave(const std::string& uid, const std::string& scope, const std::string& jsonObj);
