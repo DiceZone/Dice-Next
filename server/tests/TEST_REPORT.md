@@ -3,6 +3,27 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-21: Windows short-path image aliases (local fix)
+
+- Release run [39475215795](https://github.com/DiceZone/Dice-Next/actions/runs/39475215795)
+  built all five platform packages and passed WebUI/Linux tests, but the Windows
+  core run had one failed assertion: the migrated module's work-relative old
+  image path was not registered. CI uses a `RUNNER~1` temporary-path component;
+  the instance data root was canonical while the source path was not.
+- Reproduced the same failure locally before the fix by running the existing
+  owner-migration case under `E:/DICERE~1` rather than `E:/DiceRefactor`.
+  The fix canonicalizes the already safety-checked source for relative aliases,
+  retaining both original and canonical absolute aliases. Existing link/reparse
+  and source-root checks remain in place.
+- A new Windows regression obtains a real 8.3 path, imports Unicode owner/image
+  names and checks relative/absolute aliases before and after reopening the
+  resource index. The short-name branch actually ran on this host. The resource
+  suite passed **26 cases / 139 assertions** under both full and short temporary
+  roots; these are repeated checks, not 52 distinct cases.
+- Windows Release server/core/Lua builds passed. Unfiltered runs passed **881
+  core cases / 50,279 assertions** and **66 Lua cases / 611 assertions**. SSO is
+  not included in these results; a new remote Release result is not yet claimed.
+
 ## 2026-10-21: Managed image files, portable deck archives and list avatars (local)
 
 - Added authenticated image-file management with server-side metadata paging,

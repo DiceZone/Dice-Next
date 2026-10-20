@@ -8,6 +8,9 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 using namespace dice::image_resources;
 namespace fs=std::filesystem;
@@ -123,6 +126,28 @@ TEST(ImageResources, PluginAndModuleImagesRemainUnderTheirOwner) {
     auto result=f.service->importOwner(f.folder/"data/mod",root,"mod","自定义规则");ASSERT_EQ(result["copied"],1);
     ASSERT_TRUE(fs::exists(f.service->checkedPath("mod/自定义规则/art/sub/图片.png")));
     ASSERT_TRUE(f.service->resolve("data/mod/自定义规则/art/sub/图片.png").has_value());
+}
+TEST(ImageResources, WindowsShortSourcePathsPreserveRelativeAndAbsoluteAliases) {
+#ifdef _WIN32
+    Images f;const auto root=f.folder/"data/mod"/fromUtf8("自定义规则");fs::create_directories(root/"art/sub");
+    const auto source=root/"art/sub"/fromUtf8("图片.png");
+    {std::ofstream out(source,std::ios::binary);out<<png;}
+    const auto length=GetShortPathNameW(f.folder.c_str(),nullptr,0);ASSERT_TRUE(length>0);
+    std::wstring shortName(length,L'\0');const auto written=GetShortPathNameW(f.folder.c_str(),shortName.data(),length);
+    ASSERT_TRUE(written>0 && written<length);shortName.resize(written);const fs::path shortRoot(shortName);
+    if(shortRoot==fs::canonical(f.folder)) {std::cout<<"(8.3 names unavailable; short-path branch not exercised) ";return;}
+    const auto shortDirectory=shortRoot/"data/mod"/fromUtf8("自定义规则");
+    const auto shortSource=shortDirectory/"art/sub"/fromUtf8("图片.png");
+    ASSERT_TRUE(fs::equivalent(source,shortSource));
+    const auto result=f.service->importOwner(shortRoot/"data/mod",shortDirectory,"mod","自定义规则");
+    ASSERT_EQ(result["copied"],1);ASSERT_TRUE(result["warnings"].empty());
+    const std::string relative="data/mod/自定义规则/art/sub/图片.png",canonical=utf8(fs::canonical(source)),original=utf8(fs::absolute(shortSource).lexically_normal());
+    for(const auto& alias:{std::string(relative),canonical,original})ASSERT_TRUE(f.service->resolve(alias).has_value());
+    ASSERT_TRUE(fs::is_regular_file(f.service->checkedPath("mod/自定义规则/art/sub/图片.png")));
+    ASSERT_TRUE(fs::is_regular_file(source));
+    f.service.reset();f.service=std::make_unique<Service>(f.folder/"data");
+    for(const auto& alias:{std::string(relative),canonical,original})ASSERT_TRUE(f.service->resolve(alias).has_value());
+#endif
 }
 TEST(ImageResources, DeckPackageRoundTripUsesSealDiceLayoutAndKeepsSamplesAndWeights) {
     Images f;f.upload("deck/塔罗.json/cards/a.png");fs::create_directories(f.folder/"data/decks");

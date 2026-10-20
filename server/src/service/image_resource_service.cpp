@@ -297,7 +297,13 @@ Json Service::importOwner(const fs::path& sourceRoot,const fs::path& directory,c
             const auto relative=utf8(source.lexically_relative(directory));
             const auto imported=importFile(sourceRoot,source,prefix+"/"+relative,utf8(source));
             addAlias(utf8(fs::absolute(source).lexically_normal()),imported["path"].get<std::string>());
-            const auto fromWork=fs::absolute(source).lexically_normal().lexically_relative(impl_->data.parent_path());
+            // The instance root is canonical. Resolve the already safety-checked
+            // source to the same spelling before deriving a work-relative alias:
+            // Windows TEMP may contain an 8.3 name such as RUNNER~1. Keep both
+            // absolute spellings for callers that still use the original path.
+            const auto canonicalSource=fs::canonical(source);
+            addAlias(utf8(canonicalSource),imported["path"].get<std::string>());
+            const auto fromWork=canonicalSource.lexically_relative(impl_->data.parent_path());
             if(!fromWork.empty() && !utf8(fromWork).starts_with("../"))addAlias(utf8(fromWork),imported["path"].get<std::string>());
             ++copied;
         } catch(const std::exception& error){warnings.push_back(utf8(source)+"："+error.what());}
