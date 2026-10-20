@@ -4119,64 +4119,191 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // ── Sessions ──────────────────────────────────────────────
     auto logUsageCache = std::make_shared<log_usage::Cache>();
-    app.registerHandler("/api/logs", [lst, &db, logUsageCache](Req req, CB&& cb) {
+    auto logBriefCache = std::make_shared<log_usage::BriefCache>();
+    // 群号 → 群名：群设置里记录的群名优先，其次已连接账号的群缓存。
+    auto groupNamesFor = [&db, &adapterMgr](const std::set<std::string>& ids) {
+        std::map<std::string, std::string> names;
+        if (ids.empty()) return names;
+        if (auto* st = db.getStorage()) {
+            try {
+                for (const auto& row : st->get_all<GroupSettingRow>(
+                         orm::where(orm::c(&GroupSettingRow::key) == std::string("name"))))
+                    if (!row.value.empty() && row.value != row.groupId && ids.count(row.groupId))
+                        names.emplace(row.groupId, row.value);
+            } catch (...) {}
+        }
+        for (const auto& id : ids) {
+            if (names.count(id)) continue;
+            for (const auto& adapter : adapterMgr.allAdapters()) {
+                const auto name = adapter->getGroupName(id);
+                if (!name.empty() && name != id) { names.emplace(id, name); break; }
+            }
+        }
+        return names;
+    };
+    // 本地缓存的日志图片（文件名 log<日志号>_*）计入占用；wanted 为空表示统计全部日志。
+    auto addImageBytes = [](log_usage::UsageMap& usage, const std::set<int>* wanted) {
+        namespace fs = std::filesystem;
+        std::error_code imageEc;
+        for (const char* dir : {"data/logs/images", "../data/logs/images"}) {
+            imageEc.clear();
+            if (!fs::is_directory(dir, imageEc)) continue;
+            for (const auto& entry : fs::directory_iterator(dir, imageEc)) {
+                if (!entry.is_regular_file(imageEc)) continue;
+                const std::string filename = dnx_u8str(entry.path().filename());
+                if (filename.rfind("log", 0) != 0) continue;
+                const auto underscore = filename.find('_', 3);
+                if (underscore == std::string::npos || underscore == 3) continue;
+                int logId = 0;
+                try { logId = std::stoi(filename.substr(3, underscore - 3)); }
+                catch (...) { continue; }
+                if (wanted && !wanted->count(logId)) continue;
+                const auto bytes = entry.file_size(imageEc);
+                if (!imageEc) usage[logId].imageBytes += static_cast<std::uint64_t>(bytes);
+                imageEc.clear();
+            }
+            break;
+        }
+    };
+    // 日志行自身字段的字节数（与消息字节一起构成数据库内容占用）。
+    auto logRowBytes = [](const GameLogRow& r) -> std::uint64_t {
+        return sizeof(r.id) + sizeof(r.status) + r.groupId.size() + r.gmId.size() + r.name.size()
+            + r.players.size() + r.customRules.size() + r.createdAt.size();
+    };
+    auto logGameMeta = [](const GameLogRow& r) {
+        std::pair<std::string, std::string> meta;
+        try {
+            auto parsed = J::parse(r.customRules, nullptr, false);
+            if (parsed.is_object()) meta = {parsed.value("gameCode", ""), parsed.value("gameName", "")};
+        } catch (...) {}
+        return meta;
+    };
+    app.registerHandler("/api/logs", [lst, &db, logUsageCache, logBriefCache, groupNamesFor, addImageBytes,
+                                      logRowBytes, logGameMeta](Req req, CB&& cb) {
         try {
             std::string gid = req->getParameter("groupId");
             auto rows = lst->get_all<GameLogRow>();
-            log_usage::UsageMap usage;
+            auto* raw = db.getLogConnection();
 
             // SQLite 无法精确拆分出单行占用页数；这里按该日志实际保存的字段字节数
             // 统计数据库内容，并与本地缓存图片的真实文件大小相加。这样既不会把
             // 整个 logs.db 的空闲页重复分摊，也能准确反映图片带来的主要磁盘占用。
             // 消息统计在数据库内聚合，大型日志库不会被整份读入内存。
-            if (auto* raw = db.getLogConnection()) logUsageCache->snapshot(raw, usage);
-            namespace fs = std::filesystem;
-            std::error_code imageEc;
-            for (const char* dir : {"data/logs/images", "../data/logs/images"}) {
-                imageEc.clear();
-                if (!fs::is_directory(dir, imageEc)) continue;
-                for (const auto& entry : fs::directory_iterator(dir, imageEc)) {
-                    if (!entry.is_regular_file(imageEc)) continue;
-                    const std::string filename = dnx_u8str(entry.path().filename());
-                    if (filename.rfind("log", 0) != 0) continue;
-                    const auto underscore = filename.find('_', 3);
-                    if (underscore == std::string::npos || underscore == 3) continue;
-                    int logId = 0;
-                    try { logId = std::stoi(filename.substr(3, underscore - 3)); }
-                    catch (...) { continue; }
-                    const auto bytes = entry.file_size(imageEc);
-                    if (!imageEc) usage[logId].imageBytes += static_cast<std::uint64_t>(bytes);
-                    imageEc.clear();
-                }
-                break;
-            }
-            J arr = J::array();
-            for (auto& r : rows) {
-                if (!gid.empty() && r.groupId != gid) continue;
-                auto& size = usage[r.id];
-                size.databaseBytes += sizeof(r.id) + sizeof(r.status) + r.groupId.size()
-                    + r.gmId.size() + r.name.size() + r.players.size()
-                    + r.customRules.size() + r.createdAt.size();
-                std::string gameCode, gameName;
-                try {
-                    auto meta = J::parse(r.customRules, nullptr, false);
-                    if (meta.is_object()) { gameCode = meta.value("gameCode", ""); gameName = meta.value("gameName", ""); }
-                } catch (...) {}
-                arr.push_back(J{
-                    {"id", r.id}, {"groupId", r.groupId}, {"gmId", r.gmId},
+            auto itemFor = [&](const GameLogRow& r, const log_usage::Usage& size, const std::string& groupName) {
+                const auto [gameCode, gameName] = logGameMeta(r);
+                return J{
+                    {"id", r.id}, {"groupId", r.groupId}, {"groupName", groupName}, {"gmId", r.gmId},
                     {"name", r.name.empty() ? ("log" + std::to_string(r.id)) : r.name},
                     {"status", r.status}, {"createdAt", r.createdAt},
                     {"lastAt", size.lastAt}, {"count", size.count},
-                    {"storageBytes", size.databaseBytes + size.imageBytes},
+                    {"storageBytes", size.databaseBytes + logRowBytes(r) + size.imageBytes},
                     {"imageBytes", size.imageBytes},
                     {"gameCode", gameCode}, {"gameName", gameName}
-                });
+                };
+            };
+
+            if (req->getParameter("page").empty()) {
+                // 不带分页参数：一次返回全部日志（旧接口）。
+                log_usage::UsageMap usage;
+                if (raw) logUsageCache->snapshot(raw, usage);
+                addImageBytes(usage, nullptr);
+                std::set<std::string> groupIds;
+                for (const auto& r : rows) groupIds.insert(r.groupId);
+                const auto names = groupNamesFor(groupIds);
+                J arr = J::array();
+                for (const auto& r : rows) {
+                    if (!gid.empty() && r.groupId != gid) continue;
+                    const auto name = names.find(r.groupId);
+                    arr.push_back(itemFor(r, usage[r.id], name == names.end() ? std::string() : name->second));
+                }
+                jsonReply(ok(arr), std::move(cb));
+                return;
             }
-            jsonReply(ok(arr), std::move(cb));
+
+            // 分页：筛选与排序在服务端完成，只为当前页统计消息字节数。
+            auto intParam = [&](const char* key, int fallback) {
+                try { return std::stoi(req->getParameter(key)); } catch (...) { return fallback; }
+            };
+            const int page = (std::max)(1, intParam("page", 1));
+            const int size = std::clamp(intParam("size", 20), 1, 100);
+            auto lowerAscii = [](std::string text) {
+                for (auto& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return text;
+            };
+            const std::string query = lowerAscii(utils::trim(req->getParameter("q")));
+            std::string sortKey = req->getParameter("sort");
+            if (sortKey.empty()) sortKey = "lastAt";
+            const bool descending = req->getParameter("dir") != "asc";
+
+            std::set<std::string> groupIds;
+            for (const auto& r : rows) groupIds.insert(r.groupId);
+            const auto names = groupNamesFor(groupIds);
+            struct Entry { const GameLogRow* row; std::string groupName, gameCode, gameName; };
+            std::vector<Entry> list;
+            list.reserve(rows.size());
+            for (const auto& r : rows) {
+                if (!gid.empty() && r.groupId != gid) continue;
+                const auto name = names.find(r.groupId);
+                auto [gameCode, gameName] = logGameMeta(r);
+                Entry entry{&r, name == names.end() ? std::string() : name->second, std::move(gameCode), std::move(gameName)};
+                if (!query.empty()) {
+                    const std::string label = r.name.empty() ? ("log" + std::to_string(r.id)) : r.name;
+                    bool hit = false;
+                    for (const std::string* field : std::initializer_list<const std::string*>{
+                             &label, &r.groupId, &entry.groupName, &entry.gameCode, &entry.gameName, &r.gmId})
+                        if (lowerAscii(*field).find(query) != std::string::npos) { hit = true; break; }
+                    if (!hit) continue;
+                }
+                list.push_back(std::move(entry));
+            }
+
+            // 条数与最后更新只需索引；按占用排序才需要完整汇总（有缓存）。
+            log_usage::BriefMap brief;
+            log_usage::UsageMap full;
+            if (raw && (sortKey == "count" || sortKey == "lastAt")) logBriefCache->snapshot(raw, brief);
+            if (raw && sortKey == "storage") { logUsageCache->snapshot(raw, full); addImageBytes(full, nullptr); }
+            auto briefOf = [&](int id) { const auto it = brief.find(id); return it == brief.end() ? log_usage::Brief{} : it->second; };
+            auto storageOf = [&](const GameLogRow& r) {
+                const auto it = full.find(r.id);
+                return logRowBytes(r) + (it == full.end() ? 0 : it->second.databaseBytes + it->second.imageBytes);
+            };
+            auto textCompare = [](const std::string& a, const std::string& b) { return a.compare(b); };
+            auto compare = [&](const Entry& a, const Entry& b) -> int {
+                const auto& x = *a.row; const auto& y = *b.row;
+                if (sortKey == "name") return textCompare(x.name, y.name);
+                if (sortKey == "group") return textCompare(a.groupName + " (" + x.groupId + ")", b.groupName + " (" + y.groupId + ")");
+                if (sortKey == "status") return x.status - y.status;
+                if (sortKey == "count") return briefOf(x.id).count - briefOf(y.id).count;
+                if (sortKey == "storage") { const auto l = storageOf(x), r = storageOf(y); return l < r ? -1 : l > r ? 1 : 0; }
+                if (sortKey == "game") return textCompare(a.gameName + " " + a.gameCode, b.gameName + " " + b.gameCode);
+                if (sortKey == "creator") return textCompare(x.gmId, y.gmId);
+                if (sortKey == "createdAt") return textCompare(x.createdAt, y.createdAt);
+                const auto l = briefOf(x.id).lastId, r = briefOf(y.id).lastId;   // lastAt：消息编号随时间递增
+                return l < r ? -1 : l > r ? 1 : textCompare(x.createdAt, y.createdAt);
+            };
+            std::stable_sort(list.begin(), list.end(), [&](const Entry& a, const Entry& b) {
+                int result = compare(a, b);
+                if (result == 0) result = a.row->id - b.row->id;
+                return descending ? result > 0 : result < 0;
+            });
+
+            const std::size_t total = list.size();
+            const std::size_t first = (std::min)(total, static_cast<std::size_t>(page - 1) * static_cast<std::size_t>(size));
+            const std::size_t last = (std::min)(total, first + static_cast<std::size_t>(size));
+            std::vector<int> pageIds;
+            std::set<int> pageIdSet;
+            for (std::size_t i = first; i < last; ++i) { pageIds.push_back(list[i].row->id); pageIdSet.insert(list[i].row->id); }
+            log_usage::UsageMap pageUsage;
+            if (raw) log_usage::aggregateFor(raw, pageIds, pageUsage);
+            addImageBytes(pageUsage, &pageIdSet);
+            J items = J::array();
+            for (std::size_t i = first; i < last; ++i)
+                items.push_back(itemFor(*list[i].row, pageUsage[list[i].row->id], list[i].groupName));
+            jsonReply(ok(J{{"items", items}, {"total", total}, {"page", page}, {"size", size}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get});
     // 跨群团务会话：进行中的会话从索引读取，已结团的会话从日志元数据恢复。
-    app.registerHandler("/api/game-sessions", [&luaMod, lst](Req, CB&& cb) {
+    app.registerHandler("/api/game-sessions", [&luaMod, lst, groupNamesFor](Req, CB&& cb) {
         try {
             auto index = J::parse(luaMod.confGet("game:index", "sessions"), nullptr, false);
             J out = J::array();
@@ -4240,6 +4367,20 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                                 {"activeLogs", it.value().value("activeLogs", 0)},
                                 {"pausedLogs", it.value().value("pausedLogs", 0)},
                                 {"endedLogs", it.value().value("endedLogs", 0)}, {"active", false}});
+            }
+            std::set<std::string> sessionGroups;
+            for (const auto& session : out)
+                for (const auto& group : session.value("groups", J::array()))
+                    if (group.is_string()) sessionGroups.insert(group.get<std::string>());
+            const auto names = groupNamesFor(sessionGroups);
+            for (auto& session : out) {
+                J groupNames = J::object();
+                for (const auto& group : session.value("groups", J::array()))
+                    if (group.is_string()) {
+                        const auto found = names.find(group.get<std::string>());
+                        if (found != names.end()) groupNames[found->first] = found->second;
+                    }
+                session["groupNames"] = groupNames;
             }
             jsonReply(ok(out), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }

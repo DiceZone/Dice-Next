@@ -107,3 +107,33 @@ TEST(LogUsage, DatabasesUseWriteAheadLogging) {
     ASSERT_EQ(journalMode(other), std::string("wal"));
     sqlite3_close(other);
 }
+
+TEST(LogUsage, BriefAndPageAggregatesOnlyCoverRequestedData) {
+    LogDb t;
+    t.add(1, "a", "2026-10-19T10:00:00");
+    const int last = t.add(1, "b", "2026-10-19T10:05:00");
+    t.add(2, "c", "2026-10-19T09:00:00");
+    log_usage::BriefMap brief;
+    ASSERT_TRUE(log_usage::briefAll(t.raw(), 0, brief));
+    ASSERT_EQ(brief[1].count, 2);
+    ASSERT_EQ(brief[1].lastId, static_cast<std::int64_t>(last));
+    ASSERT_EQ(brief[2].count, 1);
+
+    log_usage::BriefCache cache;
+    log_usage::BriefMap cached;
+    ASSERT_TRUE(cache.snapshot(t.raw(), cached));
+    const int newest = t.add(2, "d", "2026-10-19T11:00:00");
+    ASSERT_TRUE(cache.snapshot(t.raw(), cached));
+    ASSERT_EQ(cached[2].count, 2);
+    ASSERT_EQ(cached[2].lastId, static_cast<std::int64_t>(newest));
+
+    log_usage::UsageMap page;
+    ASSERT_TRUE(log_usage::aggregateFor(t.raw(), {2}, page));
+    ASSERT_EQ(page.size(), size_t(1));
+    ASSERT_EQ(page[2].count, 2);
+    ASSERT_EQ(page[2].lastAt, std::string("2026-10-19T11:00:00"));
+    log_usage::UsageMap none;
+    ASSERT_TRUE(log_usage::aggregateFor(t.raw(), {}, none));
+    ASSERT_TRUE(none.empty());
+}
+
