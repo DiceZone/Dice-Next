@@ -136,9 +136,10 @@ inline std::optional<std::string> normalizeBase(std::string base) {
 
 inline std::string callbackFor(const std::string& base) { return base + kCallbackPath; }
 
-/// 受限管理员（信任等级 ≥4 的非骰主）不能做的事：改骰主名单、口令、服务配置与第三方登录，
-/// 安装/启停/编辑插件与规则包，恢复或下载备份。插件与规则包能执行代码、读写配置，备份
-/// 含口令哈希与各类密钥，放开任何一条都等于放开骰主权限。
+/// 受限管理员（信任等级 ≥4 的非骰主）不能做的事：改骰主名单、口令、全部系统设置与适配器、
+/// 第三方登录，安装/启停/编辑插件与规则包，恢复或下载备份，读取插件配置与存档。插件与规则包
+/// 能执行代码、读写配置，备份与插件存档可能含口令哈希与各类密钥，放开任何一条都等于放开骰主
+/// 权限。系统设置与适配器一律不许写，也保证脱敏后的占位值不会被存回去覆盖真实密钥。
 inline bool blockedForRestrictedAdmin(const std::string& method, const std::string& path) {
     auto under = [&](const char* prefix) {
         const std::string p(prefix);
@@ -146,14 +147,45 @@ inline bool blockedForRestrictedAdmin(const std::string& method, const std::stri
     };
     if (under("/api/backup") && method != "GET") return true;
     if (path == "/api/backup/download" || path == "/api/backup/export" || path.rfind("/api/backup/download", 0) == 0) return true;
+    if (under("/api/plugins/js/config") || under("/api/plugins/js/storage")) return true;
     if (method == "GET") return false;
-    for (const char* prefix : {"/api/masters", "/api/auth/sso", "/api/system/webui-auth", "/api/system/server-config",
-                               "/api/system/update", "/api/system/plugin-verify", "/api/system/js-fetch",
+    for (const char* prefix : {"/api/masters", "/api/auth/sso", "/api/system", "/api/adapters",
                                "/api/plugins/js", "/api/mod/lua", "/api/mods", "/api/rulepacks"})
         if (under(prefix)) return true;
     // 玩家 Lua 变量里的 trust 键直接对应信任等级。
     if (path.rfind("/api/players/", 0) == 0 && path.size() > 7 && path.compare(path.size() - 7, 7, "/luavar") == 0) return true;
     return false;
+}
+
+/// 受限管理员看到的响应里要遮住的字段（不分大小写，按完整字段名匹配，避免误伤
+/// max_tokens、keywords、token_tail 这类普通字段）。
+inline bool sensitiveField(std::string key) {
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    static const char* names[] = {
+        "token", "access_token", "accesstoken", "refresh_token", "refreshtoken", "secret", "client_secret",
+        "clientsecret", "app_secret", "appsecret", "registration_secret", "api_key", "apikey", "heart_api_key",
+        "heartapikey", "heartbeat_key", "password", "pass", "passwd", "private_key", "privatekey",
+        "authorization", "cookie", "secret_key", "secretkey", "access_key", "accesskey",
+    };
+    return std::any_of(std::begin(names), std::end(names), [&](const char* name) { return key == name; });
+}
+
+inline constexpr const char* kRedacted = "********";
+
+/// 把响应中的密钥换成占位符：适配器 Token、AI 与各服务的 Key、邮件口令、Webhook 地址等。
+inline void redactSecrets(json& value, const std::string& parent = {}) {
+    if (value.is_object()) {
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            const bool hidden = sensitiveField(it.key()) || (parent == "webhook" && it.key() == "url");
+            if (hidden && it.value().is_string()) {
+                if (!it.value().get_ref<const std::string&>().empty()) it.value() = kRedacted;
+            } else {
+                redactSecrets(it.value(), it.key());
+            }
+        }
+    } else if (value.is_array()) {
+        for (auto& item : value) redactSecrets(item, parent);
+    }
 }
 
 // ─── HTTP ───────────────────────────────────────────────────────

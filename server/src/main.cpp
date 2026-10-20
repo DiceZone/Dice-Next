@@ -3276,6 +3276,18 @@ static int realMain(int argc, char* argv[]) {
                 } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }
             }, {drogon::Post});
         dice::sso::registerRoutes(app, configMgr, cmdRouter, configPath, sessionCookieName, makeSsoCookie);
+        // 受限管理员收到的 JSON 一律遮住密钥（适配器 Token、AI Key、邮件口令等），新增接口同样生效。
+        app.registerPostHandlingAdvice([](const drogon::HttpRequestPtr& req, const drogon::HttpResponsePtr& resp) {
+            std::string role;
+            try { role = req->attributes()->get<std::string>("dn_role"); } catch (...) { return; }
+            if (role != "admin" || !resp) return;
+            const auto& type = resp->contentTypeString();
+            if (type.find("json") == std::string::npos || resp->body().size() > 16 * 1024 * 1024) return;
+            auto body = nlohmann::json::parse(resp->body(), nullptr, false);
+            if (body.is_discarded()) return;
+            dice::sso::redactSecrets(body);
+            resp->setBody(body.dump());
+        });
         // 公寓托管实例：以公开访问地址自动启用骰子之间账号登录（稍后执行，不拖慢启动）。
         if (const char* publicUrl = std::getenv("DICENEXT_PUBLIC_URL"); diceFlatsManaged && publicUrl && *publicUrl) {
             managedSsoSetup.start([&configMgr, url = std::string(publicUrl)](dice::sso::BackgroundTask& task) {

@@ -72,6 +72,19 @@ TEST(SsoAuth, RestrictedAdminsCannotReachPrivilegedOperations) {
     for (const char* path : {"/api/masters", "/api/plugins/js", "/api/auth/sso/config", "/api/backup/list"})
         ASSERT_FALSE(sso::blockedForRestrictedAdmin("GET", path));
     ASSERT_FALSE(sso::blockedForRestrictedAdmin("PUT", "/api/players/onebot_v11/10001"));
+    // 适配器与全部系统设置都属于服务配置：受限管理员只读。
+    ASSERT_TRUE(sso::blockedForRestrictedAdmin("POST", "/api/adapters"));
+    ASSERT_TRUE(sso::blockedForRestrictedAdmin("PATCH", "/api/adapters/1"));
+    ASSERT_TRUE(sso::blockedForRestrictedAdmin("DELETE", "/api/adapters/1"));
+    ASSERT_TRUE(sso::blockedForRestrictedAdmin("POST", "/api/adapters/1/reconnect"));
+    ASSERT_TRUE(sso::blockedForRestrictedAdmin("PUT", "/api/system/ai"));
+    ASSERT_TRUE(sso::blockedForRestrictedAdmin("PUT", "/api/system/notice"));
+    ASSERT_TRUE(sso::blockedForRestrictedAdmin("PUT", "/api/system/global"));
+    ASSERT_FALSE(sso::blockedForRestrictedAdmin("GET", "/api/adapters"));
+    ASSERT_FALSE(sso::blockedForRestrictedAdmin("GET", "/api/system/ai"));
+    // 插件配置与存档内容由插件自定，可能直接存着密钥：连读取也不行。
+    ASSERT_TRUE(sso::blockedForRestrictedAdmin("GET", "/api/plugins/js/config"));
+    ASSERT_TRUE(sso::blockedForRestrictedAdmin("GET", "/api/plugins/js/storage"));
     ASSERT_FALSE(sso::blockedForRestrictedAdmin("POST", "/api/decks/upload"));
     ASSERT_FALSE(sso::blockedForRestrictedAdmin("POST", "/api/mastersx"));
 }
@@ -173,5 +186,37 @@ TEST(SsoAuth, BackgroundTaskStopsPromptlyOnDestruction) {
     quick.start([&](sso::BackgroundTask& self) { if (self.waitFor(std::chrono::milliseconds(10))) done = true; });
     for (int i = 0; i < 200 && !done; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     ASSERT_TRUE(done.load());
+}
+
+TEST(SsoAuth, SecretsAreRedactedForRestrictedAdmins) {
+    json body = {
+        {"code", 0},
+        {"data", {
+            {"adapters", json::array({{{"id", 1}, {"accessToken", "onebot-token"}, {"heart_api_key", "bdc_secret"},
+                                       {"appSecret", "qq-secret"}, {"token_tail", "...abcd"}}})},
+            {"ai", {{"models", json::array({{{"name", "gpt"}, {"api_key", "sk-123"}, {"max_tokens", 2048}}})}}},
+            {"smtp", {{"user", "dice@example.com"}, {"pass", "mail-pass"}}},
+            {"webhook", {{"enabled", true}, {"url", "https://hook.example.com/?access_token=abc"}}},
+            {"entries", json::array({{{"key", "dice/self_name"}, {"value", "希亚"}}})},
+            {"keywords", json::array({"开团"})}, {"has_secret", true}, {"Password", ""},
+            {"links", json::array({{{"url", "https://example.com"}}})}
+        }}
+    };
+    sso::redactSecrets(body);
+    const auto& d = body["data"];
+    ASSERT_EQ(d["adapters"][0]["accessToken"], json(sso::kRedacted));
+    ASSERT_EQ(d["adapters"][0]["heart_api_key"], json(sso::kRedacted));
+    ASSERT_EQ(d["adapters"][0]["appSecret"], json(sso::kRedacted));
+    ASSERT_EQ(d["adapters"][0]["token_tail"], json("...abcd"));
+    ASSERT_EQ(d["ai"]["models"][0]["api_key"], json(sso::kRedacted));
+    ASSERT_EQ(d["ai"]["models"][0]["max_tokens"], json(2048));
+    ASSERT_EQ(d["smtp"]["pass"], json(sso::kRedacted));
+    ASSERT_EQ(d["smtp"]["user"], json("dice@example.com"));
+    ASSERT_EQ(d["webhook"]["url"], json(sso::kRedacted));
+    ASSERT_EQ(d["entries"][0]["key"], json("dice/self_name"));
+    ASSERT_EQ(d["keywords"][0], json("开团"));
+    ASSERT_EQ(d["has_secret"], json(true));
+    ASSERT_EQ(d["Password"], json(""));                       // 空值保持为空，表示未设置
+    ASSERT_EQ(d["links"][0]["url"], json("https://example.com"));   // 只遮 Webhook 的地址
 }
 
