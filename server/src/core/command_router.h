@@ -5388,6 +5388,14 @@ public:
     }
     /// Public wrapper for Master check by (platform,id) — used by the invite审批 whitelist policy.
     bool isMasterUser(const std::string& platform, const std::string& id) const { return isMaster(platform, id); }
+    /// 网页后台按真实 QQ 判定权限：任一平台的骰主名单里有它即为 Master，否则取 QQ 平台上的信任等级。
+    int panelTrustOfQQ(const std::string& qq) const {
+        if (qq.empty()) return kTrustNormal;
+        if (isMasterAnyPlatform(qq)) return kTrustMaster;
+        int level = kTrustNormal;
+        for (const char* platform : {"onebot_v11", "milky"}) level = (std::max)(level, getTrust(platform, qq));
+        return level;
+    }
 
     /// 解析规则 mod 的属性模板 model/*.xml（原版 Dice! 的 <property>/<any name alias>），
     /// 把属性别名并入全局同义词表 → .st/.ra 认得该规则系统的属性名（如 .st STR50 → 力量）。

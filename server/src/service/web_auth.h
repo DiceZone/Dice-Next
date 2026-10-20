@@ -22,6 +22,8 @@ namespace dice {
 // Shared WebUI password plus browser sessions. A normal session is memory-only
 // and expires with the browser; a trusted device is persisted for 30 days in
 // config/webui_sessions.json so a program restart does not log it out.
+// Third-party (SSO) logins carry the identity they were issued for and a fixed
+// one-day lifetime; password sessions carry an empty identity (full access).
 class WebAuth {
 public:
     static WebAuth& instance() { static WebAuth a; return a; }
@@ -133,17 +135,45 @@ public:
     std::string issueToken(bool trustDevice = false, bool* trustedPersisted = nullptr) {
         std::lock_guard<std::mutex> lk(m_);
         const std::string token = randomToken();
-        tokens_[token] = trustDevice ? std::time(nullptr) + 30 * 24 * 3600 : 0;
+        tokens_[token] = Session{trustDevice ? std::time(nullptr) + 30 * 24 * 3600 : 0, nlohmann::json::object()};
         const bool persisted = !trustDevice || saveTrustedLocked();
         if (!persisted) tokens_.erase(token);
         if (trustedPersisted) *trustedPersisted = persisted;
+        return token;
+    }
+    /// 第三方登录的会话：固定有效期（不随浏览器关闭失效，也不能续期），带登录身份。
+    std::string issueIdentityToken(const nlohmann::json& identity, int lifetimeSeconds, bool* persisted = nullptr) {
+        std::lock_guard<std::mutex> lk(m_);
+        const std::string token = randomToken();
+        tokens_[token] = Session{std::time(nullptr) + lifetimeSeconds, identity.is_object() ? identity : nlohmann::json::object()};
+        const bool saved = saveTrustedLocked();
+        if (!saved) tokens_.erase(token);
+        if (persisted) *persisted = saved;
         return token;
     }
     bool validToken(const std::string& token) const {
         std::lock_guard<std::mutex> lk(m_);
         if (password_.empty()) return false;   // 未设口令 = 无有效会话（前端走 setup 流程）
         const auto it = tokens_.find(token);
-        return it != tokens_.end() && (it->second == 0 || it->second > std::time(nullptr));
+        return it != tokens_.end() && (it->second.expires == 0 || it->second.expires > std::time(nullptr));
+    }
+    /// 会话的登录身份；口令会话为空对象。
+    nlohmann::json identityOf(const std::string& token) const {
+        std::lock_guard<std::mutex> lk(m_);
+        const auto it = tokens_.find(token);
+        return it == tokens_.end() ? nlohmann::json::object() : it->second.identity;
+    }
+    /// 撤销符合条件的会话（解除第三方绑定、身份失去权限时用）。返回撤销数量。
+    template <typename Predicate>
+    int revokeWhere(Predicate predicate) {
+        std::lock_guard<std::mutex> lk(m_);
+        int removed = 0;
+        for (auto it = tokens_.begin(); it != tokens_.end();) {
+            if (predicate(it->second.identity)) { it = tokens_.erase(it); ++removed; }
+            else ++it;
+        }
+        if (removed) saveTrustedLocked();
+        return removed;
     }
     std::string sessionCookieName() const {
         std::lock_guard<std::mutex> lk(m_);
@@ -155,8 +185,8 @@ public:
         std::lock_guard<std::mutex> lk(m_);
         const auto it = tokens_.find(token);
         const auto now = std::time(nullptr);
-        if (it == tokens_.end() || it->second <= now) return 0;
-        const auto remaining = it->second - now;
+        if (it == tokens_.end() || it->second.expires <= now) return 0;
+        const auto remaining = it->second.expires - now;
         const auto limit = static_cast<std::time_t>((std::numeric_limits<int>::max)());
         return static_cast<int>(remaining > limit ? limit : remaining);
     }
@@ -226,6 +256,10 @@ public:
     }
 
 private:
+    struct Session {
+        std::time_t expires = 0;          // 0 = browser session only
+        nlohmann::json identity = nlohmann::json::object();
+    };
     static std::string randomToken() {
         static const char* hex = "0123456789abcdef";
         std::random_device rd; std::mt19937_64 g(rd() ^ (uint64_t)std::random_device{}() << 1);
@@ -241,7 +275,9 @@ private:
             for (const auto& item : j.value("trusted", nlohmann::json::array())) {
                 const std::string token = item.value("token", std::string());
                 const std::time_t expires = item.value("expires_at", std::time_t(0));
-                if (!token.empty() && expires > now) tokens_[token] = expires;
+                auto identity = item.value("identity", nlohmann::json::object());
+                if (!identity.is_object()) identity = nlohmann::json::object();
+                if (!token.empty() && expires > now) tokens_[token] = Session{expires, identity};
             }
             // Prune expired entries after loading. This writes atomically, so a
             // crash or abrupt restart cannot leave a truncated sessions file.
@@ -252,7 +288,12 @@ private:
         if (sessionsPath_.empty()) return true;
         try {
             nlohmann::json trusted = nlohmann::json::array(); const auto now = std::time(nullptr);
-            for (const auto& [token, expires] : tokens_) if (expires > now) trusted.push_back({{"token", token}, {"expires_at", expires}});
+            for (const auto& [token, session] : tokens_) {
+                if (session.expires <= now) continue;
+                nlohmann::json item{{"token", token}, {"expires_at", session.expires}};
+                if (!session.identity.empty()) item["identity"] = session.identity;
+                trusted.push_back(std::move(item));
+            }
             std::error_code ec;
             if (!sessionsPath_.parent_path().empty()) std::filesystem::create_directories(sessionsPath_.parent_path(), ec);
             if (ec) return false;
@@ -275,7 +316,7 @@ private:
     std::string apiKey_;
     std::filesystem::path sessionsPath_;
     std::string sessionCookieName_ = "dice_session_default";
-    std::unordered_map<std::string, std::time_t> tokens_; // 0 = browser session only
+    std::unordered_map<std::string, Session> tokens_;
 };
 
 } // namespace dice

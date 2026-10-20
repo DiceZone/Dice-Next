@@ -3,6 +3,35 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-21: SSO merge acceptance (local)
+
+- Merged the core and WebUI `feat/sso` implementations without dropping image
+  management, list-avatar fixes or the Windows short-path alias repair. Existing
+  branches and the original SSO worktrees are retained.
+- The SSO subset passed **11 cases / 217 assertions**: PKCE, verified QQ email
+  identities, current local trust, persistent/revocable identity sessions,
+  command-test sender binding, interruptible background-task shutdown and
+  restricted access. The write allowlist rejects legacy migration, rule-package
+  modification and unknown new endpoints. Plugin-list/config/storage reads and
+  backup downloads are denied; oversized/unparseable JSON is refused rather
+  than returned with credentials intact.
+- A separate diagnostic compiled against the actual SSO header confirmed that
+  the previously missed plugin-list, migration and rule-upload/delete paths are
+  now blocked. It used fake credentials and did not launch a bot or call BDC.
+- Merged Windows Release server/core/Lua/resource builds passed. The unfiltered
+  core run passed **892 cases / 50,496 assertions**, including the SSO cases,
+  with `TMP` and `TEMP` set to the real `E:/DICERE~1` short path. The Lua run
+  passed **66 cases / 611 assertions**; the isolated resource run passed **26
+  cases / 139 assertions** under the short path (a subset of the core total).
+- WebUI passed **340 of 343 tests**, with zero failures and three opt-in backend
+  preview tests skipped; type checking and the production build passed. Five new
+  tests exercise reverse-proxy bases, login/bind URL encoding and one-time
+  callback-result cleanup. All four locales have the same 54 SSO translation
+  keys. Release automation passed **33 tests**.
+- No real OIDC/BDC identity, provider registration, adapter connection or live
+  message was exercised. HTTPS callback/provider behavior still needs live
+  acceptance; local checks do not claim a successful remote Release.
+
 ## 2026-10-21: Windows short-path image aliases (local fix)
 
 - Release run [39475215795](https://github.com/DiceZone/Dice-Next/actions/runs/39475215795)

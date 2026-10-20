@@ -19,6 +19,7 @@
 #include "service/api_service.h"
 #include "service/http_diagnostics.h"
 #include "service/web_auth.h"          // WebUI 登录鉴权
+#include "service/sso_routes.h"        // WebUI 第三方登录（OpenID Connect）
 #include "service/chat_image.h"        // 模拟聊天图片本地化
 #include "service/image_host.h"        // 图床（QQ 官方富媒体需要公网 URL）
 #include "service/image_resource_api.h"
@@ -138,6 +139,13 @@ drogon::Cookie makeWebSessionCookie(const std::string& name,
     cookie.setHttpOnly(true);
     cookie.setSameSite(drogon::Cookie::SameSite::kLax);
     if (persistentSeconds > 0) cookie.setMaxAge(persistentSeconds);
+    return cookie;
+}
+
+// 第三方登录接口用的 Cookie：maxAge >0 持久、0 浏览器会话、<0 立即过期。
+drogon::Cookie makeSsoCookie(const std::string& name, const std::string& value, int maxAge) {
+    drogon::Cookie cookie = makeWebSessionCookie(name, value, maxAge > 0 ? maxAge : 0);
+    if (maxAge < 0) cookie.setMaxAge(0);
     return cookie;
 }
 
@@ -3097,6 +3105,9 @@ static int realMain(int argc, char* argv[]) {
     app.setClientMaxBodySize(128 * 1024 * 1024);
     app.setClientMaxMemoryBodySize(128 * 1024 * 1024);
 
+    // 公寓托管实例自动启用第三方登录的后台任务。声明在 configMgr 之后：退出时先于它停止并结束。
+    dice::sso::BackgroundTask managedSsoSetup;
+
     // ── WebUI 登录鉴权 ───────────────────────────────────
     auto& webAuth = dice::WebAuth::instance();
     webAuth.configure(configMgr.get<std::string>("webui/password", ""),
@@ -3109,12 +3120,15 @@ static int realMain(int argc, char* argv[]) {
 
     // 前置拦截：设了口令时，/api/* 需有效会话 Cookie（放行登录/状态查询与静态文件）。
     app.registerPreHandlingAdvice(
-        [apiKey, diceFlatsManaged, sessionCookieName](const drogon::HttpRequestPtr& req,
+        [apiKey, diceFlatsManaged, sessionCookieName, &configMgr, &cmdRouter](const drogon::HttpRequestPtr& req,
            drogon::AdviceCallback&& stop, drogon::AdviceChainCallback&& next) {
             const std::string& path = req->path();
             if (path.rfind("/api/", 0) != 0 ||                       // 静态文件
                 path == "/api/auth/login" || path == "/api/auth/status" ||
-                path == "/api/auth/logout" || path == "/api/auth/setup") { next(); return; }
+                path == "/api/auth/logout" || path == "/api/auth/setup" ||
+                // 第三方登录：登录页列表、发起授权、回调与图标无需会话。
+                path == "/api/auth/sso/providers" || path == "/api/auth/sso/start" ||
+                path == "/api/auth/sso/callback" || path.rfind("/api/auth/sso/logo/", 0) == 0) { next(); return; }
             // BDC daemon obtains this instance's generated API key only from inside
             // the managed container. Host/remote requests never see this bypass.
             if (diceFlatsManaged && path == "/api/managed/bootstrap" &&
@@ -3131,7 +3145,27 @@ static int realMain(int argc, char* argv[]) {
                 resp->setBody("{\"code\":401,\"message\":\"need_setup\",\"need_setup\":true}");
                 stop(resp); return;
             }
-            if (findValidWebSession(auth, req, sessionCookieName)) { next(); return; }
+            std::string sessionToken;
+            if (findValidWebSession(auth, req, sessionCookieName, &sessionToken)) {
+                // 第三方登录的会话每次按当前配置与本地信任等级重新判定权限。
+                int trust = dice::sso::kTrustMaster;
+                const auto role = dice::sso::roleOf(auth.identityOf(sessionToken), configMgr, cmdRouter, &trust);
+                if (role != dice::sso::Role::None) {
+                    if (role == dice::sso::Role::Admin &&
+                        dice::sso::blockedForRestrictedAdmin(req->methodString(), path)) {
+                        auto resp = drogon::HttpResponse::newHttpResponse();
+                        resp->setStatusCode(drogon::k403Forbidden);
+                        resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+                        resp->setBody("{\"code\":403,\"message\":\"restricted\"}");
+                        stop(resp); return;
+                    }
+                    req->attributes()->insert("dn_role", std::string(dice::sso::roleName(role)));
+                    req->attributes()->insert("dn_trust", trust);
+                    req->attributes()->insert("dn_qq", auth.identityOf(sessionToken).value("qq", std::string()));
+                    next(); return;
+                }
+                auth.revoke(sessionToken);
+            }
 
             auto resp = drogon::HttpResponse::newHttpResponse();
             resp->setStatusCode(drogon::k401Unauthorized);
@@ -3166,18 +3200,28 @@ static int realMain(int argc, char* argv[]) {
 
         // 是否需要登录 + 当前会话是否已登录。
         app.registerHandler("/api/auth/status",
-            [jResp, sessionCookieName](const drogon::HttpRequestPtr& req,
+            [jResp, sessionCookieName, &configMgr, &cmdRouter](const drogon::HttpRequestPtr& req,
                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 auto& auth = dice::WebAuth::instance();
                 const bool required = auth.hasPassword();
                 const bool needSetup = !required;
                 std::string token;
                 bool usedLegacyCookie = false;
-                const bool authed = required && findValidWebSession(
+                bool authed = required && findValidWebSession(
                     auth, req, sessionCookieName, &token, &usedLegacyCookie);
+                const auto identity = authed ? auth.identityOf(token) : nlohmann::json::object();
+                const auto role = authed ? dice::sso::roleOf(identity, configMgr, cmdRouter) : dice::sso::Role::None;
+                if (authed && role == dice::sso::Role::None) { auth.revoke(token); authed = false; }
                 auto resp = jResp({{"code", 0}, {"message", "ok"},
                     {"data", {{"required", required}, {"authed", authed},
-                              {"need_setup", needSetup}}}});
+                              {"need_setup", needSetup},
+                              {"role", authed ? dice::sso::roleName(role) : "none"},
+                              {"identity", authed && !identity.empty()
+                                  ? nlohmann::json{{"kind", identity.value("kind", std::string())},
+                                                   {"provider", identity.value("provider", std::string("bdc"))},
+                                                   {"label", identity.value("label", std::string())}}
+                                  : nlohmann::json(nullptr)},
+                              {"sso", required ? dice::sso::detail::loginProviders(configMgr) : nlohmann::json::array()}}}});
                 if (authed && usedLegacyCookie) {
                     // Preserve the remaining 30-day lifetime when migrating a
                     // trusted cookie; memory-only sessions stay session cookies.
@@ -3259,6 +3303,29 @@ static int realMain(int argc, char* argv[]) {
                     }
                 } catch (const std::exception& e) { cb(jResp({{"code", 1}, {"message", e.what()}})); }
             }, {drogon::Post});
+        dice::sso::registerRoutes(app, configMgr, cmdRouter, configPath, sessionCookieName, makeSsoCookie);
+        // 受限管理员收到的 JSON 一律遮住密钥（适配器 Token、AI Key、邮件口令等），新增接口同样生效。
+        app.registerPostHandlingAdvice([](const drogon::HttpRequestPtr& req, const drogon::HttpResponsePtr& resp) {
+            std::string role;
+            try { role = req->attributes()->get<std::string>("dn_role"); } catch (...) { return; }
+            if (role != "admin" || !resp) return;
+            bool refused = false;
+            auto body = dice::sso::restrictedResponseBody(resp->contentTypeString(), std::string(resp->body()), &refused);
+            if (!body) return;
+            if (refused) {
+                resp->setStatusCode(drogon::k403Forbidden);
+                resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+            }
+            resp->setBody(std::move(*body));
+        });
+        // 公寓托管实例：以公开访问地址自动启用骰子之间账号登录（稍后执行，不拖慢启动）。
+        if (const char* publicUrl = std::getenv("DICENEXT_PUBLIC_URL"); diceFlatsManaged && publicUrl && *publicUrl) {
+            managedSsoSetup.start([&configMgr, url = std::string(publicUrl)](dice::sso::BackgroundTask& task) {
+                if (!task.waitFor(std::chrono::seconds(15))) return;   // 进程正在退出
+                try { DICE_LOG_INFO("网页后台：骰子之间账号登录 {}", dice::sso::ensureManagedBdcLogin(configMgr, url)); }
+                catch (...) { DICE_LOG_EXCEPTION("managed BDC sign-in setup"); }
+            });
+        }
         // 首次设置管理口令（仅空口令时可用；成功后自动登录）。
         app.registerHandler("/api/auth/setup",
             [jResp, &configMgr, sessionCookieName](const drogon::HttpRequestPtr& req,
@@ -3576,7 +3643,15 @@ static int realMain(int argc, char* argv[]) {
                 // Optional multi-bot targeting fields for testing.
                 msg.selfId = body.value("selfId", std::string(""));
                 msg.adapterId = body.value("adapterId", std::string(""));
-                if (body.contains("role")) msg.extra["role"] = body.value("role", std::string(""));
+                // 第三方登录的受限管理员只能以自己的 QQ 测试：指令会真实执行，不能借此冒充骰主或骰娘自身。
+                std::string panelRole, panelQQ;
+                try { panelRole = req->attributes()->get<std::string>("dn_role"); } catch (...) {}
+                try { panelQQ = req->attributes()->get<std::string>("dn_qq"); } catch (...) {}
+                if (panelRole == "admin") {
+                    if (panelQQ.empty()) throw std::invalid_argument("restricted");
+                    dice::sso::bindTestSender(msg, panelQQ, msg.type == dice::MessageType::kPrivate);
+                }
+                if (body.contains("role") && panelRole != "admin") msg.extra["role"] = body.value("role", std::string(""));
                 if (body.contains("card")) msg.extra["card"] = body.value("card", std::string(""));   // 测试台注入群名片，验证 {card}/{nick}
                 if (body.contains("atList") && body["atList"].is_array())
                     for (const auto& a : body["atList"])
