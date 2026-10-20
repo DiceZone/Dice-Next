@@ -5223,12 +5223,26 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // PUT /api/players/{platform}/{userId}  {trustLevel}  — edit trust.
     // DELETE /api/players/{platform}/{userId}             — remove profile.
     app.registerHandler("/api/players/{1}/{2}",
-        [st](Req req, CB&& cb, const std::string& plat, const std::string& uid) {
+        [st, &cmdRouter](Req req, CB&& cb, const std::string& plat, const std::string& uid) {
         try {
             auto rows = st->get_all<PlayerProfileRow>(
                 orm::where(orm::c(&PlayerProfileRow::platform) == plat
                     and orm::c(&PlayerProfileRow::userId) == uid));
             if (rows.empty()) { jsonReply(fail("not found"), std::move(cb)); return; }
+            // 第三方登录的管理员（受限权限）只能处理信任等级低于自己的用户，也不能把人提到与自己同级或更高。
+            std::string role;
+            try { role = req->attributes()->get<std::string>("dn_role"); } catch (...) {}
+            if (role == "admin") {
+                int own = 0;
+                try { own = req->attributes()->get<int>("dn_trust"); } catch (...) {}
+                const int target = cmdRouter.isMasterUser(plat, uid) ? 256 : rows.front().trustLevel;
+                bool allowed = target < own;
+                if (allowed && req->method() != drogon::Delete) {
+                    const auto body = J::parse(req->body(), nullptr, false);
+                    if (body.is_object() && body.contains("trustLevel") && body.value("trustLevel", 0) >= own) allowed = false;
+                }
+                if (!allowed) { jsonReply(fail("无权修改信任等级不低于自己的用户"), std::move(cb)); return; }
+            }
             if (req->method() == drogon::Delete) {
                 st->remove_all<PlayerProfileRow>(
                     orm::where(orm::c(&PlayerProfileRow::platform) == plat

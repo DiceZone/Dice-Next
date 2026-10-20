@@ -18,6 +18,7 @@ set(TEST_SOURCES
     test_cooldown_manager.cpp
     test_counter_store.cpp
     test_log_usage.cpp
+    test_sso_auth.cpp
     test_game_session_list.cpp
     test_chat_persistence.cpp
     test_causal_rule_manager.cpp
