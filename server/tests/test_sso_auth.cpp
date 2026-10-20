@@ -240,4 +240,8 @@ TEST(SsoAuth, SecretsAreRedactedForRestrictedAdmins) {
     ASSERT_EQ(d["has_secret"], json(true));
     ASSERT_EQ(d["Password"], json(""));                       // 空值保持为空，表示未设置
     ASSERT_EQ(d["links"][0]["url"], json("https://example.com"));   // 只遮 Webhook 的地址
+    json channels=json::array({{{"kind","webhook"},{"url","https://example.com/private?key=fake"}},{{"kind",1},{"url","https://example.com/public"}}});
+    sso::redactSecrets(channels);
+    ASSERT_EQ(channels[0]["url"],json(sso::kRedacted));
+    ASSERT_EQ(channels[1]["url"],json("https://example.com/public"));
 }

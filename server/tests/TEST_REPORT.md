@@ -3,6 +3,33 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-21: Notification rule management (local)
+
+- Notification management now uses paged server responses and per-rule CRUD,
+  rather than loading all windows/players/groups and saving one replacement
+  array. The UI supports compact list/cards, cached nicknames and shared avatars,
+  and a top-action editor for independent sources and multiple destinations.
+- Nine notification cases passed **52 assertions**, including real dispatch to
+  in-memory adapters: selected offline accounts do not fall back, foreign
+  platforms are excluded, overlapping rules do not duplicate delivery, empty
+  explicit event subscriptions send nothing, and tests target one rule only.
+  Other cases cover unchanged legacy masks, source scopes/system events, shared
+  SMTP with verification disabled, legacy transport retention, validation and
+  `.notice off` preserving other destinations/accounts. Keyword search excludes
+  Webhook URLs so redacted secrets cannot be inferred from matching counts.
+- Windows server and core builds passed. The full core run passed **901 cases /
+  50,550 assertions** under the real short-path temporary root; Lua passed **66
+  cases / 611 assertions**. Notification assertions are included in the core
+  total, not additional coverage. SSO redaction also covers Webhook channels
+  without treating numeric `kind` fields as strings.
+- WebUI passed **345 of 348 tests**, with zero failures and three opt-in backend
+  preview tests skipped; the production build passed. Isolated browser checks exercised
+  nickname display, edit-only subscriptions, multiple group selection and
+  paging to the last seven records. A stale-page correction found during browser
+  testing has its own regression. This preview uses disposable, in-memory data.
+- No actual bot, SMTP recipient or Webhook service was contacted. Live delivery
+  remains an operator acceptance step; these checks do not claim remote receipt.
+
 ## 2026-10-21: SSO merge acceptance (local)
 
 - Merged the core and WebUI `feat/sso` implementations without dropping image

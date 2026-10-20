@@ -19,6 +19,7 @@ set(TEST_SOURCES
     test_counter_store.cpp
     test_log_usage.cpp
     test_sso_auth.cpp
+    test_notice_rules.cpp
     test_game_session_list.cpp
     test_image_resources.cpp
     test_image_resource_documents.cpp

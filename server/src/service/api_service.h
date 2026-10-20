@@ -55,6 +55,7 @@
 #include "ai_vision.h"      // 多模态图像识别（默认提示词）
 #include "ai_vision_config.h"
 #include "notice_manager.h" // B：通知系统（全局开关变更推送）
+#include "notice_api.h"
 #include "heart_service.h"  // 心跳上报（heart.dice.zone）
 #include "cloudban_service.h" // 云黑名单同步（cloudban.dice.zone）
 #include "backup_service.h"
@@ -1559,11 +1560,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // B：骰主通知设置（dice/notice）。GET 读（附事件目录 catalog 供前端分组勾选），
     // PUT 覆盖 windows（含逐项 events + 显示名 name）+ webhook + smtp。
+    registerNoticeRuleRoutes(db,cfg,adapterMgr);
     app.registerHandler("/api/system/notice", [&cfg](Req req, CB&& cb) {
         try {
+            std::lock_guard lock(notice_rules::configMutex());
             if (req->method() == drogon::Put) {
                 auto j = J::parse(req->body());
-                J out = J::object();
+                J out = dice::notice::conf(cfg);
                 J wins = J::array();
                 if (j.contains("windows") && j["windows"].is_array())
                     for (auto& w : j["windows"]) {
@@ -1571,16 +1574,17 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         std::string cid = w.value("chat_id", std::string());
                         if (cid.empty()) continue;
                         int mask = w.value("level_mask", (int)dice::notice::kAll);
-                        if (mask < 1) mask = 1; if (mask > (int)dice::notice::kAll) mask = dice::notice::kAll;
+                        if (mask < 0) mask = 0; if (mask > (int)dice::notice::kAll) mask = dice::notice::kAll;
                         J evs = J::array();
                         if (w.contains("events") && w["events"].is_array())
                             for (auto& e : w["events"]) if (e.is_string() && dice::notice::areaOf(e.get<std::string>())) evs.push_back(e);
                         wins.push_back(J{{"platform", w.value("platform", std::string())},
                                          {"adapter_id", w.value("adapter_id", std::string())}, {"chat_id", cid},
                                          {"is_group", w.value("is_group", true)}, {"name", w.value("name", std::string())},
-                                         {"level_mask", mask}, {"events", evs}});
+                                         {"level_mask", mask}, {"events", evs},
+                                         {"subscription",w.value("subscription",evs.empty()?std::string("levels"):std::string("events"))}});
                     }
-                out["windows"] = wins;
+                if(j.contains("windows"))out["windows"] = wins;
                 // Webhook（POST JSON 到第三方）。
                 J wh = (j.contains("webhook") && j["webhook"].is_object()) ? j["webhook"] : J::object();
                 int whm = wh.value("level_mask", (int)dice::notice::kAll);
@@ -1618,10 +1622,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Get, drogon::Put});
 
     // B：发送测试通知（走完整 notify 链路：窗口 + Webhook + SMTP + 审计）。
-    app.registerHandler("/api/system/notice/test", [&cfg, &adapterMgr](Req, CB&& cb) {
+    app.registerHandler("/api/system/notice/test", [&cfg, &adapterMgr](Req req, CB&& cb) {
         try {
+            const auto body=req->body().empty()?J::object():J::parse(req->body());
+            const auto id=body.value("id",std::string());
+            if(!id.empty()) {const auto rules=notice_rules::all(dice::notice::conf(cfg));
+                if(std::none_of(rules.begin(),rules.end(),[&](const auto& r){return r.value("id",std::string())==id;}))throw std::invalid_argument("通知规则不存在");}
             dice::notice::notify(cfg, adapterMgr, dice::notice::kImportant,
-                "\xe8\xbf\x99\xe6\x98\xaf\xe4\xb8\x80\xe6\x9d\xa1\xe6\xb5\x8b\xe8\xaf\x95\xe9\x80\x9a\xe7\x9f\xa5\xe3\x80\x82", "", "", "test");
+                "\xe8\xbf\x99\xe6\x98\xaf\xe4\xb8\x80\xe6\x9d\xa1\xe6\xb5\x8b\xe8\xaf\x95\xe9\x80\x9a\xe7\x9f\xa5\xe3\x80\x82", "", "", "test", "", id);
             jsonReply(ok(nullptr), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});

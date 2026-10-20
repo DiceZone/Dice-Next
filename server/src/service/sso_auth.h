@@ -185,7 +185,8 @@ inline constexpr const char* kRedacted = "********";
 inline void redactSecrets(json& value, const std::string& parent = {}) {
     if (value.is_object()) {
         for (auto it = value.begin(); it != value.end(); ++it) {
-            const bool hidden = sensitiveField(it.key()) || (parent == "webhook" && it.key() == "url");
+            const bool webhookChannel=value.contains("kind") && value["kind"].is_string() && value["kind"]=="webhook";
+            const bool hidden = sensitiveField(it.key()) || ((parent == "webhook" || webhookChannel) && it.key() == "url");
             if (hidden && it.value().is_string()) {
                 if (!it.value().get_ref<const std::string&>().empty()) it.value() = kRedacted;
             } else {

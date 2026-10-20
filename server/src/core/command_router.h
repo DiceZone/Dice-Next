@@ -7170,6 +7170,7 @@ public:
     // .notice [on|off|status|level <n>]。level 位掩码：1 例行 / 2 重要 / 4 关键（可叠加，7=全部）。
     std::string handleNotice(Locale loc, const std::string& args, const Message& msg) {
         if (!isMaster(msg)) return i18n_.tr(loc, "gate.not_master");
+        std::lock_guard noticeLock(dice::notice_rules::configMutex());
         using J = nlohmann::json;
         std::string plat = msg.platform;
         bool isGroup = msg.type == MessageType::kGroup;
@@ -7188,7 +7189,13 @@ public:
             }
         std::istringstream iss(args); std::string act; iss >> act; act = toLower(act);
         if (act.empty() || act == "status") {
-            if (idx < 0) return i18n_.tr(loc, "notice.off_status");
+            if (idx < 0) {
+                for(const auto& rule:dice::notice_rules::all(nc))if(rule.value("enabled",true) && dice::notice_rules::sourceMatches(rule,plat,msg.adapterId))
+                    for(const auto& ch:rule.value("channels",J::array()))if(ch.value("kind",std::string())=="chat"
+                        && ch.value("platform",std::string())==plat && ch.value("chat_id",std::string())==chatId && ch.value("is_group",true)==isGroup)
+                        return i18n_.tr(loc,"notice.status",{{"level",std::to_string(rule.value("level_mask",15))}});
+                return i18n_.tr(loc, "notice.off_status");
+            }
             return i18n_.tr(loc, "notice.status", {{"level", std::to_string(wins[idx].value("level_mask", (int)dice::notice::kAll))}});
         }
         if (act == "off" || act == "0") {
@@ -7200,7 +7207,8 @@ public:
                     && (account.empty() || account == msg.adapterId);
                 if (!matches) remaining.push_back(window);
             }
-            nc["windows"] = remaining; cfg_.set<J>("dice/notice", nc); cfg_.save();
+            nc["windows"] = remaining;dice::notice_rules::removeChat(nc,plat,msg.adapterId,chatId,isGroup);
+            cfg_.set<J>("dice/notice", nc); cfg_.save();
             return i18n_.tr(loc, "notice.removed");
         }
         int mask = dice::notice::kAll;
@@ -7216,7 +7224,8 @@ public:
                {"is_group", isGroup}, {"level_mask", mask}, {"events", evs}};
         if (idx >= 0) { if (wins[idx].contains("name")) w["name"] = wins[idx]["name"]; wins[idx] = w; }
         else wins.push_back(w);
-        nc["windows"] = wins; cfg_.set<J>("dice/notice", nc); cfg_.save();
+        nc["windows"] = wins;dice::notice_rules::removeChat(nc,plat,msg.adapterId,chatId,isGroup);
+        cfg_.set<J>("dice/notice", nc); cfg_.save();
         return i18n_.tr(loc, "notice.set", {{"level", std::to_string(mask)}});
     }
 

@@ -15,6 +15,7 @@
 #include "../common/subprocess.h"
 #include "../adapter/adapter_manager.h"
 #include "../adapter/adapter_interface.h"
+#include "notice_rules.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/sinks/base_sink.h>
 #include <string>
@@ -41,18 +42,7 @@ constexpr int kAll       = 0b1111;
 
 // 事件目录：op → 所属区域。与所有 notify() 调用点保持同步；前端逐项勾选用同一份 op 名。
 inline const std::vector<std::pair<std::string, int>>& eventCatalog() {
-    static const std::vector<std::pair<std::string, int>> v{
-        {"trust", kRoutine}, {"alias", kRoutine},
-        {"friend_req", kImportant}, {"friend_add", kImportant}, {"group_invite", kImportant},
-        {"leave", kImportant}, {"dismiss", kImportant}, {"group_left", kImportant},
-        {"blacklist_leave", kImportant}, {"nonfriend_leave", kImportant}, {"keyword_leave", kImportant},
-        {"schedule", kImportant}, {"global", kImportant},
-        {"censor", kImportant},
-        {"update_available", kImportant}, {"update_result", kImportant},
-        {"admin", kCritical}, {"blacklist", kCritical},
-        {"error", kError}, {"update_error", kError},
-    };
-    return v;
+    return notice_rules::catalog();
 }
 // 某区域掩码覆盖的全部事件（指令 .notice level N 的展开）。
 inline std::vector<std::string> eventsForMask(int mask) {
@@ -220,72 +210,104 @@ inline void smtpSendAsync(const json& s, const std::string& subject, const std::
 
 // 推送 + 审计。窗口匹配：有 events 列表则按事件 op 逐项匹配，否则按区域掩码。
 // origin* 用于排除来源窗口（避免回声）并记入审计「发生地」。
-inline void notify(ConfigManager& cfg, AdapterManager& adapters, int level, const std::string& msg,
-                   const std::string& originPlatform = "", const std::string& originChat = "",
-                   const std::string& op = "", const std::string& originAdapterId = "") {
-    ProcessingScope source(ProcessingContext{{{"通知", op.empty() ? "系统通知" : op, "", ""}},
-        activeProcessingContext.trigger, "通知内容已生成"});
+inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, const std::string &msg,
+                   const std::string &originPlatform = "", const std::string &originChat = "",
+                   const std::string &op = "", const std::string &originAdapterId = "",
+                   const std::string &ruleId = "") {
+    ProcessingScope source(ProcessingContext{
+        {{"通知", op.empty() ? "系统通知" : op, "", ""}}, activeProcessingContext.trigger, "通知内容已生成"});
     OutboundScope independentNotification(nullptr);
     std::string origin = originChat.empty() ? std::string() : (originPlatform + ":" + originChat);
     audit(level, msg, op, origin);
     json c = conf(cfg);
-    for (auto& w : windows(cfg)) {
-        // 帐号窗口只收该帐号来源的通知；全局窗口（adapter_id 空）收所有帐号。
-        // 测试通知（op=="test"）不受来源限制，逐窗口验证链路。
-        if (op != "test" && !w.adapterId.empty() && !originAdapterId.empty() &&
-            w.adapterId != originAdapterId) continue;
-        bool hit = (op == "test")   // 测试通知不受订阅过滤（骰主手动触发验证链路）
-            || (op.empty() ? ((w.mask & level) != 0)
-                : (!w.events.empty()
-                    ? (std::find(w.events.begin(), w.events.end(), op) != w.events.end())
-                    : ((w.mask & level) != 0)));
-        if (!hit) continue;
-        if (!originChat.empty() && w.platform == originPlatform && w.chatId == originChat) continue;  // 不回推来源
-        // 哪里来的就发给谁：帐号来源的通知先由来源适配器发；发送失败（例如
-        // 掉线通知时来源已离线）或系统级通知，则按内部适配器编号顺序依次尝试，
-        // 直到成功发出一次。
-        auto trySend = [&](const AdapterPtr& a) -> bool {
-            if (!a || !a->isConnected()) return false;
-            try {
-                Message m;
-                m.platform = a->platform();
-                m.type = w.isGroup ? MessageType::kGroup : MessageType::kPrivate;
-                m.targetId = w.chatId;
-                m.content = msg;
-                a->sendMessage(m);
-                return true;
-            } catch (...) { return false; }
-        };
-        bool sent = false;
-        const std::string preferredAdapterId =
-            !originAdapterId.empty() ? originAdapterId : w.adapterId;
-        if (!preferredAdapterId.empty()) {
-            auto src = adapters.getAdapter(preferredAdapterId);
-            if (src && src->isConnected()
-                && (w.platform.empty() || src->platform() == w.platform))
-                sent = trySend(src);
-        }
-        if (!sent) {
-            for (auto& a : orderedCandidates(adapters, w.platform)) {
-                if (sent) break;
-                sent = trySend(a);
+    std::set<std::string> delivered;
+    for (const auto &rule : notice_rules::all(c)) {
+        if (!ruleId.empty() && rule.value("id", std::string()) != ruleId)
+            continue;
+        if (op != "test" && (!notice_rules::subscribed(rule, level, op) ||
+                             !notice_rules::sourceMatches(rule, originPlatform, originAdapterId)))
+            continue;
+        if (op == "test" && ruleId.empty() && !rule.value("enabled", true))
+            continue;
+        for (const auto &channel : rule.value("channels", json::array())) {
+            const auto kind = channel.value("kind", std::string());
+            if (kind == "webhook") {
+                const auto url = channel.value("url", std::string());
+                if (notice_rules::webhook(url) && delivered.insert("webhook:" + url).second)
+                    webhookPostAsync(url, json{{"ts", utils::formatTimeInTimezone(std::time(nullptr),
+                                                                                  "%Y-%m-%d %H:%M:%S")},
+                                               {"level", level},
+                                               {"op", op},
+                                               {"msg", msg},
+                                               {"origin", origin}}
+                                              .dump());
+                continue;
+            }
+            if (kind == "smtp") {
+                const auto to = channel.value("to", std::string());
+                if (notice_rules::mailbox(to) && delivered.insert("smtp:" + to).second)
+                    smtpSendAsync(notice_rules::smtpTransport(cfg.getAll(), c, channel), "[Dice!Next] " + op,
+                                  msg + (origin.empty() ? "" : "\n\n(" + origin + ")"));
+                continue;
+            }
+            if (kind != "chat")
+                continue;
+            Window w;
+            w.platform = channel.value("platform", std::string());
+            w.chatId = channel.value("chat_id", std::string());
+            w.isGroup = channel.value("is_group", true);
+            w.adapterId = channel.value("preferred_adapter", std::string());
+            if (w.chatId.empty())
+                continue;
+            // 帐号窗口只收该帐号来源的通知；全局窗口（adapter_id 空）收所有帐号。
+            // 测试通知（op=="test"）不受来源限制，逐窗口验证链路。
+            if (!originChat.empty() && w.platform == originPlatform && w.chatId == originChat)
+                continue; // 不回推来源
+            // 哪里来的就发给谁：帐号来源的通知先由来源适配器发；发送失败（例如
+            // 掉线通知时来源已离线）或系统级通知，则按内部适配器编号顺序依次尝试，
+            // 直到成功发出一次。
+            auto trySend = [&](const AdapterPtr &a) -> bool {
+                if (!a || !a->isConnected())
+                    return false;
+                if (!w.platform.empty() && a->platform() != w.platform)
+                    return false;
+                const auto key = json::array({a->id(), w.chatId, w.isGroup}).dump();
+                if (delivered.count(key))
+                    return true;
+                try {
+                    Message m;
+                    m.platform = a->platform();
+                    m.type = w.isGroup ? MessageType::kGroup : MessageType::kPrivate;
+                    m.targetId = w.chatId;
+                    m.content = msg;
+                    a->sendMessage(m);
+                    delivered.insert(key);
+                    return true;
+                } catch (...) {
+                    return false;
+                }
+            };
+            bool sent = false;
+            if (channel.value("delivery", std::string("auto")) == "selected") {
+                for (const auto &id : channel.value("adapter_ids", json::array()))
+                    if (id.is_string())
+                        trySend(adapters.getAdapter(id.get<std::string>()));
+                continue; // An explicit account selection must never fall back to another account.
+            }
+            const std::string preferredAdapterId = !originAdapterId.empty() ? originAdapterId : w.adapterId;
+            if (!preferredAdapterId.empty()) {
+                auto src = adapters.getAdapter(preferredAdapterId);
+                if (src && src->isConnected() && (w.platform.empty() || src->platform() == w.platform))
+                    sent = trySend(src);
+            }
+            if (!sent) {
+                for (auto &a : orderedCandidates(adapters, w.platform)) {
+                    if (sent)
+                        break;
+                    sent = trySend(a);
+                }
             }
         }
-    }
-    // 第三方推送（按区域掩码过滤；后台线程，不阻塞调用方）。
-    if (c.contains("webhook") && c["webhook"].is_object()) {
-        auto& wh = c["webhook"];
-        if (wh.value("enabled", false) && (wh.value("level_mask", (int)kAll) & level)) {
-            std::time_t t = std::time(nullptr);
-            const std::string ts = utils::formatTimeInTimezone(t, "%Y-%m-%d %H:%M:%S");
-            webhookPostAsync(wh.value("url", std::string()),
-                json{{"ts", ts}, {"level", level}, {"op", op}, {"msg", msg}, {"origin", origin}}.dump());
-        }
-    }
-    if (c.contains("smtp") && c["smtp"].is_object()) {
-        auto& sm = c["smtp"];
-        if (sm.value("enabled", false) && (sm.value("level_mask", (int)kAll) & level))
-            smtpSendAsync(sm, "[Dice!Next] " + op, msg + (origin.empty() ? "" : "\n\n(" + origin + ")"));
     }
 }
 
@@ -296,19 +318,24 @@ inline void notify(ConfigManager& cfg, AdapterManager& adapters, int level, cons
 // No mutex may be held across cb_: sending a notification can log another error.
 // The callback is immutable, throttling is atomic and reentry is thread-local.
 class ErrorNotifySink : public spdlog::sinks::base_sink<spdlog::details::null_mutex> {
-public:
-    using Callback = std::function<void(const std::string&)>;
+  public:
+    using Callback = std::function<void(const std::string &)>;
     explicit ErrorNotifySink(Callback cb) : cb_(std::move(cb)) {}
-protected:
-    void sink_it_(const spdlog::details::log_msg& msg) override {
-        if (msg.level < spdlog::level::err || !cb_) return;
+
+  protected:
+    void sink_it_(const spdlog::details::log_msg &msg) override {
+        if (msg.level < spdlog::level::err || !cb_)
+            return;
         static thread_local bool inNotify = false;
-        if (inNotify) return;                                  // 重入保护
+        if (inNotify)
+            return; // 重入保护
         static std::atomic<long long> lastSent{0};
         long long now = (long long)std::time(nullptr);
         long long prev = lastSent.load();
-        if (now - prev < 60) return;                           // 节流：60s 一条
-        if (!lastSent.compare_exchange_strong(prev, now)) return;
+        if (now - prev < 60)
+            return; // 节流：60s 一条
+        if (!lastSent.compare_exchange_strong(prev, now))
+            return;
         inNotify = true;
         try { cb_(std::string(msg.payload.data(), msg.payload.size())); }
         catch (...) { DICE_LOG_EXCEPTION("error notification delivery"); }
