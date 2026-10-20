@@ -49,7 +49,7 @@ public:
 
     /// Restore a validated full configuration snapshot, normally recovered from
     /// the database after an invalid on-disk edit.
-    bool restoreSnapshot(const json& snapshot);
+    bool restoreSnapshot(const json& snapshot, const json* expected = nullptr);
 
     /// When normal validation fails, read only a string db_path from server.json
     /// so startup can locate its last snapshot without loading the config.

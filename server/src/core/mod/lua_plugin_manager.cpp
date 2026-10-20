@@ -9,6 +9,7 @@
 #include "common/sample_template.h"
 #include "common/message_break.h"
 #include "common/legacy_model.h"
+#include "service/image_resource_service.h"
 #include "../../../third_party/tomlplusplus/toml.hpp"
 
 #include <nlohmann/json.hpp>
@@ -534,8 +535,21 @@ static int l_resolvePluginFile(lua_State* L) {
     if (!mapped.empty() && mapped.back() != '/' && mapped.back() != '\\')
         mapped.push_back(fs::path::preferred_separator);
     mapped += tail;
+    mapped = image_resources::resolvePath(mapped);
     lua_pushlstring(L, mapped.data(), mapped.size());
     return 1;
+}
+// Only an already-managed image alias is redirected. Arbitrary plugin file IO
+// and new paths keep their existing semantics and filesystem permissions.
+static int l_resolveImageResource(lua_State* L) {
+    try {
+        const auto raw=argStr(L,1);
+        if(auto resources=image_resources::current()) {
+            if(auto path=resources->resolve(raw)) {const auto value=image_resources::utf8(*path);lua_pushlstring(L,value.data(),value.size());return 1;}
+            if(resources->known(raw)) {const auto unavailable=image_resources::utf8(resources->root()/".unavailable"/"recycled-resource");lua_pushlstring(L,unavailable.data(),unavailable.size());return 1;}
+        }
+    } catch(...) {}
+    lua_pushnil(L);return 1;
 }
 // 取配置键，并解析 &field（经 speech 模板 → 实际字段名）。
 static std::string resolvedKey(LuaPluginManager* m, lua_State* L, int i) {
@@ -1509,6 +1523,7 @@ void LuaPluginManager::registerGlobals() {
         {"__dnx_conf", l_confRaw},                                 // 通用配置读写（GameTable 等）
         {"__dnx_audit", l_audit},                                  // Lua 安全审计回调
         {"__dnx_resolve_plugin_file", l_resolvePluginFile},         // 旧插件缓存路径重映射
+        {"__dnx_resolve_image_resource", l_resolveImageResource},
         {nullptr, nullptr},
     };
     for (const luaL_Reg* f = fns; f->name; ++f) lua_register(state_, f->name, f->func);
@@ -1881,6 +1896,11 @@ if __dnx_audit then
       local orig = io.open
       io.open = function(path, ...)
         __dnx_audit('io.open', detail(path, ...))
+        local image = __dnx_resolve_image_resource and __dnx_resolve_image_resource(path)
+        if image ~= nil and image ~= path then
+          __dnx_audit('io.open.image', detail(path, image))
+          return orig(image, ...)
+        end
         local file, err, code = orig(path, ...)
         if file ~= nil then return file, err, code end
         local mapped = __dnx_resolve_plugin_file and __dnx_resolve_plugin_file(path)

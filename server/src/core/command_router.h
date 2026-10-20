@@ -9757,8 +9757,8 @@ private:
                 try {   // 同步清缓存图 data/logs/images/log<id>_*
                     namespace fs = std::filesystem;
                     std::string prefix = "log" + std::to_string(id) + "_";
-                    if (fs::exists("data/logs/images"))
-                        for (auto& e : fs::directory_iterator("data/logs/images"))
+                    for (const auto& directory : {image_resources::cacheDirectory("log"), fs::path("data/logs/images")}) if (fs::exists(directory))
+                        for (auto& e : fs::directory_iterator(directory))
                             if (e.is_regular_file()
                                 && u8str(e.path().filename()).rfind(prefix, 0) == 0) {
                                 std::error_code ec; fs::remove(e.path(), ec);
@@ -10436,13 +10436,13 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     // 用 curl 把 url 下到 outPath（-K 配置文件传参，防 shell 注入）。返回是否成功。
     static bool curlDownload(const std::string& url, const std::string& outPath) {
         std::string cfgPath = outPath + ".curlcfg";
-        { std::ofstream cf(cfgPath, std::ios::binary);
+        { std::ofstream cf(image_resources::fromUtf8(cfgPath), std::ios::binary);
           cf << "url = \"" << curlCfgEscape(url) << "\"\noutput = \"" << curlCfgEscape(outPath) << "\"\n"
              << "--max-time 8\n--connect-timeout 4\n--silent\n--fail\n--location\n"; }
         const int rc = dice::proc::curlConfig(cfgPath).exitCode;
-        std::error_code ec; std::filesystem::remove(cfgPath, ec);
-        if (rc != 0) { std::filesystem::remove(outPath, ec); return false; }
-        return std::filesystem::exists(outPath, ec);
+        std::error_code ec; std::filesystem::remove(image_resources::fromUtf8(cfgPath), ec);
+        if (rc != 0) { std::filesystem::remove(image_resources::fromUtf8(outPath), ec); return false; }
+        return std::filesystem::exists(image_resources::fromUtf8(outPath), ec);
     }
     // 把图片数组里的远端 url 落地到 data/logs/images/，成功的替换为本地文件名。
     std::string downloadLogImages(const std::string& jsonArr, int logId,
@@ -10450,7 +10450,8 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         nlohmann::json a;
         try { a = nlohmann::json::parse(jsonArr); } catch (...) { return jsonArr; }
         if (!a.is_array()) return jsonArr;
-        std::error_code ec; std::filesystem::create_directories("data/logs/images", ec);
+        const auto imageDirectory = image_resources::cacheDirectory("log");
+        std::error_code ec; std::filesystem::create_directories(imageDirectory, ec);
         nlohmann::json out = nlohmann::json::array();
         int n = 0;
         for (auto& e : a) {
@@ -10461,7 +10462,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                 ext = u.substr(dot + 1); if (auto qm = ext.find('?'); qm != std::string::npos) ext = ext.substr(0, qm);
             }
             std::string fname = "log" + std::to_string(logId) + "_" + std::to_string(nowEpoch()) + "_" + std::to_string(n++) + "." + ext;
-            std::string path = "data/logs/images/" + fname;
+            std::string path = image_resources::utf8(imageDirectory / image_resources::fromUtf8(fname));
             if (!isHostSafe(u)) { out.push_back(u); continue; }   // SSRF 黑名单：内网/环回/控制字符一律不下载
             if (!curlDownload(u, path)) { out.push_back(u); continue; }   // 下载失败→保留临时 url
             // generic 图床：立即上传拿稳定 url（趁 QQ 链接还活着）；失败退回本地文件名。

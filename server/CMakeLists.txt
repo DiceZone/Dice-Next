@@ -48,6 +48,7 @@ find_package(nlohmann_json REQUIRED)
 
 # sqlite_orm — ORM for SQLite (header-only)
 find_package(SqliteOrm CONFIG REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 # spdlog — async logging
 find_package(spdlog REQUIRED)
@@ -61,6 +62,7 @@ endif()
 
 # zlib — SealDice 兼容日志上传（items JSON 需 zlib 压缩），drogon 依赖里已带
 find_package(ZLIB REQUIRED)
+find_package(miniz CONFIG REQUIRED)
 
 # zstd — SealDice V105 日志上传（Parquet 页压缩用 zstd）
 find_package(zstd CONFIG REQUIRED)
@@ -80,6 +82,23 @@ find_package(Lua REQUIRED)
 # MD4C — pinned CommonMark/GFM parser used for structural Markdown-to-text
 # downgrade on adapters which only support plain text.
 add_library(dice-md4c STATIC third_party/md4c/md4c.c)
+add_library(dice-image-resources STATIC
+    src/service/image_reference.cpp
+    src/service/image_resource_service.cpp
+    src/service/image_resource_api.cpp
+    src/service/image_archive.cpp
+    src/service/deck_package.cpp
+)
+target_include_directories(dice-image-resources PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dice-image-resources PUBLIC nlohmann_json::nlohmann_json
+    yaml-cpp::yaml-cpp OpenSSL::Crypto Drogon::Drogon miniz::miniz unofficial::sqlite3::sqlite3)
+if(MSVC)
+    target_compile_options(dice-image-resources PRIVATE /utf-8 /bigobj)
+    target_compile_definitions(dice-image-resources PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+if(NOT WIN32)
+    target_link_libraries(dice-image-resources PUBLIC Iconv::Iconv)
+endif()
 target_include_directories(dice-md4c PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/md4c
 )
@@ -208,6 +227,7 @@ target_link_libraries(dice-next-server PRIVATE
     dicescript::dicescript
     qjs
     dice-md4c
+    dice-image-resources
     ${LUA_LIBRARIES}
 )
 

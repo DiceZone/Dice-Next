@@ -14,6 +14,7 @@
 #include <cstdlib>
 
 #include "../common/subprocess.h"
+#include "image_resource_service.h"
 #include <cctype>
 #include <random>
 
@@ -68,14 +69,14 @@ inline std::string randToken() {
 // curl 下载（-K 配置文件传参，防 shell 注入）；成功返回 true。
 inline bool download(const std::string& url, const std::string& outPath) {
     std::string cfgPath = outPath + ".curlcfg";
-    { std::ofstream cf(cfgPath, std::ios::binary);
+    { std::ofstream cf(image_resources::fromUtf8(cfgPath), std::ios::binary);
       cf << "url = \"" << url << "\"\noutput = \"" << outPath << "\"\n"
          << "--max-time 6\n--connect-timeout 3\n--silent\n--fail\n--location\n"; }
     // curl runs directly, never through a shell: see common/subprocess.h.
     const int rc = dice::proc::curlConfig(cfgPath).exitCode;
-    std::error_code ec; std::filesystem::remove(cfgPath, ec);
-    if (rc != 0) { std::filesystem::remove(outPath, ec); return false; }
-    return std::filesystem::exists(outPath, ec);
+    std::error_code ec; std::filesystem::remove(image_resources::fromUtf8(cfgPath), ec);
+    if (rc != 0) { std::filesystem::remove(image_resources::fromUtf8(outPath), ec); return false; }
+    return std::filesystem::exists(image_resources::fromUtf8(outPath), ec);
 }
 
 // 把 content 里的远端图码下载到本地并改写为 [CQ:image,file=/api/chat/images/<名>]；
@@ -83,7 +84,8 @@ inline bool download(const std::string& url, const std::string& outPath) {
 // ⚠️ 同步阻塞（含 curl）——调用方应放到后台线程，勿在消息主循环里直接调。
 inline std::string localize(const std::string& content) {
     if (!hasRemoteImage(content)) return content;
-    std::error_code ec; std::filesystem::create_directories("data/chat/images", ec);
+    const auto directory = image_resources::cacheDirectory("chat");
+    std::error_code ec; std::filesystem::create_directories(directory, ec);
     std::string out; size_t i = 0;
     while (i < content.size()) {
         if (content.compare(i, 9, "[CQ:image") == 0) {
@@ -93,7 +95,7 @@ inline std::string localize(const std::string& content) {
                 std::string url = fieldValue(inner, "url"); if (url.empty()) url = fieldValue(inner, "file");
                 if (url.rfind("http", 0) == 0) {
                     std::string name = std::to_string((long long)std::time(nullptr)) + "_" + randToken() + guessExt(url);
-                    std::string path = "data/chat/images/" + name;
+                    std::string path = image_resources::utf8(directory / name);
                     out += download(url, path) ? ("[CQ:image,file=/api/chat/images/" + name + "]") : inner;
                 } else out += inner;
                 i = end + 1; continue;
@@ -107,12 +109,14 @@ inline std::string localize(const std::string& content) {
 // 删除 data/chat/images 下收到时间早于 cutoff 的缓存图（按文件名前缀 <epoch>_ 判断）。
 inline void pruneOld(int64_t cutoff) {
     namespace fs = std::filesystem; std::error_code ec;
-    if (!fs::is_directory("data/chat/images", ec)) return;
-    for (const auto& e : fs::directory_iterator("data/chat/images", ec)) {
+    for (const auto& directory : {image_resources::cacheDirectory("chat"), fs::path("data/chat/images")}) {
+    if (!fs::is_directory(directory, ec)) continue;
+    for (const auto& e : fs::directory_iterator(directory, ec)) {
         if (!e.is_regular_file(ec)) continue;
         std::string fn = e.path().filename().string();
         long long ts = std::atoll(fn.c_str());   // 文件名前缀 = 收到时间戳
         if (ts > 0 && ts < cutoff) fs::remove(e.path(), ec);
+    }
     }
 }
 

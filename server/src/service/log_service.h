@@ -96,7 +96,7 @@ inline std::string renderHtml(Database& db, int logId) {
         return o;
     };
     auto fileToDataSrc = [](const std::string& path, const std::string& nameForExt) -> std::string {
-        std::ifstream f(path, std::ios::binary);
+        std::ifstream f(image_resources::fromUtf8(image_resources::resolvePath(path)), std::ios::binary);
         if (!f) return "";
         std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         std::string mimeImg = "image/jpeg";
@@ -131,9 +131,10 @@ inline std::string renderHtml(Database& db, int logId) {
                         if (u.empty()) continue;
                         std::string src;
                         std::string norm = u; for (auto& ch : norm) if (ch == '\\') ch = '/';
-                        if (u.rfind("http", 0) == 0) src = u;                          // 远端
-                        else if (norm.rfind("data/assets/", 0) == 0) src = fileToDataSrc(norm, norm);   // 本地资产
-                        else src = fileToDataSrc("data/logs/images/" + u, u);          // 本地落地图
+                        if (auto resources = image_resources::current(); resources && resources->resolve(u)) src = fileToDataSrc(image_resources::resolvePath(u), u);
+                        else if (u.rfind("http", 0) == 0) src = u;
+                        else if (norm.rfind("data/assets/", 0) == 0 || norm.rfind("data/images/", 0) == 0) src = fileToDataSrc(norm, norm);
+                        else src = fileToDataSrc(image_resources::utf8(image_resources::cacheDirectory("log") / image_resources::fromUtf8(u)), u);
                         if (src.empty()) continue;
                         if (src.rfind("data:", 0) == 0) {   // 本地图 base64 去重引用
                             auto it = imgIndex.find(src);

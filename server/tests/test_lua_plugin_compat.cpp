@@ -8,6 +8,7 @@
 #include "../src/core/mod/legacy_log_context.h"
 #include "../src/common/utils.h"
 #include "../src/common/bounded_executor.h"
+#include "../src/service/image_resource_service.h"
 
 #include <chrono>
 #include <clocale>
@@ -249,6 +250,25 @@ function later(msg) sleepTime(1); return 'resumed' end
 
     ASSERT_FALSE(runPluginCallback(callbacks[0]));
     ASSERT_EQ(reply, "resumed");
+}
+
+TEST(LuaPluginCompat, ManagedImageAliasesRedirectPluginReadsAndWritesWithoutTouchingOtherIo) {
+    TempWorkspace workspace("dice_lua_image_alias_");fs::create_directories("data/plugin/example/art");
+    const std::string original=std::string("\x89PNG\r\n\x1a\n",8)+"original";
+    writeText("data/plugin/example/art/a.png",original);
+    auto images=std::make_shared<image_resources::Service>("data");
+    images->importOwner("data/plugin","data/plugin/example","plugin","example");
+    struct DefaultGuard {std::shared_ptr<image_resources::Service> old=image_resources::current();~DefaultGuard(){image_resources::setDefault(std::move(old));}} guard;
+    image_resources::setDefault(images);
+    LuaPluginManager manager;ASSERT_TRUE(manager.init());std::string error;
+    ASSERT_TRUE(manager.eval(R"LUA(
+      local f=assert(io.open('data/plugin/example/art/a.png','ab'));f:write('changed');f:close()
+      local f=assert(io.open('data/plugin/example/art/a.png','rb'));assert(f:read('*a'):sub(-7)=='changed');f:close()
+      local other=assert(io.open('data/plugin/plain.txt','w'));other:write('ordinary');other:close()
+    )LUA",&error));
+    std::ifstream old("data/plugin/example/art/a.png",std::ios::binary);const std::string unchanged{std::istreambuf_iterator<char>(old),std::istreambuf_iterator<char>()};ASSERT_EQ(unchanged,original);
+    std::ifstream migrated(images->checkedPath("plugin/example/art/a.png"),std::ios::binary);const std::string changed{std::istreambuf_iterator<char>(migrated),std::istreambuf_iterator<char>()};ASSERT_EQ(changed,original+"changed");
+    ASSERT_TRUE(fs::exists("data/plugin/plain.txt"));
 }
 
 TEST(LuaPluginCompat, EventOriginCannotBeRewrittenByLuaAndVirtualTaintSurvivesYield) {

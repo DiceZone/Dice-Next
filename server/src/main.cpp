@@ -21,6 +21,8 @@
 #include "service/web_auth.h"          // WebUI 登录鉴权
 #include "service/chat_image.h"        // 模拟聊天图片本地化
 #include "service/image_host.h"        // 图床（QQ 官方富媒体需要公网 URL）
+#include "service/image_resource_api.h"
+#include "service/image_resource_documents.h"
 #include "service/ai_polish.h"         // AI 回复润色
 #include "service/ai_translate.h"      // AI 回复翻译（.lang 自定义语言）
 #include "service/ai_chat.h"           // 智能化阶段A：AI 对话回复
@@ -583,6 +585,10 @@ static int realMain(int argc, char* argv[]) {
         } catch (...) {}
     }
 
+    // Install the image store before importing any legacy data or loading plugins.
+    auto imageResources = std::make_shared<dice::image_resources::Service>("data");
+    dice::image_resources::setDefault(imageResources);
+
     // ── 6. Check for legacy data ─────────────────────────────
     // Legacy data path: check config for explicit path, fall back to ./data/
     std::string legacyPath = configMgr.get<std::string>("migration/legacy_path",
@@ -669,6 +675,17 @@ static int realMain(int argc, char* argv[]) {
     dice::PersonaManager personaMgr(db, i18n, configMgr);
     personaMgr.loadStartupPersona();
     cmdRouter.setPersonaManager(&personaMgr);
+    dice::image_resources::configureDocuments(imageResources, db, configMgr, i18n, personaMgr, replyManager, cardDeck);
+    struct ImageResourceLifetime {
+        std::shared_ptr<dice::image_resources::Service> service;
+        ~ImageResourceLifetime() {
+            service->waitForBackground();
+            service->setDocuments({}, {});
+            dice::image_resources::setDefault(nullptr);
+        }
+    } imageResourceLifetime{imageResources};
+    const auto imageRecovery = imageResources->recoverOperations();
+    for (const auto& warning : imageRecovery["warnings"]) DICE_LOG_WARN_M("文件管理", "{}", warning.get<std::string>());
 
     // 初始化 JS 插件子系统并从 plugins/js 加载插件。
     const auto pluginTimeout = std::chrono::milliseconds(std::clamp(
@@ -3059,6 +3076,17 @@ static int realMain(int argc, char* argv[]) {
     DICE_LOG_INFO_M("管理面板", "正在启动管理面板，监听地址 {}，端口 {}。", host, port);
 
     auto& app = drogon::app();
+    dice::image_resources::registerRoutes(imageResources);
+    dice::image_resources::registerDeckPackageRoutes(imageResources, [&cardDeck] { cardDeck.reload({"decks", "data/decks"}); },
+        [&cardDeck, imageResources](const std::string& entry) -> std::optional<std::filesystem::path> {
+            const auto source = cardDeck.getSourceInfo(entry);
+            if (!source || !dice::deck_files::isSafeJsonFilename(source->filename)) return std::nullopt;
+            const auto work = imageResources->dataRoot().parent_path();
+            auto file = (source->bundled ? work / "decks" : imageResources->dataRoot() / "decks") / u8path(source->filename);
+            if (!std::filesystem::exists(file) && source->bundled) file = work.parent_path() / "decks" / u8path(source->filename);
+            if (!dice::migration_resources::safePath(work, file) && !dice::migration_resources::safePath(work.parent_path() / "decks", file)) throw std::runtime_error("依赖牌堆路径不安全");
+            return file;
+        });
     app.setLogLevel(trantor::Logger::kWarn);
     dice::installHttpDiagnostics(app);
     app.addListener(host, static_cast<uint16_t>(port));
@@ -4173,7 +4201,7 @@ static int realMain(int argc, char* argv[]) {
     // ── Image asset upload + serve (for 发图 in dice text / replies) ──
     // POST /api/assets/upload  {filename, data:"<base64 or dataURL>"} → {url, code, name}
     app.registerHandler("/api/assets/upload",
-        [](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+        [imageResources](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
             nlohmann::json out;
             try {
                 auto j = nlohmann::json::parse(req->getBody());
@@ -4190,13 +4218,10 @@ static int realMain(int argc, char* argv[]) {
                     if (safeExt.empty()) safeExt = "png";
                     std::string name = std::to_string((long long)std::time(nullptr)) + "_" +
                                        drogon::utils::genRandomString(6) + "." + safeExt;
-                    std::filesystem::create_directories("data/assets");
-                    { std::ofstream f("data/assets/" + name, std::ios::binary); f.write(bytes.data(), (std::streamsize)bytes.size()); }
-                    // 不再把访问时的 host（往往是 localhost，跨设备失效）烧进
-                    // 链接。回复里存平台中立码 [img,file=<本地路径>]，发送时按「图片发送
-                    // 方式」配置转换；url 返回相对路径，仅供 WebUI 预览。
-                    out = {{"code",0},{"message","ok"},{"data", {{"url","/api/assets/" + name},{"name",name},
-                           {"code","[img,file=data/assets/" + name + "]"}}}};
+                    auto resource = imageResources->upload(j.value("directory", std::string("shared")), name, bytes);
+                    imageResources->addAlias("data/assets/" + name, resource["path"].get<std::string>());
+                    resource["name"] = name;
+                    out = {{"code",0},{"message","ok"},{"data",std::move(resource)}};
                     DICE_LOG_INFO("asset uploaded: {} ({} bytes)", name, bytes.size());
                 }
             } catch (const std::exception& e) { out = {{"code",1},{"message", e.what()}}; }
@@ -4208,13 +4233,20 @@ static int realMain(int argc, char* argv[]) {
 
     // GET /api/assets/{name} — serve an uploaded image.
     app.registerHandler("/api/assets/{1}",
-        [](const drogon::HttpRequestPtr&, std::function<void(const drogon::HttpResponsePtr&)>&& cb,
+        [imageResources](const drogon::HttpRequestPtr&, std::function<void(const drogon::HttpResponsePtr&)>&& cb,
            const std::string& name) {
             // Reject path traversal.
             if (name.find("..") != std::string::npos || name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
                 auto r = drogon::HttpResponse::newHttpResponse(); r->setStatusCode(drogon::k400BadRequest); cb(r); return;
             }
-            std::string path = "data/assets/" + name;
+            const auto managed = imageResources->resolve("data/assets/" + name);
+            if (!managed && imageResources->known("data/assets/" + name)) {
+                auto r = drogon::HttpResponse::newHttpResponse(); r->setStatusCode(drogon::k404NotFound); cb(r); return;
+            }
+            auto path = managed.value_or(u8path("data/assets/" + name));
+            if (!dice::migration_resources::safePath(imageResources->dataRoot(), path) || !std::filesystem::is_regular_file(path) || std::filesystem::file_size(path) > 128ULL * 1024 * 1024) {
+                auto r = drogon::HttpResponse::newHttpResponse(); r->setStatusCode(drogon::k404NotFound); cb(r); return;
+            }
             std::ifstream f(path, std::ios::binary);
             if (!f) { auto r = drogon::HttpResponse::newHttpResponse(); r->setStatusCode(drogon::k404NotFound); cb(r); return; }
             std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -4223,6 +4255,8 @@ static int realMain(int argc, char* argv[]) {
                               : ext == "webp" ? "image/webp" : ext == "bmp" ? "image/bmp" : "image/png";
             auto resp = drogon::HttpResponse::newHttpResponse();
             resp->setContentTypeString(mime);
+            resp->addHeader("X-Content-Type-Options", "nosniff");
+            resp->addHeader("Content-Security-Policy", "sandbox; default-src 'none'");
             resp->setBody(std::move(body));
             cb(resp);
         }, {drogon::Get});
@@ -4860,6 +4894,7 @@ static int realMain(int argc, char* argv[]) {
     });
 
     DICE_LOG_SUCCESS_M("系统", "初始化完成，开始提供服务；控制台按 Ctrl+C 可正常退出。");
+    imageResources->startMigration();
     dice::crashdiag::setPhase("running");
     app.run();
 
@@ -4882,6 +4917,8 @@ static int realMain(int argc, char* argv[]) {
     jsCallbacks->stop();
     luaCallbacks->stop();
     adapterMgr.stopAll();
+    imageResources->waitForBackground();
+    dice::image_resources::setDefault(nullptr);
     db.close();
     DICE_LOG_SUCCESS_M("系统", "数据保存与服务关闭完成，程序正常退出。");
 

@@ -19,6 +19,8 @@ set(TEST_SOURCES
     test_counter_store.cpp
     test_log_usage.cpp
     test_game_session_list.cpp
+    test_image_resources.cpp
+    test_image_resource_documents.cpp
     test_chat_persistence.cpp
     test_causal_rule_manager.cpp
     test_help_entry_filter.cpp
@@ -142,6 +144,7 @@ target_link_libraries(dice-next-tests PRIVATE
     onedice::onedice
     dicescript::dicescript
     dice-md4c
+    dice-image-resources
     yaml-cpp::yaml-cpp
     ZLIB::ZLIB
     ${DICE_ZSTD_TARGET}
@@ -167,6 +170,7 @@ target_include_directories(dice-next-lua-tests PRIVATE
     ${LUA_INCLUDE_DIR}
 )
 target_link_libraries(dice-next-lua-tests PRIVATE
+    dice-image-resources
     qjs
     Drogon::Drogon
     nlohmann_json::nlohmann_json
@@ -204,5 +208,10 @@ if(MSVC)
 endif()
 
 enable_testing()
+add_executable(dice-next-image-resource-tests EXCLUDE_FROM_ALL test_main.cpp test_image_resources.cpp)
+target_link_libraries(dice-next-image-resource-tests PRIVATE dice-image-resources)
+if(MSVC)
+    target_compile_options(dice-next-image-resource-tests PRIVATE /utf-8 /bigobj)
+endif()
 add_test(NAME dice_next_tests COMMAND dice-next-tests)
 add_test(NAME dice_next_lua_tests COMMAND dice-next-lua-tests)

@@ -10,6 +10,7 @@
 
 #include "../config/config_manager.h"
 #include "../config/scoped_settings.h"
+#include "image_resource_service.h"
 
 #include <drogon/utils/Utilities.h>
 #include <nlohmann/json.hpp>
@@ -63,6 +64,22 @@ inline std::string resolve(const std::string& file,
                            const std::string& adapterId = {}) {
     if (file.empty()) return file;
     if (file.rfind("base64://", 0) == 0 || file.rfind("file:", 0) == 0) return file;
+    if (auto resources = image_resources::current()) {
+        if (auto path = resources->resolve(file)) {
+            auto c = conf(platform, adapterId);
+            if (c.value("mode", std::string("base64")) == "httpurl") {
+                auto host = c.value("host", std::string());
+                if (host.empty()) host = "localhost:" + std::to_string(g_cfg ? g_cfg->get<int>("server/port", 18088) : 18088);
+                if (!host.starts_with("http://") && !host.starts_with("https://")) host = "http://" + host;
+                while (!host.empty() && host.back() == '/') host.pop_back();
+                try { return host + resources->share(image_resources::utf8(path->lexically_relative(resources->root()))); }
+                catch (...) { /* Private caches must stay inline, never become public links. */ }
+            }
+            auto result = fileToBase64(image_resources::utf8(*path));
+            return result.empty() ? file : result;
+        }
+        if (resources->known(file)) return {}; // Recycled aliases must not fall back to old physical copies.
+    }
     std::string name;        // data/assets 内的文件名（可走 httpurl）
     std::string localPath;   // 本地实际路径（走 base64）
     if (file.rfind("http://", 0) == 0 || file.rfind("https://", 0) == 0) {

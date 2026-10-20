@@ -16,6 +16,7 @@
 #include "../config/scoped_settings.h"
 #include "../common/subprocess.h"
 #include "../message/qq_official_message.h"
+#include "image_resource_service.h"
 #include <nlohmann/json.hpp>
 #include <string>
 #include <optional>
@@ -53,6 +54,15 @@ inline std::string publicUrlFor(ConfigManager& cfg, const std::string& filename,
 // images 列里的 ref（http 稳定 url 或 本地文件名）→ 对外可访问 URL（无法对外则空）。
 inline std::string resolveRef(ConfigManager& cfg, const std::string& ref,
                               const std::string& platform = {}, const std::string& adapterId = {}) {
+    if (auto resources = image_resources::current()) if (auto path = resources->resolve(ref)) {
+        auto base = publicBase(cfg, platform, adapterId);
+        if (base.empty()) return "";
+        if (base.back() == '/') base.pop_back();
+        const auto relative = image_resources::utf8(path->lexically_relative(resources->root()));
+        if (relative.starts_with("cache/log/")) return base + "/api/logs/images/" + image_resources::utf8(path->filename());
+        if (relative.starts_with("cache/")) return "";
+        return base + resources->share(relative);
+    }
     if (ref.rfind("http", 0) == 0) return ref;
     // 骰娘回复里的本地资产（[img,file=data/assets/..]）→ /api/assets/ 路径。
     std::string norm = ref; for (auto& ch : norm) if (ch == '\\') ch = '/';

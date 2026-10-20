@@ -3,6 +3,48 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-21: Managed image files, portable deck archives and list avatars (local)
+
+- Added authenticated image-file management with server-side metadata paging,
+  directory operations, explicit image preview/code copying, shared upload/picker
+  entry points, recycling/restoration and image ZIP import/export. Entering a
+  directory or inserting an existing image code does not download image bytes.
+  Deck images stay under the exact deck filename; plugin/module images stay
+  under their owner and retain internal subdirectories.
+- Twenty-five isolated image-resource cases passed **126 assertions**, covering
+  upload/content validation, literal search/paging, owner layout, known-reference
+  protection, rename/alias/share continuity, rollback/recovery, partial catalog
+  restoration and bounded malformed templates. ZIP fixtures cover traversal,
+  ambiguous names, CRC corruption and encrypted input. Deck round trips retain
+  weights/nested sample, collect static cross-file dependencies and reject missing
+  local assets rather than exporting incomplete packages. Recycled aliases do
+  not fall back to retained legacy files; unmigrated old cache URLs still work.
+- A real SQL/config/deck integration case adds **11 passing assertions**, updating
+  stored references and live deck caches together while retaining other values.
+  A real Lua-manager case adds **5 passing assertions** for managed image read/write
+  aliases, unchanged compatibility copies and unchanged ordinary file IO. Dynamic
+  plugin paths cannot be exhaustively identified; source scripts are not rewritten
+  and uncertain old private files are retained for compatibility/recovery.
+- Group and player list/card/detail avatars share one component. Four frontend
+  cases check QQ/OneBot aliases, Milky, virtual/OpenID rejection, lazy loading,
+  visible error fallback and identity changes after a failed image. This verifies
+  URL selection/component behavior, not QQ CDN availability or live bot profiles.
+- Windows amd64 Release server, core, Lua and isolated image-resource builds passed.
+  Unfiltered native runs passed **880 core cases / 50,266 assertions** and **66 Lua
+  cases / 611 assertions**. The isolated 25-case resource run is a subset already
+  included in the core total, not additional coverage to add to that total.
+- WebUI passed **335 of 338 tests**, zero failures; three opt-in production-backend
+  preview tests were skipped. Image-management/avatar tests execute the actual
+  component callbacks/effects with deterministic substitutes. TypeScript and the
+  production WebUI build passed; the documentation-site build also passed. The
+  pre-existing large-bundle advisory remains non-fatal.
+- Browser checks used the real narrow-screen React pages with isolated in-memory
+  data: path-only listing, explicit image preview and nonempty avatar fallbacks.
+  No real bot was launched or platform messages sent. Optional external plugin
+  corpora, native Linux/macOS runs, Windows symlink-creation branches and Release
+  CI/publication are not claimed. Results were recorded before publication;
+  the Release workflow and published assets must be verified separately.
+
 ## 2026-10-20: Data-volume selection and server-paged game sessions (local)
 
 - Dashboard storage now queries the filesystem containing `Database::path()`

@@ -8,6 +8,7 @@
 #include "../storage/legacy_import_resources.h"
 #include "../common/utils.h"
 #include "../common/subprocess.h"
+#include "image_resource_service.h"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
@@ -179,7 +180,7 @@ inline bool copyTree(const fs::path& from, const fs::path& to, std::string& erro
     for (; it != end; it.increment(ec)) {
         if (ec) { error = "遍历 " + from.string() + " 失败: " + ec.message(); return false; }
         if (migration_resources::isLink(it->path())) { error = "备份/恢复不跟随符号链接或重解析点"; return false; }
-        if (skipBackups && it->is_directory(ec) && it->path().filename() == "backups") {
+        if (skipBackups && it->is_directory(ec) && (it->path().filename() == "backups" || it->path() == from / "image-tmp")) {
             it.disable_recursion_pending();
             continue;
         }
@@ -311,6 +312,10 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
                           const Selection& selection, bool automatic = false) {
     if (!beginBackup()) { error = "另一个备份正在进行中，请稍后重试"; return false; }
     struct BackupGuard { ~BackupGuard() { endBackup(); } } backupGuard;
+    auto imageStore = image_resources::current();
+    std::unique_lock<std::recursive_mutex> imageSnapshotLock;
+    if (imageStore) imageSnapshotLock = imageStore->lockMutation();
+    std::vector<std::string> includedImagePaths;
     std::error_code ec;
     fs::path stage = fs::temp_directory_path() / ("dicenext-backup-" + uniqueStamp());
     fs::remove_all(stage, ec); fs::create_directories(stage / "config", ec);
@@ -328,7 +333,7 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
                 if (path.extension() != ".db") return false;
                 const std::string name = path.filename().string();
                 return name != "cards.db" && name != "chat.db" && name != "logs.db" &&
-                    name != "plugins.db" && name != "lua_mod.db";
+                    name != "plugins.db" && name != "lua_mod.db" && name != "image-resources.db";
             })) { fs::remove_all(stage, ec); return false; }
         if (selection.characterCards && !copy("data/cards.db")) { fs::remove_all(stage, ec); return false; }
         if (selection.chatHistory && !copy("data/chat.db")) { fs::remove_all(stage, ec); return false; }
@@ -361,11 +366,33 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
                 if (!copy(item)) { fs::remove_all(stage, ec); return false; }
         }
         if (selection.uploadedAssets && !copy("data/assets")) { fs::remove_all(stage, ec); return false; }
-        if (selection.resourceImages && (!copy("data/images") || !copy("data/legacy_assets"))) { fs::remove_all(stage, ec); return false; }
-        if (selection.gameLogImages && !copy("data/logs/images")) { fs::remove_all(stage, ec); return false; }
-        if (selection.chatMedia && (!copy("data/chat/images") || !copy("data/chat_images"))) {
+        if (selection.resourceImages && !copy("data/legacy_assets")) { fs::remove_all(stage, ec); return false; }
+        if (fs::is_directory("data/images", ec)) for (const auto& entry : fs::directory_iterator("data/images")) {
+            const auto name = image_resources::utf8(entry.path().filename());
+            if (name == "cache") continue;
+            const bool selected = selection.resourceImages || (selection.uploadedAssets && (name == "reply" || name == "text" || name == "shared" || name == "chat")) || (selection.decks && name == "deck") || (selection.jsPlugins && name == "plugin") || (selection.luaMods && (name == "plugin" || name == "mod"));
+            if (selected) {
+                includedImagePaths.push_back(name);
+                if (!copy(entry.path())) { fs::remove_all(stage, ec); return false; }
+            }
+        }
+        if (selection.gameLogImages && (!copy("data/logs/images") || !copy("data/images/cache/log"))) { fs::remove_all(stage, ec); return false; }
+        if (selection.chatMedia && (!copy("data/chat/images") || !copy("data/chat_images") || !copy("data/images/cache/chat"))) {
             fs::remove_all(stage, ec); return false;
         }
+        if (selection.gameLogImages) includedImagePaths.push_back("cache/log");
+        if (selection.chatMedia) includedImagePaths.push_back("cache/chat");
+    }
+    if (selection.resourceImages || selection.uploadedAssets || selection.gameLogImages || selection.chatMedia || selection.decks || selection.jsPlugins || selection.luaMods) {
+        try {
+            if (imageStore) {
+                if (!selection.complete() && includedImagePaths.empty()) includedImagePaths.push_back("__no-images-selected__");
+                imageStore->backupCatalog(stage / "data/image-resources.db", selection.complete() ? std::vector<std::string>() : includedImagePaths);
+                fs::remove(stage / "data/image-resources.db-wal", ec);
+                fs::remove(stage / "data/image-resources.db-shm", ec);
+            }
+        }
+        catch (const std::exception& problem) { error = problem.what(); fs::remove_all(stage, ec); return false; }
     }
     if (selection.resourceImages) {
         if (!copyTree("image", stage / "image", error)) { fs::remove_all(stage, ec); return false; }
@@ -610,6 +637,10 @@ inline bool applyPendingRestore(std::string& notice) {
             if (!copyTree("data", rollback / "data", copyError)) throw std::runtime_error(copyError);
             if (fs::exists("config")) copyTree("config", rollback / "config", copyError);
             if (rootMedia && !copyTree("image", rollback / "image", copyError)) throw std::runtime_error(copyError);
+            // Keep aliases and public tokens belonging to resources which were
+            // not selected in this partial backup. Merge into the staged DB,
+            // never modify the existing DB before the rollback snapshot exists.
+            image_resources::mergeCatalogForRestore(stage / "data/image-resources.db", "data/image-resources.db");
             // 覆盖数据库文件前删掉它的 WAL 与共享内存文件：上次异常退出残留的 WAL
             // 会被套用到恢复进来的数据库上，造成数据错乱。
             if (fs::is_directory(stage / "data", ec))

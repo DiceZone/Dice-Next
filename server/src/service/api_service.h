@@ -4152,7 +4152,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     auto addImageBytes = [](log_usage::UsageMap& usage, const std::set<int>* wanted) {
         namespace fs = std::filesystem;
         std::error_code imageEc;
-        for (const char* dir : {"data/logs/images", "../data/logs/images"}) {
+        for (const auto& dir : {image_resources::cacheDirectory("log"), std::filesystem::path("data/logs/images"), std::filesystem::path("../data/logs/images")}) {
             imageEc.clear();
             if (!fs::is_directory(dir, imageEc)) continue;
             for (const auto& entry : fs::directory_iterator(dir, imageEc)) {
@@ -4652,9 +4652,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         [](Req, CB&& cb, std::string file) {
             // 仅取 basename，防路径穿越。
             if (auto p = file.find_last_of("/\\"); p != std::string::npos) file = file.substr(p + 1);
-            std::filesystem::path path = std::filesystem::path("data/logs/images") / file;
+            std::filesystem::path path = image_resources::cacheDirectory("log") / image_resources::fromUtf8(file);
+            bool tombstone = false;
+            if (auto resources = image_resources::current()) {if (auto managed = resources->resolve("/api/logs/images/" + file)) path = *managed;else tombstone = resources->known("/api/logs/images/" + file);}
+            if (!tombstone && !std::filesystem::exists(path)) path = std::filesystem::path("data/logs/images") / image_resources::fromUtf8(file);
             std::error_code ec;
-            if (file.empty() || file.find("..") != std::string::npos || !std::filesystem::exists(path, ec)) {
+            if (tombstone || file.empty() || file.find("..") != std::string::npos || !std::filesystem::exists(path, ec)) {
                 auto r = drogon::HttpResponse::newHttpResponse();
                 r->setStatusCode(drogon::k404NotFound); r->setBody("not found"); cb(r); return;
             }
@@ -4676,9 +4679,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     app.registerHandler("/api/chat/images/{1}",
         [](Req, CB&& cb, std::string file) {
             if (auto p = file.find_last_of("/\\"); p != std::string::npos) file = file.substr(p + 1);
-            std::filesystem::path path = std::filesystem::path("data/chat/images") / file;
+            std::filesystem::path path = image_resources::cacheDirectory("chat") / image_resources::fromUtf8(file);
+            bool tombstone = false;
+            if (auto resources = image_resources::current()) {if (auto managed = resources->resolve("/api/chat/images/" + file)) path = *managed;else tombstone = resources->known("/api/chat/images/" + file);}
+            if (!tombstone && !std::filesystem::exists(path)) path = std::filesystem::path("data/chat/images") / image_resources::fromUtf8(file);
             std::error_code ec;
-            if (file.empty() || file.find("..") != std::string::npos || !std::filesystem::exists(path, ec)) {
+            if (tombstone || file.empty() || file.find("..") != std::string::npos || !std::filesystem::exists(path, ec)) {
                 auto r = drogon::HttpResponse::newHttpResponse();
                 r->setStatusCode(drogon::k404NotFound); r->setBody("not found"); cb(r); return;
             }
@@ -4774,7 +4780,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             namespace fs = std::filesystem; std::error_code ec;
             int imgRemoved = 0;
             const std::string prefix = "log" + std::to_string(id) + "_";   // 末尾下划线避免 log1_ 误伤 log11_
-            for (const char* dir : {"data/logs/images", "../data/logs/images"}) {
+            for (const auto& dir : {image_resources::cacheDirectory("log"), std::filesystem::path("data/logs/images"), std::filesystem::path("../data/logs/images")}) {
                 if (!fs::is_directory(dir, ec)) continue;
                 for (const auto& e : fs::directory_iterator(dir, ec)) {
                     if (!e.is_regular_file(ec)) continue;
@@ -4782,7 +4788,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         std::error_code de; if (fs::remove(e.path(), de) && !de) ++imgRemoved;
                     }
                 }
-                break;   // 第一个存在的目录处理完即可
+                // Also remove migration compatibility copies of this log only.
             }
             jsonReply(ok(J{{"imagesRemoved", imgRemoved}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }

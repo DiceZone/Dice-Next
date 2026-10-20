@@ -35,6 +35,7 @@
 #include "../common/bot_message.h"
 #include "../core/reply/reply_definition.h"
 #include "../service/sensitive_word_filter.h"
+#include "../service/image_resource_service.h"
 
 #include <nlohmann/json.hpp>
 #include <yaml-cpp/yaml.h>
@@ -1399,6 +1400,14 @@ inline std::string legacyMediaReference(const fs::path& root, const fs::path& de
     std::error_code ec;
     if (fs::file_size(found, ec) > 128ULL * 1024 * 1024 || ec) { problem = "local media file cannot be read or exceeds 128 MiB"; return reference; }
     const auto relative = fs::absolute(found).lexically_normal().lexically_relative(fs::absolute(root).lexically_normal());
+    if (auto resources = image_resources::current(); resources && image_resources::imageExtension(found)) {
+        try {
+            auto inside = found.lexically_relative(deck.parent_path());
+            if (inside.empty() || migration_resources::utf8(inside).starts_with("../")) inside = relative;
+            auto resource = resources->importFile(root, found, "deck/" + legacyDeckTargetName(root, deck) + "/" + migration_resources::utf8(inside));
+            return "data/images/" + resource["path"].get<std::string>();
+        } catch (const std::exception& error) { problem = error.what(); return reference; }
+    }
     const auto destination = fs::path("data/legacy_assets") / hash(sourceIdentity(root, root)) / relative;
     if (!fs::exists(destination, ec) || opts.overwrite) {
         problem = copyFile(found, destination, opts.overwrite);
@@ -2057,6 +2066,14 @@ inline json importAncillaryResources(const fs::path& root, const ImportOptions& 
                 if (!value.is_object() && !value.is_array()) throw std::runtime_error("旧 selfdata 必须是 JSON 对象或数组");
                 target = fs::path("data/self_data") / relative; target.replace_extension(".json");
                 overwrite = opts.overwriteData;
+            } else if ((activeMedia || deckMedia) && image_resources::imageExtension(path) && image_resources::current()) {
+                try {
+                    auto resources = image_resources::current();
+                    auto image = resources->importFile(root, path, "shared/legacy-" + sourceKey + "/" + migration_resources::utf8(relative));
+                    resources->addAlias(migration_resources::utf8(fs::path(name) / relative), image["path"].get<std::string>());
+                    legacyResourceDetail(files, label, "success");
+                } catch (const std::exception& error) { legacyResourceDetail(files, label, "failed", error.what()); }
+                return;
             } else if (activeMedia) target = fs::path("image") / relative;
             else if (deckMedia) target = fs::path("data/legacy_assets") / sourceKey / "PublicDeck" / relative;
             else {
@@ -2214,6 +2231,10 @@ inline json runImport(Database& db, ConfigManager& cfg, I18n& i18n, ReplyManager
         {"targetPlatform", opts.targetPlatform}, {"targetAdapterId", opts.targetAdapterId}, {"backupPath", opts.beforeImportBackup},
         {"elapsedMs", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count()},
         {"reloadRequired", mods.success > 0 || plugins.success > 0}};
+    if (auto resources = image_resources::current()) {
+        resources->startMigration(true);
+        report["imageResources"] = resources->migrationStatus();
+    }
     try { migration_report::save(report); }
     catch (const std::exception& error) {
         report["ok"] = false; report["complete"] = false; report["partial"] = true;

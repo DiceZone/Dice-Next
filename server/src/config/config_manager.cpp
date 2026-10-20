@@ -419,8 +419,9 @@ bool ConfigManager::save() {
     return ok;
 }
 
-bool ConfigManager::restoreSnapshot(const json& snapshot) {
+bool ConfigManager::restoreSnapshot(const json& snapshot, const json* expected) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (expected && config_ != *expected) return false;
     std::string error;
     if (!validateConfig(snapshot, error)) {
         DICE_LOG_ERROR("配置数据库快照无效，未应用该快照：{}", error);

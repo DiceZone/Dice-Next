@@ -57,7 +57,7 @@ inline std::string base64(const std::string& in) {
     return o;
 }
 inline std::string fileToDataUrl(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(image_resources::fromUtf8(path), std::ios::binary);
     if (!f) return "";
     std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     if (data.empty() || data.size() > 8 * 1024 * 1024) return "";   // 8MB 上限
@@ -71,8 +71,9 @@ inline std::string fileToDataUrl(const std::string& path) {
 inline std::string downloadToDataUrl(const std::string& url) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    fs::create_directories("data/chat/images/tmp", ec);
-    std::string tmpName = "data/chat/images/tmp/" + std::to_string((long long)std::time(nullptr)) + "_" + chatimg::randToken() + ".tmp";
+    const auto temporary = image_resources::cacheDirectory("chat") / "tmp";
+    fs::create_directories(temporary, ec);
+    std::string tmpName = image_resources::utf8(temporary / (std::to_string((long long)std::time(nullptr)) + "_" + chatimg::randToken() + ".tmp"));
     if (!chatimg::download(url, tmpName)) return "";
     std::string result = fileToDataUrl(tmpName);
     fs::remove(tmpName, ec);
@@ -101,9 +102,10 @@ inline std::vector<std::string> extractImageSrcs(const std::string& content, int
         // 本地图：/api/chat/images/<名> 或本地路径 → base64
         std::string path;
         auto ip = u.find("/api/chat/images/");
-        if (ip != std::string::npos) path = "data/chat/images/" + u.substr(ip + 17);
+        if (auto resources = image_resources::current(); resources && resources->resolve(u)) path = image_resources::resolvePath(u);
+        else if (ip != std::string::npos) path = image_resources::utf8(image_resources::cacheDirectory("chat") / image_resources::fromUtf8(u.substr(ip + 17)));
         else if (fs::exists(u)) path = u;
-        else if (fs::exists("data/chat/images/" + u)) path = "data/chat/images/" + u;
+        else if (fs::exists(image_resources::cacheDirectory("chat") / image_resources::fromUtf8(u))) path = image_resources::utf8(image_resources::cacheDirectory("chat") / image_resources::fromUtf8(u));
         if (!path.empty()) { std::string d = fileToDataUrl(path); if (!d.empty()) out.push_back(d); }
     }
     return out;

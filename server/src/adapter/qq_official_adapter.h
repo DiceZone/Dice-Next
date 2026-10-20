@@ -14,6 +14,7 @@
 #include "../common/markdown.h"
 #include "../common/qq_rich_reply.h"
 #include "../common/outbound_payload.h"
+#include "../service/image_resource_service.h"
 
 #include <drogon/HttpAppFramework.h>   // drogon::app()：此前靠其他头间接带入，独立编译会缺
 #include <drogon/HttpClient.h>
@@ -1458,7 +1459,7 @@ private:
                 if (p == std::string::npos) return {};
                 p = (p == 0) ? key.size() + 1 : p + key.size() + 2;
                 const size_t e = seg.find(',', p);
-                return seg.substr(p, e == std::string::npos ? std::string::npos : e - p);
+                return image_resources::unescapeCode(seg.substr(p, e == std::string::npos ? std::string::npos : e - p));
             };
             MediaItem item; item.kind = kind; item.name = param("name"); item.ref = param("url");
             if (item.ref.empty()) item.ref = param("file");
@@ -1471,6 +1472,10 @@ private:
 
     /// 媒体引用分类：0=远程公网 URL（/files+url 直传）；1=本地文件（分片上传）；2=无法发送。
     static int localFileKind(const std::string& ref, std::string& localPath) {
+        if (auto resources = image_resources::current()) {
+            if (auto path = resources->resolve(ref)) {localPath = image_resources::utf8(*path); return 1;}
+            if (resources->known(ref)) return 2;
+        }
         std::string v = ref;
         for (auto& c : v) if (c == '\\') c = '/';
         auto tailOf = [&v](const char* seg) -> std::string {
@@ -1479,7 +1484,7 @@ private:
         };
         std::string n;
         if (!(n = tailOf("/api/assets/")).empty()) { localPath = "data/assets/" + n; return 1; }
-        if (!(n = tailOf("/api/chat/images/")).empty()) { localPath = "data/chat/images/" + n; return 1; }
+        if (!(n = tailOf("/api/chat/images/")).empty()) { localPath = image_resources::utf8(image_resources::cacheDirectory("chat") / image_resources::fromUtf8(n)); return 1; }
         if (v.rfind("http://", 0) == 0 || v.rfind("https://", 0) == 0) return 0;   // 真外链
         if (v.rfind("file://", 0) == 0) { localPath = v.substr(7); return 1; }
         if (v.rfind("base64://", 0) == 0) return 2;   // 官方接口不接受 base64
