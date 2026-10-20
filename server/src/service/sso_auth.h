@@ -136,25 +136,34 @@ inline std::optional<std::string> normalizeBase(std::string base) {
 
 inline std::string callbackFor(const std::string& base) { return base + kCallbackPath; }
 
-/// 受限管理员（信任等级 ≥4 的非骰主）不能做的事：改骰主名单、口令、全部系统设置与适配器、
-/// 第三方登录，安装/启停/编辑插件与规则包，恢复或下载备份，读取插件配置与存档。插件与规则包
-/// 能执行代码、读写配置，备份与插件存档可能含口令哈希与各类密钥，放开任何一条都等于放开骰主
-/// 权限。系统设置与适配器一律不许写，也保证脱敏后的占位值不会被存回去覆盖真实密钥。
+/// 受限管理员（信任等级 ≥4 的非骰主）能做的事按白名单放行，其余一律拒绝：
+/// - 写操作只放行日常管理：群、玩家（另按信任等级核对）、牌堆、自定义回复、因果规则与计数、
+///   定时任务、黑名单、广播、日志与团务、帮助文件、人格文案、回复模板、素材上传，以及掷骰、
+///   指令测试（发送者固定为本人）与规则试算。骰主名单、口令、系统设置、适配器、第三方登录、
+///   插件与规则包、旧版迁移导入、备份，以及今后新增的接口，默认都不能写。
+/// - 读操作默认放行（响应统一脱敏），但插件列表与配置、Lua 模组列表、规则包文件内容由插件
+///   自行决定，可能直接存放密钥，脱敏无法识别，因此不允许读取；备份下载同理。
 inline bool blockedForRestrictedAdmin(const std::string& method, const std::string& path) {
     auto under = [&](const char* prefix) {
         const std::string p(prefix);
         return path == p || path.rfind(p + "/", 0) == 0;
     };
-    if (under("/api/backup") && method != "GET") return true;
-    if (path == "/api/backup/download" || path == "/api/backup/export" || path.rfind("/api/backup/download", 0) == 0) return true;
-    if (under("/api/plugins/js/config") || under("/api/plugins/js/storage")) return true;
-    if (method == "GET") return false;
-    for (const char* prefix : {"/api/masters", "/api/auth/sso", "/api/system", "/api/adapters",
-                               "/api/plugins/js", "/api/mod/lua", "/api/mods", "/api/rulepacks"})
-        if (under(prefix)) return true;
-    // 玩家 Lua 变量里的 trust 键直接对应信任等级。
+    if (method == "GET" || method == "HEAD") {
+        for (const char* prefix : {"/api/plugins/js", "/api/mod/lua", "/api/rules/file",
+                                   "/api/backup/download", "/api/backup/export"})
+            if (under(prefix)) return true;
+        return false;
+    }
+    // 玩家的 Lua 变量里 trust 键直接对应信任等级；「仅白名单」是审批策略开关。
     if (path.rfind("/api/players/", 0) == 0 && path.size() > 7 && path.compare(path.size() - 7, 7, "/luavar") == 0) return true;
-    return false;
+    if (path == "/api/banlist/whitelist-only") return true;
+    for (const char* prefix : {"/api/groups", "/api/players", "/api/decks", "/api/replies", "/api/causal",
+                               "/api/counters", "/api/schedules", "/api/banlist", "/api/broadcast", "/api/logs",
+                               "/api/game-sessions", "/api/help/file", "/api/personas", "/api/templates",
+                               "/api/assets/upload", "/api/dice/roll", "/api/test/message", "/api/rules/test",
+                               "/api/auth/logout"})
+        if (under(prefix)) return false;
+    return true;
 }
 
 /// 受限管理员看到的响应里要遮住的字段（不分大小写，按完整字段名匹配，避免误伤
@@ -186,6 +195,29 @@ inline void redactSecrets(json& value, const std::string& parent = {}) {
     } else if (value.is_array()) {
         for (auto& item : value) redactSecrets(item, parent);
     }
+}
+
+inline constexpr size_t kMaxRestrictedResponse = 16 * 1024 * 1024;
+
+/// 受限管理员的响应：JSON（或以 { [ 开头的文本）脱敏后返回；过大或无法解析的 JSON 不能安全脱敏，
+/// 换成拒绝说明，绝不原样放行。返回 nullopt 表示不是 JSON，原样返回（文件下载、图片等）。
+inline std::optional<std::string> restrictedResponseBody(const std::string& contentType, const std::string& body,
+                                                         bool* refused = nullptr) {
+    if (refused) *refused = false;
+    const auto first = body.find_first_not_of(" \t\r\n");
+    const bool jsonType = contentType.find("json") != std::string::npos;
+    const bool jsonText = contentType.find("text") != std::string::npos && first != std::string::npos &&
+                          (body[first] == '{' || body[first] == '[');
+    if (!jsonType && !jsonText) return std::nullopt;
+    auto refuse = [&](const char* message) {
+        if (refused) *refused = true;
+        return json{{"code", 403}, {"message", message}}.dump();
+    };
+    if (body.size() > kMaxRestrictedResponse) return refuse("response too large for restricted access");
+    json value = json::parse(body, nullptr, false);
+    if (value.is_discarded()) return jsonType ? std::optional<std::string>(refuse("response cannot be redacted")) : std::nullopt;
+    redactSecrets(value);
+    return value.dump();
 }
 
 // ─── HTTP ───────────────────────────────────────────────────────

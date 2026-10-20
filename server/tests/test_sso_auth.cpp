@@ -61,32 +61,54 @@ TEST(SsoAuth, RolesFollowLocalTrustLevels) {
 }
 
 TEST(SsoAuth, RestrictedAdminsCannotReachPrivilegedOperations) {
+    // 写操作默认拒绝：骰主名单、第三方登录、系统设置、适配器、插件、规则包、旧版迁移、备份，
+    // 以及没有列入白名单的新接口。
     for (const char* path : {"/api/masters", "/api/masters/onebot_v11/10001", "/api/auth/sso/bdc",
                              "/api/auth/sso/providers/gh", "/api/system/webui-auth", "/api/system/server-config",
-                             "/api/system/update/install", "/api/plugins/js/upload", "/api/mod/lua/toggle",
-                             "/api/mods/upload", "/api/rulepacks/upload", "/api/backup/restore",
-                             "/api/players/onebot_v11/10001/luavar"})
-        ASSERT_TRUE(sso::blockedForRestrictedAdmin("POST", path));
-    ASSERT_TRUE(sso::blockedForRestrictedAdmin("GET", "/api/backup/download"));
-    ASSERT_TRUE(sso::blockedForRestrictedAdmin("GET", "/api/backup/export"));
-    for (const char* path : {"/api/masters", "/api/plugins/js", "/api/auth/sso/config", "/api/backup/list"})
+                             "/api/system/update/install", "/api/system/ai", "/api/system/notice", "/api/system/global",
+                             "/api/adapters", "/api/adapters/1", "/api/adapters/1/reconnect",
+                             "/api/plugins/js/upload", "/api/plugins/js/config", "/api/mod/lua/toggle", "/api/mods/upload",
+                             "/api/rulepacks/upload", "/api/rules/upload", "/api/rules/delete", "/api/rules/save",
+                             "/api/rules/toggle", "/api/legacy/import", "/api/backup/restore", "/api/backup/create",
+                             "/api/dice/rules", "/api/players/onebot_v11/10001/luavar", "/api/banlist/whitelist-only",
+                             "/api/some-future-endpoint"})
+        for (const char* method : {"POST", "PUT", "PATCH", "DELETE"})
+            ASSERT_TRUE(sso::blockedForRestrictedAdmin(method, path));
+    // 日常管理放行（玩家信任等级另在接口内按等级核对）。
+    for (const char* path : {"/api/groups/onebot_v11/1001", "/api/groups/onebot_v11/1001/messages",
+                             "/api/players/onebot_v11/10001", "/api/players/onebot_v11/10001/card-attr",
+                             "/api/decks/upload", "/api/replies/3", "/api/schedules", "/api/banlist", "/api/logs/7",
+                             "/api/game-sessions/abc", "/api/help/file", "/api/causal/rules/2", "/api/test/message",
+                             "/api/rules/test", "/api/dice/roll", "/api/auth/logout"})
+        ASSERT_FALSE(sso::blockedForRestrictedAdmin("POST", path));
+    // 读取默认放行（响应会脱敏），插件、Lua 模组列表、规则包文件与备份下载除外。
+    for (const char* path : {"/api/masters", "/api/adapters", "/api/system/ai", "/api/auth/sso/config",
+                             "/api/backup/list", "/api/rules", "/api/players"})
         ASSERT_FALSE(sso::blockedForRestrictedAdmin("GET", path));
-    ASSERT_FALSE(sso::blockedForRestrictedAdmin("PUT", "/api/players/onebot_v11/10001"));
-    // 适配器与全部系统设置都属于服务配置：受限管理员只读。
-    ASSERT_TRUE(sso::blockedForRestrictedAdmin("POST", "/api/adapters"));
-    ASSERT_TRUE(sso::blockedForRestrictedAdmin("PATCH", "/api/adapters/1"));
-    ASSERT_TRUE(sso::blockedForRestrictedAdmin("DELETE", "/api/adapters/1"));
-    ASSERT_TRUE(sso::blockedForRestrictedAdmin("POST", "/api/adapters/1/reconnect"));
-    ASSERT_TRUE(sso::blockedForRestrictedAdmin("PUT", "/api/system/ai"));
-    ASSERT_TRUE(sso::blockedForRestrictedAdmin("PUT", "/api/system/notice"));
-    ASSERT_TRUE(sso::blockedForRestrictedAdmin("PUT", "/api/system/global"));
-    ASSERT_FALSE(sso::blockedForRestrictedAdmin("GET", "/api/adapters"));
-    ASSERT_FALSE(sso::blockedForRestrictedAdmin("GET", "/api/system/ai"));
-    // 插件配置与存档内容由插件自定，可能直接存着密钥：连读取也不行。
-    ASSERT_TRUE(sso::blockedForRestrictedAdmin("GET", "/api/plugins/js/config"));
-    ASSERT_TRUE(sso::blockedForRestrictedAdmin("GET", "/api/plugins/js/storage"));
-    ASSERT_FALSE(sso::blockedForRestrictedAdmin("POST", "/api/decks/upload"));
-    ASSERT_FALSE(sso::blockedForRestrictedAdmin("POST", "/api/mastersx"));
+    for (const char* path : {"/api/plugins/js", "/api/plugins/js/config", "/api/plugins/js/storage", "/api/mod/lua",
+                             "/api/rules/file", "/api/backup/download", "/api/backup/export"})
+        ASSERT_TRUE(sso::blockedForRestrictedAdmin("GET", path));
+}
+
+TEST(SsoAuth, RestrictedResponsesAreRedactedOrRefusedNeverPassedThrough) {
+    bool refused = false;
+    auto body = sso::restrictedResponseBody("application/json", R"({"data":{"api_key":"sk-1","name":"gpt"}})", &refused);
+    ASSERT_TRUE(body.has_value());
+    ASSERT_FALSE(refused);
+    ASSERT_TRUE(body->find("sk-1") == std::string::npos);
+    ASSERT_TRUE(body->find("gpt") != std::string::npos);
+    // 超过上限：不再原样放行，换成拒绝说明。
+    std::string big = R"({"api_key":"sk-big","pad":")" + std::string(sso::kMaxRestrictedResponse, 'x') + "\"}";
+    body = sso::restrictedResponseBody("application/json; charset=utf-8", big, &refused);
+    ASSERT_TRUE(body.has_value() && refused);
+    ASSERT_TRUE(body->find("sk-big") == std::string::npos);
+    // 声称是 JSON 却解析不了：同样拒绝。
+    body = sso::restrictedResponseBody("application/json", R"({"api_key":"sk-2")", &refused);
+    ASSERT_TRUE(body.has_value() && refused);
+    // 文本里装着 JSON 也要脱敏；真正的文件下载不动。
+    body = sso::restrictedResponseBody("text/plain", R"({"token":"t-3"})", &refused);
+    ASSERT_TRUE(body.has_value() && body->find("t-3") == std::string::npos);
+    ASSERT_FALSE(sso::restrictedResponseBody("image/png", "PNG", &refused).has_value());
 }
 
 TEST(SsoAuth, OnlyHttpsBasesAreAccepted) {

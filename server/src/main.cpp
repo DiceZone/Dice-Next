@@ -3281,12 +3281,14 @@ static int realMain(int argc, char* argv[]) {
             std::string role;
             try { role = req->attributes()->get<std::string>("dn_role"); } catch (...) { return; }
             if (role != "admin" || !resp) return;
-            const auto& type = resp->contentTypeString();
-            if (type.find("json") == std::string::npos || resp->body().size() > 16 * 1024 * 1024) return;
-            auto body = nlohmann::json::parse(resp->body(), nullptr, false);
-            if (body.is_discarded()) return;
-            dice::sso::redactSecrets(body);
-            resp->setBody(body.dump());
+            bool refused = false;
+            auto body = dice::sso::restrictedResponseBody(resp->contentTypeString(), std::string(resp->body()), &refused);
+            if (!body) return;
+            if (refused) {
+                resp->setStatusCode(drogon::k403Forbidden);
+                resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+            }
+            resp->setBody(std::move(*body));
         });
         // 公寓托管实例：以公开访问地址自动启用骰子之间账号登录（稍后执行，不拖慢启动）。
         if (const char* publicUrl = std::getenv("DICENEXT_PUBLIC_URL"); diceFlatsManaged && publicUrl && *publicUrl) {
