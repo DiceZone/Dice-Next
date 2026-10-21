@@ -3,6 +3,7 @@
 #include "../core/dice/dice_result.h"
 #include "check_reply.h"
 #include "check_rules.h"
+#include "markdown.h"
 #include <algorithm>
 #include <ctime>
 #include <iomanip>
@@ -29,7 +30,14 @@ struct Example {
     int between(int low, int high) { return low + die(high - low + 1) - 1; }
     std::string word(const char *zh, const char *en) const { return chinese ? zh : en; }
     std::string tr(const std::string &key, const I18n::Args &args = {}) const {
-        return i18n ? i18n->tr(locale, key, args) : I18n::interpolate(key, args);
+        const auto fragment = I18n::captureFragment([&] {
+            return i18n ? i18n->tr(locale, key, args) : I18n::interpolate(key, args);
+        });
+        // Only this trusted, computed fragment is Markdown. Values such as a
+        // player's name remain literal arguments, never template source. This
+        // also covers styled grade labels, receipts and generated totals.
+        return fragment.format == ContentFormat::kMarkdown ? markdown::toPlainText(fragment.text)
+                                                           : fragment.text;
     }
     void number(const std::string &key, int value) { context.args[key] = std::to_string(value); }
     DiceResult roll(const std::string &expression) {

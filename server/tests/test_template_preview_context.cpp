@@ -216,3 +216,73 @@ TEST(TemplateSimulation, PersonaGradeTextAppliesToGeneratedArgumentsAndDoesNotLe
     ASSERT_NE(global["onebot"].get<std::string>(), "PERSONA_FAILURE");
     i18n.clearPersonaBundles(7999);
 }
+
+TEST(TemplateSimulation, NestedSanityAndCheckOutputsDoNotLeakMarkdownIntoPlainViews) {
+    auto &i18n = previewTranslations();
+    for (const auto locale : {Locale::kZhHans, Locale::kZhHant, Locale::kEn, Locale::kJa})
+        for (const auto *key : {"dice.sc.result", "dice.st.result"})
+            for (const auto *format : {"plain", "markdown"}) {
+                // Plain-authored wrappers may intentionally contain literal
+                // stars. Exercise a plain wrapper and the actual Markdown
+                // wrapper separately instead of reclassifying authored text.
+                auto request = json{{"text",std::string(format) == "plain" ? "{output}" : i18n.getDefault(locale,key)},
+                                    {"format", format},
+                                    {"simulation", example(key)},
+                                    {"locale", localeToString(locale)},
+                                    {"forcePlain", true}};
+                const auto result = outbound::templatePreview(request, &i18n);
+                ASSERT_TRUE(result["simulation"]["unresolved"].empty());
+                for (const auto *view : {"onebot", "preview"}) {
+                    const auto text = std::string(view) == "preview" ? result[view]["text"].get<std::string>()
+                                                                     : result[view].get<std::string>();
+                    ASSERT_TRUE(text.find("**") == std::string::npos);
+                    ASSERT_TRUE(text.find('`') == std::string::npos);
+                    ASSERT_TRUE(text.find("{output}") == std::string::npos);
+                    ASSERT_TRUE(!text.empty());
+                }
+                ASSERT_FALSE(result["preview"]["markdown"].get<bool>());
+            }
+}
+TEST(TemplateSimulation, ComputedFragmentsRespectMarkdownAndPlainOverridesSeparately) {
+    // A private translation instance prevents override state leaking to another test.
+    I18n i18n("");
+    i18n.setOverride(Locale::kZhHans, "card.sc.result", "**{nick}**：`{roll}`；损失 **{loss}**",
+                     ContentFormat::kMarkdown);
+    const auto markdown = outbound::templatePreview(
+        {{"text", "{output}"}, {"format", "markdown"}, {"simulation", example("dice.sc.result")}}, &i18n);
+    auto text = markdown["onebot"].get<std::string>();
+    ASSERT_TRUE(text.find("**") == std::string::npos);
+    ASSERT_TRUE(text.find('`') == std::string::npos);
+    ASSERT_TRUE(text.find("损失") != std::string::npos);
+    i18n.setOverride(Locale::kZhHans, "card.sc.result", "literal **keep** 2**3 {loss}",
+                     ContentFormat::kPlainText);
+    const auto plain = outbound::templatePreview(
+        {{"text", "{output}"}, {"format", "markdown"}, {"simulation", example("dice.sc.result")}}, &i18n);
+    ASSERT_TRUE(plain["onebot"].get<std::string>().find("literal **keep** 2**3") != std::string::npos);
+}
+TEST(TemplateSimulation, MarkdownConversionDoesNotReinterpretInsertedUserData) {
+    const std::string literal = "**昵称** 2**3 {sample:BAD|BAD} [CQ:image,file=/data/images/test.png]";
+    const auto result = outbound::templatePreview(
+        {{"text", "**{nick}**"}, {"format", "markdown"}, {"args", {{"nick", literal}}}});
+    ASSERT_EQ(result["onebot"].get<std::string>(), literal);
+    const auto plain = outbound::templatePreview({{"text", "**literal plain**"}, {"format", "plain"}});
+    ASSERT_EQ(plain["onebot"].get<std::string>(), "**literal plain**");
+}
+
+TEST(TemplateSimulation, StyledGradeFragmentsDoNotLeakMarkdownFromOverridesOrPersonas) {
+    I18n i18n("");
+    i18n.setOverride(Locale::kZhHans,"dice.level.failure","**失败**",ContentFormat::kMarkdown);
+    auto request = json{{"text","{level}"},{"format","markdown"},
+        {"simulation",example("dice.outcome.standard.failure")}};
+    const auto global = outbound::templatePreview(request,&i18n);
+    ASSERT_EQ(global["onebot"].get<std::string>(),"失败");
+    i18n.setPersonaBundles(7998,Locale::kZhHans,{{"dice.level.failure","**人格失败**"}},
+        {{"dice.level.failure","markdown"}});
+    request["personaId"] = 7998;
+    const auto persona = outbound::templatePreview(request,&i18n);
+    ASSERT_EQ(persona["onebot"].get<std::string>(),"人格失败");
+    i18n.setOverride(Locale::kZhHans,"dice.level.failure","**字面文本**",ContentFormat::kPlainText);
+    request["personaId"] = 0;
+    const auto literal = outbound::templatePreview(request,&i18n);
+    ASSERT_EQ(literal["onebot"].get<std::string>(),"**字面文本**");
+}

@@ -3,6 +3,44 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-21: Readable notices, asynchronous recursion guard and plain previews (local)
+
+- Error notifications now describe the failed business operation and real error,
+  with available actor/group names and adapter identity. Interpreter messages,
+  filenames and line numbers are retained; syntax errors are not diagnosed as a
+  particular punctuation mistake. Plugin-authored ERROR text is not recast as a
+  failed invocation. Normal updates retain their release notes and link without
+  timestamp/severity/correlation report boilerplate in the message body.
+- Notification transport failures use the captured processing snapshot even on
+  another thread. They produce a local, concise error only, never another error
+  notification. Matching account/target/reason failures merge for sixty seconds;
+  normal delivery errors still distinguish sources, targets and causes. Failed
+  message bodies are kept in sanitized local details, not quoted into notices.
+  Configuration-stage error-notice failures are guarded after scope unwinding.
+  Permission, subscription, fallback and account-selection policies are unchanged.
+- Native regressions cover deferred failures after scopes end, unrelated plugin
+  activity on the callback thread, changed bodies/msgIDs, different targets,
+  reasons and platform actions, offline/throwing mock adapters, malformed details,
+  old nested message bodies, retained release notes, and exact interpreter errors.
+  Real QuickJS and Lua parse failures at line 123 each produce one primary error;
+  an already-reported operation summary cannot hide a new exception.
+- Computed preview translations are converted according to their actual format
+  before becoming literal arguments: nested SAN/check output, grade labels,
+  receipts and totals. Four-locale tests cover plain and Markdown wrappers,
+  overrides and persona formats. Plain-authored stars, arithmetic, CQ text and
+  inserted sample syntax retain their literal meaning rather than being stripped
+  or evaluated. The preview subset passed **13 cases / 13,225 assertions**.
+- Windows Release server, core, Lua and credential-free preview builds passed.
+  The unfiltered core run passed **935 cases / 63,963 assertions** and Lua passed
+  **67 cases / 616 assertions**, with the real short-path temporary root. WebUI
+  passed **350 tests, zero failures and zero skips** against the updated production
+  renderer; its production build passed. Release automation passed **33 tests**.
+- Tests used isolated files, local renderers and in-memory adapters. They did not
+  start a real bot/server, send a platform message, contact SMTP/Webhook, or prove
+  cross-platform CI success. Notification and preview boundaries are documented in
+  [notification rules](../../docs/notification-rules.md) and
+  [reply previews](../../docs/reply-previews.md).
+
 ## 2026-10-21: Command-aware reply previews (local)
 
 - Replaced the frontend's fixed argument maps with isolated backend example
