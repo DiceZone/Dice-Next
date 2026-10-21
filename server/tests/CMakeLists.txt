@@ -36,6 +36,7 @@ set(TEST_SOURCES
     test_persona_manager.cpp
     test_i18n_persona.cpp
     test_outcome_replies.cpp
+    test_template_preview_context.cpp
     test_sample_template.cpp
     test_presentation_style.cpp
     test_import_v2.cpp
@@ -102,6 +103,7 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/reply/reply_matcher.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/dice/dice_expression.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/template_preview_context.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/dice/dice_engine.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/character/card_store.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/deck/card_deck.cpp
@@ -201,6 +203,8 @@ add_executable(dice-next-reply-preview EXCLUDE_FROM_ALL
     ../src/i18n/i18n.cpp
     ../src/common/markdown.cpp
     ../src/common/markdown_md4c.cpp
+    ../src/common/template_preview_context.cpp
+    ../src/core/dice/dice_expression.cpp
 )
 target_include_directories(dice-next-reply-preview PRIVATE ../src)
 target_link_libraries(dice-next-reply-preview PRIVATE

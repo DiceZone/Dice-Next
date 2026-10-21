@@ -17,6 +17,7 @@
 #include "../common/qq_rich_reply.h"
 #include "../common/sample_template.h"
 #include "../common/check_reply.h"
+#include "../common/check_rules.h"
 #include "../common/legacy_check_replies.h"
 #include "../common/subprocess.h"
 #include "../common/bounded_regex.h"
@@ -1207,71 +1208,12 @@ private:
 
     // ─── Skill-check success levels (faithful to original RollSuccessLevel) ──
 
-    enum class SuccessLevel { kFumble, kFailure, kRegular, kHard, kExtreme, kCritical };
+    using SuccessLevel = check_rules::SuccessLevel;
 
     /// COC7 success level under house rule @p rule (0-7), ported verbatim from
     /// the original RD::RollSuccessLevel. Rule is set per-group/user via .setcoc.
     static SuccessLevel rollSuccessLevel(int res, int rate, int rule = 0) {
-        using S = SuccessLevel;
-        switch (rule) {
-        case 1:
-            if (res == 100) return S::kFumble;
-            if (res == 1 || (res <= 5 && rate >= 50)) return S::kCritical;
-            if (res <= rate / 5) return S::kExtreme;
-            if (res <= rate / 2) return S::kHard;
-            if (res <= rate)     return S::kRegular;
-            if (rate >= 50 || res < 96) return S::kFailure;
-            return S::kFumble;
-        case 2:
-            if (res == 100) return S::kFumble;
-            if (res <= 5 && res <= rate) return S::kCritical;
-            if (res <= rate / 5) return S::kExtreme;
-            if (res <= rate / 2) return S::kHard;
-            if (res <= rate)     return S::kRegular;
-            if (res < 96) return S::kFailure;
-            return S::kFumble;
-        case 3:
-            if (res >= 96) return S::kFumble;
-            if (res <= 5)  return S::kCritical;
-            if (res <= rate / 5) return S::kExtreme;
-            if (res <= rate / 2) return S::kHard;
-            if (res <= rate)     return S::kRegular;
-            return S::kFailure;
-        case 4:
-            if (res == 100) return S::kFumble;
-            if (res <= 5 && res <= rate / 10) return S::kCritical;
-            if (res <= rate / 5) return S::kExtreme;
-            if (res <= rate / 2) return S::kHard;
-            if (res <= rate)     return S::kRegular;
-            if (rate >= 50 || res < 96 + rate / 10) return S::kFailure;
-            return S::kFumble;
-        case 5:
-            if (res >= 99) return S::kFumble;
-            if (res <= 2 && res < rate / 10) return S::kCritical;
-            if (res <= rate / 5) return S::kExtreme;
-            if (res <= rate / 2) return S::kHard;
-            if (res <= rate)     return S::kRegular;
-            if (rate >= 50 || res < 96) return S::kFailure;
-            return S::kFumble;
-        case 6:
-            if (res > rate) return (res == 100 || res % 11 == 0) ? S::kFumble : S::kFailure;
-            return (res == 1 || res % 11 == 0) ? S::kCritical : S::kRegular;
-        case 7:
-            if (res >= 100) return S::kFumble;
-            if (res >= 96)  return ((90 - rate) / 20 + res >= 100) ? S::kFumble : S::kFailure;
-            if (res == 1 || res <= rate / 5) return S::kExtreme;
-            if (res <= rate) return S::kRegular;
-            return S::kFailure;
-        case 0:
-        default:
-            if (res == 100) return S::kFumble;
-            if (res == 1)   return S::kCritical;
-            if (res <= rate / 5) return S::kExtreme;
-            if (res <= rate / 2) return S::kHard;
-            if (res <= rate)     return S::kRegular;
-            if (rate >= 50 || res < 96) return S::kFailure;
-            return S::kFumble;
-        }
+        return check_rules::coc(res, rate, rule);
     }
 
     const char* levelKey(SuccessLevel lv) const {
@@ -1609,15 +1551,7 @@ private:
     //   大成功 ≤ 技能/20(至少1) · 特殊成功 ≤ 技能/5 · 成功 ≤ 技能 · 失败 > 技能
     //   大失败：掷出 100 必为大失败；失败且掷出 99 也为大失败。
     static SuccessLevel brpSuccessLevel(int roll, int skill) {
-        if (skill < 1) skill = 1;
-        if (roll >= 100) return SuccessLevel::kFumble;                 // 100 → 大失败
-        if (roll > skill) return (roll == 99) ? SuccessLevel::kFumble  // 失败且 99 → 大失败
-                                              : SuccessLevel::kFailure; // 失败
-        int crit = skill / 20; if (crit < 1) crit = 1;                 // 大成功 ≤ 技能/20
-        int spec = skill / 5;                                          // 特殊成功 ≤ 技能/5
-        if (roll <= crit) return SuccessLevel::kCritical;
-        if (roll <= spec) return SuccessLevel::kExtreme;               // 复用 kExtreme = 特殊成功
-        return SuccessLevel::kRegular;                                 // 成功
+        return check_rules::brp(roll, skill);
     }
     const char* brpLevelKey(SuccessLevel lv) const {
         switch (lv) {

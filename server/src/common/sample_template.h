@@ -1,17 +1,39 @@
 #pragma once
 
 #include <random>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace dice::sample_template {
 
+inline thread_local std::mt19937_64* scopedRandom = nullptr;
+inline std::mt19937_64& randomEngine() {
+    if (scopedRandom) return *scopedRandom;
+    thread_local std::mt19937_64 random(std::random_device{}());
+    return random;
+}
+
+// Only previews opt in: switching platforms should not redraw weighted replies
+// or nested samples. The real cosmetic/game RNGs are not consumed or reseeded.
+class RandomScope {
+public:
+    explicit RandomScope(std::optional<std::uint32_t> seed) : previous_(scopedRandom), random_(seed.value_or(0)) {
+        if (seed) scopedRandom = &random_;
+    }
+    ~RandomScope() { scopedRandom = previous_; }
+    RandomScope(const RandomScope&) = delete;
+    RandomScope& operator=(const RandomScope&) = delete;
+private:
+    std::mt19937_64* previous_;
+    std::mt19937_64 random_;
+};
+
 // Cosmetic choices use a random source independent of game dice.
 inline size_t choose(size_t count) {
     if (count <= 1) return 0;
-    thread_local std::mt19937_64 random(std::random_device{}());
-    return std::uniform_int_distribution<size_t>(0, count - 1)(random);
+    return std::uniform_int_distribution<size_t>(0, count - 1)(randomEngine());
 }
 
 inline bool escaped(std::string_view text, size_t pos) {

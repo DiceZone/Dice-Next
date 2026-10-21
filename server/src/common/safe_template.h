@@ -352,8 +352,7 @@ inline std::string expand(const std::vector<Node>& nodes, const Args& args, cons
             } else if (node.kind == Kind::random) {
                 const auto low = integer(evaluate(0)), high = integer(evaluate(1));
                 if (low && high && *low <= *high) {
-                    thread_local std::mt19937_64 random(std::random_device{}());
-                    result += hold(std::to_string(std::uniform_int_distribution<int64_t>(*low, *high)(random)), budget);
+                    result += hold(std::to_string(std::uniform_int_distribution<int64_t>(*low, *high)(sample_template::randomEngine())), budget);
                 }
             } else if (node.kind == Kind::mention) {
                 auto target = evaluate(0);

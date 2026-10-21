@@ -136,6 +136,7 @@ set(SOURCES
     src/storage/migration.cpp
     src/storage/legacy_importer.cpp
     src/core/dice/dice_expression.cpp
+    src/common/template_preview_context.cpp
     src/core/dice/dice_engine.cpp
     src/core/reply/reply_matcher.cpp
     src/core/reply/reply_manager.cpp

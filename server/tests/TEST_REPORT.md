@@ -3,6 +3,37 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-21: Command-aware reply previews (local)
+
+- Replaced the frontend's fixed argument maps with isolated backend example
+  generation. Original SAN/growth/death-save texts now receive their variables;
+  per-outcome examples preserve arithmetic and branch semantics, including when
+  inheriting standard or legacy text. Persona grade/receipt texts apply while
+  computing the example, not just during final rendering, and do not leak into
+  subsequent global previews.
+- The nine new cases passed **13,056 assertions**. They traverse every bundled
+  string in four locales, exercise every outcome family/grade with 40 seeds,
+  verify loss/growth/totals/counters, weighted nested samples, stable platform
+  switches, resampling, unknown fields, invalid inputs and literal-data safety.
+  The COC extraction additionally matches the old router's fingerprint over
+  **120,800 decisions** (eight house rules, rates 0..150, every D100 face).
+  That fingerprint check is included in the assertion count, not 120,800 extra
+  assertions. The scan found and fixed `{{qq}}` in the four cloud-authorization
+  replies; these now use the native `{qq}` syntax.
+- Windows Release server/core/Lua/credential-free renderer builds passed.
+  Unfiltered core tests passed **921 cases / 63,696 assertions** using the real
+  short-path temporary root. Lua passed **66 cases / 611 assertions**. The
+  Release automation suite passed **33 tests**.
+- WebUI passed **350 tests, zero failures and zero skips**, with the production
+  renderer explicitly enabled; the production build passed. Browser checks on
+  the isolated mock page verified real substituted SAN values, resampling and
+  platform switching without changing the same example. They did not save a
+  production reply or contact an adapter.
+- No real cards, statistics, bot RNG state, plugin execution, platform delivery,
+  SMTP/Webhook or cloud authorization were used. Cross-platform CI and actual
+  platform presentation remain separate acceptance steps. See
+  [reply preview boundaries](../../docs/reply-previews.md).
+
 ## 2026-10-21: Notification content and diagnostic context (local)
 
 - All notification channels now receive readable event titles, timestamps,
