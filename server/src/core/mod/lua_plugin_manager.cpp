@@ -3012,7 +3012,7 @@ bool LuaPluginManager::runLegacyEvent(const LegacyCycleEvent& action, json& cont
             }
         } else if (status == LUA_OK) status = dnx_pcall(state_, 0, 0);
         if (status != LUA_OK && status != LUA_YIELD)
-            DICE_LOG_ERROR("Lua 事件「{}」执行失败：{}", action.id, dnx_normalizeLuaText(argStr(state_, -1)));
+            logPluginFailure("执行事件「" + action.id + "」", dnx_normalizeLuaText(argStr(state_, -1)));
         if (status != LUA_OK && status != LUA_YIELD) context["@dice_event_failed"] = true;
         if (!pending && status == LUA_OK) {
             lua_rawgeti(state_, LUA_REGISTRYINDEX, contextRef);
@@ -3129,8 +3129,8 @@ void LuaPluginManager::loadModFile(const fs::path& path, bool enabled) {
     const int stackBase = lua_gettop(state_);
     if (dnx_loadLegacyEnvironment(state_, path) != LUA_OK) {
         ++lastLoadErrors_;
-        DICE_LOG_ERROR("插件「{}」加载失败：{}", m.name, argStr(state_, -1));
-        operation.fail("file=" + dnx_u8str(path) + " script evaluation failed");
+        logPluginFailure("加载", dnx_normalizeLuaText(argStr(state_, -1)));
+        operation.fail("file=" + dnx_u8str(path) + " script evaluation failed", true);
         lua_settop(state_, stackBase); loadingModDir_.clear(); mods_.push_back(std::move(m)); return;
     }
     const int env = lua_absindex(state_, -1);
@@ -3274,7 +3274,7 @@ bool LuaPluginManager::runTask(const std::string& name, std::string* error) {
     if (status != LUA_OK) {
         const std::string message = dnx_normalizeLuaText(argStr(state_, -1));
         if (error) *error = message;
-        DICE_LOG_ERROR("[lua] scheduled task '{}' failed: {}", name, message);
+        logPluginFailure("运行定时任务「" + name + "」", message);
         lua_settop(state_, base);
         return false;
     }
@@ -4120,7 +4120,7 @@ void LuaPluginManager::resumeCoroutine(int threadRef) {
     const auto scopedSender = scopedAsyncReply_;
     lock.unlock();
     if (!error.empty()) {
-        DICE_LOG_ERROR("[lua] async reply '{}' failed: {}", ruleName, error);
+        logPluginFailure("执行延时回复「" + ruleName + "」", error);
         return;
     }
     if (!reply.empty() && (sender || scopedSender)) {
@@ -4444,7 +4444,7 @@ LuaPluginManager::DispatchResult LuaPluginManager::dispatch(
         if (!callOk) {
             res.failed = true;
             if (callError.empty()) callError = dnx_normalizeLuaText(argStr(state_, -1));
-            DICE_LOG_ERROR("[lua] reply '{}' echo error: {}", rule.name, callError);
+            logPluginFailure("执行回复「" + rule.name + "」", callError);
             lua_settop(state_, sbase); res.matched = true; return res;
         }
         // 取第一个返回值作回复（msg_order 常 return reply, "" 两值）。

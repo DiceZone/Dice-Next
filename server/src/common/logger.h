@@ -66,7 +66,11 @@ public:
     LogOperation& operator=(const LogOperation&) = delete;
     void phase(std::string_view name);
     void detail(std::string text) { detail_ = std::move(text); }
-    void fail(std::string reason) { failed_ = true; detail_ = std::move(reason); }
+    void fail(std::string reason, bool errorAlreadyReported = false) {
+        failed_ = true;
+        detail_ = std::move(reason);
+        errorReported_ = errorAlreadyReported;
+    }
     void partial(std::string reason) { partial_ = true; detail_ = std::move(reason); }
 private:
     spdlog::source_loc source_;
@@ -74,6 +78,7 @@ private:
     uint64_t id_;
     int exceptions_;
     bool failed_ = false;
+    bool errorReported_ = false;
     bool partial_ = false;
     std::chrono::steady_clock::time_point start_;
 };

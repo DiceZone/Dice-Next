@@ -3079,7 +3079,13 @@ static int realMain(int argc, char* argv[]) {
                     dice::notice::notify(configMgr, adapterMgr, dice::notice::kError,
                         report.text(), report.processing.origin.platform, report.processing.origin.groupId,
                         "error", report.processing.origin.adapterId);
-                } catch (...) { DICE_LOG_EXCEPTION("deferred error notification delivery"); }
+                } catch (...) {
+                    // notify() may fail before reaching a transport (for
+                    // example, while reading configuration). Its own scope
+                    // has already unwound; don't turn this into another notice.
+                    dice::ProcessingScope failedNotice(dice::ProcessingSource{"通知", "运行错误通知", "", ""});
+                    DICE_LOG_EXCEPTION("发送运行错误通知失败");
+                }
             });
         }));
 

@@ -12,6 +12,10 @@ inline std::string readable(std::string_view value, size_t limit = 6000) {
     text = nlohmann::json::parse(
                nlohmann::json(text).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace))
                .get<std::string>();
+    // Log files indent continuations to prevent forged log headers. A chat
+    // notification is already a single message; don't copy the log gutter.
+    for (size_t at = 0; (at = text.find("\n    | ", at)) != std::string::npos; ++at)
+        text.erase(at + 1, 6);
     for (size_t at = 0; (at = text.find("[CQ:", at)) != std::string::npos; at += 6)
         text.replace(at, 1, "［");
     if (text.size() > limit) {
@@ -73,24 +77,35 @@ inline std::string eventTitle(const std::string &op) {
             return title;
     return op.empty() ? "系统通知" : "通知 · " + readable(op, 120);
 }
-inline std::string contextText(const ProcessingOrigin &o) {
+inline std::string adapterLabel(const ProcessingOrigin &o) {
+    const auto platform = o.platform == "onebot_v11"    ? "OneBot"
+                          : o.platform == "qq_official" ? "QQ官方"
+                                                        : o.platform;
+    if (!o.accountId.empty())
+        return readable(platform, 80) + ":" + readable(o.accountId, 180);
+    return o.accountName.empty() ? readable(platform, 80)
+                                 : readable(platform, 80) + "「" + readable(o.accountName, 240) + "」";
+}
+inline std::string contextText(const ProcessingOrigin &o, const std::string &body = "") {
+    std::vector<std::string> parts;
+    if (!o.groupId.empty() && body.find(o.groupId) == std::string::npos)
+        parts.push_back("群" + identity(o.groupName, o.groupId, ""));
+    if (!o.userId.empty() && body.find(o.userId) == std::string::npos)
+        parts.push_back("用户" + identity(o.userName, o.userId, ""));
+    if (!o.targetId.empty() && o.targetId != o.groupId && o.targetId != o.userId &&
+        body.find(o.targetId) == std::string::npos)
+        parts.push_back(o.targetId == "*" ? "所有符合条件的群组"
+                                          : std::string(o.targetType == "group" ? "目标群" : "目标用户") +
+                                                identity(o.targetName, o.targetId, ""));
+    if ((!o.accountId.empty() || !o.accountName.empty()) &&
+        (o.accountId.empty() || body.find(o.accountId) == std::string::npos))
+        parts.push_back("适配器 " + adapterLabel(o));
     std::string text;
-    if (!o.adapterId.empty() || !o.accountId.empty())
-        text += "\n来源帐号：" + readable(o.platform, 100) + " · " +
-                identity(o.accountName, o.accountId, "机器人") +
-                (o.adapterId.empty() ? "" : "〔适配器 " + readable(o.adapterId, 100) + "〕");
-    if (!o.entry.empty())
-        text += "\n触发入口：" + readable(o.entry, 160);
-    if (!o.userId.empty())
-        text += "\n操作／触发者：" + identity(o.userName, o.userId);
-    if (!o.groupId.empty())
-        text += "\n群组／频道：" + identity(o.groupName, o.groupId, "群组");
-    if (!o.messageId.empty())
-        text += "\n触发消息 ID：" + readable(o.messageId, 180);
-    if (!o.targetId.empty())
-        text += "\n操作对象：" + (o.targetId == "*" ? std::string("所有符合条件的群组")
-                                                    : identity(o.targetName, o.targetId,
-                                                               o.targetType == "group" ? "群组" : "用户"));
+    for (const auto &part : parts) {
+        if (!text.empty())
+            text += "，";
+        text += part;
+    }
     return text;
 }
 inline std::string triggerText(std::string text) {
@@ -103,66 +118,107 @@ inline std::string triggerText(std::string text) {
             return "[身份验证内容已隐藏]";
     return readable(text, 800);
 }
-inline std::string notificationText(int level, const std::string &op, const std::string &message,
-                                    const ProcessingContext &processing, const std::string &time) {
-    std::string text = "【" + eventTitle(op) + "】\n时间：" + time + "\n级别：" +
-                       (level & 8   ? "错误"
-                        : level & 4 ? "关键"
-                        : level & 2 ? "重要"
-                                    : "例行");
-    text += contextText(processing.origin);
-    if (op != "censor" && !processing.sources.empty()) {
-        text += "\n处理来源：" + readable(processing.label(), 700);
-        size_t files = 0;
-        for (const auto &source : processing.sources)
-            if (!source.file.empty() && files++ < 4)
-                text += "\n脚本／资源：" + readable(source.file, 500);
-    }
-    if (op != "censor" && !processing.trigger.empty())
-        text += "\n触发内容：" + triggerText(processing.trigger);
-    return text + "\n\n" + readable(message, 10000);
+inline std::string notificationText(int /*level*/, const std::string &op, const std::string &message,
+                                    const ProcessingContext &processing, const std::string & /*time*/) {
+    // ErrorReport already contains its business title and useful context.
+    if (op == "error")
+        return readable(message, 6000);
+    std::string text = "[" + eventTitle(op) + "] " + readable(message, 10000);
+    const auto context = contextText(processing.origin, text);
+    if (!context.empty())
+        text += "\n" + context;
+    return text;
 }
 struct ErrorReport {
     nlohmann::json record;
     ProcessingContext processing;
     size_t suppressed = 0;
     std::string text() const {
-        auto value = [&](const char *key) {
-            auto i = record.find(key);
-            return i != record.end() && i->is_string() ? i->get<std::string>() : std::string();
+        auto value = [](const nlohmann::json &object, const char *key) {
+            const auto i = object.is_object() ? object.find(key) : object.end();
+            return i != object.end() && i->is_string() ? i->get<std::string>() : std::string();
         };
-        std::string text = "模块：" + readable(value("module"), 160);
-        if (!value("timestamp").empty())
-            text += "\n错误发生于：" + readable(value("timestamp"), 80);
-        text += "\n错误详情：\n" + (value("message").empty()
-                                        ? "日志未提供错误正文，请凭关联日志 ID 检查诊断记录。"
-                                        : readable(value("message")));
-        const auto details = record.value("details", nlohmann::json::object());
-        for (const auto &[key, label] :
-             std::vector<std::pair<std::string, std::string>>{{"reason", "原因"},
-                                                              {"error", "错误"},
-                                                              {"exception", "异常"},
-                                                              {"cause", "底层原因"},
-                                                              {"stderr", "进程错误输出"},
-                                                              {"status", "状态"},
-                                                              {"code", "错误码"},
-                                                              {"http_status", "HTTP 状态码"},
-                                                              {"business_code", "业务错误码"},
-                                                              {"request_id", "管理请求 ID"},
-                                                              {"operation", "操作"},
-                                                              {"path", "请求／资源路径"}}) {
-            auto it = details.find(key);
-            if (it != details.end() && !it->is_null())
-                text += "\n" + label + "：" +
-                        readable(it->is_string() ? it->get<std::string>() : it->dump(), 1600);
+        const auto details = record.is_object() && record.contains("details") && record["details"].is_object()
+                                 ? record["details"]
+                                 : nlohmann::json::object();
+        auto message = value(record, "message");
+        // Older send errors included the complete failed message and IDs.
+        // Never quote that body into another notification.
+        const auto content = message.find("；实际内容：");
+        if (content != std::string::npos)
+            message.resize(content);
+        const auto correlation = message.find("(msgID:");
+        if (correlation != std::string::npos)
+            message.resize(correlation);
+        auto original = value(details, "error");
+        if (original.empty())
+            original = value(details, "plugin_text");
+        if (original.empty())
+            original = message;
+        if (original.empty())
+            original = "程序未返回具体错误。";
+        const ProcessingSource *plugin = nullptr;
+        for (const auto &source : processing.sources)
+            if (source.kind.find("插件") != std::string::npos)
+                plugin = &source;
+        const auto module = value(record, "module");
+        const auto operation = value(details, "operation");
+        const bool delivery = operation == "发送消息" || operation == "发送通知" || operation == "执行事件";
+        std::string text;
+        if (plugin && !delivery) {
+            text = "[插件错误] ";
+            if (operation.empty() && !plugin->name.empty() &&
+                original.find(plugin->name) != std::string::npos)
+                text += readable(original, 3500);
+            else {
+                text += plugin->name.empty() ? "插件" : "插件「" + readable(plugin->name, 240) + "」";
+                if (!operation.empty())
+                    text += readable(operation, 120) + "失败";
+                if (!plugin->file.empty()) {
+                    const auto at = plugin->file.find_last_of("/\\");
+                    const auto filename = plugin->file.substr(at == std::string::npos ? 0 : at + 1);
+                    if (!filename.empty() && original.find(filename) == std::string::npos &&
+                        plugin->name != filename)
+                        text += "（" + readable(plugin->file, 500) + "）";
+                }
+                text += "：" + readable(original, 3500);
+            }
+        } else {
+            const auto category = module.find("插件") != std::string::npos   ? "插件"
+                                  : module == "消息"                         ? "消息"
+                                  : module == "通知"                         ? "通知"
+                                  : module == "事件"                         ? "操作"
+                                  : module == "自动更新"                     ? "更新"
+                                  : module.find("定时") != std::string::npos ? "定时任务"
+                                  : module == "配置"                         ? "配置"
+                                                                             : "运行";
+            text =
+                "[" + std::string(category) + "错误] " + readable(message.empty() ? original : message, 3500);
+            // Include the first distinct underlying error, not a diagnostic
+            // field dump. Full structured records remain in the local log.
+            for (const auto *key : {"error", "reason", "exception", "cause", "stderr"}) {
+                const auto detail = value(details, key);
+                if (!detail.empty() && text.find(readable(detail, 1200)) == std::string::npos) {
+                    text += "；" + readable(detail, 1200);
+                    break;
+                }
+            }
+            const auto path = value(details, "path");
+            if (!path.empty() && text.find(path) == std::string::npos)
+                text += "（" + readable(path, 500) + "）";
+            if (plugin && !plugin->name.empty())
+                text += "\n来源：插件「" + readable(plugin->name, 240) + "」";
         }
-        if (!value("id").empty())
-            text += "\n关联日志 ID：" + readable(value("id"), 180);
-        if (record.contains("msg_id") && record["msg_id"].is_string())
-            text += "\n发送关联 msgID：" + readable(record["msg_id"].get<std::string>(), 180);
+        if (plugin && !delivery) {
+            const auto reason = value(details, "reason");
+            if (!reason.empty() && text.find(readable(reason, 1000)) == std::string::npos)
+                text += "；" + readable(reason, 1000);
+        }
+        const auto context = contextText(processing.origin, text);
+        if (!context.empty())
+            text += "\n" + context;
         if (suppressed)
-            text += "\n相同错误在上次通知后另出现 " + std::to_string(suppressed) +
-                    " 次，已合并通知；详细次数和内容可查后台日志。";
+            text += "（相同错误另出现 " + std::to_string(suppressed) + " 次，已合并）";
         return text;
     }
 };

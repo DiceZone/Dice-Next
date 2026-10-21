@@ -280,23 +280,51 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
             // 掉线通知时来源已离线）或系统级通知，则按内部适配器编号顺序依次尝试，
             // 直到成功发出一次。
             auto trySend = [&](const AdapterPtr &a) -> bool {
-                if (!a || !a->isConnected())
+                if (!a)
                     return false;
                 if (!w.platform.empty() && a->platform() != w.platform)
                     return false;
                 const auto key = json::array({a->id(), w.chatId, w.isGroup}).dump();
                 if (delivered.count(key))
                     return true;
+                ProcessingOrigin destination;
+                destination.platform = a->platform();
+                destination.adapterId = a->id();
+                destination.targetId = w.chatId;
+                destination.targetType = w.isGroup ? "group" : "user";
+                enrichOrigin(destination, adapters);
+                const auto target = std::string(w.isGroup ? "群" : "用户") +
+                                    (destination.targetName.empty() || destination.targetName == w.chatId
+                                         ? w.chatId
+                                         : identity(destination.targetName, w.chatId));
+                const auto platformName = a->platform() == "onebot_v11"    ? "OneBot"
+                                          : a->platform() == "qq_official" ? "QQ官方"
+                                                                           : a->platform();
+                const auto label =
+                    std::string(platformName) +
+                    (destination.accountId.empty() ? "「" + a->name() + "」" : ":" + destination.accountId);
+                auto prepared =
+                    std::make_shared<PreparedOutput>(target, content, activeProcessingContext, label);
+                OutboundScope delivery(prepared);
+                auto failure = OutboundAttempt::prepare(label, target, content);
+                if (!a->isConnected()) {
+                    failure.failed("适配器未连接");
+                    return false;
+                }
+                Message m;
+                m.platform = a->platform();
+                m.type = w.isGroup ? MessageType::kGroup : MessageType::kPrivate;
+                m.targetId = w.chatId;
+                m.content = content;
                 try {
-                    Message m;
-                    m.platform = a->platform();
-                    m.type = w.isGroup ? MessageType::kGroup : MessageType::kPrivate;
-                    m.targetId = w.chatId;
-                    m.content = content;
                     a->sendMessage(m);
                     delivered.insert(key);
                     return true;
+                } catch (const std::exception &error) {
+                    failure.failed(error.what());
+                    return false;
                 } catch (...) {
+                    failure.failed("发送接口抛出未知异常");
                     return false;
                 }
             };
@@ -326,8 +354,8 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
 
 // ─── 运行报错推送 ──────────────────────────────────────────────────
 // spdlog 自定义 sink：捕获 ERROR 级日志 → 通知订阅了 kError 的窗口。
-// 防护：① thread_local 重入保护（notify 发送本身出错打日志时不再递归）；
-//       ② 同一来源的同种错误 60 秒合并一次，不掩盖其他群/插件的新错误。
+// 防护：① 同步重入保护；② 从日志快照识别异步通知投递，禁止错误自循环；
+//       ③ 同一来源的同种错误 60 秒合并一次，不掩盖其他群/插件的新错误。
 // No mutex may be held across cb_: sending a notification can log another error.
 // The callback is immutable, throttling is atomic and reentry is thread-local.
 class ErrorNotifySink : public spdlog::sinks::base_sink<spdlog::details::null_mutex> {
@@ -344,9 +372,18 @@ class ErrorNotifySink : public spdlog::sinks::base_sink<spdlog::details::null_mu
         static thread_local bool inNotify = false;
         if (inNotify)
             return; // 重入保护
+        auto record = currentLogRecord();
         auto processing = activeOutboundContext.output ? activeOutboundContext.output->processing : activeProcessingContext;
-        for (const auto& source : processing.sources) if (source.kind == "通知") return;
-        ErrorReport report{currentLogRecord(), std::move(processing)};
+        const auto details = record.is_object() && record.contains("details") && record["details"].is_object()
+                                 ? record["details"]
+                                 : json::object();
+        if (details.contains("processing") && details["processing"].is_object())
+            processing = processingContextFromJson(details["processing"]);
+        if (isNotificationProcessing(processing) ||
+            (details.contains("notification_delivery") && details["notification_delivery"].is_boolean() &&
+             details["notification_delivery"].get<bool>()))
+            return;
+        ErrorReport report{std::move(record), std::move(processing)};
         if(report.record.contains("details") && report.record["details"].is_object()
             && report.record["details"].contains("notice_event") && report.record["details"]["notice_event"].is_string()
             && report.record["details"]["notice_event"].get<std::string>()=="update_error") return;
@@ -354,9 +391,23 @@ class ErrorNotifySink : public spdlog::sinks::base_sink<spdlog::details::null_mu
             {"module", std::string(msg.logger_name.data(), msg.logger_name.size())}};
         auto message = report.record.value("message", std::string());
         const auto suffix = message.find("(msgID:"); if (suffix != std::string::npos) message.resize(suffix);
+        // A platform error is one failure even when the attempted body/msgID
+        // changes. Keep different targets/accounts/reasons independent.
+        auto field = [&](const char *key) {
+            const auto item = details.find(key);
+            return item != details.end() && item->is_string() ? item->get<std::string>() : std::string();
+        };
+        const auto operation = field("operation");
+        const auto errorKey =
+            operation == "发送消息" || operation == "发送通知"
+                ? json::array({field("adapter"), field("target"), field("error"), operation})
+                      .dump(-1, ' ', false, json::error_handler_t::replace)
+                : message.substr(0, 1200);
         const auto key = json::array({report.processing.label(), report.processing.origin.platform,
-            report.processing.origin.adapterId, report.processing.origin.groupId, report.processing.origin.userId,
-            report.record.value("module", std::string()), message.substr(0, 1200)}).dump(-1,' ',false,json::error_handler_t::replace);
+                                      report.processing.origin.adapterId, report.processing.origin.groupId,
+                                      report.processing.origin.userId,
+                                      report.record.value("module", std::string()), errorKey})
+                             .dump(-1, ' ', false, json::error_handler_t::replace);
         const auto now = clock_();
         {
             std::lock_guard<std::mutex> lock(throttleMutex_);

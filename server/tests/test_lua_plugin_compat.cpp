@@ -81,6 +81,27 @@ private:
 
 }  // namespace
 
+TEST(LuaPluginCompat, SyntaxFailureLogsActualPluginAndInterpreterLineOnlyOnce) {
+    TempWorkspace workspace("dice_lua_syntax_notice_");
+    const auto filename = "watermelon-" + newLogCorrelationId() + ".lua";
+    writeText(workspace.root() / "data" / "plugin" / filename,
+              std::string(122, '\n') + "local broken = {1，2}\n");
+    LuaPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    manager.loadDir("data/mod");
+    int errors = 0;
+    for (const auto &record : recentLogRecords(1000)) {
+        if (record["level"] != "error" || record.dump().find(filename) == std::string::npos)
+            continue;
+        ++errors;
+        const auto text = record["message"].get<std::string>();
+        ASSERT_TRUE(text.find("加载失败") != std::string::npos);
+        ASSERT_TRUE(record["details"]["error"].get<std::string>().find(":123:") != std::string::npos);
+        ASSERT_EQ(record["details"]["operation"].get<std::string>(), "加载");
+    }
+    ASSERT_EQ(errors, 1);
+}
+
 TEST(LuaPluginCompat, IndexedConfigurationSnapshotSelectsOnlyRequestedSessionsAndFields) {
     TempWorkspace workspace("dice_next_indexed_conf_");
     LuaPluginManager manager;

@@ -207,10 +207,13 @@ protected:
         if (!shouldRecordLog(level)) return;
         auto safe = sanitizeLogText({msg.payload.data(), msg.payload.size()});
         const auto module = currentEmission ? currentEmission->module : defaultLogModule(msg.source);
-        if ((module == "Lua 插件" || module == "JS 插件") && !activeProcessingContext.sources.empty())
-            safe = sanitizeLogText(activeProcessingContext.label()) + "：" + safe;
         auto details = currentEmission && currentEmission->details ? *currentEmission->details : nlohmann::json::object();
         if (!details.is_object()) details = {{"detail", details}};
+        // Structured plugin messages already identify their source. Add a
+        // prefix only for older, unstructured interpreter/host log calls.
+        if ((module == "Lua 插件" || module == "JS 插件") && !activeProcessingContext.sources.empty() &&
+            !details.contains("processing"))
+            safe = sanitizeLogText(activeProcessingContext.label()) + "：" + safe;
         if (!activeProcessingContext.sources.empty() && !details.contains("processing"))
             details["processing"] = activeProcessingContext.json();
         if (activeOutboundContext.output && !details.contains("msg_id")) {
@@ -491,15 +494,32 @@ void LogOperation::phase(std::string_view name) {
 LogOperation::~LogOperation() noexcept {
     try {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_).count();
-        const bool failed = failed_ || std::uncaught_exceptions() > exceptions_;
+        const bool exceptional = std::uncaught_exceptions() > exceptions_;
+        const bool failed = failed_ || exceptional;
         const auto action = operation_ == "reload" ? "重载" : operation_ == "load_plugin" ? "插件加载"
             : operation_ == "on_load" ? "插件初始化回调" : operation_ == "file_change" ? "配置变更处理"
             : operation_ == "sync_js_templates" ? "JS 规则模板同步" : "操作";
-        writeLog(source_, failed ? LogLevel::Error : partial_ ? LogLevel::Warn : operation_ == "reload" ? LogLevel::Success : LogLevel::Debug,
-            defaultLogModule(source_), fmt::format("{}{}，耗时 {} 毫秒{}", action, failed ? "失败" : partial_ ? "部分完成" : "完成", ms,
-                (failed || partial_) && !detail_.empty() ? "；原因：" + detail_ : "。"),
-            {{"operation_id", id_}, {"operation", operation_}, {"phase", "end"},
-                {"result", failed ? "failed" : partial_ ? "partial" : "completed"}, {"elapsed_ms", ms}, {"context", detail_}});
+        // Retain the operation summary for diagnostics, but don't issue a
+        // second error notification after the caller reported the real error.
+        writeLog(source_,
+                 failed                   ? (errorReported_ && !exceptional ? LogLevel::Debug : LogLevel::Error)
+                 : partial_               ? LogLevel::Warn
+                 : operation_ == "reload" ? LogLevel::Success
+                                          : LogLevel::Debug,
+                 defaultLogModule(source_),
+                 fmt::format("{}{}，耗时 {} 毫秒{}", action,
+                             failed     ? "失败"
+                             : partial_ ? "部分完成"
+                                        : "完成",
+                             ms, (failed || partial_) && !detail_.empty() ? "；原因：" + detail_ : "。"),
+                 {{"operation_id", id_},
+                  {"operation", operation_},
+                  {"phase", "end"},
+                  {"result", failed     ? "failed"
+                             : partial_ ? "partial"
+                                        : "completed"},
+                  {"elapsed_ms", ms},
+                  {"context", detail_}});
     } catch (...) {}
 }
 

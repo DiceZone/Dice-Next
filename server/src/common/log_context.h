@@ -1,5 +1,9 @@
 #pragma once
 #include "logger.h"
+#include <algorithm>
+#include <initializer_list>
+#include <map>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <utility>
 
@@ -48,6 +52,55 @@ struct ProcessingContext {
         return {{"sources", items}, {"trigger", trigger}, {"result", result}, {"origin", origin.json()}};
     }
 };
+// Structured records carry this snapshot across transport callbacks. It is
+// diagnostic data only; never use it for routing or permission decisions.
+inline ProcessingContext processingContextFromJson(const nlohmann::json &value) {
+    ProcessingContext result;
+    result.origin = {};
+    auto read = [](const nlohmann::json &object, const char *key) {
+        const auto it = object.is_object() ? object.find(key) : object.end();
+        return it != object.end() && it->is_string() ? it->get<std::string>() : std::string();
+    };
+    if (!value.is_object())
+        return result;
+    result.trigger = read(value, "trigger");
+    result.result = read(value, "result");
+    const auto sources = value.find("sources");
+    if (sources != value.end() && sources->is_array())
+        for (const auto &source : *sources) {
+            if (result.sources.size() >= 16)
+                break;
+            if (source.is_object())
+                result.sources.push_back({read(source, "kind"), read(source, "name"), read(source, "file"),
+                                          read(source, "entry")});
+        }
+    const auto origin = value.find("origin");
+    if (origin != value.end() && origin->is_object()) {
+        for (const auto &[key, member] :
+             std::initializer_list<std::pair<const char *, std::string ProcessingOrigin::*>>{
+                 {"platform", &ProcessingOrigin::platform},
+                 {"adapter_id", &ProcessingOrigin::adapterId},
+                 {"account_id", &ProcessingOrigin::accountId},
+                 {"account_name", &ProcessingOrigin::accountName},
+                 {"user_id", &ProcessingOrigin::userId},
+                 {"user_name", &ProcessingOrigin::userName},
+                 {"group_id", &ProcessingOrigin::groupId},
+                 {"group_name", &ProcessingOrigin::groupName},
+                 {"message_id", &ProcessingOrigin::messageId},
+                 {"entry", &ProcessingOrigin::entry},
+                 {"target_id", &ProcessingOrigin::targetId},
+                 {"target_name", &ProcessingOrigin::targetName},
+                 {"target_type", &ProcessingOrigin::targetType}})
+            result.origin.*member = read(*origin, key);
+    }
+    return result;
+}
+inline bool isNotificationProcessing(const ProcessingContext &context) {
+    for (const auto &source : context.sources)
+        if (source.kind == "通知")
+            return true;
+    return false;
+}
 inline thread_local ProcessingContext activeProcessingContext;
 class ProcessingScope {
 public:
@@ -78,12 +131,12 @@ inline void addProcessingSource(std::vector<ProcessingSource>& sources, const Pr
 // A prepared logical output survives asynchronous formatting and retries.
 // Platform-generated message IDs remain separate from this internal msgID.
 struct PreparedOutput {
-    std::string id, target, proposed;
+    std::string id, target, proposed, adapterLabel;
     ProcessingContext processing;
     PreparedOutput(std::string destination, std::string text,
-                   ProcessingContext context = activeProcessingContext)
+                   ProcessingContext context = activeProcessingContext, std::string transport = {})
         : id(newLogCorrelationId()), target(std::move(destination)), proposed(std::move(text)),
-          processing(std::move(context)) {
+          adapterLabel(std::move(transport)), processing(std::move(context)) {
         writeLog({}, LogLevel::Info, "处理", fmt::format(
             "{}；结果：{}；触发：{}；拟发送至：{}；拟发送内容：{} (msgID:{})",
             processing.label(), processing.result,
@@ -92,6 +145,35 @@ struct PreparedOutput {
             {{"msg_id", id}, {"target", target}, {"processing", processing.json()}});
     }
 };
+
+// Repeated notification delivery failures must not fill local logs either.
+// No scheduled work or configuration mutations: the next real failure can
+// report the accumulated count after the existing one-minute window.
+inline std::pair<bool, size_t>
+admitNotificationFailure(const std::string &key,
+                         std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
+    struct Entry {
+        std::chrono::steady_clock::time_point at;
+        size_t suppressed = 0;
+    };
+    static std::mutex mutex;
+    static std::map<std::string, Entry> entries;
+    std::lock_guard lock(mutex);
+    auto it = entries.find(key);
+    if (it != entries.end() && now >= it->second.at && now - it->second.at < std::chrono::seconds(60)) {
+        ++it->second.suppressed;
+        return {false, 0};
+    }
+    const auto suppressed = it == entries.end() ? size_t(0) : it->second.suppressed;
+    if (entries.size() >= 256 && it == entries.end()) {
+        auto oldest = std::min_element(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
+            return a.second.at < b.second.at;
+        });
+        entries.erase(oldest);
+    }
+    entries[key] = {now, 0};
+    return {true, suppressed};
+}
 struct OutboundContext { std::shared_ptr<const PreparedOutput> output; size_t part = 0, parts = 0; };
 inline thread_local OutboundContext activeOutboundContext;
 class OutboundScope {
@@ -112,6 +194,11 @@ struct OutboundAttempt {
     static OutboundAttempt prepare(std::string adapter, std::string target, std::string actual, std::string module = "消息") {
         auto context = activeOutboundContext;
         if (!context.output) context.output = std::make_shared<PreparedOutput>(target, actual);
+        if (isNotificationProcessing(context.output->processing)) {
+            target = context.output->target;
+            if (!context.output->adapterLabel.empty())
+                adapter = context.output->adapterLabel;
+        }
         return {std::move(context), std::move(adapter), std::move(target), std::move(actual), std::move(module)};
     }
     std::string suffix() const {
@@ -119,8 +206,13 @@ struct OutboundAttempt {
                                  : fmt::format(" (msgID:{})", context.output->id);
     }
     nlohmann::json details() const {
-        return {{"msg_id", context.output->id}, {"adapter", adapter}, {"target", target},
-                {"part", context.part}, {"parts", context.parts}, {"processing", context.output->processing.json()}};
+        return {{"msg_id", context.output->id},
+                {"adapter", adapter},
+                {"target", target},
+                {"part", context.part},
+                {"parts", context.parts},
+                {"processing", context.output->processing.json()},
+                {"notification_delivery", isNotificationProcessing(context.output->processing)}};
     }
     void submitted() const {
         writeLog({}, LogLevel::Info, module, fmt::format("发↪ [{}] [{}] 骰娘：{}；已提交发送，等待平台结果{}",
@@ -131,13 +223,48 @@ struct OutboundAttempt {
             adapter, platformId.empty() ? "未提供" : platformId, suffix()), details());
     }
     void failed(std::string_view reason) const {
-        writeLog({}, LogLevel::Error, module, fmt::format("[{}] 向 [{}] 发送失败：{}；实际内容：{}{}",
-            adapter, target, reason, content, suffix()), details());
+        const bool notice = isNotificationProcessing(context.output->processing);
+        size_t suppressed = 0;
+        if (notice) {
+            const auto admitted = admitNotificationFailure(
+                nlohmann::json::array({adapter, target, std::string(reason.substr(0, 1000))})
+                    .dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+            if (!admitted.first)
+                return;
+            suppressed = admitted.second;
+        }
+        auto data = details();
+        data["operation"] = notice ? "发送通知" : module == "事件" ? "执行事件" : "发送消息";
+        data["error"] = reason;
+        data["actual_content"] = content;
+        data["suppressed"] = suppressed;
+        std::string message =
+            notice ? fmt::format("向{}发送通知失败，请检查适配器 {} 是否可触达该通知窗口。", target, adapter)
+            : module == "事件" ? fmt::format("{}失败（{}，适配器 {}）：{}", content, target, adapter, reason)
+                               : fmt::format("向{}发送消息失败（适配器 {}）：{}", target, adapter, reason);
+        if (suppressed)
+            message += fmt::format("（此前相同错误另出现 {} 次）", suppressed);
+        writeLog({}, LogLevel::Error, notice ? "通知" : module, message, data);
     }
 };
 inline void logPluginText(LogLevel level, std::string_view text) {
-    writeLog({}, level, "插件", (activeProcessingContext.sources.empty() ? std::string("插件（未识别来源）") : activeProcessingContext.label()) + "：" + std::string(text),
-             {{"processing", activeProcessingContext.json()}});
+    writeLog({}, level, "插件",
+             (activeProcessingContext.sources.empty() ? std::string("插件（未识别来源）")
+                                                      : activeProcessingContext.label()) +
+                 "：" + std::string(text),
+             {{"processing", activeProcessingContext.json()}, {"plugin_text", text}});
+}
+// The operation is known by the caller. The interpreter's error is evidence,
+// not a reason to guess a more specific cause or suggest a speculative fix.
+inline void logPluginFailure(std::string_view operation, std::string_view error) {
+    const ProcessingSource *plugin = nullptr;
+    for (const auto &source : activeProcessingContext.sources)
+        if (source.kind.find("插件") != std::string::npos)
+            plugin = &source;
+    const auto label = plugin && !plugin->name.empty() ? "插件「" + plugin->name + "」" : "插件";
+    writeLog({}, LogLevel::Error, plugin ? plugin->kind : "插件",
+             label + std::string(operation) + "失败：" + std::string(error),
+             {{"operation", operation}, {"error", error}, {"processing", activeProcessingContext.json()}});
 }
 inline void logProcessingResult(const ProcessingSource& source, std::string_view result, std::string_view trigger = {}) {
     writeLog({}, LogLevel::Info, "处理", source.label() + "；结果：" + std::string(result),

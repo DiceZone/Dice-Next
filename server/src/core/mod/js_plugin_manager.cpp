@@ -68,7 +68,7 @@ static std::string jsErrorDetails(JSContext* ctx, JSValueConst error) {
 static bool logRejectedPromise(JSContext* ctx, JSValueConst value, std::string_view step) {
     if (JS_PromiseState(ctx, value) != JS_PROMISE_REJECTED) return false;
     JSValue error = JS_PromiseResult(ctx, value);
-    DICE_LOG_ERROR("{}的异步执行失败：{}", step, jsErrorDetails(ctx, error));
+    logPluginFailure(std::string(step) + "（异步）", jsErrorDetails(ctx, error));
     JS_FreeValue(ctx, error);
     return true;
 }
@@ -1565,8 +1565,8 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
         if (JS_IsException(r)) {
             JSValue exc = JS_GetException(ctx_);
             ++lastLoadErrors_;
-            DICE_LOG_ERROR("脚本「{}」加载失败：{}", e.meta.file, jsErrorDetails(ctx_, exc));
-            operation.fail("file=" + e.meta.file + " script evaluation failed");
+            logPluginFailure("加载", jsErrorDetails(ctx_, exc));
+            operation.fail("file=" + e.meta.file + " script evaluation failed", true);
             JS_FreeValue(ctx_, exc);
         } else { ++n; }
         JS_FreeValue(ctx_, r);
@@ -1589,13 +1589,14 @@ int JsPluginManager::loadDirLocked(const std::string& dir) {
                 pendingFailed_ = true;
                 JSValue exc = JS_GetException(ctx_);
                 ++lastLoadErrors_;
-                DICE_LOG_ERROR("插件「{}」初始化回调失败：{}", e.second, jsErrorDetails(ctx_, exc));
-                operation.fail("file=" + e.second + " onLoad callback failed");
+                logPluginFailure("初始化", jsErrorDetails(ctx_, exc));
+                operation.fail("file=" + e.second + " onLoad callback failed", true);
                 JS_FreeValue(ctx_, exc);
             }
             if (!drainJobs()) { ++lastLoadErrors_; operation.partial("初始化回调的异步任务未正常完成"); }
             if (logRejectedPromise(ctx_, r, "插件初始化回调")) {
-                ++lastLoadErrors_; operation.fail("初始化回调返回了拒绝的 Promise");
+                ++lastLoadErrors_;
+                operation.fail("初始化回调返回了拒绝的 Promise", true);
             }
             JS_FreeValue(ctx_, r);
         }
@@ -1653,7 +1654,11 @@ void JsPluginManager::fireTimer(int64_t id) {
     bool prev = capturing_; capturing_ = false;   // timer runs outside a message turn → replies route
     JSValue r = JS_Call(ctx_, cb, JS_UNDEFINED, 0, nullptr);
     const bool failed = JS_IsException(r);
-    if (failed) { JSValue e = JS_GetException(ctx_); DICE_LOG_ERROR("定时回调执行失败：{}", jsErrorDetails(ctx_, e)); JS_FreeValue(ctx_, e); }
+    if (failed) {
+        JSValue e = JS_GetException(ctx_);
+        logPluginFailure("运行定时回调", jsErrorDetails(ctx_, e));
+        JS_FreeValue(ctx_, e);
+    }
     const bool jobsFinished = drainJobs();
     const bool rejected = logRejectedPromise(ctx_, r, "定时回调");
     const bool pending = JS_PromiseState(ctx_, r) == JS_PROMISE_PENDING;
@@ -2425,7 +2430,7 @@ void JsPluginManager::dispatchCommandHookLocked(const Message& message, JSValueC
             if (JS_IsException(result)) {
                 pendingFailed_ = true;
                 JSValue exc = JS_GetException(ctx_);
-                DICE_LOG_ERROR("[js] onCommandReceived plugin='{}' error: {}", e.second, jsErrorDetails(ctx_, exc));
+                logPluginFailure("执行 onCommandReceived 回调", jsErrorDetails(ctx_, exc));
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, result);
@@ -2474,8 +2479,7 @@ JsPluginManager::Result JsPluginManager::dispatchMessageHook(
             if (JS_IsException(r)) {
                 pendingFailed_ = true;
                 JSValue exc = JS_GetException(ctx_);
-                DICE_LOG_ERROR("[js] plugin '{}' hook={} adapter={} platform={} error: {}", e.second, hook,
-                    message.adapterId, message.platform, jsErrorDetails(ctx_, exc));
+                logPluginFailure("执行 " + std::string(hook) + " 回调", jsErrorDetails(ctx_, exc));
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, r);
@@ -2535,7 +2539,7 @@ void JsPluginManager::handleMessageSend(const Message& contextMessage,
             JSValue rv = JS_Call(ctx_, fn, e.first, 3, args);
             if (JS_IsException(rv)) {
                 JSValue exc = JS_GetException(ctx_);
-                DICE_LOG_ERROR("[js] onMessageSend plugin='{}' error: {}", e.second, jsErrorDetails(ctx_, exc));
+                logPluginFailure("执行 onMessageSend 回调", jsErrorDetails(ctx_, exc));
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, rv);
@@ -2689,7 +2693,7 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
             JSValue rv = JS_Call(ctx_, fn, e.first, useOfficialEvent ? 3 : 2, args);
             if (JS_IsException(rv)) {
                 JSValue exc = JS_GetException(ctx_);
-                DICE_LOG_ERROR("[js] {} plugin='{}' error: {}", hook, e.second, jsErrorDetails(ctx_, exc));
+                logPluginFailure("执行 " + std::string(hook) + " 回调", jsErrorDetails(ctx_, exc));
                 JS_FreeValue(ctx_, exc);
             }
             JS_FreeValue(ctx_, rv);
@@ -2803,8 +2807,7 @@ JsPluginManager::Result JsPluginManager::handle(const Message& message,
         if (JS_IsException(rv)) {
             pendingFailed_ = true;
             JSValue exc = JS_GetException(ctx_);
-            DICE_LOG_ERROR("[js] command='{}' adapter={} platform={} error: {}", word,
-                message.adapterId, message.platform, jsErrorDetails(ctx_, exc));
+            logPluginFailure("执行指令「" + word + "」", jsErrorDetails(ctx_, exc));
             JS_FreeValue(ctx_, exc);
         } else if (JS_IsObject(rv)) {
             JSValue sh = JS_GetPropertyStr(ctx_, rv, "showHelp");

@@ -176,6 +176,30 @@ TEST(Logger, PreparedActualAndFailureRecordsShareIdsAndRetainOrigins) {
     ASSERT_TRUE(newLogCorrelationId() != plan->id);
 }
 
+TEST(Logger, ReportedFailureSummaryDoesNotHideANewExceptionOrAnUnreportedFailure) {
+    const auto marker = newLogCorrelationId();
+    { LogOperation op(DICE_LOG_SOURCE,"js","load_plugin",marker + "-reported");
+      op.fail(marker + "-reported",true); }
+    { LogOperation op(DICE_LOG_SOURCE,"js","load_plugin",marker + "-unreported");
+      op.fail(marker + "-unreported"); }
+    try {
+        LogOperation op(DICE_LOG_SOURCE,"js","load_plugin",marker + "-exception");
+        op.fail(marker + "-exception",true);
+        throw std::runtime_error("new failure after an already reported error");
+    } catch (const std::exception&) {}
+    int reported = 0, unreported = 0, exceptional = 0;
+    for (const auto& record : recentLogRecords(1000)) {
+        if (record["level"] != "error") continue;
+        const auto text = record["message"].get<std::string>();
+        if (text.find(marker + "-reported") != std::string::npos) ++reported;
+        if (text.find(marker + "-unreported") != std::string::npos) ++unreported;
+        if (text.find(marker + "-exception") != std::string::npos) ++exceptional;
+    }
+    ASSERT_EQ(reported,0);
+    ASSERT_EQ(unreported,1);
+    ASSERT_EQ(exceptional,1);
+}
+
 TEST(Logger, ScopesRestoreAcrossNestedAndAsynchronousWork) {
     ProcessingContext saved;
     {

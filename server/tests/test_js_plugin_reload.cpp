@@ -11,6 +11,41 @@
 using namespace dice;
 namespace fs = std::filesystem;
 
+TEST(JsPluginManager, SyntaxFailureLogsActualPluginAndInterpreterErrorOnlyOnce) {
+    const auto nonce = newLogCorrelationId();
+    const auto root = fs::temp_directory_path() / ("dice_js_syntax_notice_" + nonce);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() {
+            std::error_code ec;
+            fs::remove_all(path, ec);
+        }
+    } cleanup{root};
+    fs::create_directories(root);
+    const auto filename = "watermelon-" + nonce + ".js";
+    {
+        std::ofstream file(root / filename, std::ios::binary);
+        file << "// ==UserScript==\n// @name 合成大西瓜\n// ==/UserScript==\n"
+             << std::string(118, '\n') << "const broken = [1，2];\n";
+    }
+    JsPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir(root.string()), 0);
+    int errors = 0;
+    for (const auto &record : recentLogRecords(1000)) {
+        if (record["level"] != "error" || record.dump().find(filename) == std::string::npos)
+            continue;
+        ++errors;
+        const auto text = record["message"].get<std::string>();
+        ASSERT_TRUE(text.find("插件「合成大西瓜」加载失败") != std::string::npos);
+        ASSERT_TRUE(text.find("SyntaxError") != std::string::npos);
+        ASSERT_TRUE(record["details"]["error"].get<std::string>().find(filename) != std::string::npos);
+        ASSERT_TRUE(record["details"]["error"].get<std::string>().find(":123") != std::string::npos);
+        ASSERT_EQ(record["details"]["operation"].get<std::string>(), "加载");
+    }
+    ASSERT_EQ(errors, 1);
+}
+
 TEST(JsPluginManager, DirectoryMetadataIsScopedDynamicAndNeverExecutesAccessors) {
     const auto root = fs::temp_directory_path() / ("dice_js_directory_" + newLogCorrelationId());
     struct Cleanup { fs::path path; ~Cleanup() { std::error_code ec; fs::remove_all(path,ec); } } cleanup{root};
