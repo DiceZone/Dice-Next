@@ -3,6 +3,34 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-21: Notification content and diagnostic context (local)
+
+- All notification channels now receive readable event titles, timestamps,
+  severity and available actor/account/group context. Message, nested plugin,
+  delayed output and HTTP exception paths preserve diagnostic origins without
+  using them for permissions. Names use the originating account's cache, with
+  persistent profile/group fallback only when a notification is produced.
+- Error notifications snapshot the actual sanitized structured log record,
+  plugin/script/entry, underlying reason/code and correlation IDs before being
+  queued. Throttling distinguishes error sources, counts suppressed repeats and
+  rejects notification-delivery recursion. Tests cover deferred/nested context,
+  wrong-account nickname isolation, unknown names, CQ neutralization, malformed
+  UTF-8, authentication-text hiding and censor notices not echoing intercepted
+  content. Task recipients are not mislabeled as human operators.
+- Release metadata carries bounded user-facing changes from the same generated
+  Release notes. Old manifests remain valid. New-version notifications are tested
+  with an injected fetcher to include real notes without an additional network
+  request; check failures report the source error and unchanged running program.
+  Download verification is not presented as completed installation.
+- Windows Release server/core/Lua builds passed. The unfiltered core run passed
+  **912 cases / 50,640 assertions** under the real short-path temporary root
+  after fast-forwarding the separate image-cache fix already on remote main;
+  Lua passed **66 cases / 611 assertions**. The Release automation suite passed
+  **33 tests**, including workflow wiring and Bash syntax checks. No WebUI code
+  changed in this content-only follow-up.
+- No live adapter, recipient, SMTP server, Webhook or GitHub Release was invoked.
+  Remote delivery and cross-platform CI remain separate acceptance steps.
+
 ## 2026-10-21: Notification rule management (local)
 
 - Notification management now uses paged server responses and per-rule CRUD,

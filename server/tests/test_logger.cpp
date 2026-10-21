@@ -233,6 +233,7 @@ TEST(Logger, HttpExceptionBoundaryKeepsNestedCausesPrivateFromClients) {
     request->setPath("/api/diagnostic-probe");
     request->setBody(privateBody);
     request->addHeader("Authorization", privateHeader);
+    request->attributes()->insert("dn_qq",std::string("12345"));
     drogon::HttpResponsePtr response;
     try {
         try { throw std::runtime_error("inner HTTP failure"); }
@@ -255,4 +256,8 @@ TEST(Logger, HttpExceptionBoundaryKeepsNestedCausesPrivateFromClients) {
         ASSERT_TRUE(content.find(privateHeader) == std::string::npos);
     }
     ASSERT_TRUE(recorded);
+    bool actorRecorded=false;
+    for(const auto& record:recentLogRecords(1000)) if(record["message"].get<std::string>().find(marker)!=std::string::npos)
+        actorRecorded=record["details"]["processing"]["origin"]["user_id"]=="12345";
+    ASSERT_TRUE(actorRecorded);
 }

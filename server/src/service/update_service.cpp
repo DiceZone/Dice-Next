@@ -6,6 +6,7 @@
 #include "../common/utils.h"
 #include "../common/update_schedule.h"
 #include "update_archive.h"
+#include "update_notes.h"
 #ifndef _WIN32
 #include "../platform/posix_update.h"
 #endif
@@ -263,6 +264,8 @@ bool parseReleaseManifest(const std::string& text, ReleaseManifest& manifest, st
         parsed.prerelease = root.value("prerelease", false);
         parsed.publishedAt = root.value("published_at", std::string());
         parsed.releaseUrl = root.value("release_url", std::string());
+        if (root.contains("release_notes") && root["release_notes"].is_string())
+            parsed.releaseNotes = boundedReleaseNotes(root["release_notes"].get<std::string>());
 
         std::array<int, 3> versionParts{};
         if (parsed.schema != 1 || parsed.repository != kRepository || !safeTag(parsed.tag) ||
@@ -610,7 +613,9 @@ void UpdateService::processInstallResult() {
 
         if (success && runningExpectedBuild) {
             emitNotification("update_result",
-                "Dice!Next 更新安装成功：" + tag + "\n当前运行版本：" + releaseTag());
+                "Dice!Next 更新安装成功：" + tag + "\n当前运行版本：" + releaseTag()
+                + "\n\n本次更新内容：\n" + releaseNotesPreview(metadata.value("release_notes", std::string()))
+                + "\n发布页：https://github.com/DiceZone/Dice-Next/releases/tag/" + tag);
         } else {
             std::string detail = result.value("message", std::string());
             if (success && !runningExpectedBuild) {
@@ -618,7 +623,8 @@ void UpdateService::processInstallResult() {
             }
             emitNotification("update_error",
                 "Dice!Next 更新安装失败：" + tag +
-                (detail.empty() ? std::string() : "\n原因：" + detail));
+                "\n当前运行版本：" + releaseTag() + "\n失败阶段：安装后结果核对"
+                + "\n原因：" + (detail.empty() ? "安装器未提供原因，请查看 updates 中的安装日志。" : detail));
         }
     } catch (const std::exception& ex) {
         emitNotification("update_error",
@@ -1344,6 +1350,17 @@ std::vector<UpdateService::ProbeResult> UpdateService::raceManifestSources(
 
 void UpdateService::doCheck(bool force) {
     const Settings current = settings();
+    auto failCheck = [&](const std::string& reason) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(stopping_.load(std::memory_order_acquire))return;
+            phase_="error";error_=reason;checkedAt_=epochSeconds();
+        }
+        DICE_LOG_WARN("版本检查未完成：{}；继续运行当前版本。",reason);
+        emitNotification("update_error","Dice!Next 无法完成更新检查。\n失败阶段：检查新版本\n当前版本：" + releaseTag()
+            + "\n运行平台：" + currentOs() + " / " + currentArch() + "\n原因：" + reason
+            + "\n未下载或替换程序文件，将继续运行当前版本。");
+    };
     ProbeResult selected;
     std::vector<Source> cachedSources;
     std::vector<Source> configured;
@@ -1364,11 +1381,7 @@ void UpdateService::doCheck(bool force) {
     if (!selected.ok) {
         configured = configuredSources(current);
         if (configured.empty()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (stopping_.load(std::memory_order_acquire)) return;
-            phase_ = "error";
-            error_ = "no valid update source is configured";
-            checkedAt_ = epochSeconds();
+            failCheck("未配置有效的 GitHub／镜像更新源，请检查更新源设置。");
             return;
         }
         raced = raceManifestSources(configured);
@@ -1379,26 +1392,20 @@ void UpdateService::doCheck(bool force) {
     }
 
     if (!selected.ok) {
-        std::string details = "GitHub and configured mirrors are unavailable";
+        std::string details = "GitHub 与已配置的镜像更新源均不可用";
+        size_t count=0;
         for (const auto& result : raced) {
             if (!result.error.empty()) {
-                details += "; " + result.source.label + ": " + result.error;
-                break;
+                details += "\n- " + result.source.label + "：" + result.error;
+                if(++count>=5)break;
             }
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        phase_ = "error";
-        error_ = std::move(details);
-        checkedAt_ = epochSeconds();
-        DICE_LOG_WARN("版本检查未完成：{}；继续运行当前版本。", error_);
+        failCheck(details);
         return;
     }
 
     if (!selectAsset(selected.manifest, currentOs(), currentArch())) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        phase_ = "error";
-        error_ = "latest release has no asset for " + currentOs() + "-" + currentArch();
-        checkedAt_ = epochSeconds();
+        failCheck("发布版本 " + selected.manifest.tag + " 没有适用于 " + currentOs() + " / " + currentArch() + " 的程序包。");
         return;
     }
 
@@ -1425,6 +1432,7 @@ void UpdateService::doCheck(bool force) {
         selected.manifest.version, selected.manifest.build) < 0;
     const std::string checkedTag = selected.manifest.tag;
     const std::string checkedReleaseUrl = selected.manifest.releaseUrl;
+    const std::string checkedReleaseNotes = releaseNotesPreview(selected.manifest.releaseNotes);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_.load(std::memory_order_acquire)) return;
@@ -1466,6 +1474,9 @@ void UpdateService::doCheck(bool force) {
             "检测到 Dice!Next 新版本：" + checkedTag +
             "\n当前版本：" + releaseTag() +
             "\n更新策略：" + action +
+            "\n检测来源：" + selected.source.label +
+            "\n运行平台：" + currentOs() + " / " + currentArch() +
+            "\n\n本次更新内容：\n" + checkedReleaseNotes +
             "\n发布页：" + checkedReleaseUrl);
         config_.set<std::string>("update/last_notified_tag", checkedTag);
         if (!config_.save()) {
@@ -1848,6 +1859,7 @@ bool UpdateService::prepareStage(const fs::path& archive,
             {"tag", manifest.tag},
             {"version", manifest.version},
             {"build", manifest.build},
+            {"release_notes", releaseNotesPreview(manifest.releaseNotes)},
             {"staged_at", epochSeconds()},
             {"install_plan_enabled", false},
             {"auto_install_authorized", false}
@@ -1957,12 +1969,14 @@ void UpdateService::doDownload() {
             automaticDownload_ = false;
         }
         if (cancelled) return;
-        DICE_LOG_ERROR("更新包下载失败：{}；尚未进入安装阶段。", message);
-        if (automatic) {
+        writeLog(DICE_LOG_SOURCE,LogLevel::Error,"自动更新","更新包下载失败：" + message + "；尚未进入安装阶段。",{{"notice_event","update_error"}});
+        {
             emitNotification("update_error",
                 "Dice!Next 自动更新失败" +
                 (manifest.tag.empty() ? std::string() : "：" + manifest.tag) +
-                "\n原因：" + message);
+                "\n失败阶段：下载／校验／准备更新包\n当前版本：" + releaseTag()
+                + "\n运行平台：" + currentOs() + " / " + currentArch()
+                + "\n原因：" + message + "\n本次尚未替换程序文件，继续运行当前版本。");
         }
     };
 
@@ -2046,6 +2060,7 @@ void UpdateService::doDownload() {
         emitNotification("update_result",
             "Dice!Next 自动更新包已下载并通过 SHA-256 校验：" + manifest.tag +
             "\n下载源：" + usedSource +
+            "\n平台包：" + asset->name + "\n校验结果：文件大小与 SHA-256 均通过；尚未完成安装。" +
             (installQueued ? "\n即将重启并安装更新。" : current.scheduledInstall && current.action == "install"
                 ? "\n将在服务器时区的 " + current.installTime + " 安装更新。"
                 : "\n更新包已准备完成，等待手动安装。"));
@@ -2073,9 +2088,11 @@ void UpdateService::doInstall() {
                 scheduledInstallJob_ = false;
             }
         }
-        DICE_LOG_ERROR("更新安装尝试失败：{}；当前程序状态以安装器实际结果为准。", message);
+        writeLog(DICE_LOG_SOURCE,LogLevel::Error,"自动更新","更新安装尝试失败：" + message + "；当前程序状态以安装器实际结果为准。",{{"notice_event","update_error"}});
         emitNotification("update_error",
-            "Dice!Next 更新安装失败。\n原因：" + message);
+            "Dice!Next 更新安装失败。\n当前运行版本：" + releaseTag()
+            + "\n失败阶段：提交安装／重启\n原因：" + message
+            + "\n请查看后台更新状态与 updates 中的安装日志，确认文件替换结果后再重试。");
     };
 
     if (!downloadSupported()) {

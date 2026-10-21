@@ -134,6 +134,7 @@ class NoticeAdapter final : public dice::IAdapter {
 
   public:
     bool online = true;
+    std::map<std::string, std::string> users, groups;
     std::vector<dice::Message> sent;
     NoticeAdapter(std::string id, std::string platform)
         : id_(std::move(id)), platform_(std::move(platform)) {}
@@ -151,7 +152,14 @@ class NoticeAdapter final : public dice::IAdapter {
     void onMessage(MessageCallback) override {}
     std::string getLoginId() const override { return id_; }
     std::string getLoginName() const override { return id_; }
-    std::string getGroupName(const std::string &) const override { return {}; }
+    std::string getGroupName(const std::string &id) const override {
+        auto it = groups.find(id);
+        return it == groups.end() ? std::string() : it->second;
+    }
+    std::string getUserName(const std::string &id, const std::string & = {}) const override {
+        auto it = users.find(id);
+        return it == users.end() ? std::string() : it->second;
+    }
     std::vector<std::string> getGroupMemberList(const std::string &) const override { return {}; }
     bool isGroupAdmin(const std::string &, const std::string &) const override { return false; }
     bool isGroupOwner(const std::string &, const std::string &) const override { return false; }
@@ -227,4 +235,177 @@ TEST(NoticeRules, ActualDispatcherDoesNotSendExplicitlyEmptySubscriptionsAndTarg
     ASSERT_TRUE(a->sent.empty());
     dice::notice::notify(cfg, adapters, 2, "fake test", "", "", "test", "", "only");
     ASSERT_EQ(a->sent.size(), size_t(1));
+}
+
+TEST(NoticeContent, ContextContainsRealNamesAccountGroupPluginTriggerAndErrorDetails) {
+    dice::ProcessingOrigin origin;
+    origin.platform = "onebot_v11";
+    origin.adapterId = "7";
+    origin.accountId = "10000";
+    origin.accountName = "小羊";
+    origin.userId = "12345";
+    origin.userName = "随春生";
+    origin.groupId = "90001";
+    origin.groupName = "周末调查团";
+    origin.messageId = "incoming-42";
+    dice::ProcessingContext processing{
+        {{"Lua 插件", "求签", "plugin/求签/main.lua", "draw"}}, ".求签", "执行失败", origin};
+    dice::notice::ErrorReport report{{{"id", "log-123"},
+                                      {"module", "Lua 插件"},
+                                      {"message", "main.lua:27: attempt to index a nil value"},
+                                      {"details", {{"reason", "缺少签文配置"}, {"code", 42}}}},
+                                     processing};
+    const auto text =
+        dice::notice::notificationText(8, "error", report.text(), processing, "2026-10-21 04:00:00");
+    for (const auto *expected :
+         {"随春生(12345)", "周末调查团(90001)", "小羊(10000)", "Lua 插件「求签」", "plugin/求签/main.lua",
+          ".求签", "main.lua:27", "缺少签文配置", "错误码：42", "log-123", "incoming-42"})
+        ASSERT_TRUE(text.find(expected) != std::string::npos);
+}
+TEST(NoticeContent, PrivacyAndMalformedUtf8AreHandledWithoutEnablingCqActions) {
+    const auto text = dice::notice::readable(
+        std::string("报错 token=not-a-real-secret [CQ:at,qq=all] bad-byte-") + char(0xba));
+    ASSERT_TRUE(text.find("not-a-real-secret") == std::string::npos);
+    ASSERT_TRUE(text.find("[CQ:") == std::string::npos);
+    ASSERT_TRUE(text.find("qq=all") != std::string::npos);
+    ASSERT_TRUE(Json::parse(Json(text).dump()).is_string());
+    ASSERT_TRUE(dice::notice::triggerText("用户消息：.master 123456").find("123456") == std::string::npos);
+    ASSERT_TRUE(dice::notice::triggerText("。email verify 123456").find("123456") == std::string::npos);
+    ASSERT_EQ(dice::notice::identity("12345", "12345"), std::string("用户(12345)"));
+    ASSERT_TRUE(dice::notice::identity("昵称\n伪造标题", "12345").find('\n') == std::string::npos);
+    const auto shortened = dice::notice::readable("测试测试测试", 5);
+    ASSERT_TRUE(Json::parse(Json(shortened).dump()).is_string());
+}
+TEST(NoticeContent, CensorNoticeDoesNotPublishInterceptedTextFromProcessingContext) {
+    dice::ProcessingContext processing{
+        {{"内置指令", ".r 被拦截原文", "", ""}}, "用户消息：被拦截原文", "已拦截"};
+    const auto text = dice::notice::notificationText(2, "censor", "命中 2 条规则，详情仅保存在本机日志。",
+                                                     processing, "2026-10-21");
+    ASSERT_TRUE(text.find("命中 2 条") != std::string::npos);
+    ASSERT_TRUE(text.find("被拦截原文") == std::string::npos);
+}
+
+TEST(NoticeContent, NamesUseOnlyOriginAccountCacheThenPersistentProfiles) {
+    NoticePaths paths;
+    dice::Database db;
+    ASSERT_TRUE(db.open((paths.root / "test.db").string()));
+    dice::AdapterManager adapters(db);
+    auto a = std::make_shared<NoticeAdapter>("1", "onebot_v11"),
+         b = std::make_shared<NoticeAdapter>("2", "qq_official");
+    a->users["123"] = "正确账号的昵称";
+    a->groups["456"] = "正确的群名";
+    b->users["123"] = "另一个帐号的名字";
+    adapters.registerAdapter(a);
+    adapters.registerAdapter(b);
+    dice::Message message;
+    message.platform = "onebot_v11";
+    message.adapterId = "1";
+    message.senderId = "123";
+    message.targetId = "456";
+    auto origin = dice::notice::messageOrigin(message, adapters);
+    ASSERT_EQ(origin.userName, std::string("正确账号的昵称"));
+    ASSERT_EQ(origin.groupName, std::string("正确的群名"));
+    dice::PlayerProfileRow row;
+    row.platform = "onebot_v11";
+    row.userId = "789";
+    row.nickname = "历史昵称";
+    db.getStorage()->insert(row);
+    origin.userId = "789";
+    origin.userName.clear();
+    adapters.enrichLogOrigin(origin, true);
+    ASSERT_EQ(origin.userName, std::string("历史昵称"));
+    origin.userId.clear();
+    origin.userName.clear();
+    origin.targetType = "user";
+    origin.targetId = "789";
+    adapters.enrichLogOrigin(origin, true);
+    ASSERT_EQ(origin.targetName, std::string("历史昵称"));
+    ASSERT_TRUE(dice::notice::contextText(origin).find("操作／触发者") == std::string::npos);
+    ASSERT_TRUE(dice::notice::contextText(origin).find("历史昵称(789)") != std::string::npos);
+}
+TEST(NoticeContent, OriginSurvivesNestedAndDeferredPluginScopesWithoutLeakingToNextMessage) {
+    dice::ProcessingContext deferred;
+    {
+        dice::ProcessingOrigin origin;
+        origin.userId = "123";
+        origin.groupId = "456";
+        dice::ProcessingScope incoming(dice::ProcessingContext{{}, ".求签", "处理中", origin});
+        {
+            dice::ProcessingScope plugin(dice::ProcessingSource{"Lua 插件", "求签", "draw.lua", "draw"});
+            deferred = dice::activeProcessingContext;
+        }
+        ASSERT_EQ(dice::activeProcessingOrigin.userId, std::string("123"));
+    }
+    ASSERT_TRUE(dice::activeProcessingOrigin.userId.empty());
+    std::string group;
+    std::thread worker([&] {
+        dice::ProcessingScope resumed(deferred);
+        group = dice::activeProcessingOrigin.groupId;
+    });
+    worker.join();
+    ASSERT_EQ(group, std::string("456"));
+    ASSERT_EQ(deferred.sources[0].name, std::string("求签"));
+    ASSERT_TRUE(dice::activeProcessingOrigin.groupId.empty());
+}
+TEST(NoticeContent, DistinctPluginAndGroupErrorsAreNotGloballySilencedAndRepeatsAreCounted) {
+    long long now = 1000;
+    std::vector<dice::notice::ErrorReport> reports;
+    dice::notice::ErrorNotifySink sink([&](const auto &r) { reports.push_back(r); }, [&] { return now; });
+    const spdlog::details::log_msg error{{}, "Lua 插件", spdlog::level::err, "nil value"};
+    dice::ProcessingOrigin origin;
+    origin.groupId = "100";
+    dice::ProcessingScope first(
+        dice::ProcessingContext{{{"Lua 插件", "求签", "q.lua", "draw"}}, ".求签", "失败", origin});
+    sink.log(error);
+    sink.log(error);
+    ASSERT_EQ(reports.size(), size_t(1));
+    {
+        auto context = dice::activeProcessingContext;
+        context.origin.groupId = "200";
+        dice::ProcessingScope second(context);
+        sink.log(error);
+    }
+    {
+        dice::ProcessingScope other(dice::ProcessingSource{"JS 插件", "DailyNews", "news.js", "news"});
+        sink.log(error);
+    }
+    ASSERT_EQ(reports.size(), size_t(3));
+    now = 1061;
+    sink.log(error);
+    ASSERT_EQ(reports.size(), size_t(4));
+    ASSERT_EQ(reports.back().suppressed, size_t(1));
+    {
+        dice::ProcessingScope notification(dice::ProcessingSource{"通知", "错误通知", "", ""});
+        sink.log(error);
+    }
+    ASSERT_EQ(reports.size(), size_t(4));
+}
+TEST(NoticeContent, ErrorSinkSnapshotsSanitizedStructuredRecordBeforeDeferredDelivery) {
+    std::vector<dice::notice::ErrorReport> reports;
+    auto sink = std::make_shared<dice::notice::ErrorNotifySink>([&](const auto &r) { reports.push_back(r); });
+    auto logger = dice::getLogger();
+    logger->sinks().push_back(sink);
+    struct Cleanup {
+        decltype(logger) log;
+        decltype(sink) target;
+        ~Cleanup() {
+            auto &s = log->sinks();
+            s.erase(std::remove(s.begin(), s.end(), target), s.end());
+        }
+    } cleanup{logger, sink};
+    {
+        dice::ProcessingScope plugin(dice::ProcessingSource{"Lua 插件", "求签", "q.lua", "draw"});
+        dice::writeLog({}, dice::LogLevel::Error, "Lua 插件", "attempt to index a nil value",
+                       {{"reason", "签文读取失败"}, {"password", "fake-password"}});
+    }
+    ASSERT_EQ(reports.size(), size_t(1));
+    ASSERT_TRUE(!reports[0].record.value("id", std::string()).empty());
+    ASSERT_TRUE(reports[0].record.dump().find("fake-password") == std::string::npos);
+    ASSERT_EQ(reports[0].processing.sources[0].name, std::string("求签"));
+    ASSERT_TRUE(reports[0].text().find("签文读取失败") != std::string::npos);
+    ASSERT_TRUE(dice::currentLogRecord().empty());
+    dice::writeLog({}, dice::LogLevel::Error, "自动更新", "下载失败", {{"notice_event", "update_error"}});
+    ASSERT_EQ(reports.size(), size_t(1));
+    dice::writeLog({}, dice::LogLevel::Error, "系统", "普通错误", {{"notice_event", 42}});
+    ASSERT_EQ(reports.size(), size_t(2));
 }

@@ -1411,7 +1411,11 @@ static int realMain(int argc, char* argv[]) {
             bool matched = false;
             std::string reply;
             std::vector<dice::ProcessingSource> sources;
-            dice::ProcessingScope scheduleScope(dice::ProcessingContext{{}, "定时任务调用插件指令：" + command, "正在执行"});
+            auto origin = dice::notice::messageOrigin(message, adapterMgr);
+            origin.entry = "定时任务调用插件指令";
+            if (message.type == dice::MessageType::kPrivate) {origin.targetId=targetId;origin.targetType="user";}
+            origin.userId.clear(); origin.userName.clear();
+            dice::ProcessingScope scheduleScope(dice::ProcessingContext{{}, "定时任务调用插件指令：" + command, "正在执行", origin});
             if (jsMod.ready()) {
                 if (auto body = cmdRouter.commandBody(command); body && !body->empty()) {
                     auto result = jsMod.handle(message, *body, 0);
@@ -1722,7 +1726,7 @@ static int realMain(int argc, char* argv[]) {
             dice::ContentFormat replyFormat) {
             dice::ProcessingContext processing{replySources, processingTrigger,
                 processingPartial ? "已生成回复；处理链存在失败或尚未完成的异步任务，具体结果见相邻记录"
-                                  : "处理完成，生成 1 条回复"};
+                                  : "处理完成，生成 1 条回复", dice::notice::messageOrigin(msg, adapterMgr)};
             if (processing.sources.empty()) processing.sources = {{"AI 对话", "", "", ""}};
             dice::ProcessingScope processingScope(processing);
             const auto target = (msg.type == dice::MessageType::kPrivate ? "私聊 " : "群 ") + msg.targetId;
@@ -3066,13 +3070,15 @@ static int realMain(int argc, char* argv[]) {
     // after realMain unwinds on startup failure or normal shutdown.
     auto errorNotificationLifetime = std::make_shared<int>(0);
     dice::getLogger()->sinks().push_back(std::make_shared<dice::notice::ErrorNotifySink>(
-        [lifetime = std::weak_ptr<int>(errorNotificationLifetime), &configMgr, &adapterMgr](const std::string& m) {
+        [lifetime = std::weak_ptr<int>(errorNotificationLifetime), &configMgr, &adapterMgr](const dice::notice::ErrorReport& report) {
             if (lifetime.expired()) return;
-            drogon::app().getLoop()->queueInLoop([lifetime, &configMgr, &adapterMgr, m] {
+            drogon::app().getLoop()->queueInLoop([lifetime, &configMgr, &adapterMgr, report] {
                 if (lifetime.expired()) return;
                 try {
+                    dice::ProcessingScope errorScope(report.processing);
                     dice::notice::notify(configMgr, adapterMgr, dice::notice::kError,
-                        "\xe8\xbf\x90\xe8\xa1\x8c\xe9\x94\x99\xe8\xaf\xaf\xef\xbc\x9a" + m, "", "", "error");
+                        report.text(), report.processing.origin.platform, report.processing.origin.groupId,
+                        "error", report.processing.origin.adapterId);
                 } catch (...) { DICE_LOG_EXCEPTION("deferred error notification delivery"); }
             });
         }));
@@ -4810,8 +4816,16 @@ static int realMain(int argc, char* argv[]) {
                               tk.name, tk.platform.empty() ? "any" : tk.platform, tk.targetId, done);
                 if (tk.action != "leave") {
                     // B：定时任务触发通知骰主。
+                    dice::ProcessingOrigin origin;
+                    origin.platform=tk.platform;origin.adapterId=tk.adapterId;origin.entry="自动定时任务";
+                    origin.targetId=tk.targetId;origin.targetType=tk.targetType=="private"?"user":"group";
+                    dice::ProcessingScope taskScope(dice::ProcessingContext{{{"定时任务",tk.name,"",tk.action}},"计划触发","已提交执行",origin});
                     cmdRouter.notifyMasters(dice::notice::kImportant,
-                        "\xe5\xae\x9a\xe6\x97\xb6\xe4\xbb\xbb\xe5\x8a\xa1\xe3\x80\x8c" + tk.name + "\xe3\x80\x8d\xe5\xb7\xb2\xe6\x89\xa7\xe8\xa1\x8c \xe2\x86\x92 " + tk.targetId, "schedule");
+                        "定时任务「" + tk.name + "」已提交执行。\n任务 ID：" + std::to_string(tk.id)
+                            + "\n动作：" + tk.action + "\n已处理目标数：" + std::to_string(done)
+                            + (tk.content.empty()?"":"\n任务内容："+dice::notice::readable(tk.content,1200))
+                            + "\n说明：提交执行不代表平台已经确认送达，实际发送结果请查看消息日志。",
+                        "schedule", tk.adapterId);
                 }
             };
             for (auto& tk : st->get_all<dice::ScheduledTaskRow>()) {

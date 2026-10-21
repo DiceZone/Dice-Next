@@ -16,6 +16,7 @@
 #include "../adapter/adapter_manager.h"
 #include "../adapter/adapter_interface.h"
 #include "notice_rules.h"
+#include "notice_content.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/sinks/base_sink.h>
 #include <string>
@@ -214,18 +215,29 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
                    const std::string &originPlatform = "", const std::string &originChat = "",
                    const std::string &op = "", const std::string &originAdapterId = "",
                    const std::string &ruleId = "") {
+    auto processing = activeProcessingContext;
+    if (processing.origin.adapterId.empty()) processing.origin.adapterId = originAdapterId;
+    if (processing.origin.platform.empty()) processing.origin.platform = originPlatform;
+    if (processing.origin.groupId.empty() && !originChat.empty() && originChat != processing.origin.userId)
+        processing.origin.groupId = originChat;
+    enrichOrigin(processing.origin, adapters);
+    const auto fromPlatform = originPlatform.empty() ? processing.origin.platform : originPlatform;
+    const auto fromAdapter = originAdapterId.empty() ? processing.origin.adapterId : originAdapterId;
+    const auto fromChat = originChat.empty() ? (!processing.origin.groupId.empty() ? processing.origin.groupId : processing.origin.userId) : originChat;
+    const auto content = notificationText(level, op, msg, processing,
+        utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%d %H:%M:%S"));
     ProcessingScope source(ProcessingContext{
-        {{"通知", op.empty() ? "系统通知" : op, "", ""}}, activeProcessingContext.trigger, "通知内容已生成"});
+        {{"通知", eventTitle(op), "", ""}}, processing.trigger, "通知内容已生成", processing.origin});
     OutboundScope independentNotification(nullptr);
-    std::string origin = originChat.empty() ? std::string() : (originPlatform + ":" + originChat);
-    audit(level, msg, op, origin);
+    std::string origin = fromChat.empty() ? std::string() : (fromPlatform + ":" + fromChat);
+    audit(level, content, op, origin);
     json c = conf(cfg);
     std::set<std::string> delivered;
     for (const auto &rule : notice_rules::all(c)) {
         if (!ruleId.empty() && rule.value("id", std::string()) != ruleId)
             continue;
         if (op != "test" && (!notice_rules::subscribed(rule, level, op) ||
-                             !notice_rules::sourceMatches(rule, originPlatform, originAdapterId)))
+                             !notice_rules::sourceMatches(rule, fromPlatform, fromAdapter)))
             continue;
         if (op == "test" && ruleId.empty() && !rule.value("enabled", true))
             continue;
@@ -238,7 +250,8 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
                                                                                   "%Y-%m-%d %H:%M:%S")},
                                                {"level", level},
                                                {"op", op},
-                                               {"msg", msg},
+                                               {"title", eventTitle(op)},
+                                               {"msg", content},
                                                {"origin", origin}}
                                               .dump());
                 continue;
@@ -246,8 +259,8 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
             if (kind == "smtp") {
                 const auto to = channel.value("to", std::string());
                 if (notice_rules::mailbox(to) && delivered.insert("smtp:" + to).second)
-                    smtpSendAsync(notice_rules::smtpTransport(cfg.getAll(), c, channel), "[Dice!Next] " + op,
-                                  msg + (origin.empty() ? "" : "\n\n(" + origin + ")"));
+                    smtpSendAsync(notice_rules::smtpTransport(cfg.getAll(), c, channel), "[Dice!Next] " + eventTitle(op),
+                                  content);
                 continue;
             }
             if (kind != "chat")
@@ -261,7 +274,7 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
                 continue;
             // 帐号窗口只收该帐号来源的通知；全局窗口（adapter_id 空）收所有帐号。
             // 测试通知（op=="test"）不受来源限制，逐窗口验证链路。
-            if (!originChat.empty() && w.platform == originPlatform && w.chatId == originChat)
+            if (!fromChat.empty() && w.platform == fromPlatform && w.chatId == fromChat)
                 continue; // 不回推来源
             // 哪里来的就发给谁：帐号来源的通知先由来源适配器发；发送失败（例如
             // 掉线通知时来源已离线）或系统级通知，则按内部适配器编号顺序依次尝试，
@@ -279,7 +292,7 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
                     m.platform = a->platform();
                     m.type = w.isGroup ? MessageType::kGroup : MessageType::kPrivate;
                     m.targetId = w.chatId;
-                    m.content = msg;
+                    m.content = content;
                     a->sendMessage(m);
                     delivered.insert(key);
                     return true;
@@ -294,7 +307,7 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
                         trySend(adapters.getAdapter(id.get<std::string>()));
                 continue; // An explicit account selection must never fall back to another account.
             }
-            const std::string preferredAdapterId = !originAdapterId.empty() ? originAdapterId : w.adapterId;
+            const std::string preferredAdapterId = !fromAdapter.empty() ? fromAdapter : w.adapterId;
             if (!preferredAdapterId.empty()) {
                 auto src = adapters.getAdapter(preferredAdapterId);
                 if (src && src->isConnected() && (w.platform.empty() || src->platform() == w.platform))
@@ -314,13 +327,15 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
 // ─── 运行报错推送 ──────────────────────────────────────────────────
 // spdlog 自定义 sink：捕获 ERROR 级日志 → 通知订阅了 kError 的窗口。
 // 防护：① thread_local 重入保护（notify 发送本身出错打日志时不再递归）；
-//       ② 节流：60 秒窗口内只推第一条（其余仍在日志文件里）。
+//       ② 同一来源的同种错误 60 秒合并一次，不掩盖其他群/插件的新错误。
 // No mutex may be held across cb_: sending a notification can log another error.
 // The callback is immutable, throttling is atomic and reentry is thread-local.
 class ErrorNotifySink : public spdlog::sinks::base_sink<spdlog::details::null_mutex> {
   public:
-    using Callback = std::function<void(const std::string &)>;
-    explicit ErrorNotifySink(Callback cb) : cb_(std::move(cb)) {}
+    using Callback = std::function<void(const ErrorReport &)>;
+    using Clock = std::function<long long()>;
+    explicit ErrorNotifySink(Callback cb, Clock clock = [] { return (long long)std::time(nullptr); })
+        : cb_(std::move(cb)), clock_(std::move(clock)) {}
 
   protected:
     void sink_it_(const spdlog::details::log_msg &msg) override {
@@ -329,21 +344,45 @@ class ErrorNotifySink : public spdlog::sinks::base_sink<spdlog::details::null_mu
         static thread_local bool inNotify = false;
         if (inNotify)
             return; // 重入保护
-        static std::atomic<long long> lastSent{0};
-        long long now = (long long)std::time(nullptr);
-        long long prev = lastSent.load();
-        if (now - prev < 60)
-            return; // 节流：60s 一条
-        if (!lastSent.compare_exchange_strong(prev, now))
-            return;
+        auto processing = activeOutboundContext.output ? activeOutboundContext.output->processing : activeProcessingContext;
+        for (const auto& source : processing.sources) if (source.kind == "通知") return;
+        ErrorReport report{currentLogRecord(), std::move(processing)};
+        if(report.record.contains("details") && report.record["details"].is_object()
+            && report.record["details"].contains("notice_event") && report.record["details"]["notice_event"].is_string()
+            && report.record["details"]["notice_event"].get<std::string>()=="update_error") return;
+        if (report.record.empty()) report.record = {{"message", sanitizeLogText({msg.payload.data(), msg.payload.size()})},
+            {"module", std::string(msg.logger_name.data(), msg.logger_name.size())}};
+        auto message = report.record.value("message", std::string());
+        const auto suffix = message.find("(msgID:"); if (suffix != std::string::npos) message.resize(suffix);
+        const auto key = json::array({report.processing.label(), report.processing.origin.platform,
+            report.processing.origin.adapterId, report.processing.origin.groupId, report.processing.origin.userId,
+            report.record.value("module", std::string()), message.substr(0, 1200)}).dump(-1,' ',false,json::error_handler_t::replace);
+        const auto now = clock_();
+        {
+            std::lock_guard<std::mutex> lock(throttleMutex_);
+            auto found = throttles_.find(key);
+            if (found != throttles_.end() && now >= found->second.at && now - found->second.at < 60) {
+                ++found->second.suppressed; return;
+            }
+            if (found != throttles_.end()) report.suppressed = found->second.suppressed;
+            if (throttles_.size() >= 128 && found == throttles_.end()) {
+                auto oldest = std::min_element(throttles_.begin(), throttles_.end(), [](const auto& a,const auto& b){return a.second.at < b.second.at;});
+                throttles_.erase(oldest);
+            }
+            throttles_[key] = {now, 0};
+        }
         inNotify = true;
-        try { cb_(std::string(msg.payload.data(), msg.payload.size())); }
+        try { cb_(report); }
         catch (...) { DICE_LOG_EXCEPTION("error notification delivery"); }
         inNotify = false;
     }
     void flush_() override {}
 private:
     Callback cb_;
+    Clock clock_;
+    struct Throttle { long long at; size_t suppressed; };
+    std::mutex throttleMutex_;
+    std::map<std::string, Throttle> throttles_;
 };
 
 }  // namespace dice::notice

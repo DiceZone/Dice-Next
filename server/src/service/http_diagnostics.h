@@ -1,11 +1,20 @@
 #pragma once
 #include "../common/logger.h"
+#include "../common/log_context.h"
 #include "../common/http_log.h"
 #include "../common/script_execution.h"
 #include <drogon/drogon.h>
 #include <atomic>
 
 namespace dice {
+inline ProcessingContext httpDiagnosticContext(const drogon::HttpRequestPtr& req) {
+    ProcessingOrigin origin;origin.entry="网页后台";
+    try {origin.userId=req->attributes()->get<std::string>("dn_qq");} catch (...) {}
+    if(!origin.userId.empty())origin.platform="onebot_v11";
+    else origin.entry+="（未提供可识别的 QQ 身份）";
+    return ProcessingContext{{{"网页后台", "管理请求", "", ""}},
+        std::string(req->methodString())+" "+req->path(),"请求处理",origin};
+}
 inline void installHttpDiagnostics(drogon::HttpAppFramework& app) {
     struct RequestTrace { uint64_t id{}; std::chrono::steady_clock::time_point start; };
     static std::atomic<uint64_t> nextRequest{0};
@@ -19,6 +28,7 @@ inline void installHttpDiagnostics(drogon::HttpAppFramework& app) {
     });
     app.setExceptionHandler([](const std::exception& error, const drogon::HttpRequestPtr& req,
                                std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
+        ProcessingScope requestScope(httpDiagnosticContext(req));
         const auto& trace = req->attributes()->get<RequestTrace>("dice.diagnostic");
         // No request body, query string, cookies or authorization headers.
         const auto current = std::current_exception();
@@ -38,6 +48,7 @@ inline void installHttpDiagnostics(drogon::HttpAppFramework& app) {
         if (req->path().rfind("/api/", 0) != 0) return;
         const auto& trace = req->attributes()->get<RequestTrace>("dice.diagnostic");
         if (!trace.id) return;
+        ProcessingScope requestScope(httpDiagnosticContext(req));
         response->addHeader("X-Dice-Request-Id", std::to_string(trace.id));
         try {
             const auto result = httpLogResult(static_cast<int>(response->statusCode()), response->body());

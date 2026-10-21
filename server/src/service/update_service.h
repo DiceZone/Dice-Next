@@ -34,6 +34,7 @@ struct ReleaseManifest {
     bool prerelease = false;
     std::string publishedAt;
     std::string releaseUrl;
+    std::string releaseNotes;
     std::vector<ReleaseAsset> assets;
 };
 

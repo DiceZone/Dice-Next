@@ -153,6 +153,54 @@ public:
 
     // ─── Message Routing ─────────────────────────────────────
 
+    // Cache-only at ingress; database fallback is reserved for notifications.
+    void enrichLogOrigin(ProcessingOrigin& o, bool databaseFallback = false) const {
+        try { if (auto a = getAdapter(o.adapterId)) {
+            if (o.platform.empty()) o.platform = a->platform();
+            if (o.accountId.empty()) o.accountId = a->getLoginId();
+            if (o.accountName.empty()) o.accountName = a->getLoginName();
+            if (!o.groupId.empty() && (o.groupName.empty() || o.groupName == o.groupId)) o.groupName = a->cachedGroupName(o.groupId);
+            if (!o.userId.empty() && (o.userName.empty() || o.userName == o.userId || o.userName == "用户")) o.userName = a->cachedUserName(o.userId, o.groupId);
+        } } catch (...) { /* Cache diagnostics must not interrupt dispatch. */ }
+        if(!o.targetId.empty() && o.targetId!="*" && (o.targetName.empty() || o.targetName==o.targetId)) {
+            ProcessingOrigin target;target.platform=o.platform;target.adapterId=o.adapterId;
+            if(o.targetType=="group")target.groupId=o.targetId;else target.userId=o.targetId;
+            enrichLogOrigin(target,databaseFallback);
+            o.targetName=o.targetType=="group"?target.groupName:target.userName;
+        }
+        if (!databaseFallback || o.platform.empty()) return;
+        if (auto* st = db_.getStorage()) try {
+            namespace orm = sqlite_orm;
+            if (!o.groupId.empty() && (o.groupName.empty() || o.groupName == o.groupId)) {
+                auto rows=st->get_all<GroupSettingRow>(orm::where(orm::c(&GroupSettingRow::platform)==o.platform && orm::c(&GroupSettingRow::groupId)==o.groupId && orm::c(&GroupSettingRow::key)==std::string("name")),orm::limit(1));
+                if(!rows.empty())o.groupName=rows.front().value;
+            }
+            if (!o.userId.empty() && (o.userName.empty() || o.userName == o.userId || o.userName == "用户")) {
+                auto rows=st->get_all<PlayerProfileRow>(orm::where(orm::c(&PlayerProfileRow::platform)==o.platform && orm::c(&PlayerProfileRow::userId)==o.userId),orm::limit(1));
+                if(!rows.empty())o.userName=rows.front().nickname;
+            }
+        } catch (...) { /* Identity diagnostics must never interrupt dispatch. */ }
+    }
+    ProcessingOrigin logOrigin(const Message& m) const {
+        ProcessingOrigin o;
+        o.platform=m.platform;o.adapterId=m.adapterId;o.accountId=m.selfId;
+        o.userId=m.senderId;o.userName=m.senderName;o.messageId=m.id;
+        o.entry=m.type==MessageType::kPrivate?"私聊指令／消息":"群聊指令／消息";
+        if(m.type!=MessageType::kPrivate)o.groupId=m.targetId;
+        enrichLogOrigin(o);return o;
+    }
+    ProcessingOrigin logOrigin(const BotEvent& e) const {
+        ProcessingOrigin o;
+        o.platform=e.platform;o.adapterId=e.adapterId;o.accountId=e.selfId;o.groupId=e.groupId;o.entry="平台事件";
+        o.userId=!e.operatorId.empty()?e.operatorId:e.userId!=e.selfId?e.userId:"";
+        if(e.extra.is_object()) {
+            auto it=e.extra.find(!e.operatorId.empty()?"operator_name":"user_name");
+            if(it!=e.extra.end()&&it->is_string())o.userName=it->get<std::string>();
+            it=e.extra.find("group_name");if(it!=e.extra.end()&&it->is_string())o.groupName=it->get<std::string>();
+        }
+        enrichLogOrigin(o);return o;
+    }
+
     /// Route an incoming message to all message handlers.
     /// Called by adapters when they receive a message.
     void routeMessage(const Message& msg) {
@@ -174,7 +222,7 @@ public:
             routed.displayContent.empty() ? routed.content : routed.displayContent),
             {{"adapter", routed.adapterId}, {"platform", routed.platform}, {"platform_msg_id", routed.id},
              {"sender_name_source", routed.extra.is_object() ? routed.extra.value("__sender_name_source", std::string("platform")) : "platform"}});
-        ProcessingScope incoming(ProcessingContext{{}, "用户消息：" + routed.content, "正在处理用户消息"});
+        ProcessingScope incoming(ProcessingContext{{}, "用户消息：" + routed.content, "正在处理用户消息", logOrigin(routed)});
         for (auto& handler : messageHandlers_) {
             try { handler(routed); }
             catch (...) { DICE_LOG_EXCEPTION("消息处理未完成；适配器 " + routed.adapterId + "，平台 " + routed.platform); }
@@ -227,6 +275,7 @@ public:
                 }
             }
         }
+        ProcessingScope incoming(ProcessingContext{{}, "平台事件", "正在处理平台事件", logOrigin(routed)});
         for (auto& handler : eventHandlers_) {
             try { handler(routed); }
             catch (...) { DICE_LOG_EXCEPTION("event handler adapter=" + routed.adapterId + " platform=" + routed.platform); }

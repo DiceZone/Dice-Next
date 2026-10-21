@@ -41,6 +41,9 @@ void writeLog(spdlog::source_loc source, LogLevel level, std::string_view module
 // Bounded in-memory records for the current process; no daily-file rescan on
 // dashboard polling. Structured diagnostics are also saved beside the text log.
 nlohmann::json recentLogRecords(size_t limit = 100);
+// A sanitized immutable snapshot of the record currently being delivered to
+// sinks on this thread. Empty outside sink delivery; never searches global logs.
+nlohmann::json currentLogRecord();
 std::string newLogCorrelationId();
 
 template<class... Args>

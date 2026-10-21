@@ -335,6 +335,10 @@ void writeLog(spdlog::source_loc source, LogLevel level, std::string_view module
     auto logger = std::static_pointer_cast<SafeLogger>(getLogger());
     logger->emit(source, level, module, text, details);
 }
+nlohmann::json currentLogRecord() {
+    return currentRecord ? *currentRecord : nlohmann::json::object();
+}
+
 nlohmann::json recentLogRecords(size_t limit) {
     std::lock_guard lock(recordsMutex);
     auto out = nlohmann::json::array();

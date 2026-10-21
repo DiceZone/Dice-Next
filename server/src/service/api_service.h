@@ -56,6 +56,7 @@
 #include "ai_vision_config.h"
 #include "notice_manager.h" // B：通知系统（全局开关变更推送）
 #include "notice_api.h"
+#include "notice_http.h"
 #include "heart_service.h"  // 心跳上报（heart.dice.zone）
 #include "cloudban_service.h" // 云黑名单同步（cloudban.dice.zone）
 #include "backup_service.h"
@@ -2924,10 +2925,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
                 cfg.save();
                 bool newSilent  = cfg.get<bool>("dice/silent_global", false);
-                if (scope == "global" && newSilent != oldSilent)
+                if (scope == "global" && newSilent != oldSilent) {
+                    ProcessingScope noticeScope(dice::notice::webContext(req, adapterMgr));
                     dice::notice::notify(cfg, adapterMgr, dice::notice::kImportant,
                         newSilent ? "\xe5\x85\xa8\xe5\xb1\x80\xe9\x9d\x99\xe9\xbb\x98\xe5\xb7\xb2\xe5\xbc\x80\xe5\x90\xaf\xef\xbc\x88\xe7\xbd\x91\xe9\xa1\xb5\xef\xbc\x89"
                                   : "\xe5\x85\xa8\xe5\xb1\x80\xe9\x9d\x99\xe9\xbb\x98\xe5\xb7\xb2\xe5\x85\xb3\xe9\x97\xad\xef\xbc\x88\xe7\xbd\x91\xe9\xa1\xb5\xef\xbc\x89", "", "", "global");
+                }
                 if (filtered.contains("message_format") || (clear.is_array() && std::find(clear.begin(), clear.end(), "message_format") != clear.end()))
                     refreshMessageFormats();
                 jsonReply(ok(responseFor(scope, target, platform)), std::move(cb));
@@ -3760,6 +3763,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     r.reason = reason; r.createdAt = utils::nowIso8601(); st->insert(r);
                     // 新增黑名单条目后通知骰主。
                     if (list == 0) {
+                        auto context=dice::notice::webContext(req, adapterMgr);
+                        context.origin.targetId=id;context.origin.targetType=type==0?"user":"group";
+                        ProcessingScope noticeScope(std::move(context));
                         dice::notice::notify(cfg, adapterMgr, dice::notice::kCritical,
                             std::string("\xe5\xb7\xb2\xe6\x8b\x89\xe9\xbb\x91") + (type == 0 ? "\xe7\x94\xa8\xe6\x88\xb7 " : "\xe7\xbe\xa4 ") + id
                                 + (reason.empty() ? std::string() : ("\xef\xbc\x88" + reason + "\xef\xbc\x89")), "", "", "blacklist");

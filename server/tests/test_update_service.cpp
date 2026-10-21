@@ -5,6 +5,7 @@
 #include "../src/common/update_schedule.h"
 #include "../src/common/utils.h"
 #include "../src/service/update_service.h"
+#include "../src/service/update_notes.h"
 
 #include <atomic>
 #include <chrono>
@@ -841,6 +842,50 @@ TEST(UpdateService, VerifiedDownloadAndCacheReuseStillWork) {
     ASSERT_TRUE(std::filesystem::is_regular_file(fixture.root / "updates" / "downloads" / "test-update.zip"));
 }
 #endif
+
+TEST(UpdateManifest, OptionalNotesRemainBackwardCompatibleAndHaveBoundedReadablePreview) {
+    auto root=nlohmann::json::parse(validManifest());ReleaseManifest manifest;std::string error;
+    ASSERT_TRUE(parseReleaseManifest(root.dump(),manifest,error));ASSERT_TRUE(manifest.releaseNotes.empty());
+    root["release_notes"]="## 问题修复\n- 修复通知内容 ([主程序](https://example.com/commit))\n## 源码与完整比较\n<details>internal history</details>";
+    ASSERT_TRUE(parseReleaseManifest(root.dump(),manifest,error));
+    const auto notes=releaseNotesPreview(manifest.releaseNotes);
+    ASSERT_TRUE(notes.find("修复通知内容")!=std::string::npos);ASSERT_TRUE(notes.find("internal history")==std::string::npos);
+    ASSERT_TRUE(notes.find("https://example.com")==std::string::npos);
+    root["release_notes"]=42;ASSERT_TRUE(parseReleaseManifest(root.dump(),manifest,error));ASSERT_TRUE(manifest.releaseNotes.empty());
+    root["release_notes"]=std::string(25000,'a');ASSERT_TRUE(parseReleaseManifest(root.dump(),manifest,error));
+    ASSERT_TRUE(manifest.releaseNotes.size()<=24000);ASSERT_TRUE(releaseNotesPreview(manifest.releaseNotes).size()<3400);
+    ASSERT_TRUE(releaseNotesPreview("").find("不代表没有改动")!=std::string::npos);
+    const auto utf8=boundedReleaseNotes("测试测试",5);ASSERT_TRUE(nlohmann::json::parse(nlohmann::json(utf8).dump()).is_string());
+    ASSERT_TRUE(releaseNotesPreview("## 性能\n耗时 <500ms，保留后续文字").find("<500ms，保留后续文字")!=std::string::npos);
+}
+TEST(UpdateService, FailedCheckReportsTheActualSourceFailureAndKeepsCurrentProgram) {
+    DownloadFixture fixture;dice::ConfigManager config((fixture.root/"config").string());
+    config.set<bool>("update/auto_check",false);config.set<std::string>("update/source","direct");
+    std::mutex mutex;std::string event,text;
+    auto fetch=[](const std::string&,const std::filesystem::path&,std::uint64_t,int,std::string& error,const UpdateService::CancellationCheck&) {
+        error="模拟上游 HTTP 503";return false;
+    };
+    UpdateService service(config,[]{},[&](const auto& e,const auto& message){std::lock_guard lock(mutex);event=e;text=message;},ContainerEnvironment{},fetch);
+    std::string error;ASSERT_TRUE(service.requestCheck(true,error));
+    ASSERT_TRUE(waitUntil([&]{std::lock_guard lock(mutex);return !text.empty();}));
+    {std::lock_guard lock(mutex);ASSERT_EQ(event,std::string("update_error"));
+     ASSERT_TRUE(text.find("模拟上游 HTTP 503")!=std::string::npos);ASSERT_TRUE(text.find("未下载或替换")!=std::string::npos);}
+}
+TEST(UpdateService, NewVersionNotificationIncludesRealChangesWithoutAnotherNetworkRequest) {
+    DownloadFixture fixture;dice::ConfigManager config((fixture.root/"config").string());
+    config.set<bool>("update/auto_check",false);config.set<std::string>("update/source","direct");config.set<std::string>("update/auto_action","notify");
+    auto manifest=nlohmann::json::parse(downloadManifest());manifest["release_notes"]="## 问题修复\n- 修复通知缺少插件名称\n- 保留群组昵称";
+    std::atomic<int> requests{0};std::mutex mutex;std::string event,text;
+    auto fetch=[&](const std::string&,const std::filesystem::path& output,std::uint64_t,int,std::string&,const UpdateService::CancellationCheck&) {
+        ++requests;writeResponse(output,manifest.dump());return true;
+    };
+    UpdateService service(config,[]{},[&](const auto& e,const auto& message){std::lock_guard lock(mutex);event=e;text=message;},ContainerEnvironment{},fetch);
+    std::string error;ASSERT_TRUE(service.requestCheck(true,error));
+    ASSERT_TRUE(waitUntil([&]{std::lock_guard lock(mutex);return !text.empty();}));
+    {std::lock_guard lock(mutex);ASSERT_EQ(event,std::string("update_available"));
+     for(const auto* expected:{"修复通知缺少插件名称","保留群组昵称","v99.0.0-beta.900","当前版本","更新策略","发布页"})ASSERT_TRUE(text.find(expected)!=std::string::npos);}
+    ASSERT_EQ(requests.load(),1);
+}
 
 TEST(UpdateManifest, ParsesAndSelectsExactPlatformAsset) {
     ReleaseManifest manifest;

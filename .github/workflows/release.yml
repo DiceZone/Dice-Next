@@ -599,6 +599,10 @@ jobs:
             --webui-path release-webui --webui-sha "$WEBUI_SHA" \
             --tag "$RELEASE_TAG" \
             --output release-notes.md --sources-output release-sources.json
+          # Reuse the user-facing notes, without the full source/commit history.
+          # Keep metadata bounded; mirror clients need no extra GitHub API call.
+          jq --rawfile notes release-notes.md '.release_notes = ($notes | split("## 源码与完整比较")[0] | .[0:16000])' update-manifest.json > update-manifest-with-notes.json
+          mv update-manifest-with-notes.json update-manifest.json
           cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
       - name: Record successful build number
         shell: bash

@@ -379,6 +379,10 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertLess(workflow.index("Generate categorized release notes"), workflow.index("Record successful build number"))
         self.assertIn("body_path: release-notes.md", workflow)
         self.assertIn("generate_release_notes: false", workflow)
+        self.assertIn('jq --rawfile notes release-notes.md', workflow)
+        self.assertIn('split("## 源码与完整比较")[0] | .[0:16000]', workflow)
+        self.assertLess(workflow.index("--sources-output release-sources.json"), workflow.index("jq --rawfile notes"))
+        self.assertLess(workflow.index("jq --rawfile notes"), workflow.index("body_path: release-notes.md"))
         self.assertTrue(workflow.rstrip().endswith("release-sources.json"))
         self.assertIn("Test Release automation", workflow)
 

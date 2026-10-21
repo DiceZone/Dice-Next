@@ -4,6 +4,20 @@
 #include <utility>
 
 namespace dice {
+// Captured at ingress and carried with asynchronous plugin/output work. This is
+// diagnostic identity only, never an authorization or routing decision.
+struct ProcessingOrigin {
+    std::string platform, adapterId, accountId, accountName;
+    std::string userId, userName, groupId, groupName, messageId, entry;
+    std::string targetId, targetName, targetType;
+    nlohmann::json json() const {
+        return {{"platform", platform}, {"adapter_id", adapterId}, {"account_id", accountId},
+                {"account_name", accountName}, {"user_id", userId}, {"user_name", userName},
+                {"group_id", groupId}, {"group_name", groupName}, {"message_id", messageId}, {"entry", entry},
+                {"target_id", targetId}, {"target_name", targetName}, {"target_type", targetType}};
+    }
+};
+inline thread_local ProcessingOrigin activeProcessingOrigin;
 struct ProcessingSource {
     std::string kind, name, file, entry;
     std::string label() const {
@@ -19,6 +33,7 @@ struct ProcessingContext {
     std::string trigger;
     // Active plugin sends are requests, not proof the whole invocation succeeded.
     std::string result = "请求发送（处理仍在执行）";
+    ProcessingOrigin origin = activeProcessingOrigin;
     std::string label() const {
         std::string text;
         for (const auto& source : sources) {
@@ -30,24 +45,29 @@ struct ProcessingContext {
     nlohmann::json json() const {
         auto items = nlohmann::json::array();
         for (const auto& source : sources) items.push_back(source.json());
-        return {{"sources", items}, {"trigger", trigger}, {"result", result}};
+        return {{"sources", items}, {"trigger", trigger}, {"result", result}, {"origin", origin.json()}};
     }
 };
 inline thread_local ProcessingContext activeProcessingContext;
 class ProcessingScope {
 public:
     explicit ProcessingScope(ProcessingContext context)
-        : previous_(std::exchange(activeProcessingContext, std::move(context))) {}
+        : previous_(std::exchange(activeProcessingContext, std::move(context))),
+          previousOrigin_(std::exchange(activeProcessingOrigin, activeProcessingContext.origin)) {}
     ProcessingScope(ProcessingSource source, std::string trigger = {})
         : ProcessingScope(ProcessingContext{{std::move(source)},
             trigger.empty() ? activeProcessingContext.trigger
                 : activeProcessingContext.trigger.empty() || activeProcessingContext.trigger.find(trigger) != std::string::npos
                     ? (activeProcessingContext.trigger.empty() ? trigger : activeProcessingContext.trigger)
                     : activeProcessingContext.trigger + " → " + trigger}) {}
-    ~ProcessingScope() { activeProcessingContext = std::move(previous_); }
+    ~ProcessingScope() {
+        activeProcessingContext = std::move(previous_);
+        activeProcessingOrigin = std::move(previousOrigin_);
+    }
     ProcessingScope(const ProcessingScope&) = delete;
 private:
     ProcessingContext previous_;
+    ProcessingOrigin previousOrigin_;
 };
 inline void addProcessingSource(std::vector<ProcessingSource>& sources, const ProcessingSource& item) {
     for (const auto& old : sources)
