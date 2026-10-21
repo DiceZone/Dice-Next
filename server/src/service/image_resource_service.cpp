@@ -190,6 +190,39 @@ struct Service::Impl {
         Statement put(db,"INSERT INTO aliases(alias,resource_id) VALUES(?1,?2) ON CONFLICT(alias) DO UPDATE SET resource_id=excluded.resource_id");
         put.bind(1,referenceKey(old));put.bind(2,id);put.step();
     }
+    // Chat and log cache images are copied into cache/ by the migration; the old
+    // copy is then pure duplication (gigabytes on busy bots). Delete an old file
+    // only when its alias points at the same name under cache/ with identical
+    // bytes. Renamed copies stay: some readers still look up the cache by name.
+    // Asset, plugin and module trees are not touched; they remain the backup.
+    int dropMigratedCaches() {
+        int removed=0;
+        for(const auto& [folder,category]:std::vector<std::pair<std::string,std::string>>{{"chat/images","cache/chat"},{"logs/images","cache/log"}}) {
+            const auto root=data/fromUtf8(folder);
+            if(!fs::is_directory(root) || migration_resources::isLink(root)) continue;
+            std::vector<fs::path> files;
+            migration_resources::walk(root,root,[&](const fs::path& source){if(imageExtension(source))files.push_back(source);},[](const auto&,const auto&){});
+            for(const auto& source:files) {
+                try {
+                    std::optional<std::pair<std::string,std::string>> found;fs::path target;
+                    {
+                        std::lock_guard lock(mutex);
+                        found=find("data/"+utf8(source.lexically_relative(data)));
+                        if(!found || found->second!=clean(category+"/"+utf8(source.lexically_relative(root)))) continue;
+                        target=path(found->second);
+                    }
+                    if(!fs::is_regular_file(target) || fs::file_size(target)!=fs::file_size(source) || digest(target)!=digest(source)) continue;
+                    if(fs::remove(source)) ++removed;
+                } catch(const std::exception&) {}
+            }
+            std::vector<fs::path> directories;std::error_code ec;
+            for(fs::recursive_directory_iterator it(root,ec),end;!ec && it!=end;it.increment(ec)) if(it->is_directory(ec) && !migration_resources::isLink(it->path())) directories.push_back(it->path());
+            std::sort(directories.begin(),directories.end(),[](const auto& a,const auto& b){return a.native().size()>b.native().size();});
+            for(const auto& directory:directories) fs::remove(directory,ec);
+            fs::remove(root,ec);
+        }
+        return removed;
+    }
     void scanDirectory(const std::string& directory,bool recursive=false) {
         const auto base=path(directory,true); if(!fs::is_directory(base)) throw std::runtime_error("文件夹不存在");
         std::set<std::string> found;
@@ -652,12 +685,22 @@ Json Service::migrateExisting(bool force) {
     // Copy-first migration: old files remain readable until all known documents
     // have been saved. Unknown plugin IO is never rewritten or executed.
     std::vector<Document> documents;
+    bool migrated=false;
     {
         std::lock_guard lock(impl_->mutex);
         Statement prior(impl_->db,"SELECT v FROM meta WHERE k='layout_version'");
-        if(prior.step() && prior.text(0)=="1" && !force) {impl_->migration=Json{{"status","complete"},{"copied",0},{"warnings",Json::array()}};return impl_->migration;}
-        impl_->migration=Json{{"status","running"},{"copied",0},{"warnings",Json::array()}};
-        documents=impl_->documents();
+        migrated=prior.step() && prior.text(0)=="1" && !force;
+        if(!migrated) {
+            impl_->migration=Json{{"status","running"},{"copied",0},{"warnings",Json::array()}};
+            documents=impl_->documents();
+        }
+    }
+    if(migrated) {
+        // Instances migrated by earlier versions still carry the duplicated caches.
+        const auto removed=impl_->dropMigratedCaches();
+        std::lock_guard lock(impl_->mutex);
+        impl_->migration=Json{{"status","complete"},{"copied",0},{"warnings",Json::array()},{"cacheDuplicatesRemoved",removed}};
+        return impl_->migration;
     }
     auto warning=[&](const std::string& value) {std::lock_guard lock(impl_->mutex);impl_->migration["warnings"].push_back(value);};
     auto increment=[&] {std::lock_guard lock(impl_->mutex);impl_->migration["copied"]=impl_->migration["copied"].get<int>()+1;};
@@ -713,8 +756,11 @@ Json Service::migrateExisting(bool force) {
         },[&](const auto& path,const auto& error){warning(utf8(path)+"："+error);});
     }
     // Keep old bytes as a recovery backup. The alias index is authoritative for
-    // new sends; no old source deck/plugin is edited or removed here.
+    // new sends; no old source deck/plugin is edited or removed here. Only the
+    // chat and log caches are disposable and are not kept twice.
+    const auto removed=impl_->dropMigratedCaches();
     std::lock_guard lock(impl_->mutex);
+    impl_->migration["cacheDuplicatesRemoved"]=removed;
     if(impl_->documentsChanged)try{impl_->documentsChanged();}catch(const std::exception& error){impl_->migration["warnings"].push_back(std::string("引用缓存刷新失败：")+error.what());}
     if(impl_->migration["warnings"].empty()) {
         Statement mark(impl_->db,"INSERT INTO meta(k,v) VALUES('layout_version','1') ON CONFLICT(k) DO UPDATE SET v=excluded.v");mark.step();

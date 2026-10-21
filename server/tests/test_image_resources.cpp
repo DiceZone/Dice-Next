@@ -115,6 +115,25 @@ TEST(ImageResources, MigrationCollectsDeckAssetsInTheFilenameDirectoryAndIsIdemp
     ASSERT_TRUE(fs::exists(f.folder/"data/assets/old.png"));ASSERT_TRUE(f.service->resolve("/api/assets/old.png").has_value());
     ASSERT_EQ(f.service->migrateExisting()["copied"],0);
 }
+TEST(ImageResources, MigratedChatAndLogCachesAreNotKeptTwice) {
+    Images f;fs::create_directories(f.folder/"data/chat/images/sub");fs::create_directories(f.folder/"data/logs/images");
+    const std::string other=png+"-other";
+    auto write=[&](const fs::path& path,const std::string& bytes){std::ofstream out(path,std::ios::binary);out<<bytes;};
+    write(f.folder/"data/chat/images/1_a.png",png);write(f.folder/"data/chat/images/sub/2_b.png",png);
+    write(f.folder/"data/logs/images/log1_c.png",png);
+    // Same name already taken in the cache with different bytes: the import is renamed, the old file stays.
+    f.upload("cache/chat/3_d.png");write(f.folder/"data/chat/images/3_d.png",other);
+    auto result=f.service->migrateExisting();ASSERT_EQ(result["status"],"complete");ASSERT_EQ(result["cacheDuplicatesRemoved"],3);
+    ASSERT_TRUE(fs::exists(f.service->checkedPath("cache/chat/1_a.png")));ASSERT_TRUE(fs::exists(f.service->checkedPath("cache/log/log1_c.png")));
+    ASSERT_FALSE(fs::exists(f.folder/"data/chat/images/1_a.png"));ASSERT_FALSE(fs::exists(f.folder/"data/chat/images/sub"));
+    ASSERT_FALSE(fs::exists(f.folder/"data/logs/images"));ASSERT_TRUE(fs::exists(f.folder/"data/chat/images/3_d.png"));
+    ASSERT_TRUE(f.service->resolve("/api/chat/images/1_a.png").has_value());ASSERT_TRUE(f.service->resolve("/api/logs/images/log1_c.png").has_value());
+    // Earlier versions kept the old copy after migrating; a later start removes it, unless the bytes differ.
+    fs::create_directories(f.folder/"data/chat/images/sub");
+    write(f.folder/"data/chat/images/1_a.png",png);write(f.folder/"data/chat/images/sub/2_b.png",other);
+    result=f.service->migrateExisting();ASSERT_EQ(result["cacheDuplicatesRemoved"],1);
+    ASSERT_FALSE(fs::exists(f.folder/"data/chat/images/1_a.png"));ASSERT_TRUE(fs::exists(f.folder/"data/chat/images/sub/2_b.png"));
+}
 TEST(ImageResources, CacheImagesCannotBePublishedAndLinksCannotBeFollowed) {
     Images f;f.upload("cache/chat/private.png");ASSERT_TRUE(f.fails([&]{f.service->share("cache/chat/private.png");}));
     std::error_code ec;fs::create_directory_symlink(f.folder,f.service->root()/"escape",ec);
