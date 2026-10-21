@@ -170,8 +170,12 @@ struct Service::Impl {
         const auto size=directory ? 0 : fs::file_size(file);
         const auto modified=fs::last_write_time(file)-fs::file_time_type::clock::now()+std::chrono::system_clock::now();
         const auto epoch=std::chrono::duration_cast<std::chrono::seconds>(modified.time_since_epoch()).count();
-        Statement previous(db,"SELECT id FROM resources WHERE path=?1 AND trashed=0"); previous.bind(1,relative);
-        const auto id=previous.step() ? previous.text(0) : randomId();
+        Statement previous(db,"SELECT id,parent,name,is_dir,bytes,modified FROM resources WHERE path=?1 AND trashed=0"); previous.bind(1,relative);
+        const bool known=previous.step();
+        const auto id=known ? previous.text(0) : randomId();
+        // Listing a folder registers every entry; an unchanged row must not cost a write.
+        if(known && previous.text(1)==parentOf(relative) && previous.text(2)==basename(relative) && (previous.integer(3)!=0)==directory
+            && previous.integer(4)==static_cast<std::int64_t>(size) && previous.integer(5)==epoch) return id;
         Statement put(db,"INSERT INTO resources(id,path,parent,name,is_dir,bytes,modified) VALUES(?1,?2,?3,?4,?5,?6,?7) "
             "ON CONFLICT(id) DO UPDATE SET parent=excluded.parent,name=excluded.name,is_dir=excluded.is_dir,bytes=excluded.bytes,modified=excluded.modified");
         put.bind(1,id);put.bind(2,relative);put.bind(3,parentOf(relative));put.bind(4,basename(relative));put.bind(5,directory?1:0);put.bind(6,static_cast<std::int64_t>(size));put.bind(7,epoch);put.step();
@@ -225,6 +229,13 @@ struct Service::Impl {
     }
     void scanDirectory(const std::string& directory,bool recursive=false) {
         const auto base=path(directory,true); if(!fs::is_directory(base)) throw std::runtime_error("文件夹不存在");
+        // One transaction for the whole folder: a commit per file made a folder of
+        // a few thousand chat images take half a minute to open on cloud disks.
+        exec(db,"SAVEPOINT scan_directory");
+        try {scanDirectoryRows(base,directory,recursive);exec(db,"RELEASE scan_directory");}
+        catch(...) {exec(db,"ROLLBACK TO scan_directory; RELEASE scan_directory");throw;}
+    }
+    void scanDirectoryRows(const fs::path& base,const std::string& directory,bool recursive) {
         std::set<std::string> found;
         auto visit=[&](const fs::directory_entry& entry) {
             const auto relative=utf8(entry.path().lexically_relative(images));

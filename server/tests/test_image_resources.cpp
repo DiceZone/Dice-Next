@@ -316,3 +316,13 @@ TEST(ImageResources, UnmigratedCacheUrlsAreNotMistakenForRecycledResources) {
     ASSERT_TRUE(f.service->known("/api/chat/images/old.png"));
     ASSERT_FALSE(f.service->resolve("/api/chat/images/old.png").has_value());
 }
+TEST(ImageResources, ListingAFolderPicksUpFilesChangedOutsideTheWebUI) {
+    Images f;const auto dir=f.service->checkedPath("cache/chat");fs::create_directories(dir);
+    {std::ofstream out(dir/"1_a.png",std::ios::binary);out<<png;}
+    auto items=f.service->list("cache/chat",1,20)["items"];ASSERT_EQ(items.size(),std::size_t(1));
+    ASSERT_EQ(items[0]["size"],static_cast<std::int64_t>(png.size()));
+    // Unchanged rows are skipped while listing; a changed file must still be refreshed.
+    {std::ofstream out(dir/"1_a.png",std::ios::binary);out<<png<<"-larger";}
+    items=f.service->list("cache/chat",1,20)["items"];ASSERT_EQ(items[0]["size"],static_cast<std::int64_t>(png.size()+7));
+    fs::remove(dir/"1_a.png");ASSERT_EQ(f.service->list("cache/chat",1,20)["total"],0);
+}
