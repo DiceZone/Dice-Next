@@ -204,3 +204,91 @@ TEST(NicknameCommand, EmptyAttributesMessageDoesNotClaimTheCardIsMissing) {
         ASSERT_EQ(localized, expected);
     }
 }
+
+TEST(CharacterCardShow, BareShowReadsMixedTypedAttributesRepeatedlyWithoutChangingTheCard) {
+    NicknameFixture f;
+    const std::string longKey = "自定义_" + std::string(96, 'x');
+    const std::string background = std::string(512, 'b') + "调查员背景";
+    f.cards.replaceValuesByName("1000", "",
+                                {{"力量", 60},
+                                 {"生命值", 12},
+                                 {"职业", "记者"},
+                                 {"小数", 1.75},
+                                 {"受伤", true},
+                                 {"道具", json::array({"手电", 2})},
+                                 {"标签", {{"来源", "旧版"}}},
+                                 {"备注", nullptr},
+                                 {"&伤害", "3+4"},
+                                 {longKey, "长属性名"}});
+    f.cards.setTextByName("1000", "", "背景", background);
+    const auto before = f.cards.getValuesByName("1000", "");
+    for (const auto locale : {Locale::kZhHans, Locale::kZhHant, Locale::kEn, Locale::kJa}) {
+        f.i18n.setOverride(locale, "card.show", "{nick}|{detail}", ContentFormat::kPlainText);
+        for (const auto type : {MessageType::kPrivate, MessageType::kGroup}) {
+            f.msg.type = type;
+            f.msg.targetId = type == MessageType::kPrivate ? "1000" : "2000";
+            for (int i = 0; i < 12; ++i) {
+                const auto reply = f.run(".st show", locale);
+                ASSERT_TRUE(reply.find("力量:60") != std::string::npos);
+                ASSERT_TRUE(reply.find(CharacterCardStore::canonical("伤害") + "=3+4(=7)") !=
+                            std::string::npos);
+                for (const auto *name : {"职业", "小数", "受伤", "道具", "标签", "备注", "背景"})
+                    ASSERT_TRUE(reply.find(std::string(name) + "=" + before.at(name).dump()) !=
+                                std::string::npos);
+                ASSERT_TRUE(reply.find(longKey + "=\"长属性名\"") != std::string::npos);
+                ASSERT_EQ(f.cards.getValuesByName("1000", ""), before);
+            }
+        }
+    }
+}
+
+TEST(CharacterCardShow, BoundGroupDefaultPrivateAndOfficialCardViewsStayIsolated) {
+    NicknameFixture f;
+    f.cards.setValueByName("1000", "", "职业", "默认卡职业");
+    ASSERT_TRUE(f.cards.createCard("1000", "群人物卡"));
+    f.cards.setValueByName("1000", "群人物卡", "职业", "群卡职业");
+    f.cards.bindCard("1000", "2000", "群人物卡");
+    f.i18n.setOverride(Locale::kZhHans, "card.show", "**{nick}**：{detail}", ContentFormat::kMarkdown);
+    for (const auto *platform : {"onebot_v11", "qq_official"}) {
+        f.msg.platform = platform;
+        for (const auto type : {MessageType::kGroup, MessageType::kPrivate}) {
+            f.msg.type = type;
+            f.msg.targetId = type == MessageType::kGroup ? "2000" : "1000";
+            const auto rendered = I18n::captureFragment([&] { return f.run(".st show"); });
+            const auto plain = rendered.format == ContentFormat::kMarkdown
+                                   ? markdown::toPlainText(rendered.text)
+                                   : rendered.text;
+            const auto expected = type == MessageType::kGroup ? "群卡职业" : "默认卡职业";
+            const auto absent = type == MessageType::kGroup ? "默认卡职业" : "群卡职业";
+            ASSERT_TRUE(plain.find(expected) != std::string::npos);
+            ASSERT_TRUE(plain.find(absent) == std::string::npos);
+            if (f.msg.platform == "qq_official") {
+                const auto official = f.router.lastOfficialCard();
+                ASSERT_TRUE(official != nullptr);
+                ASSERT_EQ(official->original, rendered.text);
+            } else
+                ASSERT_TRUE(f.router.lastOfficialCard() == nullptr);
+            ASSERT_EQ(f.cards.boundCard("1000", "2000"), "群人物卡");
+            ASSERT_EQ(f.cards.getValueByName("1000", "", "职业").value(), json("默认卡职业"));
+            ASSERT_EQ(f.cards.getValueByName("1000", "群人物卡", "职业").value(), json("群卡职业"));
+        }
+    }
+}
+
+TEST(CharacterCardShow, EmptyLegacyTextNamesAndReadLocksRemainSafe) {
+    NicknameFixture f;
+    f.i18n.setOverride(Locale::kZhHans, "card.show", "{detail}", ContentFormat::kPlainText);
+    // Older/plugin-owned metadata can contain an empty text key. It is not a
+    // displayable attribute and must never reach string::front().
+    f.cards.setTextByName("1000", "", "", "invalid-empty-field");
+    const auto empty = f.run(".st show");
+    ASSERT_TRUE(empty.find("invalid-empty-field") == std::string::npos);
+    f.cards.setValueByName("1000", "", "职业", "记者");
+    ASSERT_TRUE(f.cards.lockCard("1000", "2000", "r"));
+    const auto locked = f.i18n.tr(Locale::kZhHans, "card.locked_r");
+    for (const auto *command : {".st show", ".st show 职业", ".st show 职业 力量", ".st show 50"})
+        ASSERT_EQ(f.run(command), locked);
+    ASSERT_TRUE(f.cards.unlockCard("1000", "2000", "r"));
+    ASSERT_TRUE(f.run(".st show").find("职业=\"记者\"") != std::string::npos);
+    ASSERT_TRUE(f.run(".st show 职业").find("记者") != std::string::npos);
+}

@@ -3,6 +3,41 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-10-22: Bare `.st show` card-data lifetime fix (local)
+
+- The no-argument branch iterated `getValuesByName(...).items()` directly.
+  The returned JSON was a temporary owner, while `items()` retained a view of it;
+  under the project's C++20 setting the owner died before traversal. This is
+  undefined memory access, consistent with missing attributes, `std::bad_alloc`
+  or a hard crash. Live messages and `/api/test/message` use the same router.
+- A standalone reproduction of that exact iteration pattern, compiled with MSVC
+  AddressSanitizer and C++20, failed with **stack-use-after-scope** and exit 1.
+  Keeping the JSON in a named local passed the same check with exit 0. This was
+  a focused memory-sanitizer reproduction, not an ASan build of the entire bot.
+- The fix retains the JSON owner throughout iteration and ignores empty legacy
+  text keys before `front()`. It does not clear/reimport cards, rewrite data,
+  change card bindings, bypass read locks, or add a catch to mask memory errors.
+  The scan found no other temporary-call `.items()` traversal in `server/src`.
+- A real-router regression failed before the fix because typed fields were
+  absent. After the fix, three new cases passed **1,092 assertions**, including
+  96 repeated bare-show requests across four languages and private/group scope;
+  integers, text, decimals, booleans, arrays, objects, null, expressions, long
+  keys and metadata text; unchanged card data; bound/default card isolation;
+  OneBot/QQ Official contexts, Markdown capture, official card payloads, empty
+  text names and read locks. Existing typed legacy-card tests now also invoke
+  bare `.st show`, not only the single-attribute form.
+- After fast-forwarding remote main through `abc41d8`, Windows Release
+  server/core builds passed and the unfiltered core run passed **939 cases /
+  65,062 assertions**. Lua passed **67 cases / 616 assertions**.
+  WebUI passed **350 tests, zero failures and zero skips**, with its production
+  preview renderer enabled; its tested `7e252c9` remains remote main. Release
+  automation passed **33 tests**. Subset counts are included in the core total.
+- Checks used synthetic cards, isolated databases and in-process dispatch; no
+  real bot/server was started and no platform message was sent. The HTTP test
+  route was inspected for the shared call, not exercised through a live panel.
+  The original reproduction used `0deaafa`; the intervening commits synchronized
+  before release did not change either affected card source.
+
 ## 2026-10-21: Readable notices, asynchronous recursion guard and plain previews (local)
 
 - Error notifications now describe the failed business operation and real error,

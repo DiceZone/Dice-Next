@@ -3673,8 +3673,11 @@ private:
                     detail += k + "=" + e;
                     if (auto cv = evalComputedFormula(e, msg)) detail += "(=" + std::to_string(*cv) + ")";
                 }
-                for (const auto& [key, value] : cards_.getValuesByName(user, cards_.boundCard(user, group)).items()) {
-                    if (key.front() == '&' || value.is_number_integer()) continue;
+                // items() is a view: the owning JSON must outlive the loop.
+                // Chaining it on getValuesByName() leaves a dangling view in C++20.
+                const auto values = cards_.getValuesByName(user, cards_.boundCard(user, group));
+                for (const auto& [key, value] : values.items()) {
+                    if (key.empty() || key.front() == '&' || value.is_number_integer()) continue;
                     if (!detail.empty()) detail += " ";
                     detail += key + "=" + value.dump();
                 }

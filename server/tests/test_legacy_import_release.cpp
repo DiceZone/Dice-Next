@@ -253,6 +253,10 @@ TEST(ReleaseMigration, TypedCardCommandsEditDeleteClearExportAndSwitchTogether) 
     Message msg; msg.platform="onebot_v11"; msg.adapterId="test"; msg.type=MessageType::kGroup;
     msg.senderId="10001"; msg.senderName="Tester"; msg.targetId="20001";
     auto run=[&](const std::string& text){msg.content=text; return router.handleMessage(msg,Locale::kZhHans);};
+    const auto shown=run(".st show");
+    ASSERT_TRUE(shown.find("小数=1.75")!=std::string::npos);
+    ASSERT_TRUE(shown.find("记者")!=std::string::npos);
+    ASSERT_TRUE(shown.find("3+4")!=std::string::npos);
     ASSERT_TRUE(run(".st show 小数").find("1.75")!=std::string::npos);
     ASSERT_TRUE(run(".st show 伤害").find("3+4")!=std::string::npos);
     const auto exported=run(".st export"); const auto marker=exported.find("json "); ASSERT_TRUE(marker!=std::string::npos);
