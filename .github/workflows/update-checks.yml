@@ -24,6 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  NODE_VERSION: '26.x'
   VCPKG_BASELINE: '44819aa2a6c10e56065e2b0330e7d6c89d1d2574'
   WEBUI_REF: ${{ github.event_name == 'push' && 'cross-platform-update' || inputs.webui_ref || 'main' }}
   DOCS_REF: ${{ github.event_name == 'push' && 'cross-platform-update' || inputs.docs_ref || 'main' }}
@@ -42,12 +43,14 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: ${{ env.NODE_VERSION }}
+          check-latest: true
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Check and build frontend
         working-directory: web
         run: |
+          node scripts/check-node-version.mjs
           npm ci
           npm test
           npm run lint
@@ -127,7 +130,14 @@ jobs:
           path: web/dist
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: ${{ env.NODE_VERSION }}
+          check-latest: true
+      - name: Verify Node.js security baseline
+        working-directory: main
+        shell: bash
+        run: |
+          node tools/check-node-version.mjs
+          node --test tools/check-node-version.test.mjs
       - name: Install build tools
         if: runner.os == 'Linux'
         run: |

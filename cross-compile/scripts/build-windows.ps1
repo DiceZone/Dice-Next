@@ -20,6 +20,7 @@ if ($Architecture -eq 'arm64') {
 
 & (Join-Path $env:VCPKG_ROOT 'vcpkg.exe') install `
     'drogon[sqlite3]' nlohmann-json sqlite-orm spdlog yaml-cpp zstd quickjs-ng lua `
+    "--overlay-ports=$serverDir/vcpkg-overlays" `
     "--triplet=$triplet"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

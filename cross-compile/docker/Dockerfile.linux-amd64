@@ -33,6 +33,7 @@ ENV VCPKG_ROOT=/opt/vcpkg
 ENV PATH="${VCPKG_ROOT}:${PATH}"
 
 # Install vcpkg dependencies
+COPY dice-next/server/vcpkg-overlays /opt/dice-next-overlays
 RUN /opt/vcpkg/vcpkg install \
     drogon[sqlite3] \
     nlohmann-json \
@@ -42,6 +43,7 @@ RUN /opt/vcpkg/vcpkg install \
     zstd \
     quickjs-ng \
     lua \
+    --overlay-ports=/opt/dice-next-overlays \
     --triplet=x64-linux-dynamic
 
 WORKDIR /workspace/dice-next

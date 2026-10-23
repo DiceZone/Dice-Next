@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 env:
-  NODE_VERSION: '20'
+  NODE_VERSION: '26.x'
   # Keep the vcpkg executable aligned with server/vcpkg.json's builtin-baseline.
   VCPKG_BASELINE: '44819aa2a6c10e56065e2b0330e7d6c89d1d2574'
 
@@ -140,14 +140,16 @@ jobs:
         id: source
         working-directory: web
         run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
+          check-latest: true
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Build WebUI
         working-directory: web
         run: |
+          node scripts/check-node-version.mjs
           npm ci
           npm test
           npm run build
@@ -238,6 +240,16 @@ jobs:
       - name: Compile release
         working-directory: main
         run: cmake --build server/${{ matrix.build_dir }} --parallel "$(nproc)"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          check-latest: true
+      - name: Verify Node.js security baseline
+        working-directory: main
+        shell: bash
+        run: |
+          node tools/check-node-version.mjs
+          node --test tools/check-node-version.test.mjs
       - name: Test POSIX package manager
         working-directory: main
         run: |
@@ -440,6 +452,16 @@ jobs:
       - name: Compile release
         working-directory: main
         run: cmake --build server/build --parallel "$(sysctl -n hw.ncpu)"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          check-latest: true
+      - name: Verify Node.js security baseline
+        working-directory: main
+        shell: bash
+        run: |
+          node tools/check-node-version.mjs
+          node --test tools/check-node-version.test.mjs
       - name: Test POSIX package manager
         working-directory: main
         run: |

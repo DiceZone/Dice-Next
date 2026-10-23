@@ -37,6 +37,7 @@ ENV PATH="${VCPKG_ROOT}:${PATH}"
 # Install vcpkg dependencies for ARM64
 COPY dice-next/cross-compile/vcpkg-triplets/arm64-linux-dynamic.cmake /opt/vcpkg/triplets/
 COPY dice-next/cross-compile/vcpkg-triplets/arm64-linux-toolchain.cmake /opt/vcpkg/triplets/
+COPY dice-next/server/vcpkg-overlays /opt/dice-next-overlays
 
 RUN /opt/vcpkg/vcpkg install \
     drogon[sqlite3] \
@@ -47,6 +48,7 @@ RUN /opt/vcpkg/vcpkg install \
     zstd \
     quickjs-ng \
     lua \
+    --overlay-ports=/opt/dice-next-overlays \
     --triplet=arm64-linux-dynamic
 
 WORKDIR /workspace/dice-next

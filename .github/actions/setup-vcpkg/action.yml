@@ -14,7 +14,7 @@ runs:
       id: identity
       shell: bash
       env:
-        CACHE_FAMILY: vcpkg-bin-v3-${{ runner.os }}-${{ runner.arch }}-${{ inputs.triplet }}-${{ inputs.baseline }}-${{ hashFiles('main/server/vcpkg.json', 'main/.github/actions/setup-vcpkg/action.yml') }}
+        CACHE_FAMILY: vcpkg-bin-v3-${{ runner.os }}-${{ runner.arch }}-${{ inputs.triplet }}-${{ inputs.baseline }}-${{ hashFiles('main/server/vcpkg.json', 'main/server/vcpkg-configuration.json', 'main/server/vcpkg-overlays/**', 'main/.github/actions/setup-vcpkg/action.yml') }}
       run: |
         set -euo pipefail
         : "${ImageVersion:?Hosted runner ImageVersion is required}"

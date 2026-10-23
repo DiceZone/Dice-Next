@@ -36,6 +36,7 @@ $VCPKG_ROOT/vcpkg install \
     zstd \
     quickjs-ng \
     lua \
+    --overlay-ports="$SERVER_DIR/vcpkg-overlays" \
     --triplet=$TRIPLET
 
 # 配置 CMake

@@ -12,6 +12,7 @@ set(TEST_SOURCES
     test_system_info.cpp
     test_runtime_reliability.cpp
     test_bounded_regex.cpp
+    test_brotli_security.cpp
     test_script_execution_windows_macros.cpp
     test_startup_guard.cpp
     test_tray_settings.cpp
@@ -141,6 +142,7 @@ target_link_libraries(dice-next-tests PRIVATE
     # 显式连 OpenSSL::SSL——靠 Drogon 传递过来在部分三元组上并不成立。
     OpenSSL::SSL
     Drogon::Drogon
+    unofficial::brotli::brotlidec
     nlohmann_json::nlohmann_json
     sqlite_orm::sqlite_orm
     spdlog::spdlog

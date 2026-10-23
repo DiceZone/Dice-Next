@@ -41,6 +41,7 @@ $VCPKG_ROOT/vcpkg install \
     zstd \
     quickjs-ng \
     lua \
+    --overlay-ports="$SERVER_DIR/vcpkg-overlays" \
     --triplet=arm64-osx
 
 # 配置 CMake

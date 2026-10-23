@@ -31,7 +31,14 @@ End-Release-Notes
 
 ## 独立前端检查（本轮本地新增）
 
-WebUI 仓的 `.github/workflows/checks.yml` 在 push / pull_request / 手动运行时执行 `npm ci`、`npm test`、类型检查、生产构建和 PWA 产物检查。固定 Ubuntu 24.04 / Node 24，缓存 npm 下载，旧任务可被新提交取消。只读权限、不保留检出凭据、不使用发布密钥、不部署，不修改主仓后端发布工作流或 vcpkg 缓存。首次 GH 执行须等提交后验证。
+WebUI 仓的 `.github/workflows/checks.yml` 在 push / pull_request / 手动运行时执行 `npm ci`、`npm test`、类型检查、生产构建和 PWA 产物检查。固定 Ubuntu 24.04，Node 使用 `26.x` 与 `check-latest: true`，构建前拒绝低于 26.12.1 的运行时并输出实际版本。缓存 npm 下载，旧任务可被新提交取消。只读权限、不保留检出凭据、不使用发布密钥、不部署。首次 GH 执行须等提交后验证。
+
+## 2026-10-22：依赖安全修复
+
+- 主程序 Release、更新验证、WebUI 与日志站构建统一跟随最新的 Node 26.x，最低安全版本为 26.12.1；不能只用缓存中的旧 26.x，也不锁死在 26.12.x 而漏掉后续次版本修复。`.node-version` 记录最低安全版本，具体运行版本保留在任务日志中。
+- Brotli 1.2.0 通过 `server/vcpkg-overlays/brotli` 回移上游 `0ed4268a4401abcb4472096340477cf4af7d1a2b`，不整体升级 vcpkg 基线。manifest、经典脚本及 Docker 构建均使用该端口。
+- ABI 缓存键包含 overlay 配置与补丁内容。CMake 在配置时检查修复后的头文件；回归测试同时验证解码器 DLL 的新错误码，以及有效、二进制、截断和非法数据的处理。只升级 Node 不视为修复 C++ 后端的 Brotli。
+- 以上不会自动触发发布，其他平台的实际构建仍需后续 CI 验证。
 
 ## 2026-09-28–30 修复
 

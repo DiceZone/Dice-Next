@@ -41,6 +41,22 @@ endfunction()
 
 # drogon — HTTP framework with WebSocket
 find_package(Drogon REQUIRED)
+find_package(unofficial-brotli CONFIG REQUIRED)
+
+# Fail configuration rather than silently building with unpatched system or
+# cached Brotli. Compile/link only (not try_run), including for cross builds.
+include(CheckCXXSourceCompiles)
+function(dicenext_require_secure_brotli)
+    set(CMAKE_REQUIRED_LIBRARIES unofficial::brotli::brotlidec)
+    unset(DICENEXT_BROTLI_HAS_BLOCK_SWITCH_FIX CACHE)
+    check_cxx_source_compiles("#include <brotli/decode.h>
+        static_assert(BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH == -17);
+        int main() { return 0; }" DICENEXT_BROTLI_HAS_BLOCK_SWITCH_FIX)
+    if(NOT DICENEXT_BROTLI_HAS_BLOCK_SWITCH_FIX)
+        message(FATAL_ERROR "Brotli is missing the CVE-2026-111497 fix. Install dependencies using server/vcpkg-configuration.json (or --overlay-ports=server/vcpkg-overlays).")
+    endif()
+endfunction()
+dicenext_require_secure_brotli()
 find_package(OpenSSL REQUIRED)
 
 # nlohmann/json — JSON parsing

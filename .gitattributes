@@ -1,3 +1,5 @@
 # Build counters are semantic values, not ordinary text. The configured merge
 # driver keeps the greatest counter for the same major.minor release line.
 server/build_counter.txt merge=dicenext-build-counter
+# Patches are parsed as unified diffs; preserve context-only blank lines and LF.
+server/vcpkg-overlays/**/*.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof

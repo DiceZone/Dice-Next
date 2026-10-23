@@ -1,0 +1,12 @@
+{
+  "name": "brotli",
+  "version": "1.2.0",
+  "port-version": 1,
+  "description": "Brotli with the upstream CVE-2026-111497 decoder fix",
+  "homepage": "https://github.com/google/brotli",
+  "license": "MIT",
+  "dependencies": [
+    { "name": "vcpkg-cmake", "host": true },
+    { "name": "vcpkg-cmake-config", "host": true }
+  ]
+}
