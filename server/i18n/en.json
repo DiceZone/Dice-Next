@@ -485,7 +485,8 @@
     "status": "This window is subscribed to owner notices, level mask: {level}",
     "off_status": "This window is not subscribed to owner notices. Use .notice on to enable.",
     "set": "This window is now a notice window, level: {level} √",
-    "removed": "Owner notices for this window disabled √"
+    "removed": "Owner notices for this window disabled √",
+    "save_failed": "Could not save notification subscriptions. The previous configuration is unchanged; check configuration directory permissions."
   },
   "shortcut": {
     "usage": "Command shortcuts .alias\n.alias <name> <command> // create a group shortcut in group chat\n.alias --my <name> <command> // create a personal shortcut; default in private chat\n.alias del/rm [--my] <name> // delete a shortcut in that scope\n.alias show/list // list this group's and your personal shortcuts\n.&<name> [arguments] / .a <name> [arguments] // append arguments and execute\nGroup shortcuts take priority. Execution uses the caller's permissions. Recursive shortcuts are not allowed.",

@@ -2,6 +2,8 @@
 #include "../storage/database.h"
 #include "identity_email_service.h"
 #include "notice_manager.h"
+#include "notice_http.h"
+#include "notice_windows.h"
 #include "notice_search.h"
 #include <drogon/drogon.h>
 #include <drogon/utils/Utilities.h>
@@ -79,8 +81,97 @@ void save(ConfigManager &cfg, const Json &before, const Json &after) {
         throw std::runtime_error("保存通知配置失败");
     }
 }
+void validateDestination(ConfigManager& cfg, AdapterManager& adapters, const Json& window) {
+    const auto& channel = window["channel"];
+    if (channel["kind"] == "smtp") {
+        const auto transport = notice_rules::smtpTransport(cfg.getAll(), notice::conf(cfg), channel);
+        if (!identity_email::validSettings(transport)) throw std::invalid_argument("SMTP 配置无效，请先前往权限设置配置邮件服务器");
+    }
+    if (channel["kind"] != "chat") return;
+    const auto platform = channel["platform"].get<std::string>();
+    for (const auto& policy : window["subscriptions"]) {
+        const auto sender = policy.value("sender", Json::object());
+        if (sender.value("delivery", std::string("auto")) != "selected") continue;
+        for (const auto& id : sender.value("adapter_ids", Json::array())) {
+            const auto account = id.get<std::string>(); const auto live = adapters.getAdapter(account);
+            bool found = live && live->platform() == platform;
+            for (const auto& configured : cfg.getAll().value("adapters", Json::array())) {
+                const auto value = configured.value("id", Json());
+                if ((value.is_string() ? value.get<std::string>() : value.dump()) == account && configured.value("type", std::string()) == platform) found = true;
+            }
+            if (!found) throw std::invalid_argument("请选择属于通知窗口平台的有效发送帐号");
+        }
+    }
+}
+void registerWindows(Database& db, ConfigManager& cfg, AdapterManager& adapters) {
+    auto decorate = [&db, &adapters](Json& window) {
+        auto& channel = window["channel"];
+        if (channel.value("kind", std::string()) == "chat") channel["display_name"] = label(db, adapters, channel);
+    };
+    drogon::app().registerHandler("/api/system/notice/windows", [&cfg, &adapters, decorate](Req req, CB&& cb) {
+        try {
+            std::lock_guard lock(notice_rules::configMutex()); const auto before = notice::conf(cfg);
+            if (req->method() == drogon::Post) {
+                if (req->body().size() > 1024 * 1024) throw std::invalid_argument("通知窗口配置过大");
+                auto window = notice_windows::normalize(Json::parse(req->body())); const auto key = notice_windows::key(window["channel"]);
+                for (const auto& existing : notice_windows::all(before))
+                    if (notice_windows::key(existing["channel"]) == key) throw std::invalid_argument("该通知窗口已存在，请编辑已有窗口");
+                if (window["channel"]["kind"] == "chat" && window["channel"].value("delivery", std::string("auto")) != "selected")
+                    throw std::invalid_argument("请选择通知窗口使用的发送帐号");
+                validateDestination(cfg, adapters, window);
+                auto next = before; notice_windows::store(next, window, "rule-" + drogon::utils::genRandomString(24)); save(cfg, before, next);
+                notice::webManagementNotice(req, cfg, adapters, [&](const auto&) { return notice::ruleChanged(window["name"].get<std::string>(), "新增", 1); });
+                reply(std::move(cb), {{"saved", true}}); return;
+            }
+            Json rows = Json::array(); const auto q = lower(req->getParameter("q"));
+            for (auto window : notice_windows::all(before)) {
+                decorate(window);
+                Json searchable{{"name", window["name"]}, {"channels", Json::array({window["channel"]})}, {"subscriptions", window["subscriptions"]}};
+                if (notice_rules::matchesSearch(searchable, q)) rows.push_back(std::move(window));
+            }
+            const int size = number(req->getParameter("pageSize"), 10, 50), total = static_cast<int>(rows.size());
+            const int page = (std::min)(number(req->getParameter("page"), 1, 1000000), (std::max)(1, (total + size - 1) / size));
+            Json items = Json::array();
+            for (int i = (page - 1) * size; i < (std::min)(page * size, total); ++i) items.push_back(rows[i]);
+            reply(std::move(cb), {{"items", items}, {"total", total}, {"page", page}, {"size", size}});
+        } catch (const std::exception& e) { fail(std::move(cb), e); }
+    }, {drogon::Get, drogon::Post});
+    drogon::app().registerHandler("/api/system/notice/windows/{1}", [&cfg, &adapters](Req req, CB&& cb, const std::string& id) {
+        try {
+            std::lock_guard lock(notice_rules::configMutex()); const auto before = notice::conf(cfg);
+            Json old; for (const auto& w : notice_windows::all(before)) if (w["id"] == id) { old = w; break; }
+            if (old.is_null()) throw std::invalid_argument("通知窗口已变更或不存在，请刷新列表");
+            auto next = before; notice_windows::erase(next, old["channel"]);
+            Json window = old;
+            if (req->method() != drogon::Delete) {
+                if (req->body().size() > 1024 * 1024) throw std::invalid_argument("通知窗口配置过大");
+                window = notice_windows::normalize(Json::parse(req->body()));
+                for (const auto& other : notice_windows::all(next)) if (notice_windows::key(other["channel"]) == notice_windows::key(window["channel"]))
+                    throw std::invalid_argument("该通知窗口已存在，请编辑已有窗口");
+                validateDestination(cfg, adapters, window);
+                notice_windows::store(next, window, "rule-" + drogon::utils::genRandomString(24));
+            }
+            save(cfg, before, next);
+            notice::webManagementNotice(req, cfg, adapters, [&](const auto&) { return notice::ruleChanged(window.value("name", std::string()), req->method() == drogon::Delete ? "删除" : "修改", 1); });
+            reply(std::move(cb), {{"saved", true}});
+        } catch (const std::exception& e) { fail(std::move(cb), e); }
+    }, {drogon::Put, drogon::Delete});
+    drogon::app().registerHandler("/api/system/notice/windows/{1}/test", [&cfg, &adapters](Req, CB&& cb, const std::string& id) {
+        try {
+            Json window; { std::lock_guard lock(notice_rules::configMutex());
+                for (const auto& w : notice_windows::all(notice::conf(cfg))) if (w["id"] == id) { window = w; break; }
+            }
+            if (window.is_null()) throw std::invalid_argument("通知窗口不存在，请刷新列表");
+            validateDestination(cfg, adapters, window);
+            std::set<std::string> ids; for (const auto& value : window["rule_ids"]) ids.insert(value.get<std::string>());
+            notice::notify(cfg, adapters, notice::kImportant, "这是一条测试通知。", "", "", "test", "", "", "", &ids, &window["channel"]);
+            reply(std::move(cb), {{"submitted", true}});
+        } catch (const std::exception& e) { fail(std::move(cb), e); }
+    }, {drogon::Post});
+}
 } // namespace
 void registerNoticeRuleRoutes(Database &db, ConfigManager &cfg, AdapterManager &adapters) {
+    registerWindows(db, cfg, adapters);
     auto &app = drogon::app();
     app.registerHandler("/api/system/notice/rules",
                         [&db, &cfg, &adapters](Req req, CB &&cb) {
@@ -97,6 +188,9 @@ void registerNoticeRuleRoutes(Database &db, ConfigManager &cfg, AdapterManager &
                                         next["rules"] = Json::array();
                                     next["rules"].push_back(r);
                                     save(cfg, conf, next);
+                                    notice::webManagementNotice(req, cfg, adapters, [&](const auto&) {
+                                        return notice::ruleChanged(r.value("name", std::string()), "新增", r["channels"].size());
+                                    });
                                     reply(std::move(cb), r);
                                     return;
                                 }
@@ -132,10 +226,13 @@ void registerNoticeRuleRoutes(Database &db, ConfigManager &cfg, AdapterManager &
                         },
                         {drogon::Get, drogon::Post});
     app.registerHandler("/api/system/notice/rules/{1}",
-                        [&cfg](Req req, CB &&cb, const std::string &id) {
+                        [&cfg, &adapters](Req req, CB &&cb, const std::string &id) {
                             try {
                                 std::lock_guard lock(notice_rules::configMutex());
                                 auto before = notice::conf(cfg), next = before;
+                                Json changed;
+                                for (const auto& rule : notice_rules::all(before))
+                                    if (rule.value("id", std::string()) == id) changed = rule;
                                 if (!notice_rules::remove(next, id))
                                     throw std::invalid_argument("通知规则不存在，请刷新列表");
                                 if (req->method() != drogon::Delete) {
@@ -146,8 +243,13 @@ void registerNoticeRuleRoutes(Database &db, ConfigManager &cfg, AdapterManager &
                                                   ? id
                                                   : "rule-" + drogon::utils::genRandomString(24);
                                     next["rules"].push_back(r);
+                                    changed = r;
                                 }
                                 save(cfg, before, next);
+                                notice::webManagementNotice(req, cfg, adapters, [&](const auto&) {
+                                    return notice::ruleChanged(changed.value("name", std::string()),
+                                        req->method() == drogon::Delete ? "删除" : "修改", changed["channels"].size());
+                                });
                                 reply(std::move(cb), Json::object());
                             } catch (const std::exception &e) {
                                 fail(std::move(cb), e);
@@ -176,6 +278,9 @@ void registerNoticeRuleRoutes(Database &db, ConfigManager &cfg, AdapterManager &
                 reply(std::move(cb), {{"accounts", accounts},
                                       {"catalog", events},
                                       {"smtp_ready", identity_email::validSettings(transport)},
+                                      {"legacy_smtp_ready", identity_email::validSettings(notice::conf(cfg).value("smtp", Json::object()))},
+                                      {"webhook_profiles", Json::array({"generic", "wecom", "dingtalk", "feishu", "custom"})},
+                                      {"webhook_variables", notice_webhook::variables()},
                                       {"smtp_host", transport.value("host", std::string())},
                                       {"smtp_from", transport.value("from", std::string())}});
             } catch (const std::exception &e) {
@@ -185,7 +290,7 @@ void registerNoticeRuleRoutes(Database &db, ConfigManager &cfg, AdapterManager &
         {drogon::Get});
     app.registerHandler(
         "/api/system/notice/targets",
-        [&db, &adapters](Req req, CB &&cb) {
+        [&db, &adapters, &cfg](Req req, CB &&cb) {
             try {
                 auto *st = db.getStorage();
                 if (!st)
@@ -226,8 +331,13 @@ void registerNoticeRuleRoutes(Database &db, ConfigManager &cfg, AdapterManager &
                                         {"delivery", "auto"},
                                         {"adapter_ids", Json::array()}});
                 }
-                for (auto &channel : rows)
+                const auto windows = notice_windows::all(notice::conf(cfg));
+                for (auto &channel : rows) {
                     channel["display_name"] = label(db, adapters, channel);
+                    for (const auto& window : windows) if (notice_windows::key(window["channel"]) == notice_windows::key(channel)) {
+                        channel["notice_window_id"] = window["id"]; break;
+                    }
+                }
                 reply(std::move(cb), {{"items", rows}, {"total", total}, {"page", page}, {"pageSize", size}});
             } catch (const std::exception &e) {
                 fail(std::move(cb), e);

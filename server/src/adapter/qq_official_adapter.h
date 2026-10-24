@@ -1314,7 +1314,7 @@ private:
     void dispatchEvent(const std::string& type,const json& data,const std::string& eventId){
         BotEvent ev; ev.platform=platform(); ev.adapterId=id_; ev.selfId=loginId_; ev.timestamp=qqprotocol::eventTime(data,std::time(nullptr)); ev.extra={{"event_id",eventId},{"event_type",type},{"data",data}};
         ev.extra["official_bot_id"] = appId_;   // 供事件层按 bot 映射 OpenID → 公共号
-        if(type=="GROUP_ADD_ROBOT"||type=="GROUP_DEL_ROBOT"){ev.type=type=="GROUP_ADD_ROBOT"?EventType::kGroupIncrease:EventType::kGroupDecrease;ev.groupId=data.value("group_openid",std::string());ev.userId=loginId_;ev.operatorId=data.value("op_member_openid",std::string());rememberPassiveEvent(MessageType::kGroup,ev.groupId,eventId);}
+        if(type=="GROUP_ADD_ROBOT"||type=="GROUP_DEL_ROBOT"){ev.type=type=="GROUP_ADD_ROBOT"?EventType::kGroupIncrease:EventType::kGroupDecrease;ev.subType=type=="GROUP_DEL_ROBOT"?"removed":"invite";ev.groupId=data.value("group_openid",std::string());ev.userId=loginId_;ev.operatorId=data.value("op_member_openid",std::string());rememberPassiveEvent(MessageType::kGroup,ev.groupId,eventId);}
         else if(type=="FRIEND_ADD"||type=="FRIEND_DEL"){ev.type=type=="FRIEND_ADD"?EventType::kFriendAdd:EventType::kOther;ev.userId=data.value("openid",std::string());if(type=="FRIEND_ADD")rememberPassiveEvent(MessageType::kPrivate,ev.userId,eventId);}
         else if(type=="GROUP_MEMBER_ADD"||type=="GROUP_MEMBER_REMOVE"){
             ev.type=type=="GROUP_MEMBER_ADD"?EventType::kGroupIncrease:EventType::kGroupDecrease;
@@ -1378,7 +1378,12 @@ private:
             if(type.rfind("CHANNEL_",0)==0)ev.extra["channel_id"]=qqprotocol::text(data,"id");
         }
         if(!ev.groupId.empty()) {
-            if(type=="GROUP_DEL_ROBOT") forgetNameGroup(ev.groupId);
+            if(type=="GROUP_DEL_ROBOT") {
+                // Snapshot names before removing per-group membership caches.
+                ev.extra["group_name"]=cachedGroupName(ev.groupId);
+                if(!ev.operatorId.empty())ev.extra["operator_name"]=cachedUserName(ev.operatorId,ev.groupId);
+                forgetNameGroup(ev.groupId);
+            }
             else {
                 rememberNameGroup(ev.groupId);
                 if(type=="GROUP_ADD_ROBOT"||type=="GROUP_MEMBER_ADD") {
@@ -1395,9 +1400,9 @@ private:
         }
         if(!ev.groupId.empty()){
             names_.rememberGroup(appId_,ev.groupId,QQOfficialNameCache::text(data,"group_name"));
-            ev.extra["group_name"]=getGroupName(ev.groupId);
+            if(!ev.extra.contains("group_name")||ev.extra["group_name"]=="")ev.extra["group_name"]=type=="GROUP_DEL_ROBOT"?cachedGroupName(ev.groupId):getGroupName(ev.groupId);
         }
-        if(!ev.operatorId.empty())ev.extra["operator_name"]=getUserName(ev.operatorId,ev.groupId);
+        if(!ev.operatorId.empty()&&(!ev.extra.contains("operator_name")||ev.extra["operator_name"]==""))ev.extra["operator_name"]=type=="GROUP_DEL_ROBOT"?cachedUserName(ev.operatorId,ev.groupId):getUserName(ev.operatorId,ev.groupId);
         if(eventCb_)eventCb_(ev);
     }
     bool acceptOfficialOnce(const std::string& key) {

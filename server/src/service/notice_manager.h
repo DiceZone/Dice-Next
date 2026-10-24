@@ -17,6 +17,7 @@
 #include "../adapter/adapter_interface.h"
 #include "notice_rules.h"
 #include "notice_content.h"
+#include "notice_event_text.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/sinks/base_sink.h>
 #include <string>
@@ -30,6 +31,7 @@
 #include <thread>
 #include <cstdlib>
 #include <ctime>
+#include <openssl/rand.h>
 
 namespace dice::notice {
 
@@ -125,26 +127,53 @@ inline std::string curlEsc(const std::string& s) {
 }
 
 // Webhook：后台线程 POST JSON（配置文件传参防注入，超时 10s，静默失败）。
-inline void webhookPostAsync(const std::string& url, const std::string& body) {
-    if (url.rfind("http", 0) != 0) return;
-    std::thread([url, body]() {
+inline void webhookPostAsync(const json& channel, const json& variables) {
+    std::thread([channel, variables, context = activeProcessingContext]() {
+        ProcessingScope scope(context); // Notification transport must never recursively notify.
         namespace fs = std::filesystem;
-        static std::atomic<long long> seq{0};
-        long long id = ++seq;
-        fs::path tmp = fs::temp_directory_path();
-        fs::path cfgF = tmp / ("dnwh_" + std::to_string(id) + ".cfg");
-        fs::path bodyF = tmp / ("dnwh_" + std::to_string(id) + ".body");
-        std::error_code ec;
+        struct Temp { fs::path dir; ~Temp() { if (!dir.empty()) { std::error_code ec; fs::remove_all(dir, ec); } } } temp;
         try {
-            { std::ofstream bf(bodyF, std::ios::binary); bf << body; }
-            std::ofstream cf(cfgF, std::ios::binary);
-            cf << "url = \"" << curlEsc(url) << "\"\nrequest = \"POST\"\nmax-time = 10\nsilent\n"
-               << "proto = \"=http,https\"\n"
-               << "header = \"Content-Type: application/json\"\n"
-               << "data-binary = \"@" << curlEsc(bodyF.string()) << "\"\n";
-        } catch (...) { fs::remove(cfgF, ec); fs::remove(bodyF, ec); return; }
-        dice::proc::curlConfig(cfgF);
-        fs::remove(cfgF, ec); fs::remove(bodyF, ec);
+            const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            const auto request = notice_webhook::build(channel, variables, now);
+            unsigned char random[16]; if (RAND_bytes(random, sizeof(random)) != 1) throw std::runtime_error("无法创建 Webhook 临时文件");
+            std::string nonce; static const char hex[] = "0123456789abcdef";
+            for (auto c : random) { nonce += hex[c >> 4]; nonce += hex[c & 15]; }
+            const auto dir = fs::temp_directory_path() / ("dicenext-webhook-" + nonce);
+            if (!fs::create_directory(dir)) throw std::runtime_error("无法创建 Webhook 临时目录");
+            temp.dir = dir; fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace);
+            const auto cfgF = dir / "curl.cfg", bodyF = dir / "body.json";
+            { std::ofstream body(bodyF, std::ios::binary); body << request.body; body.close(); if (!body) throw std::runtime_error("无法准备 Webhook 请求体"); }
+            {
+                std::ofstream config(cfgF, std::ios::binary);
+                config << "url = \"" << curlEsc(request.url) << "\"\nrequest = \"" << request.method << "\"\n"
+                    << "max-time = 15\nconnect-timeout = 5\nsilent\nfail\ngloboff\nproto = \"=http,https\"\n";
+                bool contentType = false;
+                for (auto it = request.headers.begin(); it != request.headers.end(); ++it) {
+                    auto key = it.key(); std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if (key == "content-type") contentType = true;
+                    config << "header = \"" << curlEsc(it.key() + ": " + it->get<std::string>()) << "\"\n";
+                }
+                if (!contentType) config << "header = \"Content-Type: application/json; charset=utf-8\"\n";
+                config << "data-binary = \"@" << curlEsc(bodyF.string()) << "\"\nwrite-out = \"\\nDN_HTTP_STATUS:%{http_code}\"\n";
+                config.close(); if (!config) throw std::runtime_error("无法准备 Webhook 请求配置");
+            }
+            const auto result = dice::proc::curlConfig(cfgF, 64 * 1024);
+            const auto marker = result.output.rfind("\nDN_HTTP_STATUS:");
+            int status = 0; if (marker != std::string::npos) try { status = std::stoi(result.output.substr(marker + 16)); } catch (...) {}
+            if (!result.ok() || result.truncated || status < 200 || status >= 300) {
+                DICE_LOG_WARN_M("通知", "Webhook 请求未完成（HTTP {}，curl {}），请检查通知窗口地址及服务端状态。", status, result.exitCode); return;
+            }
+            const auto profile = channel.value("profile", std::string("generic"));
+            if (profile == "wecom" || profile == "dingtalk" || profile == "feishu") {
+                const auto reply = json::parse(result.output.substr(0, marker), nullptr, false);
+                const auto key = profile == "feishu" ? "code" : "errcode";
+                if (!reply.is_object() || !reply.contains(key) || !reply[key].is_number_integer() || reply[key] != 0)
+                    DICE_LOG_WARN_M("通知", "Webhook 服务端未确认成功，请检查机器人关键词、签名密钥及推送权限。");
+            }
+        } catch (const std::exception&) {
+            // Never echo a URL, header, payload or provider response containing credentials.
+            DICE_LOG_WARN_M("通知", "Webhook 请求准备失败，请检查通知窗口的地址、请求模板与签名设置。");
+        }
     }).detach();
 }
 
@@ -214,7 +243,8 @@ inline void smtpSendAsync(const json& s, const std::string& subject, const std::
 inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, const std::string &msg,
                    const std::string &originPlatform = "", const std::string &originChat = "",
                    const std::string &op = "", const std::string &originAdapterId = "",
-                   const std::string &ruleId = "") {
+                   const std::string &ruleId = "", const std::string& displayTitle = "",
+                   const std::set<std::string>* ruleIds = nullptr, const json* destination = nullptr) {
     auto processing = activeProcessingContext;
     if (processing.origin.adapterId.empty()) processing.origin.adapterId = originAdapterId;
     if (processing.origin.platform.empty()) processing.origin.platform = originPlatform;
@@ -224,42 +254,47 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
     const auto fromPlatform = originPlatform.empty() ? processing.origin.platform : originPlatform;
     const auto fromAdapter = originAdapterId.empty() ? processing.origin.adapterId : originAdapterId;
     const auto fromChat = originChat.empty() ? (!processing.origin.groupId.empty() ? processing.origin.groupId : processing.origin.userId) : originChat;
+    const auto title = displayTitle.empty() ? eventTitle(op) : readable(displayTitle, 120);
     const auto content = notificationText(level, op, msg, processing,
-        utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%d %H:%M:%S"));
+        utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%d %H:%M:%S"), title);
     ProcessingScope source(ProcessingContext{
-        {{"通知", eventTitle(op), "", ""}}, processing.trigger, "通知内容已生成", processing.origin});
+        {{"通知", title, "", ""}}, processing.trigger, "通知内容已生成", processing.origin});
     OutboundScope independentNotification(nullptr);
     std::string origin = fromChat.empty() ? std::string() : (fromPlatform + ":" + fromChat);
     audit(level, content, op, origin);
     json c = conf(cfg);
     std::set<std::string> delivered;
     for (const auto &rule : notice_rules::all(c)) {
+        if (ruleIds && !ruleIds->count(rule.value("id", std::string()))) continue;
         if (!ruleId.empty() && rule.value("id", std::string()) != ruleId)
             continue;
         if (op != "test" && (!notice_rules::subscribed(rule, level, op) ||
                              !notice_rules::sourceMatches(rule, fromPlatform, fromAdapter)))
             continue;
-        if (op == "test" && ruleId.empty() && !rule.value("enabled", true))
+        if (op == "test" && ruleId.empty() && !ruleIds && !rule.value("enabled", true))
             continue;
         for (const auto &channel : rule.value("channels", json::array())) {
+            if (destination && notice_rules::destinationKey(channel) != notice_rules::destinationKey(*destination)) continue;
             const auto kind = channel.value("kind", std::string());
             if (kind == "webhook") {
                 const auto url = channel.value("url", std::string());
                 if (notice_rules::webhook(url) && delivered.insert("webhook:" + url).second)
-                    webhookPostAsync(url, json{{"ts", utils::formatTimeInTimezone(std::time(nullptr),
+                    webhookPostAsync(channel, json{{"time", utils::formatTimeInTimezone(std::time(nullptr),
                                                                                   "%Y-%m-%d %H:%M:%S")},
                                                {"level", level},
-                                               {"op", op},
-                                               {"title", eventTitle(op)},
-                                               {"msg", content},
-                                               {"origin", origin}}
-                                              .dump());
+                                               {"level_name", levelNames(level)},
+                                               {"event", op},
+                                               {"title", title},
+                                               {"message", content}, {"origin", origin},
+                                               {"platform", processing.origin.platform}, {"adapter_id", processing.origin.adapterId},
+                                               {"account_id", processing.origin.accountId}, {"group_id", processing.origin.groupId},
+                                               {"group_name", processing.origin.groupName}, {"user_id", processing.origin.userId}, {"user_name", processing.origin.userName}});
                 continue;
             }
             if (kind == "smtp") {
                 const auto to = channel.value("to", std::string());
-                if (notice_rules::mailbox(to) && delivered.insert("smtp:" + to).second)
-                    smtpSendAsync(notice_rules::smtpTransport(cfg.getAll(), c, channel), "[Dice!Next] " + eventTitle(op),
+                if (notice_rules::mailbox(to) && delivered.insert(notice_rules::destinationKey(channel)).second)
+                    smtpSendAsync(notice_rules::smtpTransport(cfg.getAll(), c, channel), "[Dice!Next] " + title,
                                   content);
                 continue;
             }
@@ -350,6 +385,53 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
             }
         }
     }
+}
+
+inline void emit(ConfigManager& cfg, AdapterManager& adapters, const EventText& text,
+                 const std::string& adapterId = "") {
+    notify(cfg, adapters, text.level, text.body, "", "", text.operation, adapterId, "", text.title);
+}
+// Notification delivery must not turn an already committed management change
+// into an apparent failure (and cause the caller to repeat that change).
+inline void emitSafely(ConfigManager& cfg, AdapterManager& adapters, const EventText& text,
+                       const std::string& adapterId = "") noexcept {
+    try { emit(cfg, adapters, text, adapterId); }
+    catch (const std::exception& error) {
+        try { DICE_LOG_WARN("管理操作已执行，但未能生成通知：{}", error.what()); } catch (...) {}
+    } catch (...) {
+        try { DICE_LOG_WARN("管理操作已执行，但未能生成通知：未知异常"); } catch (...) {}
+    }
+}
+
+// Queueing an adapter action is not a leave confirmation. Correlate a later
+// platform event without changing group policy, permissions or punishment.
+inline bool requestGroupLeave(ConfigManager& cfg, AdapterManager& adapters, const AdapterPtr& adapter,
+                              const std::string& groupId, LeaveIntent intent) {
+    auto context = activeProcessingContext;
+    if (adapter) {
+        context.origin.platform = adapter->platform(); context.origin.adapterId = adapter->id();
+        context.origin.accountId = adapter->getLoginId();
+    }
+    context.origin.groupId = groupId; context.origin.groupName = intent.groupName;
+    context.origin.targetId.clear(); context.origin.targetName.clear();
+    enrichOrigin(context.origin, adapters);
+    if (intent.groupName.empty()) intent.groupName = context.origin.groupName;
+    if (intent.actor.userId.empty() && intent.actor.entry.empty()) intent.actor = context.origin;
+    ProcessingScope originScope(std::move(context));
+    auto failed = [&](const std::string& error) {
+        emitSafely(cfg, adapters, {"leave_error", "退群请求失败", requestedBy(intent) + "请求骰娘退出" +
+            groupIdentity(intent.groupName, groupId) + "失败：" + readable(error, 1000) + "。", 8}, adapter ? adapter->id() : "");
+        return false;
+    };
+    if (groupId.empty()) return failed("未提供群帐号，未提交退群请求");
+    if (!adapter || !adapter->isConnected()) return failed("来源适配器未连接，未提交退群请求");
+    if (!adapter->supportsGroupLeave()) return failed("此适配器不支持主动退群，未提交退群请求");
+    const auto request = LeaveIntents::instance().remember(adapter->id(), adapter->platform(), groupId, intent);
+    try { adapter->leaveGroup(groupId); }
+    catch (const std::exception& error) { LeaveIntents::instance().cancel(request); return failed(error.what()); }
+    catch (...) { LeaveIntents::instance().cancel(request); return failed("退群接口抛出未知异常"); }
+    emitSafely(cfg, adapters, leaveRequested(groupId, intent), adapter->id());
+    return true;
 }
 
 // ─── 运行报错推送 ──────────────────────────────────────────────────

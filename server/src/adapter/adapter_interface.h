@@ -83,6 +83,8 @@ enum class EventType {
     kGroupRecall,     // 群消息撤回（extra.message_id = 被撤回消息）
     kGroupHistory,    // 历史消息拉取结果（extra.messages = OneBot 消息数组）
     kGroupUpload,     // 群文件上传（extra.file = {id,name,size,busid}）
+    kGroupBan,        // 群禁言／解除禁言（含全体禁言；extra.duration 为秒）
+    kGroupAdmin,      // 群管理员设置／取消
     kOther,
 };
 

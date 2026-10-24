@@ -4999,6 +4999,8 @@ private:
             if (enabled == requested)
                 return i18n_.tr(loc, enabled ? "bot.feature_already_on" : "bot.feature_already_off", {{"feature", name}});
             const auto warning = updateGroupControl(loc, msg, feature, requested);
+            notifyMasters({"group_control", "群功能开关变更", "已" + std::string(requested ? "启用" : "停用") +
+                dice::notice::groupIdentity(groupSettingValue(msg.platform, msg.targetId, "name", msg.adapterId), msg.targetId) + "的「" + name + "」功能。", 2}, msg.adapterId);
             return i18n_.tr(loc, requested ? "bot.feature_on" : "bot.feature_off", {{"feature", name}})
                 + (warning.empty() ? "" : "\n" + warning);
         }
@@ -5006,11 +5008,16 @@ private:
         const bool currentlyOff = (getGroupSetting(msg, "enabled") == "0");
         if (action == "on") {
             if (!currentlyOff) return i18n_.tr(loc, "bot.already_on");
-            updateGroupControl(loc, msg, "", true);  return i18n_.tr(loc, "bot.on");
+            updateGroupControl(loc, msg, "", true);
+            notifyMasters({"group_control", "群指令开关变更", "已启用" + dice::notice::groupIdentity(
+                groupSettingValue(msg.platform, msg.targetId, "name", msg.adapterId), msg.targetId) + "的普通指令响应。", 2}, msg.adapterId);
+            return i18n_.tr(loc, "bot.on");
         }
         if (action == "off") {
             if (currentlyOff) return i18n_.tr(loc, "bot.already_off");
             const auto warning = updateGroupControl(loc, msg, "", false);
+            notifyMasters({"group_control", "群指令开关变更", "已停用" + dice::notice::groupIdentity(
+                groupSettingValue(msg.platform, msg.targetId, "name", msg.adapterId), msg.targetId) + "的普通指令响应。", 2}, msg.adapterId);
             return i18n_.tr(loc, "bot.off") + (warning.empty() ? "" : "\n" + warning);
         }
         // 三行系统信息固定置顶；原版 strBotHeader / strBotMsg 仅作为附加说明。
@@ -6560,7 +6567,7 @@ public:
         setTrust(msg.platform, target, nl);
         std::string origin = (msg.type == MessageType::kGroup) ? msg.targetId : msg.senderId;
         dice::notice::notify(cfg_, adapters_, dice::notice::kRoutine,
-            "\xe5\xb7\xb2\xe5\xb0\x86 " + name + "(" + target + ") \xe7\x9a\x84\xe4\xbf\xa1\xe4\xbb\xbb\xe7\xad\x89\xe7\xba\xa7\xe8\xae\xbe\xe4\xb8\xba " + std::to_string(nl),
+            "已将" + dice::notice::identity(name, target) + "的信任等级从 " + std::to_string(cur) + " 调整为 " + std::to_string(nl) + "。",
             msg.platform, origin, "trust", msg.adapterId);
         return i18n_.tr(loc, "trust.set", {{"user", name}, {"level", std::to_string(nl)}});
     }
@@ -6585,8 +6592,8 @@ public:
         const std::string origin = msg.type == MessageType::kGroup ? msg.targetId : msg.senderId;
         dice::notice::notify(cfg_, adapters_, censor::noticeMask(match.level),
             i18n_.tr(loc, "censor.owner_notice", {
-                {"user", msg.senderId},
-                {"target", origin}, {"level", censor::levelName(match.level)},
+                {"user", dice::notice::identity(msg.senderName, msg.senderId)},
+                {"target", msg.type == MessageType::kGroup ? dice::notice::groupIdentity(groupSettingValue(msg.platform, msg.targetId, "name", msg.adapterId), origin) : "私聊"}, {"level", censor::levelName(match.level)},
                 {"count", std::to_string(match.words.size())}
             }), msg.platform, origin, "censor", msg.adapterId);
 
@@ -6730,14 +6737,14 @@ public:
         if (act == "add") {
             setTrust(msg.platform, target, kTrustAdmin);
             dice::notice::notify(cfg_, adapters_, dice::notice::kCritical,
-                "\xe5\xb7\xb2\xe6\xb7\xbb\xe5\x8a\xa0 " + name + "(" + target + ") \xe7\x9a\x84\xe7\xae\xa1\xe7\x90\x86\xe6\x9d\x83\xe9\x99\x90",
+                "已授予" + dice::notice::identity(name, target) + "骰娘管理权限。",
                 msg.platform, origin, "admin", msg.adapterId);
             return i18n_.tr(loc, "admin.added", {{"user", name}});
         }
         if (getTrust(msg.platform, target) < kTrustAdmin) return i18n_.tr(loc, "admin.not_admin");
         setTrust(msg.platform, target, kTrustNormal);
         dice::notice::notify(cfg_, adapters_, dice::notice::kCritical,
-            "\xe5\xb7\xb2\xe6\x94\xb6\xe5\x9b\x9e " + name + "(" + target + ") \xe7\x9a\x84\xe7\xae\xa1\xe7\x90\x86\xe6\x9d\x83\xe9\x99\x90",
+            "已收回" + dice::notice::identity(name, target) + "的骰娘管理权限。",
             msg.platform, origin, "admin", msg.adapterId);
         return i18n_.tr(loc, "admin.removed", {{"user", name}});
     }
@@ -6801,6 +6808,8 @@ public:
                     row.lastRun = clockTime <= hm
                         ? utils::formatTimeInTimezone(current, "%Y-%m-%d") : std::string();
                     if (updating) st->update(row); else st->insert(row);
+                    notifyMasters({"schedule_manage", "定时任务变更", "已" + std::string(updating ? "修改" : "添加") +
+                        "定时指令任务「" + request.name + "」，每天服务器时间 " + clockTime + " 执行。\n指令：" + dice::notice::triggerText(request.command), 1}, msg.adapterId);
                     return i18n_.tr(loc, "admin.clock_command_added", {
                         {"task", request.name}, {"time", clockTime}, {"command", request.command}});
                 } catch (const std::exception& e) {
@@ -6833,6 +6842,8 @@ public:
                 row.lastRun = clockTime <= hm
                     ? utils::formatTimeInTimezone(current, "%Y-%m-%d") : std::string();
                 if (updating) st->update(row); else st->insert(row);
+                notifyMasters({"schedule_manage", "定时任务变更", "已" + std::string(updating ? "修改" : "添加") +
+                    "全局 Lua 定时函数「" + request.name + "」，每天服务器时间 " + clockTime + " 执行。", 1}, msg.adapterId);
                 return i18n_.tr(loc, "admin.clock_added", {{"task", request.name}, {"time", clockTime}});
             } catch (const std::exception& e) {
                 DICE_LOG_ERROR("failed to save legacy Lua clock '{}': {}", request.name, e.what());
@@ -6858,6 +6869,7 @@ public:
                     }
                 }
             } catch (...) { return i18n_.tr(loc, "admin.clock_error"); }
+            if (removed) notifyMasters({"schedule_manage", "定时任务变更", "已删除定时任务「" + request.name + "」，共 " + std::to_string(removed) + " 条。", 1}, msg.adapterId);
             return removed ? i18n_.tr(loc, "admin.clock_removed", {{"task", request.name}})
                            : i18n_.tr(loc, "admin.clock_schedule_not_found", {{"task", request.name}});
         }
@@ -6904,7 +6916,16 @@ public:
                 if (remaining > 0) wins[idx]["level_mask"] = remaining;
                 else wins.erase(wins.begin() + idx);
             }
-            nc["windows"] = wins; cfg_.set<J>("dice/notice", nc); cfg_.save();
+            nc["windows"] = wins;
+            if (!cfg_.setAndSave("dice/notice", nc)) return false;
+            auto context = activeProcessingContext;
+            context.origin.targetId = chatId; context.origin.targetType = isGroup ? "group" : "user";
+            context.origin.targetName.clear(); dice::notice::enrichOrigin(context.origin, adapters_);
+            const auto target = isGroup ? dice::notice::groupIdentity(context.origin.targetName, chatId)
+                : dice::notice::identity(context.origin.targetName, chatId);
+            ProcessingScope scope(std::move(context));
+            dice::notice::emitSafely(cfg_, adapters_, {"notice_manage", "通知订阅变更", "已调整" + target +
+                "的通知订阅，" + std::string(change[0] == '+' ? "增加" : "移除") + dice::notice::levelNames(mask) + "级通知。", 1}, adapterId);
             return true;
         } catch (const std::exception& e) {
             DICE_LOG_ERROR("failed to update legacy Lua notice window: {}", e.what());
@@ -6989,6 +7010,7 @@ public:
                 return i18n_.tr(loc, "trust.target_higher");
             const bool fresh = !banlistHas(0, 0, target);
             banlistAdd(0, 0, target, reason.empty() ? "local diss" : reason);
+            if (fresh) notifyListChange(0, 0, target, true, reason);
             return i18n_.tr(loc, fresh ? "legacy_user.dissed" : "legacy_user.already_dissed",
                             {{"user", target}});
         }
@@ -7081,7 +7103,35 @@ public:
     /// B：便捷推送——把一条通知发给订阅了该级别的骰主通知窗口（供事件层/定时任务调用）。
     void notifyMasters(int level, const std::string& msg, const std::string& op = "",
                        const std::string& adapterId = "") {
-        dice::notice::notify(cfg_, adapters_, level, msg, "", "", op, adapterId);
+        dice::notice::emitSafely(cfg_, adapters_, {op, "", msg, level}, adapterId);
+    }
+    void notifyMasters(const dice::notice::EventText& text, const std::string& adapterId = "") {
+        dice::notice::emitSafely(cfg_, adapters_, text, adapterId);
+    }
+    bool requestGroupLeave(const AdapterPtr& adapter, const std::string& groupId,
+                           const std::string& cause, const std::string& operation = "leave",
+                           const std::string& reason = "") {
+        dice::notice::LeaveIntent intent;
+        intent.cause = cause; intent.operation = operation; intent.reason = reason;
+        return dice::notice::requestGroupLeave(cfg_, adapters_, adapter, groupId, std::move(intent));
+    }
+    void notifyListChange(int type, int list, const std::string& id, bool added, const std::string& reason = "") {
+        // Old list mutators may swallow database errors. Verify the resulting
+        // state rather than announcing a change that was never applied.
+        auto* storage = db_.getStorage();
+        if (!storage) return;
+        try {
+            const bool present = storage->count<BanlistRow>(orm::where(
+                orm::c(&BanlistRow::targetType) == type && orm::c(&BanlistRow::listType) == list &&
+                orm::c(&BanlistRow::targetId) == id)) > 0;
+            if (present != added) return;
+        } catch (...) { return; }
+        auto context = activeProcessingContext;
+        context.origin.targetId = id; context.origin.targetType = type == 1 ? "group" : "user";
+        context.origin.targetName.clear(); dice::notice::enrichOrigin(context.origin, adapters_);
+        const auto name = context.origin.targetName;
+        ProcessingScope scope(std::move(context));
+        dice::notice::emitSafely(cfg_, adapters_, dice::notice::listChanged(type, list, id, name, added, reason));
     }
 
     /// .link：消息从 (platform,gid) 应转发到的目标群列表（active 链接；with=双向，
@@ -7149,7 +7199,8 @@ public:
                 if (!matches) remaining.push_back(window);
             }
             nc["windows"] = remaining;dice::notice_rules::removeChat(nc,plat,msg.adapterId,chatId,isGroup);
-            cfg_.set<J>("dice/notice", nc); cfg_.save();
+            if (!cfg_.setAndSave("dice/notice", nc)) return i18n_.tr(loc, "notice.save_failed");
+            dice::notice::emitSafely(cfg_, adapters_, {"notice_manage", "通知订阅变更", "已关闭当前聊天的通知订阅。", 1}, msg.adapterId);
             return i18n_.tr(loc, "notice.removed");
         }
         int mask = dice::notice::kAll;
@@ -7166,7 +7217,8 @@ public:
         if (idx >= 0) { if (wins[idx].contains("name")) w["name"] = wins[idx]["name"]; wins[idx] = w; }
         else wins.push_back(w);
         nc["windows"] = wins;dice::notice_rules::removeChat(nc,plat,msg.adapterId,chatId,isGroup);
-        cfg_.set<J>("dice/notice", nc); cfg_.save();
+        if (!cfg_.setAndSave("dice/notice", nc)) return i18n_.tr(loc, "notice.save_failed");
+        dice::notice::emitSafely(cfg_, adapters_, {"notice_manage", "通知订阅变更", "已将当前聊天的通知级别设置为" + dice::notice::levelNames(mask) + "。", 1}, msg.adapterId);
         return i18n_.tr(loc, "notice.set", {{"level", std::to_string(mask)}});
     }
 
@@ -7204,6 +7256,9 @@ public:
             for (auto& a : arr) { if (a.is_object() && a.value("alias", std::string()) == a1) { found = true; continue; } na.push_back(a); }
             if (!found) return i18n_.tr(loc, "alias.not_found");
             cfg_.set<J>("dice/aliases", na); cfg_.save();
+            dice::notice::notify(cfg_, adapters_, dice::notice::kRoutine,
+                "已解除帐号别名 " + a1 + " 的绑定。", msg.platform,
+                msg.type == MessageType::kGroup ? msg.targetId : msg.senderId, "alias", msg.adapterId);
             return i18n_.tr(loc, "alias.removed", {{"alias", a1}});
         }
         return i18n_.tr(loc, "alias.usage");
@@ -7430,6 +7485,8 @@ private:
             if (gid.empty()) return std::nullopt;   // 裸 botoff/boton → 交给 .bot（本群开关）
             if (!isMaster(msg)) return i18n_.tr(loc, "gate.not_master");
             setGroupSettingFor(msg.platform, gid, "enabled", w == "boton" ? "1" : "0", msg.adapterId);
+            notifyMasters({"group_control", "群指令开关变更", "已通过指令 ." + w + (w == "boton" ? "启用" : "停用") +
+                dice::notice::groupIdentity(groupSettingValue(msg.platform, gid, "name", msg.adapterId), gid) + "的指令响应。", 2}, msg.adapterId);
             return i18n_.tr(loc, w == "boton" ? "master.boton" : "master.botoff", {{"group", gid}});
         }
 
@@ -7455,10 +7512,11 @@ private:
         std::string joined;
         int n = 0;
         for (const auto& id : ids) {
-            if (erase) { if (banlistRemove(type, list, id)) ++n; }
+            if (erase) { if (banlistRemove(type, list, id)) { ++n; notifyListChange(type, list, id, false); } }
             else {
                 bool fresh = !banlistHas(type, list, id);
                 banlistAdd(type, list, id, ""); ++n;
+                if (fresh) notifyListChange(type, list, id, true);
                 // 主人主动拉黑（仅黑名单、仅新增）→ 云黑上报钩子。
                 if (fresh && list == 0 && onMasterBan)
                     onMasterBan(type == 0 ? "user" : "group", id, "");
@@ -8144,22 +8202,24 @@ private:
         int delay = silent ? 0 : std::uniform_int_distribution<int>(10, 60)(rng);
         const std::string plat = msg.platform, gid = msg.targetId, aid = msg.adapterId;
         DICE_LOG_INFO(".dismiss：群 {} {}，{} 秒后退群", gid,
-                      silent ? "完全禁用状态下静默执行" : "已发退群宣言", delay);
-        drogon::app().getLoop()->runAfter(static_cast<double>(delay), [this, plat, gid, aid, context=activeProcessingContext]() {
+                      silent ? "完全禁用状态下静默执行" : "准备发送退群宣言", delay);
+        auto dismissalContext = activeProcessingContext;
+        if (dismissalContext.origin.userId.empty()) dismissalContext.origin = adapters_.logOrigin(msg);
+        drogon::app().getLoop()->runAfter(static_cast<double>(delay), [this, plat, gid, aid, context=std::move(dismissalContext)]() {
             ProcessingScope originScope(context);
             auto a = adapters_.getAdapter(aid);
-            if (!a || !a->isConnected())
+            if (aid.empty() && (!a || !a->isConnected()))
                 for (auto& x : adapters_.allAdapters())
                     if (x->isConnected() && x->platform() == plat) { a = x; break; }
-            if (a) a->leaveGroup(gid);
+            const bool submitted = requestGroupLeave(a, gid, "指令 .dismiss", "dismiss");
             setGroupSettingFor(plat, gid, "leaving", "0", aid);
+            if (!submitted) {
+                setGroupSettingFor(plat, gid, kLeaveRequestedAt, "", aid);
+                return;
+            }
             setGroupSettingFor(plat, gid, "left", "1", aid);
             setGroupSettingFor(plat, gid, kLeaveRequestedAt, leaveRequestStamp(), aid);
-            DICE_LOG_INFO(".dismiss：已退出群 {}（记录保留，状态=已退群）", gid);
-            // B：指令退群通知骰主。
-            dice::notice::notify(cfg_, adapters_, dice::notice::kImportant,
-                "\xe6\x8c\x87\xe4\xbb\xa4\xe9\x80\x80\xe7\xbe\xa4\xef\xbc\x9a\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe7\xbe\xa4 " + gid,
-                plat, gid, "dismiss", aid);
+            DICE_LOG_INFO(".dismiss：群 {} 的退群请求已提交，等待平台确认（记录保留）", gid);
         });
         return silent ? "" : i18n_.tr(loc, "dismiss.leaving");
     }
@@ -10231,9 +10291,15 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     /// Blacklist/trust ops for JS plugins' seal.ban.*  (op: ban/trust/remove).
     void jsBanOp(const std::string& op, const std::string& id, const std::string& reason) {
         if (id.empty()) return;
-        if (op == "ban")        banlistAdd(0, 0, id, reason);      // user, blacklist
-        else if (op == "trust") banlistAdd(0, 1, id, reason);      // user, whitelist(trust)
-        else if (op == "remove") { banlistRemove(0, 0, id); banlistRemove(0, 1, id); }
+        if (op == "ban" || op == "trust") {
+            const int list = op == "ban" ? 0 : 1;
+            const bool fresh = !banlistHas(0, list, id);
+            banlistAdd(0, list, id, reason);
+            if (fresh) notifyListChange(0, list, id, true, reason);
+        } else if (op == "remove") {
+            if (banlistRemove(0, 0, id)) notifyListChange(0, 0, id, false);
+            if (banlistRemove(0, 1, id)) notifyListChange(0, 1, id, false);
+        }
     }
 
     /// 主人主动拉黑（.blackqq/.blackgroup 新增）时的外部钩子——云黑上报挂在这里
@@ -10964,14 +11030,12 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         context.origin.groupName.clear();
         ProcessingScope leaveScope(std::move(context));
         if (!reason.empty()) a->sendGroupMessage(gid, applySelf(lm, reason));
-        setGroupSettingFor(a->platform(), gid, kLeaveRequestedAt, leaveRequestStamp(), a->id());
-        a->leaveGroup(gid);
-        // B：退群通知骰主（定时任务退群/不活跃自动退群/网页退群等都走这里）。
-        dice::notice::notify(cfg_, adapters_, dice::notice::kImportant,
-            "\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe7\xbe\xa4 " + gid
-                + (reason.empty() ? std::string() : ("\xef\xbc\x88" + reason + "\xef\xbc\x89")),
-            platform, gid, "leave", adapterId);
-        return true;
+        std::string cause = "主动退群";
+        for (const auto& source : activeProcessingContext.sources)
+            if (source.kind == "定时任务") cause = "定时任务「" + source.name + "」";
+        const bool submitted = requestGroupLeave(a, gid, cause, "leave", reason);
+        if (submitted) setGroupSettingFor(a->platform(), gid, kLeaveRequestedAt, leaveRequestStamp(), a->id());
+        return submitted;
     }
 
 private:

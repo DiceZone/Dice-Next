@@ -1,4 +1,5 @@
 #pragma once
+#include "group_notice_semantics.h"
 #include "outbound_logging.h"
 #include "onebot_account_identity.h"
 #include "onebot_member_snapshot.h"
@@ -1198,6 +1199,7 @@ private:
             const std::string nt = j.value("notice_type", "");
             if (nt == "group_increase")      { ev.type = EventType::kGroupIncrease; label = "入群"; }
             else if (nt == "group_decrease") { ev.type = EventType::kGroupDecrease; label = "退群"; }
+            else if (oneBotModerationEvent(ev, nt, j)) { label = nt == "group_ban" ? "群禁言状态变更" : "群管理员变更"; }
             else if (nt == "friend_add")     { ev.type = EventType::kFriendAdd;     label = "新好友"; }
             else if (nt == "notify" && j.value("sub_type", "") == "poke") {
                 ev.type = EventType::kPoke;

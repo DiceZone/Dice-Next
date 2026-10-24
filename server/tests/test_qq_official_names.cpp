@@ -476,6 +476,20 @@ TEST(OfficialNames, RetiredGroupsAndStoppedAdaptersCannotResumeOrAcceptLateResul
     ASSERT_TRUE(stopped.db.getStorage()->get_all<PlayerProfileRow>().empty());
 }
 
+TEST(OfficialNames, BotRemovalPreservesOperatorNameBeforeRetiringGroupCache) {
+    NameFixture f(false);
+    f.group("admin", "踢人管理员");
+    const auto requestsBeforeLeaving = f.requests.size();
+    f.adapter->dispatchForTest("GROUP_DEL_ROBOT", {{"group_openid", "group-A"}, {"op_member_openid", "admin"}});
+    ASSERT_EQ(f.requests.size(), requestsBeforeLeaving);
+    ASSERT_FALSE(f.events.empty());
+    const auto& event = f.events.back();
+    ASSERT_TRUE(event.type == EventType::kGroupDecrease);
+    ASSERT_EQ(event.subType, std::string("removed"));
+    ASSERT_EQ(event.operatorId, std::string("admin"));
+    ASSERT_EQ(event.extra["operator_name"], json("踢人管理员"));
+}
+
 TEST(OfficialNames, RejoiningDoesNotReviveAQueryFromBeforeLeaving) {
     NameFixture f(false); f.adapter->setNameTimeForTest(1000); f.group("seed", "名字");
     f.adapter->getMembers("group-A");

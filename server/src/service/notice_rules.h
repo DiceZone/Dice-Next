@@ -1,4 +1,5 @@
 #pragma once
+#include "notice_webhook.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -24,7 +25,11 @@ inline const std::vector<std::pair<std::string, int>> &catalog() {
         {"nonfriend_leave", 2}, {"keyword_leave", 2}, {"schedule", 2},
         {"global", 2},          {"censor", 2},        {"update_available", 2},
         {"update_result", 2},   {"admin", 4},         {"blacklist", 4},
-        {"error", 8},           {"update_error", 8}};
+        {"error", 8},           {"update_error", 8},
+        {"group_joined", 2},    {"group_request", 2}, {"group_ban", 2},
+        {"group_admin", 2},     {"group_size_leave", 2}, {"group_auto_clean", 2},
+        {"usergroup_leave", 2}, {"leave_error", 8},
+        {"group_control", 2},   {"schedule_manage", 1}, {"notice_manage", 1}};
     return value;
 }
 inline bool clean(const std::string &s, size_t max = 1024) {
@@ -37,13 +42,15 @@ inline bool mailbox(const std::string &s) {
            s.find('@', at + 1) == std::string::npos && s.find_first_of(" <>\"\\,;:") == std::string::npos;
 }
 inline bool webhook(const std::string &s) {
-    if (!clean(s, 2048))
-        return false;
-    const auto start = s.rfind("https://", 0) == 0 ? 8 : s.rfind("http://", 0) == 0 ? 7 : 0;
-    if (!start || s.size() <= static_cast<size_t>(start))
-        return false;
-    const auto host = s.substr(start, s.find_first_of("/?#", start) - start);
-    return !host.empty() && host.find('@') == std::string::npos;
+    return notice_webhook::validUrl(s);
+}
+// Destination identity is independent of subscriptions and sending accounts.
+inline std::string destinationKey(const Json& channel) {
+    const auto kind = channel.value("kind", std::string());
+    if (kind == "chat") return Json::array({kind, channel.value("platform", std::string()), channel.value("chat_id", std::string()), channel.value("is_group", true)}).dump();
+    auto address = channel.value(kind == "smtp" ? "to" : "url", std::string());
+    if (kind == "smtp") std::transform(address.begin(), address.end(), address.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return Json::array({kind, address}).dump();
 }
 inline std::string legacyId(const Json &w) {
     const auto text = Json::array({w.value("platform", std::string()), w.value("adapter_id", std::string()),
@@ -131,7 +138,7 @@ inline Json normalize(const Json &in) {
             const auto url = c.value("url", std::string());
             if (!webhook(url))
                 throw std::invalid_argument("Invalid Webhook URL");
-            ch = {{"kind", kind}, {"url", url}};
+            ch = notice_webhook::normalize(c);
         } else
             throw std::invalid_argument("Unknown notification channel");
         if (seen.insert(ch.dump()).second)

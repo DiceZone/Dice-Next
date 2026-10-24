@@ -55,20 +55,30 @@ inline std::string eventTitle(const std::string &op) {
         {"friend_req", "收到好友申请"},
         {"friend_add", "新好友已添加"},
         {"group_invite", "收到加群邀请"},
-        {"leave", "已退出群聊"},
+        {"leave", "退群请求"},
         {"dismiss", "退群操作"},
         {"group_left", "骰娘离开群聊"},
+        {"group_joined", "骰娘加入群聊"},
+        {"group_request", "群成员入群申请"},
+        {"group_ban", "骰娘／全群禁言变更"},
+        {"group_admin", "骰娘群管理权限变更"},
+        {"group_size_leave", "群规模超限退群"},
+        {"group_auto_clean", "自动清理群聊"},
+        {"usergroup_leave", "用户群要求触发退群"},
+        {"leave_error", "退群请求失败"},
+        {"group_control", "群指令开关变更"},
+        {"schedule_manage", "定时任务变更"},
+        {"notice_manage", "通知订阅变更"},
         {"blacklist_leave", "黑名单触发退群"},
         {"nonfriend_leave", "非好友邀请触发退群"},
         {"keyword_leave", "群名规则触发退群"},
-        {"group_size_leave", "群规模超限退群"},
         {"schedule", "定时任务"},
         {"global", "全局设置变更"},
         {"censor", "敏感词检测"},
         {"update_available", "发现新版本"},
         {"update_result", "更新进度与结果"},
         {"admin", "管理权限变更"},
-        {"blacklist", "黑名单变更"},
+        {"blacklist", "黑白名单变更"},
         {"error", "运行错误"},
         {"update_error", "程序更新失败"},
         {"test", "测试通知"}};
@@ -90,7 +100,7 @@ inline std::string contextText(const ProcessingOrigin &o, const std::string &bod
     std::vector<std::string> parts;
     if (!o.groupId.empty() && body.find(o.groupId) == std::string::npos)
         parts.push_back("群" + identity(o.groupName, o.groupId, ""));
-    if (!o.userId.empty() && body.find(o.userId) == std::string::npos)
+    if (!o.userId.empty() && o.userId != "0" && o.userId != o.accountId && body.find(o.userId) == std::string::npos)
         parts.push_back("用户" + identity(o.userName, o.userId, ""));
     if (!o.targetId.empty() && o.targetId != o.groupId && o.targetId != o.userId &&
         body.find(o.targetId) == std::string::npos)
@@ -118,12 +128,32 @@ inline std::string triggerText(std::string text) {
             return "[身份验证内容已隐藏]";
     return readable(text, 800);
 }
+inline std::string operationActor(const ProcessingContext& processing) {
+    for (auto it = processing.sources.rbegin(); it != processing.sources.rend(); ++it)
+        if (it->kind.find("插件") != std::string::npos)
+            return it->name.empty() ? "插件" : "插件「" + readable(it->name, 240) + "」";
+    const auto& origin = processing.origin;
+    if (!origin.userId.empty()) return identity(origin.userName, origin.userId);
+    if (origin.entry.find("网页") != std::string::npos || origin.entry.find("Web") != std::string::npos)
+        return "面板操作人（未提供可核实的昵称和帐号）";
+    return "系统";
+}
+inline std::string levelNames(int mask) {
+    std::string result;
+    for (const auto& [bit, label] : std::vector<std::pair<int, const char*>>{
+             {1, "例行"}, {2, "重要"}, {4, "关键"}, {8, "错误"}})
+        if (mask & bit) result += (result.empty() ? "" : "、") + std::string(label);
+    return result.empty() ? "无" : result;
+}
 inline std::string notificationText(int /*level*/, const std::string &op, const std::string &message,
-                                    const ProcessingContext &processing, const std::string & /*time*/) {
+                                    const ProcessingContext &processing, const std::string & /*time*/,
+                                    const std::string& title = "") {
     // ErrorReport already contains its business title and useful context.
     if (op == "error")
         return readable(message, 6000);
-    std::string text = "[" + eventTitle(op) + "] " + readable(message, 10000);
+    const bool management = op == "trust" || op == "alias" || op == "global" || op == "admin" || op == "blacklist" || op == "schedule_manage" || op == "notice_manage" || op == "group_control";
+    std::string text = "[" + (title.empty() ? eventTitle(op) : readable(title, 120)) + "] " +
+        (management ? operationActor(processing) + "：" : "") + readable(message, 10000);
     const auto context = contextText(processing.origin, text);
     if (!context.empty())
         text += "\n" + context;

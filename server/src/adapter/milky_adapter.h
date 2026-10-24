@@ -1,4 +1,5 @@
 #pragma once
+#include "group_notice_semantics.h"
 #include "outbound_logging.h"
 
 // Milky protocol adapter. API calls use HTTP /api/:api and events use the
@@ -723,21 +724,23 @@ private:
         }
         if (type == "group_admin_change") {
             const std::string gid = field(d, "group_id"), uid = field(d, "user_id");
-            if (!gid.empty() && !uid.empty()) { std::lock_guard<std::mutex> lk(cacheMutex_); memberRoles_[gid + "\x1f" + uid] = d.value("is_set", false) ? "admin" : "member"; }
-            return;
+            if (!gid.empty() && !uid.empty() && d.contains("is_set") && d["is_set"].is_boolean()) {
+                std::lock_guard<std::mutex> lk(cacheMutex_); memberRoles_[gid + "\x1f" + uid] = d["is_set"].get<bool>() ? "admin" : "member";
+            }
         }
-        if (type == "message_recall") { if (d.value("message_scene", std::string()) != "group") return; e.type = EventType::kGroupRecall; e.groupId = field(d, "peer_id"); e.extra["message_id"] = field(d, "message_seq"); }
+        if (milkyModerationEvent(e, type, d)) { /* Role cache updated above; now deliver the event too. */ }
+        else if (type == "message_recall") { if (d.value("message_scene", std::string()) != "group") return; e.type = EventType::kGroupRecall; e.groupId = field(d, "peer_id"); e.extra["message_id"] = field(d, "message_seq"); }
         else if (type == "friend_request") { e.type = EventType::kFriendRequest; e.userId = field(d, "initiator_id"); e.comment = d.value("comment", ""); e.flag = json{{"kind", "friend"}, {"initiator_uid", d.value("initiator_uid", "")}, {"is_filtered", d.value("is_filtered", false)}}.dump(); }
         else if (type == "group_join_request" || type == "group_invited_join_request") { e.type = EventType::kGroupRequest; e.groupId = field(d, "group_id"); e.userId = type == "group_join_request" ? field(d, "initiator_id") : field(d, "target_user_id"); e.operatorId = field(d, "initiator_id"); e.comment = d.value("comment", ""); e.subType = type == "group_join_request" ? "join_request" : "invited_join_request"; e.flag = json{{"kind", "group"}, {"request_type", e.subType}, {"group_id", e.groupId}, {"notification_seq", field(d, "notification_seq")}, {"is_filtered", d.value("is_filtered", false)}}.dump(); }
         else if (type == "group_invitation") { e.type = EventType::kGroupRequest; e.groupId = field(d, "group_id"); e.userId = field(d, "initiator_id"); e.operatorId = e.userId; e.subType = "invite"; e.flag = json{{"kind", "group"}, {"request_type", "invitation"}, {"group_id", e.groupId}, {"notification_seq", field(d, "invitation_seq")}}.dump(); }
-        else if (type == "group_member_increase" || type == "group_member_decrease") { e.type = type == "group_member_increase" ? EventType::kGroupIncrease : EventType::kGroupDecrease; e.groupId = field(d, "group_id"); e.userId = field(d, "user_id"); e.operatorId = field(d, "operator_id"); if (e.operatorId.empty()) e.operatorId = field(d, "invitor_id"); }
+        else if (type == "group_member_increase" || type == "group_member_decrease") { e.type = type == "group_member_increase" ? EventType::kGroupIncrease : EventType::kGroupDecrease; e.groupId = field(d, "group_id"); e.userId = field(d, "user_id"); e.operatorId = field(d, "operator_id"); if (e.operatorId.empty()) e.operatorId = field(d, "invitor_id"); e.subType = milkyDepartureType(type, d); }
         else if (type == "friend_nudge") {
             e.type = EventType::kPoke;
             e.operatorId = field(d, "user_id");
             e.userId = d.value("is_self_receive", false) ? loginId_ : e.operatorId;
         }
         else if (type == "group_nudge") { e.type = EventType::kPoke; e.groupId = field(d, "group_id"); e.userId = field(d, "receiver_id"); e.operatorId = field(d, "sender_id"); }
-        else if (type == "group_disband") { e.type = EventType::kGroupDecrease; e.groupId = field(d, "group_id"); e.userId = loginId_; e.operatorId = field(d, "operator_id"); }
+        else if (type == "group_disband") { e.type = EventType::kGroupDecrease; e.groupId = field(d, "group_id"); e.userId = loginId_; e.operatorId = field(d, "operator_id"); e.subType = "disband"; }
         else if (type == "group_file_upload") { e.type = EventType::kGroupUpload; e.groupId = field(d, "group_id"); e.userId = field(d, "user_id"); e.extra["file"] = {{"id", d.value("file_id", "")}, {"name", d.value("file_name", "")}, {"size", d.value("file_size", static_cast<int64_t>(0))}, {"busid", ""}}; }
         else return;
         for (auto& cb : eventCallbacks_) cb(e);

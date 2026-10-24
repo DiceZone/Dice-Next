@@ -2202,10 +2202,13 @@ static int realMain(int argc, char* argv[]) {
             if (result) *result = std::move(context);
             return blocked;
         };
+        std::string legacyRequestOutcome, legacyRequestReason;
         auto legacyRequestVeto = [&](bool friendRequest, bool policyAllowsApproval) {
+            legacyRequestOutcome = "等待人工处理"; legacyRequestReason = "插件阻止了自动审批，未提交同意或拒绝";
             nlohmann::json context;
             const bool blocked = runLegacyHook(friendRequest ? "FriendRequest" : "GroupRequest", &context);
             if (context.is_object() && context.contains("@dice_event_failed") && context["@dice_event_failed"] == true) {
+                legacyRequestReason = "插件审批钩子执行失败，未提交同意或拒绝";
                 DICE_LOG_WARN_M("Lua 插件", "旧模组审批钩子执行失败，本次申请保留人工处理。"); return true;
             }
             if (!blocked) return false;
@@ -2214,10 +2217,12 @@ static int realMain(int argc, char* argv[]) {
             if (action == dice::LegacyRequestAction::kReject) {
                 if (friendRequest) a->setFriendRequest(e.flag, false);
                 else a->setGroupRequest(e.flag, e.subType, false, "");
+                legacyRequestOutcome = "已提交自动拒绝"; legacyRequestReason = "插件审批明确拒绝；等待平台处理结果";
                 return true;
             }
             if (action == dice::LegacyRequestAction::kContinueHost) return false;
             if (approval.is_boolean() && approval.get<bool>()) {
+                legacyRequestReason = "插件请求同意，但骰主的审批策略不允许自动通过，未提交同意或拒绝";
                 DICE_LOG_WARN_M("Lua 插件", "旧模组请求同意{}，但当前自动审批策略不允许；已保留人工处理。", friendRequest ? "好友申请" : "加群申请");
             }
             return true; // a mod may veto, never override a restrictive host policy
@@ -2238,6 +2243,7 @@ static int realMain(int argc, char* argv[]) {
         // 解析昵称：群名片 > QQ昵称 > 记录的昵称 > QQ号（用户规范）。类型安全：user_id
         // 在 OneBot 里可能是数字或字符串，统一转字符串比较，避免 json value 类型不匹配抛异常。
         auto resolveUserNick = [&](const std::string& uid, const std::string& gid) -> std::string {
+            if (uid.empty() || uid == "0") return {};
             if (e.platform == "qq_official" && a) {
                 const auto field = uid == e.userId ? "user_name" : uid == e.operatorId ? "operator_name" : "";
                 if (*field && e.extra.is_object()) {
@@ -2246,6 +2252,10 @@ static int realMain(int argc, char* argv[]) {
                 }
                 const auto cached = a->getUserName(uid, gid);
                 if (!cached.empty()) return cached;
+            }
+            if (a) {
+                const auto cached = a->cachedUserName(uid, gid);
+                if (!cached.empty() && cached != uid) return cached;
             }
             if (!gid.empty() && a) {
                 try {
@@ -2276,6 +2286,19 @@ static int realMain(int argc, char* argv[]) {
             if (uid.empty()) return uid;
             std::string n = resolveUserNick(uid, e.groupId);
             return (n.empty() || n == uid) ? uid : (n + "(" + uid + ")");
+        };
+        auto groupNameForNotice = [&](const std::string& gid) {
+            std::string name = a ? a->cachedGroupName(gid) : std::string();
+            if ((name.empty() || name == gid) && e.extra.is_object()) {
+                const auto value = e.extra.find("group_name");
+                if (value != e.extra.end() && value->is_string()) name = value->get<std::string>();
+            }
+            if (name.empty() || name == gid) name = cmdRouter.groupSettingValue(e.platform, gid, "name", e.adapterId);
+            return name;
+        };
+        auto reportRequest = [&](const std::string& outcome, const std::string& reason) {
+            cmdRouter.notifyMasters(dice::notice::requestDecision(e, resolveUserNick(e.userId, e.groupId),
+                groupNameForNotice(e.groupId), outcome, reason), e.adapterId);
         };
 
         // Locale for this group/user (for default greetings).
@@ -2448,10 +2471,8 @@ static int realMain(int argc, char* argv[]) {
                 // 云黑群组: bot was pulled into a blacklisted group → say so and leave.
                 if (cmdRouter.isGroupBanned(e.groupId)) {
                     a->sendGroupMessage(e.groupId, cmdRouter.applySelf(lm, i18n.tr(loc, "event.blacklist_group")));
-                    a->leaveGroup(e.groupId);
+                    cmdRouter.requestGroupLeave(a, e.groupId, "黑名单群自动退群", "blacklist_leave", "目标群在黑名单中");
                     DICE_LOG_INFO_M("群管理", "事件： leaving blacklisted group {} on join", e.groupId);
-                    cmdRouter.notifyMasters(dice::notice::kImportant,
-                        "\xe8\xa2\xab\xe6\x8b\x89\xe5\x85\xa5\xe9\xbb\x91\xe5\x90\x8d\xe5\x8d\x95\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "blacklist_leave", e.adapterId);
                     return;
                 }
                 // 非好友强拉兜底：人少的群可不经审批直接把 bot 拉进来（无 request 事件），
@@ -2470,10 +2491,8 @@ static int realMain(int argc, char* argv[]) {
                         if (!isFriend) {
                             a->sendGroupMessage(e.groupId,
                                 cmdRouter.applySelf(lm, i18n.tr(loc, "event.nonfriend_group_leave")));
-                            a->leaveGroup(e.groupId);
+                            cmdRouter.requestGroupLeave(a, e.groupId, "拒绝非好友邀请规则", "nonfriend_leave", "非好友" + userLabel(puller) + "将骰娘拉入群");
                             DICE_LOG_INFO_M("群管理", "事件： 非好友 {} 强拉入群 {} → 自动退群", puller, e.groupId);
-                            cmdRouter.notifyMasters(dice::notice::kImportant,
-                                "\xe8\xa2\xab\xe9\x9d\x9e\xe5\xa5\xbd\xe5\x8f\x8b " + userLabel(puller) + " \xe6\x8b\x89\xe5\x85\xa5\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "nonfriend_leave", e.adapterId);
                             return;
                         }
                     }
@@ -2521,12 +2540,8 @@ static int realMain(int argc, char* argv[]) {
                             lm2.platform = plat; lm2.type = dice::MessageType::kGroup; lm2.targetId = gid;
                             ad->sendGroupMessage(gid, cmdRouter.applySelf(lm2,
                                 i18n.tr(loc, "event.keyword_group_leave")));
-                            ad->leaveGroup(gid);
+                            cmdRouter.requestGroupLeave(ad, gid, "群名关键词规则", "keyword_leave", "群名「" + gname + "」包含关键词「" + hitKw + "」");
                             DICE_LOG_INFO_M("群管理", "事件： 群 {}({}) 名称含关键词「{}」→ 自动退群", gname, gid, hitKw);
-                            cmdRouter.notifyMasters(dice::notice::kImportant,
-                                "\xe7\xbe\xa4\xe5\x90\x8d\xe3\x80\x8c" + gname + "\xe3\x80\x8d(" + gid
-                                    + ") \xe5\x90\xab\xe5\x85\xb3\xe9\x94\xae\xe8\xaf\x8d\xe3\x80\x8c" + hitKw
-                                    + "\xe3\x80\x8d\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "keyword_leave", evAid);
                         });
                     }
                 }
@@ -2542,15 +2557,15 @@ static int realMain(int argc, char* argv[]) {
                         auto adapter = weakAdapter.lock(); if (!adapter || !adapter->isConnected()) return;
                         const int members = adapter->getGroupMemberCount(joinedGroup);
                         if (members <= maxGroupSize) return;
-                        adapter->leaveGroup(joinedGroup);
-                        DICE_LOG_INFO("自动清理群聊：群 {} 共 {} 人，超过最大群规模 {}，已退出",
+                        if (!cmdRouter.requestGroupLeave(adapter, joinedGroup, "群规模上限规则", "group_size_leave",
+                            "当前群规模 " + std::to_string(members) + " 人，超过上限 " + std::to_string(maxGroupSize) + " 人")) return;
+                        DICE_LOG_INFO("自动清理群聊：群 {} 共 {} 人，超过最大群规模 {}，已提交退群请求，等待平台确认",
                                       joinedGroup, members, maxGroupSize);
-                        cmdRouter.notifyMasters(dice::notice::kImportant,
-                            "群 " + joinedGroup + " 共 " + std::to_string(members)
-                                + " 人，超过最大群规模 " + std::to_string(maxGroupSize) + "，已自动退出",
-                            "group_size_leave", joinedAdapter);
                     });
                 }
+                dice::notice::LeaveIntents::instance().take(e.adapterId, e.platform, e.groupId);
+                if (diceFlag("listen_group_add", true))
+                    cmdRouter.notifyMasters(dice::notice::groupJoined(e, groupNameForNotice(e.groupId), resolveUserNick(e.operatorId, e.groupId)), e.adapterId);
                 if (runLegacyHook("GroupAdd")) return;
                 std::string g = ev.value("group_joined", std::string());
                 if (g.empty()) g = i18n.tr(loc, "event.group_joined");
@@ -2564,10 +2579,8 @@ static int realMain(int argc, char* argv[]) {
                 cmdRouter.isUserBlacklisted(e.userId) &&
                 cmdRouter.blacklistQuitLevel(e.platform, e.groupId, e.adapterId) == "member") {
                 a->sendGroupMessage(e.groupId, i18n.tr(loc, "event.blacklist_quit"));
-                a->leaveGroup(e.groupId);
+                cmdRouter.requestGroupLeave(a, e.groupId, "黑名单成员入群规则", "blacklist_leave", "黑名单用户" + userLabel(e.userId) + "加入了本群");
                 DICE_LOG_INFO_M("群管理", "事件： leaving group {} — blacklisted user {} joined", e.groupId, e.userId);
-                cmdRouter.notifyMasters(dice::notice::kImportant,
-                    "\xe9\xbb\x91\xe5\x90\x8d\xe5\x8d\x95\xe7\x94\xa8\xe6\x88\xb7 " + userLabel(e.userId) + " \xe5\x8a\xa0\xe5\x85\xa5\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe9\x80\x80\xe5\x87\xba", "blacklist_leave", e.adapterId);
                 return;
             }
             // ── 必须加入用户群 —— 挂靠黑名单检查点（入群事件）。
@@ -2582,7 +2595,7 @@ static int realMain(int argc, char* argv[]) {
                     std::string gid2 = e.groupId, ug2 = ug;
                     auto aw = std::weak_ptr<dice::IAdapter>(a);
                     std::string leaveText = cmdRouter.applySelf(lm, i18n.tr(loc, "event.usergroup_leave", {{"group", ug}}));
-                    drogon::app().getLoop()->runAfter(8.0, [aw, gid2, ug2, leaveText]() {
+                    drogon::app().getLoop()->runAfter(8.0, [aw, gid2, ug2, leaveText, &cmdRouter]() {
                         auto ad = aw.lock(); if (!ad || !ad->isConnected()) return;
                         auto ids = [&](const std::string& g) {
                             std::set<std::string> s;
@@ -2600,7 +2613,7 @@ static int realMain(int argc, char* argv[]) {
                         if (gm.empty() || um.empty()) return;   // 缓存未就绪 → 本轮跳过（下次入群再查）
                         for (const auto& id : gm) if (um.count(id)) return;   // 有交集 → 合规
                         if (!leaveText.empty()) ad->sendGroupMessage(gid2, leaveText);
-                        ad->leaveGroup(gid2);
+                        cmdRouter.requestGroupLeave(ad, gid2, "必须加入用户群规则", "usergroup_leave", "本群成员与要求加入的用户群" + ug2 + "没有交集");
                         DICE_LOG_INFO_M("群管理", "事件： 群 {} 无成员在用户群 {} → 自动退群", gid2, ug2);
                     });
                 }
@@ -2702,10 +2715,25 @@ static int realMain(int argc, char* argv[]) {
             // B：骰娘被移出群（或自身退群回执）→ 标记已退群 + 通知骰主。
             if (!e.selfId.empty() && e.userId == e.selfId && !e.groupId.empty()) {
                 cmdRouter.setGroupSettingFor(e.platform, e.groupId, "left", "1", e.adapterId);
-                std::string who = (!e.operatorId.empty() && e.operatorId != e.selfId)
-                    ? ("\xef\xbc\x88\xe6\x93\x8d\xe4\xbd\x9c\xe8\x80\x85 " + userLabel(e.operatorId) + "\xef\xbc\x89") : std::string();
-                cmdRouter.notifyMasters(dice::notice::kImportant,
-                    "\xe9\xaa\xb0\xe5\xa8\x98\xe5\xb7\xb2\xe7\xa6\xbb\xe5\xbc\x80\xe7\xbe\xa4 " + groupLabel(e.groupId) + who, "group_left", e.adapterId);
+                auto intent = dice::notice::LeaveIntents::instance().take(e.adapterId, e.platform, e.groupId);
+                if (!intent && e.extra.is_object()) {
+                    const auto native = e.extra.find("__identity_native_target");
+                    if (native != e.extra.end() && native->is_string()) intent = dice::notice::LeaveIntents::instance().take(e.adapterId, e.platform, native->get<std::string>());
+                }
+                cmdRouter.notifyMasters(dice::notice::groupDeparture(e, groupNameForNotice(e.groupId),
+                    resolveUserNick(e.operatorId, e.groupId), intent), e.adapterId);
+            }
+        } else if (e.type == ET::kGroupBan) {
+            // Owner notifications only: do not activate legacy punishment hooks
+            // or change blacklist/leave policy merely by adding event reporting.
+            const bool whole = e.userId == "0" || e.subType == "whole_ban" || e.subType == "whole_lift_ban";
+            if (!e.groupId.empty() && (whole || (!e.selfId.empty() && e.userId == e.selfId))) {
+                cmdRouter.notifyMasters(dice::notice::groupModeration(e, groupNameForNotice(e.groupId), resolveUserNick(e.operatorId, e.groupId)), e.adapterId);
+            }
+        } else if (e.type == ET::kGroupAdmin) {
+            if (!e.selfId.empty() && e.userId == e.selfId && !e.groupId.empty()) {
+                a->refreshMembers(e.groupId);
+                cmdRouter.notifyMasters(dice::notice::groupModeration(e, groupNameForNotice(e.groupId), resolveUserNick(e.operatorId, e.groupId)), e.adapterId);
             }
         } else if (e.type == ET::kPoke) {
             // Poke is a unique event, never an artificial text keyword.
@@ -2763,8 +2791,8 @@ static int realMain(int argc, char* argv[]) {
             if (!diceFlag("listen_friend_add", true)) return;       // 新好友事件开关
             if (runLegacyHook("FriendAdd")) return;
             // B：新好友通过通知骰主。
-            cmdRouter.notifyMasters(dice::notice::kImportant,
-                "\xe6\x96\xb0\xe5\xa5\xbd\xe5\x8f\x8b\xe5\xb7\xb2\xe6\xb7\xbb\xe5\x8a\xa0\xef\xbc\x9a" + userLabel(e.userId), "friend_add", e.adapterId);
+            cmdRouter.notifyMasters({"friend_add", "新好友已添加",
+                "已与" + dice::notice::identity(resolveUserNick(e.userId, ""), e.userId) + "成为好友。", 2}, e.adapterId);
             std::string fw = ev.value("friend_welcome", std::string());
             if (fw.empty()) fw = i18n.tr(loc, "event.friend_welcome");
             if (!fw.empty()) a->sendPrivateMessage(e.userId, fw);
@@ -2796,10 +2824,6 @@ static int realMain(int argc, char* argv[]) {
             }
         } else if (e.type == ET::kFriendRequest) {
             if (!diceFlag("listen_friend_request", true)) return;    // 好友请求事件开关
-            // B：通知骰主收到好友申请（含附言），便于人工处理。
-            cmdRouter.notifyMasters(dice::notice::kImportant,
-                "\xe6\x94\xb6\xe5\x88\xb0\xe5\xa5\xbd\xe5\x8f\x8b\xe7\x94\xb3\xe8\xaf\xb7\xef\xbc\x9a" + userLabel(e.userId)
-                    + (e.comment.empty() ? "" : "\xef\xbc\x88\xe9\x99\x84\xe8\xa8\x80\xef\xbc\x9a" + e.comment + "\xef\xbc\x89"), "friend_req", e.adapterId);
             // 策略：all=任意通过 / keyword=含关键词才通过(其余留人工) /
             //       whitelist=白名单 / group_used=曾在任意群触发指令 /
             //       nonblacklist=非黑名单 / reject=禁止任何人添加 /
@@ -2813,7 +2837,9 @@ static int realMain(int argc, char* argv[]) {
                 pol, e.comment, ev.value("friend_keyword", std::string()), usedInGroup,
                 cmdRouter.isUserWhitelisted(e.userId), cmdRouter.isUserBlacklisted(e.userId));
             if (decision != dice::FriendRequestDecision::kReject
-                && legacyRequestVeto(true, decision == dice::FriendRequestDecision::kApprove)) return;
+                && legacyRequestVeto(true, decision == dice::FriendRequestDecision::kApprove)) {
+                reportRequest(legacyRequestOutcome, legacyRequestReason); return;
+            }
             if (decision == dice::FriendRequestDecision::kApprove) {
                 a->setFriendRequest(e.flag, true);
                 if (pol == "group_used")
@@ -2826,6 +2852,15 @@ static int realMain(int argc, char* argv[]) {
                 a->setFriendRequest(e.flag, false);
                 DICE_LOG_INFO_M("群管理", "事件： 好友申请自动拒绝(禁止添加) from {}", e.userId);
             }   // manual / 条件不满足 → 留人工，不处理
+            const bool approve = decision == dice::FriendRequestDecision::kApprove;
+            const bool reject = decision == dice::FriendRequestDecision::kReject;
+            const auto reason = pol == "all" ? "当前好友策略允许所有申请"
+                : pol == "keyword" ? (approve ? "附言命中好友验证关键词" : "附言未命中好友验证关键词，未提交审批")
+                : pol == "whitelist" ? (approve ? "申请人在好友白名单中" : "申请人不在好友白名单中，未提交审批")
+                : pol == "group_used" ? (approve ? "申请人有群聊指令使用记录" : "未找到申请人的群聊指令使用记录，未提交审批")
+                : pol == "nonblacklist" ? (approve ? "申请人不在黑名单中" : "申请人在黑名单中，按当前策略保留人工处理")
+                : reject ? "当前好友策略禁止添加" : "当前为人工审批模式，未提交同意或拒绝";
+            reportRequest(approve ? "已提交自动同意" : reject ? "已提交自动拒绝" : "等待人工处理", reason);
         } else if (e.type == ET::kGroupRequest) {
             if (!diceFlag("listen_group_request", true)) return;     // 群请求事件开关
             if (e.subType == "invite") {
@@ -2833,15 +2868,12 @@ static int realMain(int argc, char* argv[]) {
                 // 无论走哪条审批路径（自动/人工）都先记下，邀请人视同群管理（canRoomHost）。
                 if (!e.userId.empty() && !e.groupId.empty())
                     cmdRouter.setGroupSettingFor(e.platform, e.groupId, "inviter", e.userId, e.adapterId);
-                // B：通知骰主收到加群邀请（含邀请人），便于人工处理。
-                cmdRouter.notifyMasters(dice::notice::kImportant,
-                    "\xe6\x94\xb6\xe5\x88\xb0\xe5\x8a\xa0\xe7\xbe\xa4\xe9\x82\x80\xe8\xaf\xb7\xef\xbc\x9a\xe7\xbe\xa4 " + groupLabel(e.groupId)
-                        + " \xef\xbc\x88\xe9\x82\x80\xe8\xaf\xb7\xe4\xba\xba " + userLabel(e.userId) + "\xef\xbc\x89", "group_invite", e.adapterId);
                 // 加群邀请（机器人被邀请进群）。注意：邀请事件不含群名称，故「群名含
                 // 非法关键词」无法在此判定 → 归入「进群后自动退群」规则（另行规划）。
                 // 叠加拒绝：黑名单群邀请永远先拒。
                 if (ev.value("group_invite_reject_blacklist", true) && cmdRouter.isGroupBanned(e.groupId)) {
                     a->setGroupRequest(e.flag, e.subType, false, "blacklisted group");
+                    reportRequest("已提交自动拒绝", "目标群在黑名单中");
                     DICE_LOG_INFO_M("群管理", "事件： 黑名单群邀请自动拒绝 group {}", e.groupId);
                     return;
                 }
@@ -2856,8 +2888,7 @@ static int realMain(int argc, char* argv[]) {
                     if (!isFriend) {
                         a->setGroupRequest(e.flag, e.subType, false, "");
                         DICE_LOG_INFO_M("群管理", "事件： 非好友 {} 的群邀请自动拒绝 group {}", e.userId, e.groupId);
-                        cmdRouter.notifyMasters(dice::notice::kImportant,
-                            "\xe9\x9d\x9e\xe5\xa5\xbd\xe5\x8f\x8b " + userLabel(e.userId) + " \xe9\x82\x80\xe8\xaf\xb7\xe5\x8a\xa0\xe7\xbe\xa4 " + groupLabel(e.groupId) + "\xef\xbc\x8c\xe5\xb7\xb2\xe8\x87\xaa\xe5\x8a\xa8\xe6\x8b\x92\xe7\xbb\x9d", "nonfriend_leave", e.adapterId);
+                        reportRequest("已提交自动拒绝", "邀请人不是好友，且开启了拒绝非好友邀请");
                         return;
                     }
                 }
@@ -2865,7 +2896,9 @@ static int realMain(int argc, char* argv[]) {
                 if (pol.empty()) pol = ev.value("auto_approve_group", false) ? "all" : "manual";
                 const bool hostApproves = pol == "all" || (pol == "whitelist"
                     && (cmdRouter.isMasterUser(e.platform, e.userId) || cmdRouter.isUserWhitelisted(e.userId)));
-                if (pol != "reject" && legacyRequestVeto(false, hostApproves)) return;
+                if (pol != "reject" && legacyRequestVeto(false, hostApproves)) {
+                    reportRequest(legacyRequestOutcome, legacyRequestReason); return;
+                }
                 if (pol == "all") {
                     a->setGroupRequest(e.flag, e.subType, true);
                     DICE_LOG_INFO_M("群管理", "事件： 群邀请自动通过(任意) group {}", e.groupId);
@@ -2878,6 +2911,10 @@ static int realMain(int argc, char* argv[]) {
                     a->setGroupRequest(e.flag, e.subType, false, "");
                     DICE_LOG_INFO_M("群管理", "事件： 群邀请自动拒绝 group {}", e.groupId);
                 }   // ignore / manual → 不处理（忽视所有邀请）
+                reportRequest(hostApproves ? "已提交自动同意" : pol == "reject" ? "已提交自动拒绝" : "等待人工处理",
+                    pol == "all" ? "当前群邀请策略允许所有邀请"
+                    : pol == "whitelist" ? (hostApproves ? "邀请人为骰主或在白名单中" : "邀请人不是骰主且不在白名单中，未提交审批")
+                    : pol == "reject" ? "当前策略禁止接受群邀请" : "当前策略不自动处理邀请，未提交同意或拒绝");
             } else {
                 // sub_type=add：有人申请加入机器人作为管理员的群。
                 // 优先看本群 .group auto pass 设置（all=全过 / 关键字=验证消息含关键字才过）。
@@ -2885,19 +2922,22 @@ static int realMain(int argc, char* argv[]) {
                 const bool hostApproves = !ap.empty() ? ap == "all" || (!e.comment.empty() && e.comment.find(ap) != std::string::npos)
                     : ev.value("auto_approve_group", false) && (ev.value("group_keyword", std::string()).empty()
                         || e.comment.find(ev.value("group_keyword", std::string())) != std::string::npos);
-                if (legacyRequestVeto(false, hostApproves)) return;
+                if (legacyRequestVeto(false, hostApproves)) { reportRequest(legacyRequestOutcome, legacyRequestReason); return; }
                 if (!ap.empty()) {
                     if (ap == "all" || (!e.comment.empty() && e.comment.find(ap) != std::string::npos)) {
                         a->setGroupRequest(e.flag, e.subType, true);
                         DICE_LOG_INFO_M("群管理", "事件： 群 {} 加群申请自动通过(auto pass) from {}", e.groupId, e.userId);
                     }   // 不含关键字 → 留人工
+                    reportRequest(hostApproves ? "已提交自动同意" : "等待人工处理",
+                        ap == "all" ? "本群 auto pass 允许所有申请" : hostApproves ? "附言命中本群 auto pass 关键词" : "附言未命中本群 auto pass 关键词，未提交审批");
                     return;   // 本群已配 autoPass，以它为准，不再走旧全局行为
                 }
                 // 无 per-group 设置 → 回退旧全局行为。
-                if (!ev.value("auto_approve_group", false)) return;
+                if (!ev.value("auto_approve_group", false)) { reportRequest("等待人工处理", "未开启群成员申请自动审批，未提交同意或拒绝"); return; }
                 std::string kw = ev.value("group_keyword", std::string());
-                if (!kw.empty() && e.comment.find(kw) == std::string::npos) return;
+                if (!kw.empty() && e.comment.find(kw) == std::string::npos) { reportRequest("等待人工处理", "附言未命中群成员验证关键词，未提交审批"); return; }
                 a->setGroupRequest(e.flag, e.subType, true);
+                reportRequest("已提交自动同意", kw.empty() ? "已开启群成员申请自动审批" : "附言命中群成员验证关键词");
                 DICE_LOG_INFO_M("群管理", "事件： auto-approved group join request for group {}", e.groupId);
             }
         }
@@ -4729,12 +4769,10 @@ static int realMain(int argc, char* argv[]) {
                         } catch (...) {}
                     }
                     if (reason.empty()) continue;
-                    adapter->leaveGroup(groupId); ++leftCount;
+                    if (!cmdRouter.requestGroupLeave(adapter, groupId, "定期群聊清理", "group_auto_clean", reason)) continue;
+                    ++leftCount;
                     const std::string label = groupName.empty() ? groupId : groupName + "(" + groupId + ")";
-                    DICE_LOG_INFO("自动清理群聊：{}，{}，已退出", label, reason);
-                    cmdRouter.notifyMasters(dice::notice::kImportant,
-                        "自动清理群聊：" + label + "，" + reason + "，已退出",
-                        "group_auto_clean", adapter->id());
+                    DICE_LOG_INFO("自动清理群聊：{}，{}，已提交退群请求，等待平台确认", label, reason);
                 }
             }
         };
@@ -4828,8 +4866,8 @@ static int realMain(int argc, char* argv[]) {
                     dice::ProcessingScope taskScope(dice::ProcessingContext{{{"定时任务",tk.name,"",tk.action}},"计划触发","已提交执行",origin});
                     cmdRouter.notifyMasters(dice::notice::kImportant,
                         "定时任务「" + tk.name + "」已提交执行。\n任务 ID：" + std::to_string(tk.id)
-                            + "\n动作：" + tk.action + "\n已处理目标数：" + std::to_string(done)
-                            + (tk.content.empty()?"":"\n任务内容："+dice::notice::readable(tk.content,1200))
+                            + "\n动作：" + (tk.action == "command" ? std::string("执行指令") : tk.action == "lua" ? "调用 Lua 定时函数" : "发送消息") + "\n已处理目标数：" + std::to_string(done)
+                            + (tk.content.empty()?"":"\n任务内容："+dice::notice::triggerText(tk.content))
                             + "\n说明：提交执行不代表平台已经确认送达，实际发送结果请查看消息日志。",
                         "schedule", tk.adapterId);
                 }

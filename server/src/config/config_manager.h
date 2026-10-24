@@ -47,6 +47,11 @@ public:
     /// Returns true on success.
     bool save();
 
+    /// Commit a single functional section atomically. On failure neither the
+    /// in-memory tree nor that section's file is changed. Unrelated files are
+    /// not rewritten. The key uses the same slash syntax as get()/set().
+    bool setAndSave(const std::string& key, const json& value);
+
     /// Restore a validated full configuration snapshot, normally recovered from
     /// the database after an invalid on-disk edit.
     bool restoreSnapshot(const json& snapshot, const json* expected = nullptr);

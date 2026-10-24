@@ -11,6 +11,9 @@
 #include <algorithm>
 #include <cctype>
 #include <set>
+#ifdef _WIN32
+#include <Windows.h>
+#endif
 
 namespace dice {
 
@@ -148,8 +151,12 @@ static bool writeJsonFile(const fs::path& path, const json& value, std::string& 
         out << value.dump(2) << '\n';
         if (!out) { error = "写入 " + path.string() + " 失败"; return false; }
     }
-    fs::remove(path, ec); ec.clear();
+#ifdef _WIN32
+    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        ec = std::error_code(static_cast<int>(GetLastError()), std::system_category());
+#else
     fs::rename(temp, path, ec);
+#endif
     if (ec) { error = ec.message(); fs::remove(temp, ec); return false; }
     return true;
 }
@@ -417,6 +424,55 @@ bool ConfigManager::save() {
     // After a save, semantic equality rejects queued self-notifications.
     // Do not suppress an unrelated external edit for an arbitrary 1.5 seconds.
     return ok;
+}
+
+bool ConfigManager::setAndSave(const std::string& key, const json& value) {
+    ++(*writing_);
+    struct Scope { std::atomic<int>& count; ~Scope() { --count; } } scope{*writing_};
+    json snapshot;
+    std::function<void(const json&)> writer;
+    {
+        std::lock_guard lock(mutex_);
+        try {
+            const auto slash = key.find('/');
+            const auto section = key.substr(0, slash);
+            if (!isSafeSectionName(section)) return false;
+            auto candidate = config_;
+            auto* node = &candidate;
+            size_t start = 0;
+            do {
+                const auto end = key.find('/', start);
+                const auto part = key.substr(start, end == std::string::npos ? end : end - start);
+                if (part.empty()) return false;
+                if (!node->is_object() && !node->is_null()) return false;
+                node = &(*node)[part];
+                if (end == std::string::npos) break;
+                start = end + 1;
+            } while (true);
+            *node = value;
+            std::string error;
+            if (!validateConfig(candidate, error)) return false;
+            // Allocate snapshots/callbacks before the file's commit point.
+            snapshot = candidate;
+            writer = snapshotWriter_;
+            if (!writeJsonFile(configDirectory(configPath_) / (section + ".json"), candidate.at(section), error)) {
+                DICE_LOG_ERROR("配置保存失败：{}；未应用此次修改。", error);
+                return false;
+            }
+            config_.swap(candidate);
+            splitLayout_ = true;
+        } catch (const std::exception& e) {
+            DICE_LOG_ERROR("配置保存失败：{}；未应用此次修改。", e.what());
+            return false;
+        }
+    }
+    // A failed secondary snapshot must not turn a committed setting into a
+    // misleading failed API result (and lose a one-time credential response).
+    try { configureLogger(snapshot); }
+    catch (const std::exception& e) { DICE_LOG_ERROR("日志设置应用失败：{}", e.what()); }
+    if (writer) try { writer(snapshot); }
+    catch (const std::exception& e) { DICE_LOG_ERROR("配置数据库快照保存失败：{}", e.what()); }
+    return true;
 }
 
 bool ConfigManager::restoreSnapshot(const json& snapshot, const json* expected) {

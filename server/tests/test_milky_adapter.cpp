@@ -125,6 +125,29 @@ TEST(MilkyAdapter, MapsFriendNudgeAndGroupDisbandEvents) {
     ASSERT_EQ(events[1].groupId, std::string("20002"));
     ASSERT_EQ(events[1].userId, std::string("10001"));
     ASSERT_EQ(events[1].operatorId, std::string("30003"));
+    ASSERT_EQ(events[1].subType, std::string("disband"));
+}
+
+TEST(MilkyAdapter, PreservesKickerAndDeliversMuteAndAdminEventsToNotificationLayer) {
+    auto adapter = std::make_shared<MilkyAdapter>("notice-test");
+    std::vector<BotEvent> events;
+    adapter->onEvent([&](const BotEvent& event) { events.push_back(event); });
+    for (const auto& data : std::vector<json>{
+            {{"group_id", 12}, {"user_id", 34}, {"operator_id", 56}},
+            {{"group_id", 12}, {"user_id", 34}}})
+        ASSERT_TRUE(adapter->handleEventPayload({{"event_type", "group_member_decrease"}, {"self_id", 34}, {"data", data}}));
+    ASSERT_TRUE(adapter->handleEventPayload({{"event_type", "group_mute"}, {"self_id", 34},
+        {"data", {{"group_id", 12}, {"user_id", 34}, {"operator_id", 56}, {"duration", 3600}}}}));
+    ASSERT_TRUE(adapter->handleEventPayload({{"event_type", "group_whole_mute"}, {"self_id", 34},
+        {"data", {{"group_id", 12}, {"operator_id", 56}, {"is_mute", false}}}}));
+    ASSERT_TRUE(adapter->handleEventPayload({{"event_type", "group_admin_change"}, {"self_id", 34},
+        {"data", {{"group_id", 12}, {"user_id", 34}, {"is_set", true}}}}));
+    ASSERT_EQ(events.size(), size_t(5));
+    ASSERT_EQ(events[0].subType, std::string("kick")); ASSERT_EQ(events[0].operatorId, std::string("56"));
+    ASSERT_EQ(events[1].subType, std::string("leave"));
+    ASSERT_EQ(events[2].subType, std::string("ban")); ASSERT_TRUE(events[2].type == EventType::kGroupBan);
+    ASSERT_EQ(events[3].subType, std::string("whole_lift_ban"));
+    ASSERT_TRUE(events[4].type == EventType::kGroupAdmin); ASSERT_EQ(events[4].subType, std::string("set"));
 }
 
 TEST(MilkyAdapter, RoutesTemporaryMessagesAsPrivate) {

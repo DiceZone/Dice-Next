@@ -3761,14 +3761,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (!exists) {
                     BanlistRow r; r.targetType = type; r.listType = list; r.targetId = id;
                     r.reason = reason; r.createdAt = utils::nowIso8601(); st->insert(r);
-                    // 新增黑名单条目后通知骰主。
+                    dice::notice::webManagementNotice(req, cfg, adapterMgr, [&](const auto& name) {
+                        return dice::notice::listChanged(type, list, id, name, true, reason);
+                    }, "", "", type == 1 ? "group" : "user", id);
+                    // WebUI 主动拉黑 → 云黑上报（分享开启时）。
                     if (list == 0) {
-                        auto context=dice::notice::webContext(req, adapterMgr);
-                        context.origin.targetId=id;context.origin.targetType=type==0?"user":"group";
-                        ProcessingScope noticeScope(std::move(context));
-                        dice::notice::notify(cfg, adapterMgr, dice::notice::kCritical,
-                            std::string("\xe5\xb7\xb2\xe6\x8b\x89\xe9\xbb\x91") + (type == 0 ? "\xe7\x94\xa8\xe6\x88\xb7 " : "\xe7\xbe\xa4 ") + id
-                                + (reason.empty() ? std::string() : ("\xef\xbc\x88" + reason + "\xef\xbc\x89")), "", "", "blacklist");
                         // WebUI 主动拉黑 → 云黑上报（分享开启时；"[云黑#..]" 前缀条目内部自动跳过防回声）。
                         dice::cloudban::CloudbanService::instance().reportToCloud(
                             type == 0 ? "user" : "group", id, "other", reason);
@@ -3779,9 +3776,15 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Post});
 
-    app.registerHandler("/api/banlist/{1}", [st](Req, CB&& cb, int rowId) {
+    app.registerHandler("/api/banlist/{1}", [st, &cfg, &adapterMgr](Req req, CB&& cb, int rowId) {
         namespace orm = sqlite_orm;
-        try { if (st) st->remove_all<BanlistRow>(orm::where(orm::c(&BanlistRow::id) == rowId));
+        try { if (st) {
+                  auto row = st->get_pointer<BanlistRow>(rowId);
+                  st->remove_all<BanlistRow>(orm::where(orm::c(&BanlistRow::id) == rowId));
+                  if (row) dice::notice::webManagementNotice(req, cfg, adapterMgr, [&](const auto& name) {
+                      return dice::notice::listChanged(row->targetType, row->listType, row->targetId, name, false);
+                  }, "", "", row->targetType == 1 ? "group" : "user", row->targetId);
+              }
               jsonReply(ok(J{{"removed", true}}), std::move(cb)); }
         catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Delete});
@@ -3854,7 +3857,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         hm = utils::formatTimeInTimezone(now, "%H:%M");
         ymd = utils::formatTimeInTimezone(now, "%Y-%m-%d");
     };
-    app.registerHandler("/api/schedules", [st, schedToJson](Req req, CB&& cb) {
+    app.registerHandler("/api/schedules", [st, schedToJson, &cfg, &adapterMgr](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Get) {
                 J arr = J::array();
@@ -3887,16 +3890,23 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (r.enabled && r.triggerType.empty() && r.cronTime <= hm) r.lastRun = ymd;
                 if (r.triggerType == "interval") r.lastRun = ymd + " " + hm;
                 int id = st->insert(r);
+                dice::notice::webManagementNotice(req, cfg, adapterMgr, [&](const auto&) {
+                    return dice::notice::scheduleChanged(r, "新增");
+                }, r.platform, r.adapterId, r.targetType == "private" ? "user" : "group", r.targetId);
                 jsonReply(ok(J{{"id", id}}), std::move(cb));
             }
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Post});
-    app.registerHandler("/api/schedules/{1}", [st](Req req, CB&& cb, const std::string& sid) {
+    app.registerHandler("/api/schedules/{1}", [st, &cfg, &adapterMgr](Req req, CB&& cb, const std::string& sid) {
         try {
             int id = 0;
             try { id = std::stoi(sid); } catch (...) { jsonReply(fail("bad id"), std::move(cb)); return; }
             if (req->method() == drogon::Delete) {
+                auto row = st->get_pointer<ScheduledTaskRow>(id);
                 st->remove<ScheduledTaskRow>(id);
+                if (row) dice::notice::webManagementNotice(req, cfg, adapterMgr, [&](const auto&) {
+                    return dice::notice::scheduleChanged(*row, "删除");
+                }, row->platform, row->adapterId, row->targetType == "private" ? "user" : "group", row->targetId);
                 jsonReply(ok(), std::move(cb));
             } else {
                 auto j = J::parse(req->body());
@@ -3937,6 +3947,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     else                               r.lastRun = (r.cronTime <= hm) ? ymd : std::string();
                 }
                 st->update(r);
+                dice::notice::webManagementNotice(req, cfg, adapterMgr, [&](const auto&) {
+                    return dice::notice::scheduleChanged(r, "修改");
+                }, r.platform, r.adapterId, r.targetType == "private" ? "user" : "group", r.targetId);
                 jsonReply(ok(), std::move(cb));
             }
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
@@ -5609,7 +5622,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // POST /api/groups/{platform}/{groupId}/action  {action: leave|message, text?}
     app.registerHandler("/api/groups/{1}/{2}/action",
-        [st, &adapterMgr](Req req, CB&& cb, const std::string& plat, const std::string& gid) {
+        [st, &adapterMgr, &cfg](Req req, CB&& cb, const std::string& plat, const std::string& gid) {
         try {
             auto j = J::parse(req->body());
             std::string action = j.value("action", "");
@@ -5625,7 +5638,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     throw std::invalid_argument("removeRecord must be boolean");
                 group_management::requestLeave(*st, adapterId, plat, gid,
                     j.value("endpointId", std::string()), j.value("removeRecord", false),
-                    [&](const std::string& endpoint) { a->leaveGroup(endpoint); });
+                    [&](const std::string& endpoint) {
+                        auto context = dice::notice::webContext(req, adapterMgr);
+                        context.origin.platform = plat; context.origin.adapterId = a->id();
+                        ProcessingScope scope(std::move(context));
+                        dice::notice::LeaveIntent intent; intent.cause = "面板退群";
+                        if (!dice::notice::requestGroupLeave(cfg, adapterMgr, a, endpoint, std::move(intent)))
+                            throw std::runtime_error("退群请求未提交，请检查适配器状态和通知中的原因");
+                    });
             }
             else if (action == "message") a->sendGroupMessage(endpointId, j.value("text", ""));
             else { jsonReply(fail("unknown action"), std::move(cb)); return; }
