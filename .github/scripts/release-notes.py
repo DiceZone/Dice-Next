@@ -506,12 +506,20 @@ def generate(api, core_git, web_git, tag, core_head, web_head):
     return notes, sources
 
 
+def add_webui_v2_source(body, sources, value):
+    sha = full_sha(value)
+    sources["sources"]["webui_v2"] = {"repository": REPOSITORIES["webui"], "branch": "webui-v2", "sha": sha, "preview": True}
+    return body.replace("## 源码与完整比较\n", "## 源码与完整比较\n\n"
+        + f"- WebUI V2（预览版）：[`{sha[:7]}`](https://github.com/{REPOSITORIES['webui']}/commit/{sha})\n", 1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--core-path", type=Path, required=True)
     parser.add_argument("--core-sha", required=True)
     parser.add_argument("--webui-path", type=Path, required=True)
     parser.add_argument("--webui-sha", required=True)
+    parser.add_argument("--webui-v2-sha")
     parser.add_argument("--tag", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--sources-output", type=Path, required=True)
@@ -519,6 +527,8 @@ def main():
     try:
         notes, sources = generate(GitHub(), Git(args.core_path), Git(args.webui_path),
                                   args.tag, args.core_sha, args.webui_sha)
+        if args.webui_v2_sha:
+            notes = add_webui_v2_source(notes, sources, args.webui_v2_sha)
         args.output.write_text(notes, encoding="utf-8", newline="\n")
         args.sources_output.write_text(json.dumps(sources, ensure_ascii=False, indent=2) + "\n",
                                        encoding="utf-8", newline="\n")

@@ -399,5 +399,21 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class PreviewSourceTests(unittest.TestCase):
+    def test_preview_record_preserves_existing_core_and_v1(self):
+        record = sources()
+        body = notes.add_webui_v2_source("## 源码与完整比较\n", record, D)
+        self.assertEqual(record["sources"]["core"]["sha"], A)
+        self.assertEqual(record["sources"]["webui"]["sha"], C)
+        self.assertEqual(record["sources"]["webui_v2"]["sha"], D)
+        self.assertTrue(record["sources"]["webui_v2"]["preview"])
+        self.assertIn("V2（预览版）", body)
+        self.assertIn("/commit/" + D, body)
+
+    def test_preview_requires_a_full_commit_sha(self):
+        with self.assertRaises(notes.NotesError):
+            notes.add_webui_v2_source("", sources(), "webui-v2")
+
+
 if __name__ == "__main__":
     unittest.main()

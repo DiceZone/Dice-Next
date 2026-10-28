@@ -34,6 +34,9 @@ VERSION_SOURCE="$SERVER_DIR/$BUILD_DIR/generated/version_build.cpp"
 [[ -f "$SERVER_BIN" ]] || { echo "Missing $SERVER_BIN; run ./build-linux.sh $ARCH first" >&2; exit 1; }
 [[ -f "$MANAGER_BIN" ]] || { echo "Missing $MANAGER_BIN; rebuild the package manager first" >&2; exit 1; }
 [[ -d "$WEB_DIST" ]] || { echo "Missing $WEB_DIST; build Dice-Next-WebUI first or set DICENEXT_WEB_ROOT" >&2; exit 1; }
+for entry in index.html v1/index.html v2/index.html webui-versions.json; do
+    [[ -f "$WEB_DIST/$entry" ]] || { echo "Missing dual-WebUI resource: $entry; assemble with .github/scripts/bundle-webui.py" >&2; exit 1; }
+done
 [[ -d "$DOCS_ROOT" ]] || { echo "Missing documentation project; set DICENEXT_DOC_ROOT" >&2; exit 1; }
 for required in decks helpdoc plugins/js; do
     [[ -d "$DEFAULT_DATA/$required" ]] || { echo "Missing bundled resource: server/resources/default-data/$required" >&2; exit 1; }

@@ -67,6 +67,16 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
           "$py" -m unittest discover -s .github/scripts -p 'test_*.py' -v
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          check-latest: true
+      - name: Verify MCP test runtime
+        working-directory: main
+        run: node tools/check-node-version.mjs
+      - name: Install locked official MCP test clients
+        working-directory: main/tools/mcp-interop
+        run: npm ci --ignore-scripts
       - name: Install build tools
         if: runner.os == 'Linux'
         run: |
@@ -90,13 +100,13 @@ jobs:
         shell: pwsh
         working-directory: main
         run: |
-          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DDICENEXT_MSVC_COMPILE_PROCESSES=4 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$env:VCPKG_ROOT/installed"
+          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DDICENEXT_MCP_INTEROP=ON -DDICENEXT_MSVC_COMPILE_PROCESSES=4 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$env:VCPKG_ROOT/installed"
           if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
       - name: Configure tests (Linux)
         if: runner.os == 'Linux'
         working-directory: main
         run: |
-          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed" -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DDICENEXT_MCP_INTEROP=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed" -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Compile tests (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -130,22 +140,39 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
+      source_sha_v2: ${{ steps.source-v2.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
+          path: core
+      - uses: actions/checkout@v4
+        with:
           repository: DiceZone/Dice-Next-WebUI
+          ref: main
           path: web
           token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
       - name: Record WebUI build source
         id: source
         working-directory: web
         run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: DiceZone/Dice-Next-WebUI
+          ref: webui-v2
+          path: web-v2
+          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
+      - name: Record WebUI V2 build source
+        id: source-v2
+        working-directory: web-v2
+        run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           check-latest: true
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            web/package-lock.json
+            web-v2/package-lock.json
       - name: Build WebUI
         working-directory: web
         run: |
@@ -153,10 +180,49 @@ jobs:
           npm ci
           npm test
           npm run build
+      - name: Build WebUI V2 preview
+        working-directory: web-v2
+        run: |
+          node scripts/check-node-version.mjs
+          npm ci
+          npm test
+          npm run quality
+          npm run build
+      - name: Assemble both WebUI versions
+        run: |
+          python3 -m unittest discover -s core/.github/scripts -p 'test_bundle_webui.py'
+          python3 core/.github/scripts/bundle-webui.py --v1 web/dist --v2 web-v2/dist \
+            --output webui-bundle/dist --v1-sha '${{ steps.source.outputs.sha }}' --v2-sha '${{ steps.source-v2.outputs.sha }}'
+      - name: Test WebUI V1/V2 switching in Chromium
+        working-directory: web
+        env:
+          WEBUI_V2_DIST: ${{ github.workspace }}/web-v2/dist
+        run: |
+          npx --no-install playwright install --with-deps chromium --only-shell
+          npx --no-install playwright test --config playwright.webui-version.config.mjs
+      - name: Test MCP WebUI in Chromium
+        working-directory: web
+        run: |
+          npm run test:mcp-browser
+      - name: Test V2 pages, themes and interactions in Chromium
+        working-directory: web-v2
+        run: |
+          npm run test:v2-browser
+          npm run test:notice-browser
+          npm run test:mcp-browser
+      - name: Upload browser test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-browser-diagnostics
+          path: |
+            web/test-results/
+            web-v2/test-results/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: webui-dist
-          path: web/dist
+          path: webui-bundle/dist
           if-no-files-found: error
   linux:
     name: Linux (${{ matrix.arch }})
@@ -445,17 +511,26 @@ jobs:
         with:
           triplet: arm64-osx
           baseline: ${{ env.VCPKG_BASELINE }}
-      - name: Configure release
-        working-directory: main
-        run: |
-          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=arm64-osx -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
-      - name: Compile release
-        working-directory: main
-        run: cmake --build server/build --parallel "$(sysctl -n hw.ncpu)"
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           check-latest: true
+      - name: Prepare macOS MCP test clients
+        working-directory: main
+        run: |
+          node tools/check-node-version.mjs
+          npm --prefix tools/mcp-interop ci --ignore-scripts
+      - name: Configure release
+        working-directory: main
+        run: |
+          cmake -S server -B server/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DDICENEXT_MCP_INTEROP=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=arm64-osx -DVCPKG_MANIFEST_MODE=OFF -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed"
+      - name: Compile release
+        working-directory: main
+        # Avoid recompiling all backend unit tests on the packaging runner.
+        run: cmake --build server/build --target dice-next-server dice-next-launcher dice-next-mcp-probe --parallel "$(sysctl -n hw.ncpu)"
+      - name: Test macOS MCP HTTP and official clients
+        working-directory: main
+        run: ctest --test-dir server/build --output-on-failure -R '^dice_next_mcp_(http|interop)$'
       - name: Verify Node.js security baseline
         working-directory: main
         shell: bash
@@ -489,6 +564,7 @@ jobs:
           path: |
             main/server/**/vcpkg-manifest-install.log
             main/server/**/CMakeError.log
+            main/server/build/Testing/Temporary/
           if-no-files-found: ignore
 
   release:
@@ -610,6 +686,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CORE_SHA: ${{ github.sha }}
           WEBUI_SHA: ${{ needs.webui.outputs.source_sha }}
+          WEBUI_V2_SHA: ${{ needs.webui.outputs.source_sha_v2 }}
           RELEASE_TAG: ${{ steps.build.outputs.tag }}
         run: |
           set -euo pipefail
@@ -619,6 +696,7 @@ jobs:
           python3 release-notes-generator.py \
             --core-path . --core-sha "$CORE_SHA" \
             --webui-path release-webui --webui-sha "$WEBUI_SHA" \
+            --webui-v2-sha "$WEBUI_V2_SHA" \
             --tag "$RELEASE_TAG" \
             --output release-notes.md --sources-output release-sources.json
           # Reuse the user-facing notes, without the full source/commit history.

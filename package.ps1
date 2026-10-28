@@ -39,6 +39,11 @@ function Fail($m) { Write-Host "[X] $m" -ForegroundColor Red; exit 1 }
 if (-not (Test-Path $exe))     { Fail "未找到 $exe，请先编译后端 (cmake --build ...)" }
 if (-not (Test-Path $launcher)){ Fail "未找到 $launcher，请先重新编译 Windows 管理器" }
 if (-not $webRoot -or -not (Test-Path $webDist)) { Fail "未找到前端 dist，请先在 Dice-Next-WebUI 构建，或设置 DICENEXT_WEB_ROOT" }
+foreach ($entry in 'index.html', 'v1\index.html', 'v2\index.html', 'webui-versions.json') {
+    if (-not (Test-Path -LiteralPath (Join-Path $webDist $entry) -PathType Leaf)) {
+        Fail "前端双版本资源不完整：缺少 $entry。请先使用 .github/scripts/bundle-webui.py 组装 V1/V2。"
+    }
+}
 if (-not $docsRoot) { Fail "未找到文档项目，请设置 DICENEXT_DOC_ROOT 或放在同级 Dice-Next-Doc" }
 foreach ($requiredDir in 'decks','helpdoc','plugins\js') {
     if (-not (Test-Path (Join-Path $defaultData $requiredDir))) {

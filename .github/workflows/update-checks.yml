@@ -11,6 +11,10 @@ on:
         description: WebUI branch or commit to package
         default: main
         type: string
+      webui_v2_ref:
+        description: WebUI V2 preview branch or commit to package
+        default: webui-v2
+        type: string
       docs_ref:
         description: Documentation branch or commit to package
         default: main
@@ -27,6 +31,7 @@ env:
   NODE_VERSION: '26.x'
   VCPKG_BASELINE: '44819aa2a6c10e56065e2b0330e7d6c89d1d2574'
   WEBUI_REF: ${{ github.event_name == 'push' && 'cross-platform-update' || inputs.webui_ref || 'main' }}
+  WEBUI_V2_REF: ${{ inputs.webui_v2_ref || 'webui-v2' }}
   DOCS_REF: ${{ github.event_name == 'push' && 'cross-platform-update' || inputs.docs_ref || 'main' }}
 
 jobs:
@@ -37,9 +42,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          path: core
+      - uses: actions/checkout@v7
+        with:
           repository: DiceZone/Dice-Next-WebUI
           ref: ${{ env.WEBUI_REF }}
           path: web
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: DiceZone/Dice-Next-WebUI
+          ref: ${{ env.WEBUI_V2_REF }}
+          path: web-v2
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
@@ -55,10 +69,19 @@ jobs:
           npm test
           npm run lint
           npm run build
+      - name: Build V2 preview and assemble both interfaces
+        run: |
+          cd web-v2
+          npm ci
+          npm test
+          npm run quality
+          npm run build
+          cd ..
+          python3 core/.github/scripts/bundle-webui.py --v1 web/dist --v2 web-v2/dist --output webui-bundle/dist
       - uses: actions/upload-artifact@v4
         with:
           name: update-check-webui
-          path: web/dist
+          path: webui-bundle/dist
           if-no-files-found: error
 
   native:
