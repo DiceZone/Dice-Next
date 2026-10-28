@@ -9,6 +9,7 @@
 #include "../common/utils.h"
 #include "../common/subprocess.h"
 #include "image_resource_service.h"
+#include "mcp_service.h"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
@@ -383,6 +384,10 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
         if (selection.gameLogImages) includedImagePaths.push_back("cache/log");
         if (selection.chatMedia) includedImagePaths.push_back("cache/chat");
     }
+    if (selection.auditLogs) {
+        try { mcp::snapshotDefaultAudit(stage / "data/audit/mcp.db"); }
+        catch (const std::exception& problem) { error = problem.what(); fs::remove_all(stage, ec); return false; }
+    }
     if (selection.resourceImages || selection.uploadedAssets || selection.gameLogImages || selection.chatMedia || selection.decks || selection.jsPlugins || selection.luaMods) {
         try {
             if (imageStore) {
@@ -629,6 +634,19 @@ inline bool applyPendingRestore(std::string& notice) {
         const bool partial = manifest.value("version", 1) >= 2 &&
             !Selection::fromJson(manifest.value("selection", json::object())).complete();
         const bool rootMedia = manifest.value("version", 1) >= 4 && manifest.value("rootMediaIncluded", false);
+        const auto selection = Selection::fromJson(manifest.value("selection", json::object()));
+        // Resource-only restores must not disrupt existing MCP access. A config
+        // or main-DB restore can revive an old token or configuration snapshot.
+        bool affectsMcp = !partial || selection.config || selection.coreDatabase || fs::exists(stage / "config/server.json");
+        // The manifest is descriptive, not an authority boundary. Inspect
+        // actual staged files too, including custom main-DB file names.
+        if (!affectsMcp && fs::is_directory(stage / "data"))
+            for (const auto& entry : fs::directory_iterator(stage / "data")) {
+                const auto name = entry.path().filename().string();
+                if (entry.is_regular_file() && entry.path().extension() == ".db" && name != "cards.db" && name != "chat.db" &&
+                    name != "logs.db" && name != "plugins.db" && name != "lua_mod.db" && name != "image-resources.db") affectsMcp = true;
+            }
+        if (affectsMcp) mcp::markRestoreReset();
         if (partial) {
             // A partial archive overlays only its selected paths.  Keep a full
             // rollback copy so individual plugins/resources can be restored

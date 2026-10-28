@@ -97,6 +97,7 @@ enum class AdapterType {
     kQQOfficial = 3,
     kDiscord = 4,
     kKook = 5,
+    kOpenOPQ = 6,   // 内置登录（实验性）：DN 自己拉起 openopq，走 OneBot v11 反向 WS
 };
 
 inline const char* adapterTypeToString(AdapterType type) {
@@ -106,6 +107,7 @@ inline const char* adapterTypeToString(AdapterType type) {
         case AdapterType::kQQOfficial: return "qq_official";
         case AdapterType::kDiscord:   return "discord";
         case AdapterType::kKook:      return "kook";
+        case AdapterType::kOpenOPQ:   return "openopq";
         case AdapterType::kUnknown:
         default:                      return "unknown";
     }
@@ -117,6 +119,7 @@ inline AdapterType adapterTypeFromString(const std::string& s) {
     if (s == "qq_official") return AdapterType::kQQOfficial;
     if (s == "discord")    return AdapterType::kDiscord;
     if (s == "kook")       return AdapterType::kKook;
+    if (s == "openopq")    return AdapterType::kOpenOPQ;
     return AdapterType::kUnknown;
 }
 

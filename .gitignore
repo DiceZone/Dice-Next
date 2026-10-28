@@ -19,6 +19,8 @@
 /server/uploads/
 /server/tests/output.txt
 /vcpkg/
+/tools/mcp-interop/node_modules/
+/.dicenext-mcp-restore-reset
 
 # Local configuration and editor files
 /config/webui_sessions.json

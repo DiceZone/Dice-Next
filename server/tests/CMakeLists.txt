@@ -16,10 +16,12 @@ set(TEST_SOURCES
     test_script_execution_windows_macros.cpp
     test_startup_guard.cpp
     test_tray_settings.cpp
+    test_webui_versions.cpp
     test_cooldown_manager.cpp
     test_counter_store.cpp
     test_log_usage.cpp
     test_sso_auth.cpp
+    test_mcp.cpp
     test_notice_rules.cpp
     test_game_session_list.cpp
     test_image_resources.cpp
@@ -79,6 +81,7 @@ set(TEST_SOURCES
     test_identity_email.cpp
     test_milky_adapter.cpp
     test_adapter_manager_start.cpp
+    test_openopq_runtime.cpp
 
     # Project source files needed by tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/causal/cooldown_manager.cpp
@@ -94,7 +97,9 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/subprocess.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_archive.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/openopq_runtime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/network_info_service.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/mcp_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/cloud_card_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/identity_email_service.cpp
     ${VERSION_BUILD_SOURCE}
@@ -223,3 +228,38 @@ if(MSVC)
 endif()
 add_test(NAME dice_next_tests COMMAND dice-next-tests)
 add_test(NAME dice_next_lua_tests COMMAND dice-next-lua-tests)
+
+# Transport tests run in a separate, loopback-only process, not the real bot.
+find_program(DICENEXT_MCP_NODE NAMES node)
+option(DICENEXT_MCP_INTEROP "Run official MCP SDK/Inspector HTTPS integration tests" OFF)
+if(DICENEXT_MCP_INTEROP AND NOT DICENEXT_MCP_NODE)
+    message(FATAL_ERROR "MCP interop tests require Node.js and npm ci in tools/mcp-interop")
+endif()
+if(DICENEXT_MCP_NODE)
+    add_executable(dice-next-mcp-probe EXCLUDE_FROM_ALL
+        mcp_http_probe.cpp
+        ../src/service/mcp_service.cpp
+        ../src/config/config_manager.cpp
+        ../src/common/logger.cpp
+        ../src/core/dice/dice_expression.cpp
+    )
+    target_include_directories(dice-next-mcp-probe PRIVATE ../src)
+    target_link_libraries(dice-next-mcp-probe PRIVATE Drogon::Drogon OpenSSL::Crypto
+        nlohmann_json::nlohmann_json spdlog::spdlog unofficial::sqlite3::sqlite3)
+    if(MSVC)
+        target_compile_options(dice-next-mcp-probe PRIVATE /utf-8 /bigobj)
+        target_compile_definitions(dice-next-mcp-probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    add_dependencies(dice-next-tests dice-next-mcp-probe)
+    add_test(NAME dice_next_mcp_http COMMAND ${DICENEXT_MCP_NODE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/test-mcp-http.mjs $<TARGET_FILE:dice-next-mcp-probe>)
+    set_tests_properties(dice_next_mcp_http PROPERTIES TIMEOUT 45)
+    if(DICENEXT_MCP_INTEROP)
+        if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/mcp-interop/node_modules/@modelcontextprotocol/inspector/package.json")
+            message(FATAL_ERROR "Run npm ci --ignore-scripts in tools/mcp-interop before enabling MCP interop tests")
+        endif()
+        add_test(NAME dice_next_mcp_interop COMMAND ${DICENEXT_MCP_NODE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/mcp-interop/test-interop.mjs $<TARGET_FILE:dice-next-mcp-probe>)
+        set_tests_properties(dice_next_mcp_interop PROPERTIES TIMEOUT 90)
+    endif()
+endif()

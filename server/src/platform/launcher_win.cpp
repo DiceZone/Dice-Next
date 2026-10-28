@@ -164,34 +164,6 @@ void writeUpdateResult(const fs::path& root, const std::string& metadata,
     if (ec) fs::remove(temporary, ec);
 }
 
-bool applyPendingRestore(const fs::path& root) {
-    const fs::path stage = root / L"restore-pending";
-    std::error_code ec;
-    if (!fs::is_regular_file(stage / L"manifest.json", ec)) return true;
-    // Partial backups are applied by core's JSON-aware restore service.  The
-    // manager intentionally leaves them staged so it never replaces the whole
-    // data directory for a plugin/resource-only restore.
-    {
-        std::ifstream manifest(stage / L"manifest.json", std::ios::binary);
-        const std::string text((std::istreambuf_iterator<char>(manifest)), std::istreambuf_iterator<char>());
-        if (text.find("\"version\": 2") != std::string::npos && text.find("\"all\": false") != std::string::npos) return true;
-    }
-    const fs::path rollback = root / L"restore-rollbacks" / timestamp();
-    std::wstring error;
-    if (!moveTree(stage / L"data", root / L"data", rollback / L"data", error)) {
-        std::wcerr << L"Dice!Next restore failed: " << error << L"\n";
-        return false;
-    }
-    const fs::path stagedConfig = stage / L"config";
-    if (fs::exists(stagedConfig, ec) && !moveTree(stagedConfig, root / L"config", rollback / L"config", error)) {
-        std::wcerr << L"Dice!Next restore failed: " << error << L"\n";
-        return false;
-    }
-    fs::remove_all(stage, ec);
-    std::wcout << L"Dice!Next: pending restore applied. Rollback: " << rollback.wstring() << L"\n";
-    return true;
-}
-
 struct UpdateMove {
     fs::path destination;
     fs::path backup;
@@ -355,7 +327,9 @@ bool applyPendingUpdate(const fs::path& root) {
 
 int runLauncher(const fs::path& root, const std::vector<std::wstring>& args, DWORD waitFor) {
     if (waitFor != 0) waitForProcessExit(waitFor);
-    if (!applyPendingRestore(root)) return 1;
+    // All full/partial restores are applied by core before opening config/DBs.
+    // Its JSON-aware path preserves active logs and applies the MCP credential
+    // reset barrier; the DLL-free manager must not bypass either protection.
     const bool updated = applyPendingUpdate(root);
     if (updated && noRestartRequested()) {
         std::wcout << L"Dice!Next update finished; DICENEXT_UPDATE_RESTART=NO prevents core start.\n";

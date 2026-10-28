@@ -9,6 +9,7 @@
 // 第三方登录的会话固定一天有效，不向提供方回查；本地口令登录始终保留作应急入口。
 
 #include "../config/config_manager.h"
+#include "http_auth_path.h"
 
 #include <drogon/HttpClient.h>
 #include <trantor/net/EventLoopThread.h>
@@ -143,14 +144,15 @@ inline std::string callbackFor(const std::string& base) { return base + kCallbac
 ///   插件与规则包、旧版迁移导入、备份，以及今后新增的接口，默认都不能写。
 /// - 读操作默认放行（响应统一脱敏），但插件列表与配置、Lua 模组列表、规则包文件内容由插件
 ///   自行决定，可能直接存放密钥，脱敏无法识别，因此不允许读取；备份下载同理。
-inline bool blockedForRestrictedAdmin(const std::string& method, const std::string& path) {
+inline bool blockedForRestrictedAdmin(const std::string& method, const std::string& rawPath) {
+    const auto path = authRoutePath(rawPath);
     auto under = [&](const char* prefix) {
         const std::string p(prefix);
         return path == p || path.rfind(p + "/", 0) == 0;
     };
     if (method == "GET" || method == "HEAD") {
         for (const char* prefix : {"/api/plugins/js", "/api/mod/lua", "/api/rules/file",
-                                   "/api/backup/download", "/api/backup/export"})
+                                   "/api/backup/download", "/api/backup/export", "/api/system/mcp"})
             if (under(prefix)) return true;
         return false;
     }

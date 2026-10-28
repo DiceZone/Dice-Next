@@ -61,6 +61,11 @@ TEST(SsoAuth, RolesFollowLocalTrustLevels) {
 }
 
 TEST(SsoAuth, RestrictedAdminsCannotReachPrivilegedOperations) {
+    ASSERT_EQ(authRoutePath("/API/System/MCP"), std::string("/api/system/mcp"));
+    for (const char* path : {"/API/PLUGINS/JS", "/api/Mod/Lua", "/API/BACKUP/DOWNLOAD", "/API/SYSTEM/MCP"})
+        ASSERT_TRUE(sso::blockedForRestrictedAdmin("GET", path));
+    ASSERT_TRUE(sso::blockedForRestrictedAdmin("POST", "/API/SYSTEM/RESTART"));
+    ASSERT_FALSE(sso::blockedForRestrictedAdmin("POST", "/API/DECKS/UPLOAD"));
     // 写操作默认拒绝：骰主名单、第三方登录、系统设置、适配器、插件、规则包、旧版迁移、备份，
     // 以及没有列入白名单的新接口。
     for (const char* path : {"/api/masters", "/api/masters/onebot_v11/10001", "/api/auth/sso/bdc",

@@ -5,6 +5,7 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <cstdint>
 
 namespace dice {
 
@@ -74,7 +75,7 @@ public:
      * @brief Construct with a random-number generator.
      * @param randomFn  Takes sides (N), returns uniform [1, N].
      */
-    explicit DiceExpression(RandomFunc randomFn);
+    explicit DiceExpression(RandomFunc randomFn, bool checkedArithmetic = false);
 
     /**
      * @brief Parse and evaluate a dice expression.
@@ -85,6 +86,8 @@ public:
 
 private:
     RandomFunc randomFn_;
+    bool checkedArithmetic_ = false;
+    int checkedValue(int64_t value) const;
     std::vector<DiceToken> tokens_;
     size_t pos_ = 0;
     std::string lastExpression_;

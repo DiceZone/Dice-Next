@@ -18,7 +18,10 @@
 
 #include "service/api_service.h"
 #include "service/http_diagnostics.h"
+#include "service/mcp_service.h"
+#include "service/http_auth_path.h"
 #include "service/web_auth.h"          // WebUI 登录鉴权
+#include "service/webui_entry.h"
 #include "service/sso_routes.h"        // WebUI 第三方登录（OpenID Connect）
 #include "service/chat_image.h"        // 模拟聊天图片本地化
 #include "service/image_host.h"        // 图床（QQ 官方富媒体需要公网 URL）
@@ -517,13 +520,14 @@ static int realMain(int argc, char* argv[]) {
         return 1;
     }
     if (auto* configStorage = db.getStorage()) {
-        configMgr.setSnapshotWriter([configStorage](const dice::json& snapshot) {
+        auto persistConfigSnapshot = [configStorage](const dice::json& snapshot) {
             const std::string key = "system_config_snapshot";
             auto rows = configStorage->get_all<dice::DiceConfigRow>(
                 sqlite_orm::where(sqlite_orm::c(&dice::DiceConfigRow::key) == key));
             if (rows.empty()) configStorage->insert(dice::DiceConfigRow{0, key, snapshot.dump()});
             else { rows.front().value = snapshot.dump(); configStorage->update(rows.front()); }
-        });
+        };
+        configMgr.setSnapshotWriter(persistConfigSnapshot);
         if (!configLoaded) {
             try {
                 const auto rows = configStorage->get_all<dice::DiceConfigRow>(
@@ -552,9 +556,15 @@ static int realMain(int argc, char* argv[]) {
         } else {
             configMgr.save();
         }
+        try { dice::mcp::resetRestoredAccess(configMgr, persistConfigSnapshot); }
+        catch (const std::exception& e) { DICE_LOG_ERROR_M("MCP", "备份恢复后的访问保护未完成：{}；本次启动中止。", e.what()); return 1; }
     }
 
     // ── 4.5. Initialize i18n from the validated/recovered config ──
+    if (dice::mcp::restoreResetPending()) {
+        DICE_LOG_ERROR_M("MCP", "备份恢复后的访问保护未完成，缺少可写的配置快照存储；本次启动中止。");
+        return 1;
+    }
     dice::IAdapter::setPresentationStyle(dice::presentationStyleFromString(
         configMgr.get<std::string>("dice/message_format", "traditional")));
     std::string i18nDir = configMgr.get<std::string>("i18n/resource_dir", "i18n");
@@ -2965,6 +2975,13 @@ static int realMain(int argc, char* argv[]) {
                 row.connectionMode = 0;
                 extra["eventEndpoint"] = a.value("event_endpoint", a.value("eventEndpoint", std::string()));
             }
+            if (row.type == static_cast<int>(dice::AdapterType::kOpenOPQ) && a.contains("openopq") && a["openopq"].is_object()) {
+                row.connectionMode = a["openopq"].value("transport", std::string("forward_ws")) == "reverse_ws" ? 1 : 0;
+                const auto& opq = a["openopq"];
+                extra["openopq"] = {{"account", opq.value("account", std::string())},
+                                    {"consolePort", opq.value("console_port", opq.value("consolePort", 0))},
+                                    {"transport", opq.value("transport", std::string("forward_ws"))}};
+            }
             if (row.type == static_cast<int>(dice::AdapterType::kQQOfficial)) {
                 extra["appId"] = a.value("app_id", a.value("appId", std::string()));
                 extra["appSecret"] = a.value("app_secret", a.value("appSecret", std::string()));
@@ -3000,6 +3017,12 @@ static int realMain(int argc, char* argv[]) {
             }
             if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
                 a["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));
+            }
+            if (row.type == static_cast<int>(dice::AdapterType::kOpenOPQ) && extra.contains("openopq") && extra["openopq"].is_object()) {
+                const auto& opq = extra["openopq"];
+                a["openopq"] = {{"account", opq.value("account", std::string())},
+                                {"console_port", opq.value("consolePort", 0)},
+                                {"transport", opq.value("transport", std::string("forward_ws"))}};
             }
             return a;
         };
@@ -3174,7 +3197,7 @@ static int realMain(int argc, char* argv[]) {
     app.registerPreHandlingAdvice(
         [apiKey, diceFlatsManaged, sessionCookieName, &configMgr, &cmdRouter](const drogon::HttpRequestPtr& req,
            drogon::AdviceCallback&& stop, drogon::AdviceChainCallback&& next) {
-            const std::string& path = req->path();
+            const std::string path = dice::authRoutePath(req->path());
             if (path.rfind("/api/", 0) != 0 ||                       // 静态文件
                 path == "/api/auth/login" || path == "/api/auth/status" ||
                 path == "/api/auth/logout" || path == "/api/auth/setup" ||
@@ -3188,7 +3211,10 @@ static int realMain(int argc, char* argv[]) {
             auto& auth = dice::WebAuth::instance();
             // 服务间调用不依赖 WebUI 是否已设置口令；否则全新实例虽然已经有
             // server/api_key，却会先被 need_setup 分支挡住，API Key 实际不可用。
-            if (!apiKey.empty() && auth.checkApiKey(req->getHeader("X-API-Key"))) { next(); return; }
+            if (!apiKey.empty() && auth.checkApiKey(req->getHeader("X-API-Key"))) {
+                req->attributes()->insert("dn_api_authenticated", true);
+                req->attributes()->insert("dn_auth_type", std::string("api_key")); next(); return;
+            }
             // 未设置口令：浏览器访问仍强制先设置（默认 0.0.0.0 监听，空口令直通 = 未授权接管/RCE）。
             if (!auth.hasPassword()) {
                 auto resp = drogon::HttpResponse::newHttpResponse();
@@ -3212,6 +3238,8 @@ static int realMain(int argc, char* argv[]) {
                         stop(resp); return;
                     }
                     req->attributes()->insert("dn_role", std::string(dice::sso::roleName(role)));
+                    req->attributes()->insert("dn_api_authenticated", true);
+                    req->attributes()->insert("dn_auth_type", std::string("session"));
                     req->attributes()->insert("dn_trust", trust);
                     req->attributes()->insert("dn_qq", auth.identityOf(sessionToken).value("qq", std::string()));
                     next(); return;
@@ -3473,10 +3501,41 @@ static int realMain(int argc, char* argv[]) {
     if (fs::exists(webRoot)) {
         app.setDocumentRoot(webRoot);
         app.setStaticFilesCacheTime(0);
+        // Only the entry is selected dynamically; /v1/ and /v2/ retain separate
+        // assets, while cookies, APIs and application data stay on one origin.
+        const auto entry = [&configMgr, webRoot](const drogon::HttpRequestPtr& req,
+                std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+            cb(dice::webui::entryResponse(configMgr, webRoot, req->query()));
+        };
+        app.registerHandler("/", entry, {drogon::Get, drogon::Head});
+        app.registerHandler("/index.html", entry, {drogon::Get, drogon::Head});
         DICE_LOG_DEBUG_M("管理面板", "前端资源目录为「{}」。", webRoot);
     } else {
         DICE_LOG_WARN_M("管理面板", "前端资源目录「{}」不存在，请检查安装包是否完整。", webRoot);
     }
+
+    app.registerHandler("/api/system/webui-version", [&configMgr, webRoot](const drogon::HttpRequestPtr& req,
+            std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+        auto response = drogon::HttpResponse::newHttpResponse();
+        response->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+        response->addHeader("Cache-Control", "no-store");
+        try {
+            if (req->method() == drogon::Put) {
+                std::string error;
+                const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
+                if (!dice::webui::selectVersion(configMgr, webRoot, body, error)) {
+                    response->setStatusCode(drogon::k400BadRequest);
+                    response->setBody(nlohmann::json({{"code", 400}, {"message", error}}).dump());
+                    cb(response); return;
+                }
+            }
+            response->setBody(nlohmann::json({{"code", 0}, {"data", dice::webui::versions(configMgr, webRoot)}}).dump());
+        } catch (...) {
+            response->setStatusCode(drogon::k500InternalServerError);
+            response->setBody(R"({"code":500,"message":"读取 WebUI 版本失败。"})");
+        }
+        cb(response);
+    }, {drogon::Get, drogon::Put});
 
     // (Removed dead SPA-fallback route table: the frontend uses hash routing,
     // so the browser only ever requests "/" — those per-path handlers never fired
@@ -3565,6 +3624,72 @@ static int realMain(int argc, char* argv[]) {
     dice::api::registerNetworkInfoRoutes(networkInfo);
     dice::api::registerApiRoutes(db, configMgr, adapterMgr, engine, cardDeck, replyManager, i18n, jsMod, luaMod,
                                  causalMgr, cooldownMgr, counterStore, personaMgr, updateService, cmdRouter);
+    dice::mcp::Queries mcpQueries;
+    mcpQueries.version = dice::releaseTag();
+    mcpQueries.status = [](const dice::mcp::QueryContext& context) {
+        context.checkpoint();
+        return nlohmann::json{{"status", "running"}, {"version", dice::releaseTag()},
+            {"uptime_seconds", (std::max)(int64_t(0), int64_t(std::time(nullptr) - dice::utils::getStartupEpoch()))}};
+    };
+    mcpQueries.help = [&cmdRouter, &configMgr](const std::string& query, int limit, const dice::mcp::QueryContext& context) {
+        context.checkpoint();
+        auto lower = [](std::string value) { for (char& c : value) if (c >= 'A' && c <= 'Z') c += 'a' - 'A'; return value; };
+        const auto q = lower(query);
+        nlohmann::json entries = nlohmann::json::array();
+        size_t scanned = 0, bytes = 0;
+        bool searchTruncated = false;
+        cmdRouter.visitHelp(dice::localeFromString(configMgr.get<std::string>("i18n/default_locale", "zh-Hans")), "",
+            [&](const dice::CommandRouter::HelpEntryView& entry) {
+                context.checkpoint();
+                if (++scanned > 10000 || entry.key.size() + entry.content.size() > 4 * 1024 * 1024 - bytes) { searchTruncated = true; return false; }
+                bytes += entry.key.size() + entry.content.size();
+                if (lower(entry.key).find(q) == std::string::npos && lower(entry.content).find(q) == std::string::npos) return true;
+                size_t cut = (std::min)(entry.content.size(), size_t(2000));
+                while (cut < entry.content.size() && cut > 0 && (static_cast<unsigned char>(entry.content[cut]) & 0xC0) == 0x80) --cut;
+                entries.push_back({{"topic", entry.key}, {"source", entry.source},
+                    {"content", entry.content.substr(0, cut)}, {"truncated", cut < entry.content.size()}});
+                return entries.size() < static_cast<size_t>(limit);
+            });
+        context.checkpoint();
+        return nlohmann::json{{"entries", entries}, {"search_truncated", searchTruncated}, {"content_is_untrusted_data", true}};
+    };
+    mcpQueries.card = [&db, &cardStore](int id, const dice::mcp::QueryContext& context) {
+        context.checkpoint();
+        auto* storage = db.getCardStorage();
+        const auto row = storage ? storage->get_pointer<dice::CharacterCardRow>(id) : nullptr;
+        context.checkpoint();
+        if (!row) throw std::invalid_argument("人物卡不存在或已删除");
+        const auto snapshot = cardStore.snapshotById(row->userId, id);
+        context.checkpoint();
+        if (!snapshot) throw std::invalid_argument("人物卡不存在、数据异常或来源不唯一");
+        const auto meta = snapshot->data.value("__meta", nlohmann::json::object());
+        if (!meta.is_object()) throw std::invalid_argument("人物卡读取权限配置异常");
+        const std::string locks = "," + meta.value("locks", std::string()) + ",";
+        if (locks.find(",r,") != std::string::npos) throw std::invalid_argument("人物卡已锁定读取");
+        auto attributes = snapshot->data;
+        for (auto it = attributes.begin(); it != attributes.end();) {
+            context.checkpoint();
+            if (it.key().rfind("__", 0) == 0) it = attributes.erase(it); else ++it;
+        }
+        return nlohmann::json{{"card_id", id}, {"user_id", row->userId}, {"name", snapshot->name},
+            {"attributes", attributes}, {"expressions_evaluated", false}, {"content_is_untrusted_data", true}};
+    };
+    mcpQueries.cardOptions = [&db](const std::string& query, const dice::mcp::QueryContext& context) {
+        context.checkpoint();
+        nlohmann::json result = nlohmann::json::array();
+        if (auto* storage = db.getCardStorage()) {
+            using namespace sqlite_orm;
+            const auto rows = storage->get_all<dice::CharacterCardRow>(
+                where(like(&dice::CharacterCardRow::name, "%" + query + "%") || like(&dice::CharacterCardRow::userId, "%" + query + "%")),
+                order_by(&dice::CharacterCardRow::id).desc(), limit(30));
+            context.checkpoint();
+            for (const auto& row : rows) { context.checkpoint(); result.push_back({{"card_id", row.id}, {"user_id", row.userId}, {"name", row.name}}); }
+        }
+        return result;
+    };
+    auto mcpService = std::make_shared<dice::mcp::Service>(configMgr,
+        "data/audit/mcp.db", std::move(mcpQueries));
+    auto mcpTransport = dice::mcp::registerRoutes(mcpService);
     DICE_LOG_DEBUG_M("管理面板", "管理 API 路由已注册。");
 
     // ── Playground test harness ──────────────────────────────
@@ -5030,6 +5155,7 @@ static int realMain(int argc, char* argv[]) {
     imageResources->startMigration();
     dice::crashdiag::setPhase("running");
     app.run();
+    mcpTransport.reset(); // Join read-only MCP workers before their stores close.
 
     // ── 10. Graceful shutdown ────────────────────────────────
     DICE_LOG_INFO_M("系统", "收到退出请求，正在保存数据并停止后台任务、断开平台连接。");
@@ -5050,6 +5176,7 @@ static int realMain(int argc, char* argv[]) {
     jsCallbacks->stop();
     luaCallbacks->stop();
     adapterMgr.stopAll();
+    dice::openopq::Runtime::instance().stopAll();
     imageResources->waitForBackground();
     dice::image_resources::setDefault(nullptr);
     db.close();

@@ -6,6 +6,8 @@
 #include <cctype>
 #include <iomanip>
 #include <stdexcept>
+#include <cstdint>
+#include <limits>
 
 namespace dice {
 
@@ -90,8 +92,14 @@ std::unique_ptr<ASTNode> ASTNode::makeUnaryMinus(
 // DiceExpression implementation
 // ═══════════════════════════════════════════════════════════════
 
-DiceExpression::DiceExpression(RandomFunc randomFn)
-    : randomFn_(std::move(randomFn)) {
+DiceExpression::DiceExpression(RandomFunc randomFn, bool checkedArithmetic)
+    : randomFn_(std::move(randomFn)), checkedArithmetic_(checkedArithmetic) {
+}
+
+int DiceExpression::checkedValue(int64_t value) const {
+    if (checkedArithmetic_ && (value < (std::numeric_limits<int>::min)() || value > (std::numeric_limits<int>::max)()))
+        throw std::invalid_argument("integer arithmetic overflow");
+    return static_cast<int>(value);
 }
 
 // ─── Public API ──────────────────────────────────────────────
@@ -158,8 +166,8 @@ DiceResult DiceExpression::evaluate(const std::string& input) {
             RenderResult r = renderEval(node, parenDice, results);
             if (!multiTerm && !neg && !r.displayOverride.empty())
                 evaluatedDisplay = r.displayOverride;
-            const int signedVal = neg ? -r.value : r.value;
-            total += signedVal;
+            const int signedVal = neg ? checkedValue(-int64_t(r.value)) : r.value;
+            total = checkedValue(int64_t(total) + signedVal);
 
             const std::string sign = (i == 0) ? (neg ? "-" : "") : (neg ? "-" : "+");
             sep      += sign + r.sep;
@@ -213,7 +221,7 @@ DiceExpression::RenderResult DiceExpression::renderEval(
 
         case ASTNode::Kind::kUnaryMinus: {
             RenderResult r = renderEval(node->left.get(), parenDice, results);
-            out.value = -r.value;
+            out.value = checkedValue(-int64_t(r.value));
             out.sep = "-" + r.sep;
             return out;
         }
@@ -223,13 +231,13 @@ DiceExpression::RenderResult DiceExpression::renderEval(
             RenderResult l = renderEval(node->left.get(), true, results);
             RenderResult r = renderEval(node->right.get(), true, results);
             switch (node->op) {
-                case '+': out.value = l.value + r.value; out.sep = l.sep + "+" + r.sep; break;
-                case '-': out.value = l.value - r.value; out.sep = l.sep + "-" + r.sep; break;
-                case '*': out.value = l.value * r.value; out.sep = l.sep + "×" + r.sep; break;
+                case '+': out.value = checkedValue(int64_t(l.value) + r.value); out.sep = l.sep + "+" + r.sep; break;
+                case '-': out.value = checkedValue(int64_t(l.value) - r.value); out.sep = l.sep + "-" + r.sep; break;
+                case '*': out.value = checkedValue(int64_t(l.value) * r.value); out.sep = l.sep + "×" + r.sep; break;
                 case '/':
                     if (r.value == 0)
                         throw AppException(ApiErrorCode::kDiceInvalidExpression, "division by zero");
-                    out.value = l.value / r.value; out.sep = l.sep + "/" + r.sep; break;
+                    out.value = checkedValue(int64_t(l.value) / r.value); out.sep = l.sep + "/" + r.sep; break;
                 default:
                     throw AppException(ApiErrorCode::kDiceInvalidExpression,
                         std::string("unknown operator: ") + node->op);
@@ -257,7 +265,7 @@ DiceExpression::RenderResult DiceExpression::renderEval(
             for (int i = 0; i < count; ++i) {
                 const int roll = randomFn_(sides);
                 results.push_back(roll);
-                sum += roll;
+                sum = checkedValue(int64_t(sum) + roll);
                 if (i > 0) inner += "+";
                 inner += std::to_string(roll);
             }
@@ -508,23 +516,23 @@ int DiceExpression::evalNode(const ASTNode* node, std::vector<int>& results) {
             return node->value;
 
         case ASTNode::Kind::kUnaryMinus:
-            return -evalNode(node->left.get(), results);
+            return checkedValue(-int64_t(evalNode(node->left.get(), results)));
 
         case ASTNode::Kind::kBinaryOp: {
             int leftVal = evalNode(node->left.get(), results);
             int rightVal = evalNode(node->right.get(), results);
 
             switch (node->op) {
-                case '+': return leftVal + rightVal;
-                case '-': return leftVal - rightVal;
-                case '*': return leftVal * rightVal;
+                case '+': return checkedValue(int64_t(leftVal) + rightVal);
+                case '-': return checkedValue(int64_t(leftVal) - rightVal);
+                case '*': return checkedValue(int64_t(leftVal) * rightVal);
                 case '/': {
                     if (rightVal == 0) {
                         throw AppException(ApiErrorCode::kDiceInvalidExpression,
                             "division by zero");
                     }
                     // Integer division (floor toward zero in C++)
-                    return leftVal / rightVal;
+                    return checkedValue(int64_t(leftVal) / rightVal);
                 }
                 default:
                     throw AppException(ApiErrorCode::kDiceInvalidExpression,
@@ -553,7 +561,7 @@ int DiceExpression::evalNode(const ASTNode* node, std::vector<int>& results) {
             for (int i = 0; i < count; ++i) {
                 int roll = randomFn_(sides);
                 results.push_back(roll);
-                sum += roll;
+                sum = checkedValue(int64_t(sum) + roll);
             }
             return sum;
         }

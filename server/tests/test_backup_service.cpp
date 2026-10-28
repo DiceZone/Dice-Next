@@ -7,6 +7,7 @@
 
 #include "test_framework.h"
 #include "../src/service/backup_service.h"
+#include "../src/config/config_manager.h"
 
 #include <filesystem>
 #include <fstream>
@@ -113,6 +114,83 @@ TEST(BackupRestorePaths, OnlyWhitelistedChildrenAreClearedAndActiveLogsSurvive) 
     ASSERT_TRUE(fs::is_empty("config"));
     ASSERT_TRUE(fs::is_empty("image"));
     ASSERT_TRUE(backup::clearForFullRestore("data", true, error));
+}
+TEST(BackupMcp, RestoredOldKeysStayInvalidUntilExplicitRotationAndEnablement) {
+    RestoreWorkspace f;
+    ConfigManager config(fs::absolute("config").string()); ASSERT_TRUE(config.load());
+    mcp::Queries queries; queries.status = [](const mcp::QueryContext&) { return nlohmann::json{{"status", "running"}}; };
+    auto service = std::make_unique<mcp::Service>(config, (f.root / "audit.db").string(), queries);
+    service->configure({{"enabled", true}});
+    const auto original = service->createGrant({{"name", "restored client"}, {"tools", {"get_status"}}});
+    const auto archived = config.getAll();
+    service->revokeGrant(original["id"]); service.reset();
+    writeFile("restore-pending/manifest.json", nlohmann::json{{"version", 4}, {"selection", backup::Selection::full().toJson()}}.dump());
+    for (auto it = archived.begin(); it != archived.end(); ++it)
+        writeFile(fs::path("restore-pending/config") / (it.key() + ".json"), it.value().dump());
+    std::string notice; ASSERT_TRUE(backup::applyPendingRestore(notice));
+    ASSERT_TRUE(mcp::restoreResetPending());
+    ASSERT_TRUE(config.load());
+    nlohmann::json snapshot;
+    ASSERT_TRUE(mcp::resetRestoredAccess(config, [&](const auto& value) { snapshot = value; }));
+    ASSERT_FALSE(mcp::restoreResetPending());
+    ASSERT_FALSE(config.get<bool>("server/mcp/enabled"));
+    ASSERT_FALSE(snapshot["server"]["mcp"]["grants"][0]["enabled"].get<bool>());
+    ASSERT_EQ(snapshot["server"]["mcp"]["grants"][0]["token_hash"].get<std::string>(), std::string());
+    service = std::make_unique<mcp::Service>(config, (f.root / "audit.db").string(), queries);
+    auto settings = service->settings(); ASSERT_TRUE(settings["restored_access_reset"].get<bool>());
+    ASSERT_EQ(settings["grants"][0]["name"].get<std::string>(), std::string("restored client"));
+    ASSERT_TRUE(settings["grants"][0]["requires_rotation"].get<bool>());
+    bool refused = false;
+    try { service->updateGrant(original["id"], {{"name", "restored client"}, {"tools", {"get_status"}}, {"enabled", true}}); }
+    catch (const std::invalid_argument&) { refused = true; }
+    ASSERT_TRUE(refused);
+    const auto regenerated = service->rotateGrant(original["id"]);
+    ASSERT_FALSE(regenerated["enabled"].get<bool>()); ASSERT_FALSE(regenerated["requires_rotation"].get<bool>());
+    service->updateGrant(original["id"], {{"name", "restored client"}, {"tools", {"get_status"}}, {"enabled", true}});
+    service->configure({{"enabled", true}});
+    auto request = [&](const std::string& token) {
+        mcp::Request r; r.headers = {{"host", "127.0.0.1:18088"}, {"authorization", "Bearer " + token}, {"accept", "application/json, text/event-stream"}, {"content-type", "application/json"}, {"mcp-protocol-version", "2025-11-25"}};
+        r.body = nlohmann::json{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/call"}, {"params", {{"name", "get_status"}}}}.dump(); return r;
+    };
+    ASSERT_EQ(service->handle(request(original["token"])).status, 401);
+    ASSERT_EQ(service->handle(request(regenerated["token"])).status, 200);
+}
+TEST(BackupMcp, FailedSnapshotKeepsRestoreBarrierAndSnapshotRecoveryCannotReviveKeys) {
+    RestoreWorkspace f;
+    ConfigManager config(fs::absolute("config").string()); ASSERT_TRUE(config.load());
+    config.set<nlohmann::json>("server/mcp", {{"enabled", true}, {"grants", {{{"id", "old"}, {"name", "old"}, {"enabled", true}, {"token_hash", std::string(64, 'a')}}}}});
+    const auto archived = config.getAll(); mcp::markRestoreReset();
+    bool failed = false;
+    try { mcp::resetRestoredAccess(config, [](const auto&) { throw std::runtime_error("snapshot failed"); }); }
+    catch (const std::runtime_error&) { failed = true; }
+    ASSERT_TRUE(failed); ASSERT_TRUE(mcp::restoreResetPending()); ASSERT_FALSE(config.get<bool>("server/mcp/enabled"));
+    // Models startup recovering a restored main DB's old system_config_snapshot.
+    ASSERT_TRUE(config.restoreSnapshot(archived));
+    nlohmann::json clean;
+    ASSERT_TRUE(mcp::resetRestoredAccess(config, [&](const auto& value) { clean = value; }));
+    ASSERT_FALSE(mcp::restoreResetPending());
+    ASSERT_EQ(clean["server"]["mcp"]["grants"][0]["token_hash"].get<std::string>(), std::string());
+    ConfigManager disk(fs::absolute("config").string()); ASSERT_TRUE(disk.load()); ASSERT_FALSE(disk.get<bool>("server/mcp/enabled"));
+}
+TEST(BackupMcp, ResourceOnlyPartialRestoreDoesNotResetExistingAccess) {
+    RestoreWorkspace f;
+    ConfigManager config(fs::absolute("config").string()); ASSERT_TRUE(config.load());
+    config.set<bool>("server/mcp/enabled", true); ASSERT_TRUE(config.save());
+    auto selection = backup::Selection::full(); selection.config = false; selection.coreDatabase = false;
+    writeFile("restore-pending/manifest.json", nlohmann::json{{"version", 4}, {"selection", selection.toJson()}}.dump());
+    writeFile("restore-pending/data/decks/example.json", "{}");
+    std::string notice; ASSERT_TRUE(backup::applyPendingRestore(notice));
+    ASSERT_FALSE(mcp::restoreResetPending()); ASSERT_TRUE(config.load()); ASSERT_TRUE(config.get<bool>("server/mcp/enabled"));
+}
+TEST(BackupMcp, ActualConfigOrMainDatabaseTriggersProtectionEvenWithMisleadingSelection) {
+    for (const auto& payload : {"config/server.json", "data/custom-main.db"}) {
+        RestoreWorkspace f;
+        auto selection = backup::Selection::full(); selection.config = false; selection.coreDatabase = false;
+        writeFile("restore-pending/manifest.json", nlohmann::json{{"version", 4}, {"selection", selection.toJson()}}.dump());
+        writeFile(fs::path("restore-pending") / payload, "{}");
+        std::string notice; ASSERT_TRUE(backup::applyPendingRestore(notice));
+        ASSERT_TRUE(mcp::restoreResetPending());
+    }
 }
 
 TEST(BackupRestorePaths, RejectsWorkspaceParentNestedAndOutsideTargetsWithoutRemovingFiles) {

@@ -28,7 +28,10 @@ static json makeDefaultConfig() {
             {"port", 18088},
             {"api_key", ""},
             {"db_path", "./data/dice.db"},
-            {"log_level", "info"}
+            {"log_level", "info"},
+            {"mcp", {{"enabled", false}, {"allow_remote", false},
+                     {"allowed_hosts", json::array()}, {"allowed_origins", json::array()},
+                     {"grants", json::array()}}}
         }},
         {"dice", {
             {"command_prefix", "."},
@@ -80,7 +83,8 @@ static json makeDefaultConfig() {
             {"welcome_min_cooldown", 0}           // welcome cooldown 全局最低值（秒）
         }},
         {"webui", {
-            {"password", ""}
+            {"password", ""},
+            {"ui_version", "v1"}
         }},
         {"identity_email", {{"enabled", false}, {"host", ""}, {"port", 465}, {"ssl", true},
                             {"user", ""}, {"pass", ""}, {"from", ""}}},
@@ -170,6 +174,12 @@ static bool validateConfig(const json& value, std::string& error) {
     if (value.contains("adapters") && !value["adapters"].is_array()) { error = "adapters 配置必须是数组"; return false; }
     for (const char* section : {"dice", "events", "webui", "i18n", "backup", "update", "hot_reload"}) {
         if (value.contains(section) && !value[section].is_object()) { error = std::string(section) + " 配置必须是对象"; return false; }
+    }
+    if (value.contains("webui") && value["webui"].contains("ui_version")) {
+        const auto& version = value["webui"]["ui_version"];
+        if (!version.is_string() || (version != "v1" && version != "v2")) {
+            error = "webui.ui_version 必须是 v1 或 v2"; return false;
+        }
     }
     if (value.contains("dice") && value["dice"].contains("scoped_overrides")
         && !value["dice"]["scoped_overrides"].is_object()) {

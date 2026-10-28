@@ -27,6 +27,7 @@
 #include "../adapter/qq_official_adapter.h"
 #include "../adapter/discord_adapter.h"
 #include "../adapter/kook_adapter.h"
+#include "../adapter/openopq_adapter.h"
 #include "../core/deck/card_deck.h"
 #include "../core/deck/deck_file_utils.h"
 #include "../core/reply/reply_manager.h"
@@ -205,6 +206,8 @@ static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std:
     if (!cfg.is_object()) cfg = J::object();
     const bool official = a.type == static_cast<int>(AdapterType::kQQOfficial);
     const bool milky = a.type == static_cast<int>(AdapterType::kMilky);
+    const bool builtinLogin = a.type == static_cast<int>(AdapterType::kOpenOPQ);
+    const J opq = builtinLogin && cfg.contains("openopq") && cfg["openopq"].is_object() ? cfg["openopq"] : J::object();
     const char* typeStr = adapterTypeToString(static_cast<AdapterType>(a.type));
     const std::string heartApiKey = cfg.value("heartApiKey", std::string());
     return J{
@@ -214,9 +217,11 @@ static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std:
         {"connectionMode", milky ? "forward_ws" : a.connectionMode == 0 ? "forward_ws" : a.connectionMode == 1 ? "reverse_ws" : "http"},
         {"endpoint", a.endpoint},
         {"eventEndpoint", milky ? cfg.value("eventEndpoint", cfg.value("event_endpoint", std::string())) : std::string()},
-        {"accessToken", official ? "" : a.accessToken},
+        {"accessToken", official || builtinLogin ? "" : a.accessToken},
         {"appId", official && cfg.is_object() ? cfg.value("appId", std::string()) : std::string()},
-        {"qqNumber", official && cfg.is_object() ? cfg.value("qqNumber", std::string()) : std::string()},
+        {"qqNumber", official && cfg.is_object() ? cfg.value("qqNumber", std::string())
+                     : builtinLogin ? opq.value("account", std::string()) : std::string()},
+        {"openopqTransport", builtinLogin ? opq.value("transport", std::string(openopq::kTransportForward)) : std::string()},
         {"forceVerifyImageResource", official && cfg.is_object() ? cfg.value("forceVerifyImageResource", false) : false},
         {"subscribeGroupMemberEvents", official && cfg.is_object() ? cfg.value("subscribeGroupMemberEvents", false) : false},
         {"autoAcknowledgeInteractions", official && cfg.is_object() ? cfg.value("autoAcknowledgeInteractions", true) : true},
@@ -255,6 +260,11 @@ static J adapterToConfigJson(const AdapterRow& a) {
     }
     if (a.type == static_cast<int>(AdapterType::kMilky)) {
         out["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));
+    }
+    if (a.type == static_cast<int>(AdapterType::kOpenOPQ) && extra.contains("openopq") && extra["openopq"].is_object()) {
+        const J& opq = extra["openopq"];
+        out["openopq"] = J{{"account", opq.value("account", std::string())}, {"console_port", opq.value("consolePort", 0)},
+                           {"transport", opq.value("transport", std::string(openopq::kTransportForward))}};
     }
     return out;
 }
@@ -334,6 +344,20 @@ static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
         if (!cfg.is_object()) cfg = J::object();
         auto adapter = std::make_shared<KookAdapter>(std::to_string(a.id));
         adapter->configure({{"name", a.name}, {"token", a.accessToken},
+                            {"message_format", cfg.value("message_format", std::string())}});
+        return adapter;
+    }
+    if (a.type == static_cast<int>(AdapterType::kOpenOPQ)) {
+        J cfg = J::parse(a.config, nullptr, false);
+        if (!cfg.is_object()) cfg = J::object();
+        J opq = cfg.value("openopq", J::object());
+        if (!opq.is_object()) opq = J::object();
+        auto adapter = std::make_shared<OpenOpqAdapter>(std::to_string(a.id));
+        adapter->configure({{"name", a.name}, {"endpoint", a.endpoint}, {"accessToken", a.accessToken},
+                            {"heartApiKey", cfg.value("heartApiKey", std::string())},
+                            {"account", opq.value("account", std::string())},
+                            {"consolePort", opq.value("consolePort", 0)},
+                            {"transport", opq.value("transport", std::string(openopq::kTransportForward))},
                             {"message_format", cfg.value("message_format", std::string())}});
         return adapter;
     }
@@ -2573,6 +2597,27 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     if (a.accessToken.empty()) throw std::runtime_error("需要 Bot Token");
                     a.connectionMode = 0; a.endpoint.clear();
                     a.config = J{{"heartApiKey", heartApiKey}}.dump();
+                } else if (a.type == static_cast<int>(AdapterType::kOpenOPQ)) {
+                    // 实验性功能：没有骰子之间发的 Key 不让建，下载执行档、签名也都认这把 Key。
+                    if (!openopq::validApiKey(heartApiKey))
+                        throw std::runtime_error("内置登录（实验性）需要填写有效的 BDC 骰娘 API Key");
+                    const std::string account = j.value("qqNumber", j.value("account", std::string()));
+                    if (!openopq::validAccount(account)) throw std::runtime_error("请填写要登录的 QQ 号");
+                    const std::string transport = j.value("openopqTransport", std::string(openopq::kTransportForward));
+                    if (!openopq::validTransport(transport)) throw std::runtime_error("连接方式只能是 forward_ws 或 reverse_ws");
+                    // openopq 的管理接口与 OneBot 正向 WS 在同一个本机端口上；反向 WS 的端口和令牌
+                    // 也先分配好，以后切换连接方式不必重建账号
+                    const int consolePort = openopq::pickFreeLoopbackPort();
+                    const int wsPort = openopq::pickFreeLoopbackPort();
+                    const std::string token = openopq::randomToken();
+                    if (consolePort <= 0 || wsPort <= 0 || consolePort == wsPort || token.empty())
+                        throw std::runtime_error("无法分配本机端口，请稍后重试");
+                    a.connectionMode = transport == openopq::kTransportReverse ? 1 : 0;
+                    a.endpoint = std::to_string(wsPort);
+                    a.accessToken = token;
+                    a.config = J{{"heartApiKey", heartApiKey},
+                                 {"openopq", {{"account", account}, {"consolePort", consolePort},
+                                              {"transport", transport}}}}.dump();
                 } else if (a.type == static_cast<int>(AdapterType::kMilky)) {
                     a.endpoint = j.value("endpoint", "");
                     a.accessToken = j.value("accessToken", "");
@@ -2649,6 +2694,33 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value(key, std::string()) != value;
                         adapterCfg[key] = value;
                     }
+                } else if (a.type == static_cast<int>(AdapterType::kOpenOPQ)) {
+                    // 端点、令牌由 DN 分配，不接受外部修改；只能换 QQ 号和 Key。
+                    J opq = adapterCfg.value("openopq", J::object());
+                    if (!opq.is_object()) opq = J::object();
+                    if (j.contains("qqNumber") && j["qqNumber"].is_string()) {
+                        const std::string account = j["qqNumber"].get<std::string>();
+                        if (!openopq::validAccount(account)) throw std::runtime_error("请填写要登录的 QQ 号");
+                        runtimeConfigChanged = runtimeConfigChanged || opq.value("account", std::string()) != account;
+                        opq["account"] = account;
+                    }
+                    if (j.contains("openopqTransport") && j["openopqTransport"].is_string()) {
+                        const std::string transport = j["openopqTransport"].get<std::string>();
+                        if (!openopq::validTransport(transport)) throw std::runtime_error("连接方式只能是 forward_ws 或 reverse_ws");
+                        if (transport == openopq::kTransportReverse && (a.endpoint.empty() || a.accessToken.empty())) {
+                            // 早期建的账号没分配反向 WS 的端口和令牌，补上
+                            const int wsPort = openopq::pickFreeLoopbackPort();
+                            const std::string token = openopq::randomToken();
+                            if (wsPort <= 0 || token.empty()) throw std::runtime_error("无法分配本机端口，请稍后重试");
+                            a.endpoint = std::to_string(wsPort);
+                            a.accessToken = token;
+                        }
+                        runtimeConfigChanged = runtimeConfigChanged ||
+                            opq.value("transport", std::string(openopq::kTransportForward)) != transport;
+                        opq["transport"] = transport;
+                        a.connectionMode = transport == openopq::kTransportReverse ? 1 : 0;
+                    }
+                    adapterCfg["openopq"] = opq;
                 } else {
                     if (a.type == static_cast<int>(AdapterType::kMilky)) {
                         const bool hadWebhookConfig = adapterCfg.contains("webhookBaseUrl") || adapterCfg.contains("webhook_base_url") ||
@@ -2669,8 +2741,15 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         a.accessToken = j["accessToken"];
                     }
                 }
-                if (j.contains("heartApiKey") && j["heartApiKey"].is_string())
-                    adapterCfg["heartApiKey"] = j["heartApiKey"].get<std::string>();
+                if (j.contains("heartApiKey") && j["heartApiKey"].is_string()) {
+                    const std::string nextKey = j["heartApiKey"].get<std::string>();
+                    if (a.type == static_cast<int>(AdapterType::kOpenOPQ)) {
+                        if (!openopq::validApiKey(nextKey))
+                            throw std::runtime_error("内置登录（实验性）需要有效的 BDC 骰娘 API Key");
+                        runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value("heartApiKey", std::string()) != nextKey;
+                    }
+                    adapterCfg["heartApiKey"] = nextKey;
+                }
                 updateAdapterPersonaPolicy(adapterCfg, j);
                 a.config = adapterCfg.dump();
                 bool wasEnabled = a.enabled;
@@ -2682,7 +2761,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     }
                     runtimeConfigChanged = runtimeConfigChanged || a.connectionMode != 0;
                     a.connectionMode = 0;
-                } else if (j.contains("connectionMode") && j["connectionMode"].is_string()) {
+                } else if (a.type != static_cast<int>(AdapterType::kOpenOPQ) &&
+                           j.contains("connectionMode") && j["connectionMode"].is_string()) {
                     std::string m = j["connectionMode"];
                     const int nextMode = (m == "reverse_ws") ? 1 : (m == "http") ? 2 : 0;
                     runtimeConfigChanged = runtimeConfigChanged || a.connectionMode != nextMode;
@@ -2719,9 +2799,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
                 jsonReply(ok(jj), std::move(cb));
             } else if (req->method() == drogon::Delete) {
+                const auto existing = st->get_pointer<AdapterRow>(aid);
+                const bool builtinLogin = existing && existing->type == static_cast<int>(AdapterType::kOpenOPQ);
                 adapterMgr.stopAdapter(std::to_string(aid));
                 adapterMgr.unregisterAdapter(std::to_string(aid));
                 st->remove<AdapterRow>(aid);
+                if (builtinLogin) openopq::Runtime::instance().forget(std::to_string(aid));
                 scoped_settings::eraseTarget(cfg, "account", id);
                 persistAdaptersToConfig(st, cfg);
                 jsonReply(ok(nullptr), std::move(cb));
@@ -2734,6 +2817,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             int aid = std::stoi(id);
             auto a = st->get<AdapterRow>(aid);
+            if (a.type == static_cast<int>(AdapterType::kOpenOPQ)) {
+                // 内置登录不另起一个测试进程，直接看正在跑的那个连没连上。
+                auto running = adapterMgr.getAdapter(std::to_string(aid));
+                const bool connected = running && running->isConnected();
+                jsonReply(connected ? ok(J{{"success", true}, {"message", "连接测试成功"}})
+                                    : fail("内置登录尚未上线，请扫码登录"), std::move(cb));
+                return;
+            }
             auto adapter = makeRuntimeAdapter(a);
             applyScopedAdapterSettings(adapter, cfg);
             adapter->start();
@@ -2742,6 +2833,32 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             adapter->stop();
             jsonReply(connected ? ok(J{{"success",true},{"message","连接测试成功"}})
                                 : fail(adapter->lastError().empty() ? "连接失败" : adapter->lastError()), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Post});
+
+    // GET /api/adapters/{id}/openopq — 内置登录的运行状态与二维码
+    app.registerHandler("/api/adapters/{1}/openopq", [st](Req, CB&& cb, const std::string& id) {
+        try {
+            const auto a = st->get<AdapterRow>(std::stoi(id));
+            if (a.type != static_cast<int>(AdapterType::kOpenOPQ)) throw std::runtime_error("该账号不是内置登录");
+            jsonReply(ok(openopq::Runtime::instance().status(std::to_string(a.id))), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get});
+
+    // POST /api/adapters/{id}/openopq/{login|cancel|disconnect}
+    app.registerHandler("/api/adapters/{1}/openopq/{2}", [st](Req, CB&& cb, const std::string& id, const std::string& action) {
+        try {
+            const auto a = st->get<AdapterRow>(std::stoi(id));
+            if (a.type != static_cast<int>(AdapterType::kOpenOPQ)) throw std::runtime_error("该账号不是内置登录");
+            auto& runtime = openopq::Runtime::instance();
+            const std::string adapterId = std::to_string(a.id);
+            std::string error;
+            bool done = false;
+            if (action == "login") done = runtime.beginLogin(adapterId, error);
+            else if (action == "cancel") done = runtime.cancelLogin(adapterId, error);
+            else if (action == "disconnect") done = runtime.disconnect(adapterId, error);
+            else throw std::runtime_error("未知操作");
+            jsonReply(done ? ok(runtime.status(adapterId)) : fail(error), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 

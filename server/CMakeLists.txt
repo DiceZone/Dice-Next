@@ -143,10 +143,12 @@ set(SOURCES
     src/common/subprocess.cpp
     src/service/update_service.cpp
     src/service/update_archive.cpp
+    src/service/openopq_runtime.cpp
     src/service/network_info_service.cpp
     src/service/cloud_card_service.cpp
     src/service/identity_email_service.cpp
     src/service/notice_api.cpp
+    src/service/mcp_service.cpp
     src/config/config_manager.cpp
     src/storage/database.cpp
     src/storage/migration.cpp

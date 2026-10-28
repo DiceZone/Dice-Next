@@ -69,13 +69,23 @@ public:
         accessToken_ = config.value("accessToken", "");
         if (config.contains("connectionMode"))
             mode_ = config["connectionMode"].get<std::string>();
+        // 内置登录用：反向 WS 只听 127.0.0.1，并且握手必须带对令牌。
+        // 普通反向 WS 账号不设这两项，行为不变。
+        loopbackOnly_ = config.value("listenLoopback", false);
+        requireToken_ = config.value("requireToken", false);
+        // 正向 WS 的路径。多数协议端在根路径上，openopq 在 /onebot/v11/ws。
+        wsPath_ = config.value("wsPath", std::string("/"));
+        if (wsPath_.empty() || wsPath_.front() != '/') wsPath_ = "/" + wsPath_;
+        // 协议端由 DN 自己在本机拉起（内置登录）：它重启、还没扫码都是常态，
+        // 重连不该退避到一分钟一次、更不该二十次后暂停；登录资料也要等扫完码再取。
+        managedPeer_ = config.value("managedPeer", false);
         setMessageFormatOverride(parseFormatOverride(config.value("message_format", std::string())));
         DICE_LOG_INFO("OneBotV11「{}」配置已读取：端点 {}，连接模式 {}。", name_, endpoint_, mode_);
         return true;
     }
 
     bool start() override {
-        if (isConnected()) return true;
+        if (connected_) return true;
         stopping_ = false;
 
         // ── Forward WS: Dice connects to OneBot server ──────────
@@ -99,15 +109,18 @@ public:
         if (revLoop_) { revLoop_->getLoop()->quit(); revLoop_.reset(); }
         if (wsClient_) { wsClient_->stop(); wsClient_.reset(); }
         connected_ = false;
+        peerOnline_ = false;
         DICE_LOG_INFO("OneBotV11「{}」已停止。", name_);
     }
 
-    bool isConnected() const override { return connected_; }
+    // 托管的协议端（内置登录）：WS 连上只说明进程在，QQ 扫码登录、在线才算连上。
+    bool isConnected() const override { return connected_ && (!managedPeer_ || peerOnline_); }
     std::string lastError() const override { return lastError_; }
 
     /// fine-grained link state. "connected" / "timeout"（重连20次失败已暂停）/ "disconnected".
     /// "timeout" 用来和「已禁用」区分开：适配器仍是 enabled，只是暂停自动重连，可手动重连。
     std::string connectionStatus() const override {
+        if (connected_ && managedPeer_ && !peerOnline_) return "disconnected";
         if (connected_) return "connected";
         if (timedOut_)  return "timeout";
         return "disconnected";
@@ -509,16 +522,18 @@ private:
         });
         wsClient_->setConnectionClosedHandler([self](const drogon::WebSocketClientPtr&) {
             self->connected_ = false;
+            self->peerOnline_ = false;
             DICE_LOG_WARN("OneBotV11「{}」连接已断开，将按重连策略处理。", self->name_);
             self->scheduleReconnect();
         });
         auto req = drogon::HttpRequest::newHttpRequest();
-        req->setPath("/");
+        req->setPath(wsPath_);
         if (!accessToken_.empty()) req->addHeader("Authorization", "Bearer " + accessToken_);
-        DICE_LOG_INFO("OneBotV11「{}」开始连接协议端 {}。", name_, endpoint_);
+        if (!managedPeer_ || reconnectAttempts_ <= 1 || reconnectAttempts_ % 20 == 0)
+            DICE_LOG_INFO("OneBotV11「{}」开始连接协议端 {}{}。", name_, endpoint_, wsPath_);
         wsClient_->connectToServer(req, [self](drogon::ReqResult r, const drogon::HttpResponsePtr&, const drogon::WebSocketClientPtr&) {
             if (r != drogon::ReqResult::Ok) { self->connected_=false; self->lastError_="WS connect failed"; self->scheduleReconnect(); }
-            else { self->connected_=true; self->lastError_.clear();  self->timedOut_=false; DICE_LOG_INFO("OneBotV11「{}」WebSocket 连接已建立，正在读取登录资料。", self->name_); self->sendOneBotAction("get_login_info", json::object(), "login_info"); self->refreshGroupList(); self->startGroupRefreshTimer(); }
+            else { self->connected_=true; self->lastError_.clear();  self->timedOut_=false; DICE_LOG_INFO("OneBotV11「{}」WebSocket 连接已建立，正在读取登录资料。", self->name_); self->sendOneBotAction("get_login_info", json::object(), "login_info"); self->refreshGroupList(); self->startGroupRefreshTimer(); self->startPeerStatusPolling(); }
                     // after stable connection, reset reconnect counter
                     if (self->stabilityTimer_) self->stabilityTimer_.reset();
                     self->stabilityTimer_ = std::make_shared<trantor::TimerId>();
@@ -541,7 +556,7 @@ private:
         revLoop_ = std::make_shared<trantor::EventLoopThread>();
         revLoop_->run();
         tcpServer_ = std::make_shared<trantor::TcpServer>(revLoop_->getLoop(),
-            trantor::InetAddress(static_cast<uint16_t>(port)), "revws-" + id_);
+            trantor::InetAddress(static_cast<uint16_t>(port), loopbackOnly_), "revws-" + id_);
         tcpServer_->setRecvMessageCallback([self](const trantor::TcpConnectionPtr& conn, trantor::MsgBuffer* buf) {
             self->onRevWsData(conn, buf);
         });
@@ -569,6 +584,7 @@ private:
                 std::lock_guard lk(self->revConnMutex_);
                 if (self->revConn_ == conn) {
                     self->revConn_.reset();
+                    self->peerOnline_ = false;
                     if (self->connected_) {
                         self->connected_ = false;
                         DICE_LOG_WARN("OneBotV11「{}」反向 WS 客户端已断开。", self->name_);
@@ -649,10 +665,19 @@ private:
             if (pos == std::string::npos) return;   // wait for the full header block
             std::string headers = revBuffer_.substr(0, pos);
             std::string wsKey;
+            std::string authorization;
             std::istringstream iss(headers);
             std::string line;
             while (std::getline(iss, line)) {
                 if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.size() > 14) {
+                    std::string name = line.substr(0, 14);
+                    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if (name == "authorization:") {
+                        authorization = line.substr(14);
+                        authorization.erase(0, authorization.find_first_not_of(" \t"));
+                    }
+                }
                 if (line.rfind("Sec-WebSocket-Key:", 0) == 0) {  // 18 chars
                     wsKey = line.substr(18);
                     wsKey.erase(0, wsKey.find_first_not_of(" \t"));
@@ -669,6 +694,14 @@ private:
                 revBuffer_.clear();
                 return;
             }
+            if (requireToken_ && (accessToken_.empty() || authorization != "Bearer " + accessToken_)) {
+                DICE_LOG_WARN("OneBotV11「{}」反向 WS 握手令牌不符，已拒绝。", name_);
+                conn->send("HTTP/1.1 401 Unauthorized\r\n"
+                           "Connection: close\r\nContent-Length: 0\r\n\r\n");
+                conn->forceClose();
+                revBuffer_.clear();
+                return;
+            }
             conn->send("HTTP/1.1 101 Switching Protocols\r\n"
                        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
                        "Sec-WebSocket-Accept: " + wsAcceptKey(wsKey) + "\r\n\r\n");
@@ -678,6 +711,7 @@ private:
             sendOneBotAction("get_login_info", json::object(), "login_info");
             refreshGroupList();
             startGroupRefreshTimer();
+            startPeerStatusPolling();
             // fall through to parse any frames that arrived glued to the handshake
         }
 
@@ -712,6 +746,7 @@ private:
 
             if (opcode == 0x8) {                         // Close
                 connected_ = false;
+                peerOnline_ = false;
                 revBuffer_.clear();
                 conn->forceClose();
                 return;
@@ -756,11 +791,37 @@ private:
         });
     }
 
+    /// 托管协议端：定时问 get_status，QQ 是否在线以它为准。未在线 5 秒一次，在线后 15 秒一次。
+    /// 每次连上换一代，旧连接上的轮询自己停下，不会叠成好几条。
+    void startPeerStatusPolling() {
+        if (!managedPeer_) return;
+        const auto generation = ++peerPollGeneration_;
+        pollPeerStatus(generation);
+    }
+
+    void pollPeerStatus(std::uint64_t generation) {
+        if (stopping_ || !connected_ || generation != peerPollGeneration_) return;
+        sendOneBotAction("get_status", json::object(), "peer_status");
+        auto weak = std::weak_ptr<OneBotV11Adapter>(shared_from_this());
+        const double delay = peerOnline_ ? kManagedStatusOnlineSec : kManagedStatusOfflineSec;
+        drogon::app().getLoop()->runAfter(delay, [weak, generation]() {
+            if (auto self = weak.lock()) self->pollPeerStatus(generation);
+        });
+    }
+
     /// Schedule a reconnect attempt (forward WS only). 退避策略：
     ///   前 10 次每 5 秒重连；第 11~20 次每 60 秒；超过 20 次暂停自动重连，状态置「连接超时」。
     void scheduleReconnect() {
         if (stopping_ || mode_ != "forward_ws") return;
         int attempt = ++reconnectAttempts_;
+        if (managedPeer_) {
+            // 本机回环，连一次几乎不花什么；协议端起来、扫完码就该立刻接上
+            auto self = shared_from_this();
+            drogon::app().getLoop()->runAfter(kManagedReconnectDelaySec, [self]() {
+                if (!self->stopping_ && !self->connected_) self->start();
+            });
+            return;
+        }
         if (attempt > kPauseAfterAttempts) {
             timedOut_ = true;
             lastError_ = "\xe8\xbf\x9e\xe6\x8e\xa5\xe8\xb6\x85\xe6\x97\xb6";  // 连接超时
@@ -888,6 +949,13 @@ private:
                     cqContent = s;
                     text = stripCQCollectAt(s, msg.atList);
                     disp = cqToDisplay(s);   // codes → [图片]/[表情]/@xx in original order
+                    // openopq（v1.3.0-rc.1）把消息里所有 @ 提到最前面写成 [CQ:at]，正文里却还留着
+                    // 「@昵称」原文：「@骰娘 .r」到这里成了 at + 「@骰娘 .r」，去掉 @ 之后不以句点开头，
+                    // 指令就认不出来。按开头 at 的个数，摘掉正文开头同样多个「@xxx」。
+                    if (managedPeer_ && !msg.atList.empty() && s.rfind("[CQ:at,", 0) == 0) {
+                        disp = text;   // 正文里本来就有「@昵称」，比 @QQ号 好读
+                        text = stripMentionEchoes(text, msg.atList.size());
+                    }
                 } else if (rawMsg.is_array()) {
                     // OneBot array message: [{"type":"text","data":{"text":"hello"}}, ...]
                     for (auto& seg : rawMsg) {
@@ -961,6 +1029,22 @@ private:
                     if (msg.senderName.empty()) msg.senderName = s.value("card", "");
                     msg.extra["card"] = s.value("card", "");
                     msg.extra["role"] = s.value("role", "");
+                }
+                // 托管的协议端（openopq v1.3.0-rc.1）私聊推送里没有昵称，也不支持
+                // get_stranger_info / get_friend_list，没处查。记下在群里见过的 QQ 昵称
+                // （只记 nickname，不记群名片——名片可能被 .sn 改成属性串），私聊缺名时借用。
+                if (managedPeer_ && !msg.senderId.empty()) {
+                    const std::string nick = j.contains("sender") && j["sender"].is_object()
+                        ? j["sender"].value("nickname", std::string()) : std::string();
+                    std::lock_guard<std::mutex> lk(dataMutex_);
+                    if (!nick.empty()) {
+                        if (seenNicknames_.size() >= kSeenNicknameLimit && !seenNicknames_.count(msg.senderId))
+                            seenNicknames_.clear();
+                        seenNicknames_[msg.senderId] = nick;
+                    } else if (msg.senderName.empty()) {
+                        const auto known = seenNicknames_.find(msg.senderId);
+                        if (known != seenNicknames_.end()) msg.senderName = known->second;
+                    }
                 }
 
                 msg.extra["raw"] = j;
@@ -1045,7 +1129,10 @@ private:
                 // Surface FAILED API calls (e.g. set_group_ban/set_group_card rejected
                 // for lack of permission or bad params) — otherwise they fail silently.
                 // 成员与角色查询只用于刷新缓存，失败（如机器人已不在该群）按调试信息记录。
-                const bool cacheLookup = echo.rfind("role:", 0) == 0 || echo.rfind("members:", 0) == 0;
+                // 托管的协议端还没扫码登录时，取账号、群列表一律「not connected」，那是预期之内的，
+                // 每 5 秒重取一次账号资料，按警告记会在扫码前刷满日志。
+                const bool awaitingLogin = managedPeer_ && getLoginId().empty();
+                const bool cacheLookup = echo.rfind("role:", 0) == 0 || echo.rfind("members:", 0) == 0 || awaitingLogin;
                 if (failed && echo.rfind("role:", 0) == 0) {
                     const std::string tail = echo.substr(5);
                     const auto sep = tail.rfind(':');
@@ -1066,7 +1153,9 @@ private:
                 }
                 if (echo == "glist") {
                     // Group-info pull: silent on success (per spec), log only failures.
-                    if (!d.is_array()) {
+                    if (!d.is_array() && awaitingLogin) {
+                        DICE_LOG_DEBUG("OneBotV11「{}」协议端尚未登录，群列表稍后再取。", name_);
+                    } else if (!d.is_array()) {
                         DICE_LOG_ERROR("OneBotV11「{}」群列表刷新失败，保留已有缓存；平台状态 {}。", name_,
                                        j.value("status", std::string("?")));
                     } else {
@@ -1147,6 +1236,36 @@ private:
                 } else if (echo == "login_info" && !failed && d.is_object()) {
                     // A stranger/member API object is not the bot's identity.
                     identity_.observeLoginInfo(d);
+                } else if (echo == "login_info" && failed && managedPeer_) {
+                    // 托管的协议端还没扫码登录：连得上，但取不到账号。过一会儿再取，
+                    // 取到之后顺带刷新群列表——连上那一刻刷的那次是空的。
+                    auto self = shared_from_this();
+                    drogon::app().getLoop()->runAfter(kManagedLoginInfoRetrySec, [self]() {
+                        if (self->stopping_ || !self->connected_ || !self->getLoginId().empty()) return;
+                        self->sendOneBotAction("get_login_info", json::object(), "login_info_retry");
+                    });
+                } else if (echo == "peer_status") {
+                    const bool online = !failed && d.is_object() && d.value("online", false);
+                    const bool was = peerOnline_.exchange(online);
+                    if (online && !was) {
+                        DICE_LOG_SUCCESS("OneBotV11「{}」协议端账号已在线。", name_);
+                        if (getLoginId().empty()) sendOneBotAction("get_login_info", json::object(), "login_info_retry");
+                        refreshGroupList();
+                    } else if (!online && was) {
+                        DICE_LOG_WARN("OneBotV11「{}」协议端账号已离线，需要重新扫码登录。", name_);
+                    }
+                } else if (echo == "login_info_retry") {
+                    if (!failed && d.is_object()) {
+                        identity_.observeLoginInfo(d);
+                        DICE_LOG_INFO("OneBotV11「{}」协议端已登录，账号 {}。", name_, getLoginId());
+                        refreshGroupList();
+                    } else if (managedPeer_) {
+                        auto self = shared_from_this();
+                        drogon::app().getLoop()->runAfter(kManagedLoginInfoRetrySec, [self]() {
+                            if (self->stopping_ || !self->connected_ || !self->getLoginId().empty()) return;
+                            self->sendOneBotAction("get_login_info", json::object(), "login_info_retry");
+                        });
+                    }
                 }
             }
             // Handle lifecycle events
@@ -1393,6 +1512,23 @@ private:
         return out;
     }
 
+    /// 摘掉正文开头至多 @p count 个「@xxx」（连同其后的空白）。昵称里带空格的认不全，
+    /// 那种情况下指令照旧认不出来——不会误删正文里别的内容。
+    static std::string stripMentionEchoes(const std::string& text, std::size_t count) {
+        const auto blank = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+        std::size_t at = 0;
+        for (std::size_t n = 0; n < count; ++n) {
+            std::size_t start = at;
+            while (start < text.size() && blank(text[start])) ++start;
+            if (start >= text.size() || text[start] != '@') break;
+            std::size_t end = start + 1;
+            while (end < text.size() && !blank(text[end])) ++end;
+            at = end;
+        }
+        while (at < text.size() && blank(text[at])) ++at;
+        return text.substr(at);
+    }
+
     /// Strip CQ codes for clean command text, AND collect any [CQ:at,qq=..]
     /// targets into @p atList. Used for string-format messages (array format
     /// extracts @ inline). qq="all" represents @全体成员.
@@ -1581,6 +1717,17 @@ private:
     std::string endpoint_;
     std::string accessToken_;
     std::string mode_{"forward_ws"};  // forward_ws | reverse_ws | http
+    bool loopbackOnly_ = false;
+    bool requireToken_ = false;
+    std::string wsPath_{"/"};
+    bool managedPeer_ = false;
+    //: 托管协议端报告的 QQ 在线状态（get_status 的 online）
+    std::atomic<bool> peerOnline_{false};
+    std::atomic<std::uint64_t> peerPollGeneration_{0};
+    static constexpr double kManagedStatusOfflineSec = 5.0;
+    static constexpr double kManagedStatusOnlineSec = 15.0;
+    static constexpr double kManagedReconnectDelaySec = 3.0;
+    static constexpr double kManagedLoginInfoRetrySec = 5.0;
 
     OneBotAccountIdentity identity_;
     std::atomic<bool> connected_{false};
@@ -1624,6 +1771,9 @@ private:
     int friendCount_ = -1;                            // 好友数量（-1=未知/未同步）
     std::vector<std::string> friendList_;             // 好友 uid 列表（flist 同步）
     std::unordered_map<std::string,std::string> friendNames_;
+    //: 托管协议端：在消息里见过的 QQ 昵称，给缺昵称的私聊用。满了整表清空重记，不做淘汰排序
+    std::unordered_map<std::string,std::string> seenNicknames_;
+    static constexpr std::size_t kSeenNicknameLimit = 20000;
     std::map<std::string, std::string> selfRole_;    // gid -> owner|admin|member
     std::map<std::string, json> memberLists_;        // gid -> members array
     std::map<std::string, onebot_members::Snapshot> memberSnapshots_;
