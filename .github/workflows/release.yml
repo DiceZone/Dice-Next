@@ -330,6 +330,10 @@ jobs:
         run: |
           chmod +x cross-compile/scripts/package-linux.sh
           cross-compile/scripts/package-linux.sh ${{ matrix.arch }}
+      - name: Test packaged WebUI HTTP
+        timeout-minutes: 5
+        working-directory: main
+        run: node tools/test-webui-package.mjs release
       - uses: actions/upload-artifact@v4
         with:
           name: DiceNext-linux-${{ matrix.arch }}
@@ -437,6 +441,14 @@ jobs:
           DICENEXT_WEB_ROOT: ${{ github.workspace }}\web
           DICENEXT_DOC_ROOT: ${{ github.workspace }}\docs
         run: .\cross-compile\scripts\package-windows.ps1 -Architecture '${{ matrix.arch }}'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          check-latest: true
+      - name: Test packaged WebUI HTTP
+        timeout-minutes: 5
+        working-directory: main
+        run: node tools/test-webui-package.mjs release
       - uses: actions/upload-artifact@v4
         with:
           name: DiceNext-windows-${{ matrix.arch }}
@@ -551,6 +563,10 @@ jobs:
         run: |
           chmod +x cross-compile/scripts/package-macos.sh
           cross-compile/scripts/package-macos.sh
+      - name: Test packaged WebUI HTTP
+        timeout-minutes: 5
+        working-directory: main
+        run: node tools/test-webui-package.mjs release
       - uses: actions/upload-artifact@v4
         with:
           name: DiceNext-macos-arm64

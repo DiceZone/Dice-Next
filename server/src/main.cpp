@@ -3503,12 +3503,7 @@ static int realMain(int argc, char* argv[]) {
         app.setStaticFilesCacheTime(0);
         // Only the entry is selected dynamically; /v1/ and /v2/ retain separate
         // assets, while cookies, APIs and application data stay on one origin.
-        const auto entry = [&configMgr, webRoot](const drogon::HttpRequestPtr& req,
-                std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
-            cb(dice::webui::entryResponse(configMgr, webRoot, req->query()));
-        };
-        app.registerHandler("/", entry, {drogon::Get, drogon::Head});
-        app.registerHandler("/index.html", entry, {drogon::Get, drogon::Head});
+        dice::webui::registerEntryRoutes(app, configMgr, webRoot);
         DICE_LOG_DEBUG_M("管理面板", "前端资源目录为「{}」。", webRoot);
     } else {
         DICE_LOG_WARN_M("管理面板", "前端资源目录「{}」不存在，请检查安装包是否完整。", webRoot);
