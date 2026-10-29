@@ -7,7 +7,6 @@
 #include <memory>
 #include <string>
 #include <chrono>
-#include <stop_token>
 #include <stdexcept>
 
 namespace dice {
@@ -31,13 +30,26 @@ public:
     explicit QueryCancelled(bool timeout) : std::runtime_error(timeout ? "查询超时，未返回结果" : "服务正在退出，查询已取消"), timedOut(timeout) {}
     bool timedOut;
 };
+// Shared cancellation state using facilities available in the macOS release SDK.
+// Copies share a signal; contexts keep it alive independently of the service.
+class QueryCancellation {
+public:
+    QueryCancellation();
+    void requestStop() const;
+    bool stopRequested() const;
+private:
+    struct State;
+    std::shared_ptr<State> state_;
+    void waitUntil(std::chrono::steady_clock::time_point) const;
+    friend class QueryContext;
+};
 class QueryContext {
 public:
-    explicit QueryContext(std::stop_token = {}, std::chrono::milliseconds budget = std::chrono::seconds(5));
+    explicit QueryContext(QueryCancellation = {}, std::chrono::milliseconds budget = std::chrono::seconds(5));
     void checkpoint() const;
     void waitFor(std::chrono::milliseconds) const;
 private:
-    std::stop_token stop_;
+    QueryCancellation stop_;
     std::chrono::steady_clock::time_point deadline_;
 };
 struct Queries {

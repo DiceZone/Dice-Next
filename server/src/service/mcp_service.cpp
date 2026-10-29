@@ -272,7 +272,7 @@ struct Service::Impl {
     mutable sqlite3* db = nullptr;
     struct Bucket { Clock::time_point start; int count; };
     std::map<std::string, Bucket> buckets;
-    std::stop_source shutdown;
+    QueryCancellation shutdown;
     std::chrono::milliseconds queryBudget;
     std::set<std::string> activeGrants;
     Impl(ConfigManager& c, std::string p, Queries q, std::chrono::milliseconds budget) : cfg(c), path(std::move(p)), queries(std::move(q)),
@@ -280,7 +280,7 @@ struct Service::Impl {
     ~Impl() { if (db) sqlite3_close(db); }
     Json serverInfo() const { return {{"name", "Dice!Next"}, {"version", queries.version}}; }
     void pinCards(Json& grant, const Json& previous = Json::object()) const {
-        QueryContext context(shutdown.get_token(), queryBudget);
+        QueryContext context(shutdown, queryBudget);
         const auto oldOwners = previous.value("card_owners", Json::object());
         grant["card_owners"] = Json::object();
         for (const auto& id : grant["card_ids"]) {
@@ -353,20 +353,42 @@ struct Service::Impl {
     }
 };
 
-QueryContext::QueryContext(std::stop_token stop, std::chrono::milliseconds budget) : stop_(stop), deadline_(Clock::now() + budget) {}
+struct QueryCancellation::State {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool stopped = false;
+};
+QueryCancellation::QueryCancellation() : state_(std::make_shared<State>()) {}
+void QueryCancellation::requestStop() const {
+    {
+        // Use the same mutex as the wait predicate to avoid a lost wakeup if
+        // shutdown starts between a checkpoint and entering the wait.
+        std::lock_guard lock(state_->mutex);
+        state_->stopped = true;
+    }
+    state_->changed.notify_all();
+}
+bool QueryCancellation::stopRequested() const {
+    std::lock_guard lock(state_->mutex);
+    return state_->stopped;
+}
+void QueryCancellation::waitUntil(Clock::time_point deadline) const {
+    std::unique_lock lock(state_->mutex);
+    state_->changed.wait_until(lock, deadline, [&] { return state_->stopped; });
+}
+QueryContext::QueryContext(QueryCancellation stop, std::chrono::milliseconds budget) : stop_(std::move(stop)), deadline_(Clock::now() + budget) {}
 void QueryContext::checkpoint() const {
-    if (stop_.stop_requested()) throw QueryCancelled(false);
+    if (stop_.stopRequested()) throw QueryCancelled(false);
     if (Clock::now() >= deadline_) throw QueryCancelled(true);
 }
 void QueryContext::waitFor(std::chrono::milliseconds duration) const {
     checkpoint();
-    std::mutex mutex; std::unique_lock lock(mutex); std::condition_variable_any changed;
-    changed.wait_until(lock, stop_, (std::min)(deadline_, Clock::now() + duration), [] { return false; });
+    stop_.waitUntil((std::min)(deadline_, Clock::now() + duration));
     checkpoint();
 }
 Service::Service(ConfigManager& cfg, std::string path, Queries q, std::chrono::milliseconds budget) : impl_(std::make_unique<Impl>(cfg, std::move(path), std::move(q), budget)) {}
 Service::~Service() { stop(); }
-void Service::stop() { impl_->shutdown.request_stop(); }
+void Service::stop() { impl_->shutdown.requestStop(); }
 Json Service::tools() {
     auto schema = [](Json properties, Json required = Json::array()) { return Json{{"type", "object"}, {"properties", properties}, {"required", required}, {"additionalProperties", false}}; };
     auto tool = [&](const char* name, const char* description, Json input, bool idempotent) {
@@ -502,7 +524,7 @@ Json Service::audit(int page, int size, const std::string& clientId, const std::
 }
 Json Service::cardOptions(const std::string& query) const {
     if (query.size() > 100) throw std::invalid_argument("搜索词过长");
-    QueryContext context(impl_->shutdown.get_token(), impl_->queryBudget); context.checkpoint();
+    QueryContext context(impl_->shutdown, impl_->queryBudget); context.checkpoint();
     auto result = impl_->queries.cardOptions ? impl_->queries.cardOptions(query, context) : Json::array();
     context.checkpoint(); return result;
 }
@@ -527,7 +549,7 @@ Json Service::cardDetails(const Json& input) const {
         }
         if (!found) throw std::invalid_argument("授权凭据不存在");
     }
-    QueryContext context(impl_->shutdown.get_token(), impl_->queryBudget);
+    QueryContext context(impl_->shutdown, impl_->queryBudget);
     Json result = Json::array();
     for (const auto id : ids) {
         context.checkpoint();
@@ -564,7 +586,7 @@ Json Service::selfCheck(const Json& input) {
     {
         std::lock_guard lock(impl_->mutex);
         const auto conf = impl_->conf();
-        const bool running = !impl_->shutdown.stop_requested(), enabled = conf.value("enabled", false);
+        const bool running = !impl_->shutdown.stopRequested(), enabled = conf.value("enabled", false);
         add("service", running && enabled ? "pass" : "fail", !running ? "stopping" : enabled ? "enabled" : "not_enabled");
         bool auditReady = false;
         // Probe actual writeability, not only the ability to SELECT an existing
@@ -697,7 +719,7 @@ Response Service::handle(const Request& req) {
     auto denied = [&](int status, int code, const std::string& message) { return failure(status, id, code, message); };
     auto process = [&]() -> Response {
     try {
-        if (impl_->shutdown.stop_requested()) return denied(503, -32603, "服务正在退出，不再接受 MCP 请求");
+        if (impl_->shutdown.stopRequested()) return denied(503, -32603, "服务正在退出，不再接受 MCP 请求");
         const auto conf = impl_->conf();
         if (!conf.value("enabled", false)) return denied(404, -32601, "MCP 服务未开启");
         if (!impl_->rate("peer:" + req.peer, 240)) return {429, errorBody(id, -32600, "请求过于频繁，请稍后重试"), {{"Retry-After", "60"}}};
@@ -818,7 +840,7 @@ Response Service::handle(const Request& req) {
             if (!impl_->activeGrants.insert(client).second)
                 return {429, errorBody(id, -32600, "此凭据已有查询正在执行，请等待完成后再调用"), {{"Retry-After", "1"}}};
             struct CallScope { std::set<std::string>& active; std::string id; ~CallScope() { active.erase(id); } } call{impl_->activeGrants, client};
-            QueryContext context(impl_->shutdown.get_token(), impl_->queryBudget);
+            QueryContext context(impl_->shutdown, impl_->queryBudget);
             try {
                 // Pure queries can touch disk or wait on their own stores. Do
                 // not hold the grant/audit lock while they run: revocation must
@@ -873,7 +895,7 @@ Response Service::handle(const Request& req) {
                 impl_->record(grant, name, "success", "处理成功（未发送消息或修改业务数据）");
                 result = std::move(payload);
             } catch (const QueryCancelled& e) {
-                if (!impl_->shutdown.stop_requested()) impl_->record(grant, name, "error", "查询超时，未返回结果");
+                if (!impl_->shutdown.stopRequested()) impl_->record(grant, name, "error", "查询超时，未返回结果");
                 result = toolResult({{"error", e.what()}, {"cancelled", true}, {"timed_out", e.timedOut}}, true);
             } catch (const std::invalid_argument& e) {
                 impl_->record(grant, name, "error", "参数无效或查询目标不可读取");

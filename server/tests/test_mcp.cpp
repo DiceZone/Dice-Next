@@ -41,6 +41,88 @@ struct McpFixture {
     }
 };
 template<class F> bool throwsInvalid(F fn) { try { fn(); } catch (const std::invalid_argument&) { return true; } return false; }
+template<class F> bool queryCancelled(F fn, bool timedOut) {
+    try { fn(); } catch (const mcp::QueryCancelled& e) { return e.timedOut == timedOut; }
+    return false;
+}
+}
+TEST(Mcp, QueryCancellationBeforeWaitIsPersistentAndIndependent) {
+    mcp::QueryCancellation cancelled, independent;
+    mcp::QueryContext context(cancelled);
+    const auto shared = cancelled;
+    shared.requestStop(); cancelled.requestStop();
+    ASSERT_TRUE(cancelled.stopRequested());
+    ASSERT_TRUE(queryCancelled([&] { context.checkpoint(); }, false));
+    ASSERT_TRUE(queryCancelled([&] { context.waitFor(std::chrono::seconds(30)); }, false));
+    mcp::QueryContext createdAfterStop(shared);
+    ASSERT_TRUE(queryCancelled([&] { createdAfterStop.checkpoint(); }, false));
+    ASSERT_FALSE(independent.stopRequested());
+    mcp::QueryContext(independent).waitFor(std::chrono::milliseconds(1));
+    mcp::QueryContext().checkpoint();
+}
+TEST(Mcp, QueryCancellationWakesAllWaitersWithoutWaitingForTheirDeadlines) {
+    mcp::QueryCancellation cancellation;
+    std::vector<std::future<bool>> results;
+    std::vector<std::future<void>> started;
+    for (int i = 0; i < 4; ++i) {
+        std::promise<void> ready;
+        started.push_back(ready.get_future());
+        results.push_back(std::async(std::launch::async, [cancellation, ready = std::move(ready)]() mutable {
+            mcp::QueryContext context(cancellation);
+            ready.set_value();
+            return queryCancelled([&] { context.waitFor(std::chrono::seconds(30)); }, false);
+        }));
+    }
+    for (auto& ready : started) ready.wait();
+    cancellation.requestStop();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    for (auto& result : results) {
+        EXPECT_TRUE(result.wait_until(deadline) == std::future_status::ready);
+        EXPECT_TRUE(result.get());
+    }
+}
+TEST(Mcp, QueryCancellationRacingWithWaitDoesNotLoseWakeup) {
+    for (int i = 0; i < 32; ++i) {
+        mcp::QueryCancellation cancellation;
+        std::promise<void> go;
+        auto gate = go.get_future();
+        auto result = std::async(std::launch::async, [cancellation, gate = std::move(gate)]() mutable {
+            mcp::QueryContext context(cancellation);
+            gate.wait();
+            return queryCancelled([&] { context.waitFor(std::chrono::seconds(30)); }, false);
+        });
+        go.set_value();
+        cancellation.requestStop();
+        EXPECT_TRUE(result.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+        ASSERT_TRUE(result.get());
+    }
+}
+TEST(Mcp, QueryContextKeepsCancellationAliveAfterOriginalHandleIsDestroyed) {
+    auto context = [] {
+        mcp::QueryCancellation cancellation;
+        mcp::QueryContext context(cancellation);
+        cancellation.requestStop();
+        return context;
+    }();
+    ASSERT_TRUE(queryCancelled([&] { context.waitFor(std::chrono::seconds(30)); }, false));
+    auto active = [] { mcp::QueryCancellation cancellation; return mcp::QueryContext(cancellation); }();
+    active.waitFor(std::chrono::milliseconds(1));
+    active.checkpoint();
+}
+TEST(Mcp, QueryWaitHonorsDurationAndBudgetWithoutCancellingOtherContexts) {
+    mcp::QueryCancellation cancellation;
+    mcp::QueryContext active(cancellation);
+    const auto start = std::chrono::steady_clock::now();
+    active.waitFor(std::chrono::milliseconds(20));
+    ASSERT_TRUE(std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(20));
+    active.waitFor(std::chrono::milliseconds(0));
+    mcp::QueryContext expired(cancellation, std::chrono::milliseconds(30));
+    ASSERT_TRUE(queryCancelled([&] { expired.waitFor(std::chrono::seconds(30)); }, true));
+    ASSERT_FALSE(cancellation.stopRequested());
+    active.checkpoint();
+    // If shutdown and timeout are both visible, shutdown keeps its existing priority.
+    cancellation.requestStop();
+    ASSERT_TRUE(queryCancelled([&] { expired.checkpoint(); }, false));
 }
 TEST(Mcp, DisabledUntilExplicitlyEnabledAndNoPasswordOrApiKeyBypass) {
     McpFixture f; const auto grant = f.grant(); auto request = f.request(grant);
