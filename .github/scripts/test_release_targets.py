@@ -5,6 +5,13 @@ import unittest
 
 
 class ReleaseTargetsTests(unittest.TestCase):
+    def test_windows_zip_regression_runs_before_packaging(self):
+        root = pathlib.Path(__file__).resolve().parents[2]
+        workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        windows = workflow.split("  windows:", 1)[1].split("  macos-arm64:", 1)[0]
+        self.assertLess(windows.index("run: ./tools/test-release-zip.ps1"),
+                        windows.index("- name: Package"))
+
     def test_every_platform_checks_the_actual_package_before_upload(self):
         root = pathlib.Path(__file__).resolve().parents[2]
         workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")

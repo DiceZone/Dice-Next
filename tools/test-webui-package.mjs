@@ -8,6 +8,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { mkdtemp, readdir, readFile, writeFile, mkdir, stat, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 assert.ok(process.argv[2], 'Usage: node tools/test-webui-package.mjs <archive-or-release-directory>');
@@ -116,12 +117,21 @@ async function assets(version) {
   }
 }
 try {
-  // Refuse path traversal before extracting the locally built CI artifact.
-  const names = execFileSync('tar', ['-tf', archive], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }).trim().split(/\r?\n/);
-  for (const name of names) assert.ok(!name.startsWith('/') && !name.includes('\\') && !name.split('/').includes('..') && !/^[A-Za-z]:/.test(name), `Unsafe archive member: ${name}`);
-  // POSIX packages legitimately contain shared-library symlinks. The archives
-  // here are locally built release artifacts, never an upload from an API caller.
-  execFileSync('tar', ['-xf', archive, '-C', sandbox]);
+  if (process.platform === 'win32') {
+    // Windows tar can reject UTF-8 ZIP names under the CI runner's locale.
+    // .NET reads ZIP names directly, without a locale-dependent console roundtrip.
+    assert.equal(path.extname(archive).toLowerCase(), '.zip');
+    execFileSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File',
+      fileURLToPath(new URL('./expand-release-zip.ps1', import.meta.url)),
+      '-ArchivePath', archive, '-DestinationPath', sandbox], { encoding: 'utf8', windowsHide: true });
+  } else {
+    // Refuse path traversal before extracting the locally built CI artifact.
+    const names = execFileSync('tar', ['-tf', archive], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }).trim().split(/\r?\n/);
+    for (const name of names) assert.ok(!name.startsWith('/') && !name.includes('\\') && !name.split('/').includes('..') && !/^[A-Za-z]:/.test(name), `Unsafe archive member: ${name}`);
+    // POSIX packages legitimately contain shared-library symlinks. The archives
+    // here are locally built release artifacts, never an upload from an API caller.
+    execFileSync('tar', ['-xf', archive, '-C', sandbox]);
+  }
   const directories = (await readdir(sandbox, { withFileTypes: true })).filter(entry => entry.isDirectory());
   assert.equal(directories.length, 1, 'Expected one package root');
   root = path.join(sandbox, directories[0].name);
