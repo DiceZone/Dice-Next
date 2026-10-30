@@ -4097,14 +4097,19 @@ private:
                 auto newMax = vitalMax(vs.canon, vs.maxName);
                 if (!newMax) continue;                         // 该规则无此衍生（非 COC）→ 跳过
                 std::optional<int> newCur;
+                // 理智的上限 99−克苏鲁神话只是天花板：初始值等于意志（原版 mVariableCOC7「理智=&意志」，
+                // Keeper Companion p.85 同），神话增长只压低超出上限的部分，不按差值扣当前值。
+                const bool isSan = vs.canon == CharacterCardStore::canonical("\xe7\x90\x86\xe6\x99\xba");
                 if (!vs.oldCur) {
                     newCur = *newMax;                          // 首次可推导 → 落地为满值
-                    // coc7r（Keeper Companion p.85）：初始理智等于意志，上限 99−神话只是天花板。
-                    if (coc7rOn(msg) && vs.canon == CharacterCardStore::canonical("\xe7\x90\x86\xe6\x99\xba")) {
+                    if (isSan) {
                         auto pow = cards_.getAttr(user, group, "\xe6\x84\x8f\xe5\xbf\x97");   // 意志
                         if (!pow || *pow <= 0) continue;
                         newCur = (std::min)(*pow, *newMax);
                     }
+                } else if (isSan) {
+                    if (*vs.oldCur <= *newMax) continue;       // 未超新上限 → 不动
+                    newCur = *newMax;
                 } else if (vs.oldMax && *vs.oldMax != *newMax) {
                     int v = *vs.oldCur + (*newMax - *vs.oldMax);   // 上限变了 → 当前按差值同步
                     if (v < 0) v = 0; if (v > *newMax) v = *newMax; // 夹 [0,新上限]（避开 windows.h max 宏）
@@ -4256,11 +4261,13 @@ private:
         const std::string group = cardScope(msg);
         const std::string nick = displayName(msg);
 
-        int san; bool fromCard = false;
+        int san; bool fromCard = false, fromPow = false;
         if (!sanArg.empty() && isAllDigits(sanArg)) {
             san = parseIntOr(sanArg, 0);
         } else {
             auto v = cards_.getAttr(user, group, "理智");
+            // 卡上没录理智时按意志计（原版 mVariableCOC7「理智=&意志」），检定后落地。
+            if (!v) { v = cards_.getAttr(user, group, "意志"); fromPow = v.has_value(); }
             if (!v) return i18n_.tr(loc, "card.sc.no_san");
             san = *v; fromCard = true;
         }
@@ -4294,7 +4301,7 @@ private:
 
         int finalSan = san - loss;
         if (finalSan < 0) finalSan = 0;
-        if (fromCard && loss != 0) cards_.setAttr(user, group, "理智", finalSan);
+        if (fromCard && (loss != 0 || fromPow)) cards_.setAttr(user, group, "理智", finalSan);
 
         const char* gradeKey =
             (lv == SuccessLevel::kFumble) ? "dice.level.fumble" :

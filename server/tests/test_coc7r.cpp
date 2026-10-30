@@ -211,6 +211,22 @@ TEST(Coc7r, AutoCardStartsSanityAtPow) {
     f.run(".sc 0/0");                     // no SAN on the card yet → checks against POW
     ASSERT_EQ(f.get("理智"),60);
 }
+TEST(Coc7r, CoreAutoCardStartsSanityAtPow) {
+    // Original Dice! COC7 template: 理智=&意志. 99−Mythos is only a ceiling.
+    CocFixture f; f.setting("ruleSystem","coc7");
+    f.run(".st 体质60 体型50");
+    ASSERT_EQ(f.get("理智"),-999);       // no POW yet → nothing to derive
+    f.run(".st 意志55");
+    ASSERT_EQ(f.get("理智"),55);
+    f.run(".st 克苏鲁神话10");             // ceiling 89: SAN 55 untouched
+    ASSERT_EQ(f.get("理智"),55);
+    f.set("SAN",95);
+    f.run(".st 克苏鲁神话20");             // ceiling 79: only the excess is cut
+    ASSERT_EQ(f.get("理智"),79);
+    f.msg.senderId="1001"; f.set("POW",60,"1001");
+    f.run(".sc 0/0");
+    ASSERT_EQ(f.get("理智"),60);
+}
 TEST(Coc7r, ReassureAcceptsMentionedTarget) {
     // Adapters strip the @ segment from the text; the target arrives in atList.
     CocFixture f; f.stats();
