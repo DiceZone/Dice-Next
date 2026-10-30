@@ -1,0 +1,27 @@
+{
+  "name": "coc7r",
+  "fullName": "CoC7 · Keeper Companion (2026)",
+  "version": "1.0",
+  "author": "DiceZone",
+  "mechanics": "keeper-companion-2026",
+  "set": {
+    "keys": [
+      "coc7r"
+    ],
+    "diceSides": 100
+  },
+  "options": {
+    "bases": false,
+    "specialties": false,
+    "take5": false
+  },
+  "help": {
+    "coc7r": "coc7r（Keeper Companion 2026 规则扩充）\n.set coc7r // 本群切换到 coc7r（群管理）\n.set coc7 // 切回核心 CoC7\n.coc7r options [<bases|specialties|take5> <on|off>] // 查看/切换可选规则：属性基础值、格斗射击最低值、成长取 5（群管理）\n.coc7r [组数] // 生成 8 项 (2D6+5)×5 属性池，自由分配，不写入人物卡\n.coc7r array <1-10> // 显示 480 点预设数组\n.coc7r points // 购点、兴趣点与自定义职业说明\n.coc7r mov // 按 STR/DEX/SIZ/年龄计算 MOV\n.coc7r init // 卡上没有 SAN 时按 POW 初始化\n.sc <成功损失>/<失败损失> [SAN] [mythos] // 理智检定；指定 SAN 只计算不存卡；不可奖惩骰、不可孤注一掷\n.coc7r show // 查看本章累计损失、震惊、余震、Changed\n.coc7r loss <表达式> [mythos] // 记录书籍、法术等不经检定的理智损失\n.coc7r reality [assisted] // 现实检定；assisted=已有他人安抚成功，获 1 奖励骰\n.coc7r reassure <@对方|用户ID> [push] // 安抚他人：成功 +2 SAN 并结束震惊，大失败/孤注失败 -1D4（群管理结算）\n.coc7r mythos <first|later> // 结算神话引起的 Shock/Changed：首次 +5，其后 +1\n.coc7r endshock confirm // 震惊回合结束\n.coc7r sleep confirm // 在安全地点睡过一夜，结束余震\n.coc7r chapter confirm // 新章节：清零累计损失与安抚次数，不解除 Changed\n.coc7r recover confirm // KP 确认休养一周并修订背景后解除 Changed\n.coc7r reward <表达式> // 章节结束的理智奖励\n.coc7r therapy <治疗师技能> [push|phobia] // 月度治疗：成功 +1D3 或移除恐惧症\n.coc7r selfhelp <INT|POW> <已掷结果> [花费幸运] // 结算自助检定：困难成功 +1D6，否则 -1\n.coc7r fire <20|50|100> <单次伤害> <护甲> // 集中自动射击：伤害与护甲同乘 5/10/20\n.coc7r spray <20|50|100> // 扫射区域宽度\n.coc7r chase <剩余MvP> <success|fail|pushfail> [当前位置] // 追逐地点挑战结算\n射程、命中、掩体、追逐难度与剧情效果仍由 KP 裁定。"
+  },
+  "source": {
+    "title": "Call of Cthulhu Keeper Companion",
+    "sku": "CHA23197-H",
+    "year": 2026,
+    "notes": "Opt-in supplement profile, not a new core edition. Reassure fumble/failed push uses 1D4 (p.22; p.94 conflicts)."
+  }
+}

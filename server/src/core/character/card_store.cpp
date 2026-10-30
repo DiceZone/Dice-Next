@@ -731,6 +731,26 @@ std::optional<CharacterCardStore::Snapshot> CharacterCardStore::snapshotById(
     return Snapshot{rows.front().id, rows.front().name, std::move(data)};
 }
 
+bool CharacterCardStore::replaceSnapshot(const std::string& user, const Snapshot& expected, const json& data) {
+    if (!data.is_object()) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto* st = db_.getCardStorage(); if (!st) return false;
+    auto rows = st->get_all<CharacterCardRow>(orm::where(
+        orm::c(&CharacterCardRow::userId) == user and orm::c(&CharacterCardRow::id) == expected.id));
+    if (rows.size() != 1 || rows[0].name != expected.name || json::parse(rows[0].attrs, nullptr, false) != expected.data) return false;
+    const auto meta = expected.data.value("__meta", json::object());
+    if (!meta.is_object()) return false;
+    if (meta.contains("locks")) {
+        if (!meta["locks"].is_string()) return false;
+        std::istringstream locks(meta["locks"].get<std::string>()); std::string key;
+        while (std::getline(locks, key, ',')) if (key == "w") return false;
+    }
+    st->update_all(orm::set(orm::c(&CharacterCardRow::attrs) = data.dump(), orm::c(&CharacterCardRow::updatedAt) = nowIso()),
+        orm::where(orm::c(&CharacterCardRow::id) == expected.id and orm::c(&CharacterCardRow::userId) == user and
+                   orm::c(&CharacterCardRow::name) == expected.name and orm::c(&CharacterCardRow::attrs) == rows[0].attrs));
+    return st->changes() == 1;
+}
+
 std::optional<CharacterCardStore::Snapshot> CharacterCardStore::importSnapshot(
         const std::string& user, const std::string& name, const json& data,
         const std::optional<Snapshot>& expected) {

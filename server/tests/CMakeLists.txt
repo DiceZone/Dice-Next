@@ -51,6 +51,7 @@ set(TEST_SOURCES
     test_timezone.cpp
     test_js_plugin_reload.cpp
     test_dice_expression.cpp
+    test_coc7r.cpp
     test_expression_fallback.cpp
     test_roll_command_parser.cpp
     test_update_service.cpp

@@ -1,0 +1,11 @@
+{
+  "name": "coc7",
+  "fullName": "Call of Cthulhu 7",
+  "version": "1.0",
+  "set": {
+    "keys": [
+      "coc7"
+    ],
+    "diceSides": 100
+  }
+}

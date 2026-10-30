@@ -157,6 +157,9 @@ public:
     struct Snapshot { int id = 0; std::string name; nlohmann::json data; };
     std::optional<Snapshot> snapshot(const std::string& user, const std::string& name) const;
     std::optional<Snapshot> snapshotById(const std::string& user, int id) const;
+    /// Atomic existing-card update (including the unnamed card). Checks write
+    /// locks and rejects stale snapshots; used for SAN + scenario state.
+    bool replaceSnapshot(const std::string& user, const Snapshot& expected, const nlohmann::json& data);
     std::optional<Snapshot> importSnapshot(const std::string& user, const std::string& name,
         const nlohmann::json& data, const std::optional<Snapshot>& expected = std::nullopt);
 

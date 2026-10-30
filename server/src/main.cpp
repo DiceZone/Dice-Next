@@ -660,6 +660,8 @@ static int realMain(int argc, char* argv[]) {
         int packN = dice::CommandRouter::loadRulePacks("rules");
         packN += dice::CommandRouter::loadRulePacks("data/rules");
         int bundleN = dice::CommandRouter::loadRulePackBundles();   // data/rulepacks/<包>/
+        // Under i18n so even older updaters deliver the new native profiles.
+        packN += dice::CommandRouter::loadRulePacks("i18n/rules", {}, {}, true);
         int aliasN = dice::CommandRouter::loadModelTemplates();     // 规则 mod 的 model/*.xml 属性别名 → .st/.ra
         DICE_LOG_SUCCESS_M("规则包", "加载完成：{} 条规则、{} 个规则包、{} 个属性模板别名。", packN, bundleN, aliasN);
     }

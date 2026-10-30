@@ -13,6 +13,7 @@ struct Growth {
     std::optional<int> value;
     std::string failure;
     std::string success = "+1d10";
+    bool explicitGrowth = false;
     bool valid = true;
 };
 
@@ -33,6 +34,7 @@ inline Growth growth(const std::string& input) {
     if (out.attr.empty() && !out.value) { out.valid = false; return out; }
     while (p < text.size() && std::isspace(static_cast<unsigned char>(text[p]))) ++p;
     if (p < text.size() && (text[p] == '+' || text[p] == '-')) {
+        out.explicitGrowth = true;
         const auto end = text.find_first_of(" \t\r\n", p);
         const auto expr = text.substr(p, end == std::string::npos ? end : end - p);
         const auto slash = expr.find('/');

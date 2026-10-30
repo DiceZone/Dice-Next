@@ -17,7 +17,7 @@ inline bool isReservedCoreCommand(std::string word) {
     static const std::unordered_set<std::string> names = {
         "r", "h", "rh", "rs", "rsh", "rhs", "rdc", "rdx", "rav", "rcv", "rx", "ra", "rah", "rc", "rch",
         "rb", "rp", "ba", "bav", "rpmode", "ss", "cast", "longrest", "ds",
-        "game", "coc", "cocs", "coc6", "coc6s", "coc7", "coc7s",
+        "game", "coc", "cocs", "coc6", "coc6s", "coc7", "coc7s", "coc7r", "setcoc7r",
         "cocd", "cocds", "coc6d", "coc6ds", "coc7d", "coc7ds", "dnd", "bot",
         "boton", "botoff", "blackqq", "blackgroup", "whitegroup", "whiteqq", "blackfriend",
         "strselfname", "strselfcall", "st", "sc",

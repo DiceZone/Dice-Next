@@ -25,6 +25,7 @@
 #include "../core/dice/dice_engine.h"
 #include "../core/dice/roll_command_parser.h"
 #include "../core/dice/madness_data.h"
+#include "../core/dice/coc7r_rules.h"
 #include "../core/reply/reply_manager.h"
 #include "character/card_store.h"
 #include "../service/identity_email_service.h"
@@ -193,6 +194,7 @@ public:
     /// 智能化阶段D（工具调用）：按发送者的人物卡读取一个属性值（含关联属性/衍生值回退）。
     /// 供 AI function-calling 的 get_attr 工具使用。无卡/无此属性返回 nullopt。
     std::optional<int> aiGetAttr(const Message& msg, const std::string& name) {
+        if (coc7rOn(msg)) return coc7rAttr(msg,name);
         std::string attr = CharacterCardStore::canonical(name);
         auto v = cards_.getAttr(msg.senderId, cardScope(msg), attr);
         if (!v) v = evalStrAttr(msg, attr);       // 关联属性表达式
@@ -203,7 +205,7 @@ public:
     /// AI 深化（工具写卡）：设置发送者人物卡的一个属性为绝对值（走 canonical 同义词归一，
     /// 与 aiGetAttr 一致）。供 AI function-calling 的 set_attr 工具使用。仅改本人卡。
     bool aiSetAttr(const Message& msg, const std::string& name, int value) {
-        std::string attr = CharacterCardStore::canonical(name);
+        std::string attr = profileAttribute(msg,name);
         if (attr.empty()) return false;
         cards_.setAttr(msg.senderId, cardScope(msg), attr, value);
         return true;
@@ -511,6 +513,7 @@ public:
         if (auto r = tryHandlePersona(loc, msg, cmd))    return *r;  // .rpmode 人格切换
         if (auto r = tryHandleDnd(loc, pmsg, cmd))  return *r;  // .ss/.cast/.longrest/.ds (仅实际死亡豁免掷骰进入 roll)
         if (auto r = tryHandleGame(loc, msg, cmd))  return *r;  // .game 团务（须在 .ga 类之前独立匹配）
+        if (auto r = tryHandleCoc7r(loc, msg, cmd)) return *r;
         if (auto r = tryHandleGen(loc, msg, cmd))   return *r;  // .coc / .dnd 车卡生成（不润色）
         if (auto r = tryHandleMaster(loc, msg, cmd))return *r;  // boton/botoff/blackqq/whitegroup… (须在 .bot 前)
         if (auto r = tryHandleBot(loc, msg, cmd))   return *r;  // .bot / .bot on/off (+账号定向)
@@ -1498,7 +1501,7 @@ private:
                      int& rate, std::string& label, std::string& err) {
         if (tok.empty()) { err = i18n_.tr(loc, "dice.rav.usage"); return false; }
         if (isAllDigits(tok)) { rate = parseIntOr(tok, 0); label = tok; return true; }
-        auto v = cards_.getAttr(msg.senderId, cardScope(msg), tok);
+        auto v = coc7rOn(msg) ? coc7rAttr(msg, tok) : cards_.getAttr(msg.senderId, cardScope(msg), tok);
         if (!v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", tok}}); return false; }
         rate = *v; label = tok; return true;
     }
@@ -1685,7 +1688,9 @@ private:
                 for (size_t i = 1; i < adj.size() && adjOk; ++i)
                     if (!std::isdigit(static_cast<unsigned char>(adj[i]))) adjOk = false;
                 if (adjOk && nm.find_first_of("0123456789") == std::string::npos) {
-                    auto v = cards_.getAttr(owner, group, nm);
+                    auto perspective = msg; perspective.senderId = owner;
+                    auto v = coc7rOn(msg) ? coc7rAttr(perspective, nm) : cards_.getAttr(owner, group, nm);
+                    if (coc7rOn(msg) && !v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", nm}}); return false; }
                     if (!v && owner == msg.senderId && group == cardScope(msg)) v = derivedAttr(msg, nm);  // model.xml 衍生值
                     if (!v) v = defaultAttr(nm);   // 未录入 → 规则默认值（如 急救30）
                     if (!v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", nm}}); return false; }
@@ -1726,7 +1731,9 @@ private:
         }
 
         // No inline/next rate → read the value from the card; remainder is the reason.
-        auto v = cards_.getAttr(owner, group, attr);
+        auto perspective = msg; perspective.senderId = owner;
+        auto v = coc7rOn(msg) ? coc7rAttr(perspective, attr) : cards_.getAttr(owner, group, attr);
+        if (coc7rOn(msg) && !v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", attr}}); return false; }
         if (!v && owner == msg.senderId && group == cardScope(msg)) v = evalStrAttr(msg, CharacterCardStore::canonical(attr));  // 关联属性
         if (!v && owner == msg.senderId && group == cardScope(msg)) v = derivedAttr(msg, attr);  // model.xml 衍生值
         if (!v) v = defaultAttr(attr);   // 未录入 → 规则默认值（如 急救30、聆听20）
@@ -2331,6 +2338,7 @@ private:
         std::string attr, reason, err;
         int rate = 0;
         if (!resolveRate(loc, msg, rest, attr, rate, reason, err)) return err;
+        if (coc7rOn(msg) && profileAttribute(msg,attr)=="理智") return coc7rText(loc,"sc_usage");
         std::string detail;
         int result = rollBonusPenalty(n, bonus, loc, detail);
         return formatCheck(loc, msg, attr, rate, reason, detail, result, true, bonus ? "bonus" : "penalty");
@@ -2579,6 +2587,8 @@ private:
         return i18n_.tr(loc, "persona.deleted", {{"name", name}});
     }
 
+    #include "coc7r_commands.inc"
+
     // ─── Generators: .coc (investigator) / .dnd (ability scores) ────
 
     std::optional<std::string> tryHandleGen(Locale loc, const Message& msg,
@@ -2587,6 +2597,8 @@ private:
         if (lc.rfind("coc", 0) == 0) {
             if (!groupFeatureEnabled(msg, "roll")) return std::string();
             std::string rest = trim(cmd.substr(3));
+            if (coc7rOn(msg) && (rest.empty() || (isAllDigits(rest) && rest.front()!='6' && rest.front()!='7') || rest == "d" || rest == "s"))
+                return coc7rGenerate(loc, msg, isAllDigits(rest) ? clampCount(parseIntOr(rest, 1)) : 1);
             bool edition6 = false, detailed = false;
             // Dice! spellings: coc/coc7, coc6, cocd/coc7d/coc6d.  The historical
             // trailing "s" marker only affected column spacing and is accepted.
@@ -3123,6 +3135,7 @@ private:
     /// model.xml 衍生属性值（未显式设置时按公式算，如 闪避=敏捷/2、生命=&max_hp=(体质+体型)/10）。
     /// 公式里引用的属性：先取卡值，没有则递归取其衍生值（如 生命→max_hp→公式）。无则 nullopt。
     std::optional<int> derivedAttr(const Message& msg, const std::string& attr, int depth = 0) const {
+        if (coc7rOn(msg)) return coc7rAttr(msg, attr);
         if (depth > 8) return std::nullopt;   // 防环
         std::string formula;
         {
@@ -3145,6 +3158,12 @@ private:
         return evalComputedFormula(formula, msg, look);
     }
     std::optional<int> effectiveAttr(const Message& msg, const std::string& attr) const {
+        if (coc7rOn(msg)) {
+            auto base=coc7rAttr(msg,attr); const int buff=getBuff(msg,profileAttribute(msg,attr));
+            if (!base && buff==0) return {};
+            return static_cast<int>((std::clamp)(int64_t(base.value_or(0))+buff,
+                int64_t((std::numeric_limits<int>::min)()),int64_t((std::numeric_limits<int>::max)())));
+        }
         auto base = cards_.getAttr(msg.senderId, cardScope(msg), attr);
         if (!base) base = evalStrAttr(msg, CharacterCardStore::canonical(attr));  // 关联属性求值
         if (!base) base = derivedAttr(msg, attr);   // 未设置 → model.xml 衍生值
@@ -3703,7 +3722,7 @@ private:
                 std::istringstream iss(attr); std::string tk;
                 while (iss >> tk) {
                     std::string canonical = CharacterCardStore::canonical(tk);
-                    auto v = cards_.getAttr(user, group, tk);
+                    auto v = coc7rOn(msg) ? coc7rAttr(msg, tk) : cards_.getAttr(user, group, tk);
                     if (!v && dndModeOn(msg) && !isDndCardSpecialInput(tk)) v = dndSkillValue(msg, canonical);
                     if (v) picked[canonical] = *v;
                     else if (auto value = cards_.getValueByName(user, cards_.boundCard(user, group), tk)) {
@@ -3716,7 +3735,7 @@ private:
                 return i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail", numbers + (!numbers.empty() && !typedPicked.empty() ? " " : "") + typedPicked}});
             }
             std::string canonical = CharacterCardStore::canonical(attr);
-            auto v = cards_.getAttr(user, group, attr);
+            auto v = coc7rOn(msg) ? coc7rAttr(msg, attr) : cards_.getAttr(user, group, attr);
             if (!v && dndModeOn(msg) && !isDndCardSpecialInput(attr)) v = dndSkillValue(msg, canonical);
             if (v) return i18n_.tr(loc, "card.show_one",
                 {{"nick", nick}, {"attr", attr}, {"val", std::to_string(*v)}});
@@ -3730,7 +3749,7 @@ private:
         }
         if (lrest.rfind("del ", 0) == 0 || lrest == "del") {
             if (lockedW) return i18n_.tr(loc, "card.locked_w");
-            std::string attr = trim(rest.substr(3));
+            std::string attr = profileAttribute(msg, trim(rest.substr(3)));
             if (attr.empty()) return i18n_.tr(loc, "card.st.usage");
             std::string canonical = CharacterCardStore::canonical(attr);
             bool ok = false;
@@ -3913,7 +3932,7 @@ private:
                     c == '+' || c == '-' || c == '=' || c == ':' || c == ' ' || c == '|') break;
                 ++i;
             }
-            std::string attr = p.substr(nameStart, i - nameStart);
+            std::string attr = profileAttribute(msg, p.substr(nameStart, i - nameStart));
             if (attr.empty()) { ++i; continue; }
             while (i < p.size() && (p[i] == '=' || p[i] == ':')) ++i;
             bool modifier = false; int sign = 1;
@@ -4080,6 +4099,12 @@ private:
                 std::optional<int> newCur;
                 if (!vs.oldCur) {
                     newCur = *newMax;                          // 首次可推导 → 落地为满值
+                    // coc7r（Keeper Companion p.85）：初始理智等于意志，上限 99−神话只是天花板。
+                    if (coc7rOn(msg) && vs.canon == CharacterCardStore::canonical("\xe7\x90\x86\xe6\x99\xba")) {
+                        auto pow = cards_.getAttr(user, group, "\xe6\x84\x8f\xe5\xbf\x97");   // 意志
+                        if (!pow || *pow <= 0) continue;
+                        newCur = (std::min)(*pow, *newMax);
+                    }
                 } else if (vs.oldMax && *vs.oldMax != *newMax) {
                     int v = *vs.oldCur + (*newMax - *vs.oldMax);   // 上限变了 → 当前按差值同步
                     if (v < 0) v = 0; if (v > *newMax) v = *newMax; // 夹 [0,新上限]（避开 windows.h max 宏）
@@ -4194,6 +4219,10 @@ private:
                                            const std::string& cmd) {
         if (toLower(cmd).rfind("sc", 0) != 0) return std::nullopt;
         if (!groupFeatureEnabled(msg, "roll")) return std::string();
+        if (coc7rOn(msg)) {
+            try { return coc7rSanityCheck(loc, msg, trim(cmd.substr(2))); }
+            catch (const Coc7rRollError& e) { return i18n_.tr(loc,"dice.error.roll",{{"error",e.what()}}); }
+        }
         std::string rest = trim(cmd.substr(2));
 
         // Bonus/penalty sanity (青果/海豹 ".sc b ..." / ".scb ..."): leading b/p[count].
@@ -5272,6 +5301,9 @@ public:
             cmd.rfind("ba", 0) == 0 ||   // .ba/.bav BRP 检定/对抗：@ 的是被检定者
             cmd.rfind("ww", 0) == 0 || cmd.rfind("dx", 0) == 0 || cmd.rfind("en", 0) == 0)
             return true;
+        // .coc7r reassure @p：@ 的是被安抚的调查员
+        if (cmd.rfind("coc7r", 0) == 0 && toLower(trim(cmd.substr(5))).rfind("reassure", 0) == 0)
+            return true;
         // Plain roll: 'r' followed by a roll-ish char (so ".r3d6 @p"/".rh @p" count,
         // but ".reply"/".ri" do not — their @ is treated as a bot selector).
         if (!cmd.empty() && cmd[0] == 'r') {
@@ -5476,6 +5508,8 @@ public:
     // ─── 规则包注册表（P2：.set 切换 + WebUI 管理）─────────────
     struct RulePack {
         std::string name, fullName, version, file, dir, author;
+        std::string mechanics; // Opt-in native profile; never merged into global defaults.
+        std::map<std::string, bool> nativeOptions;
         // 非空表示该规则文件由一个 bundle 统一管理，WebUI 不应把它当独立规则重复展示或编辑。
         std::string ownerBundle, ownerBundleFolder;
         std::vector<std::string> setKeys;
@@ -5500,7 +5534,7 @@ public:
     /// 内置规则包（随包发行、不可删，但可停用）。数据迁移后内置也住 data/rules，故按文件名判定。
     static bool isBuiltinRulePack(const std::string& file) {
         std::string f = ruleBaseFile(file);
-        return f == "coc7.json" || f == "dnd.json";
+        return f == "coc7.json" || f == "dnd.json" || f == "coc7r.json";
     }
 
     /// 加载 @p dir 下所有规则包(rules/*.json)：① 填充元数据表(供 .set / WebUI)
@@ -5508,7 +5542,7 @@ public:
     /// loadRulePackAliases / loadRulePackComputed（仍保留以兼容，但 main 只调本函数）。
     static int loadRulePacks(const std::string& dir,
                              const std::string& ownerBundle = {},
-                             const std::string& ownerBundleFolder = {}) {
+                             const std::string& ownerBundleFolder = {}, bool fallback = false) {
         int n = 0; std::error_code ec;
         if (!std::filesystem::is_directory(dir, ec)) return 0;
         for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
@@ -5519,6 +5553,9 @@ public:
             if (fname.size() > 5 && fname.substr(fname.size() - 5) == ".json") enabled = true;
             else if (fname.size() > 14 && fname.substr(fname.size() - 14) == ".json.disabled") enabled = false;
             else continue;
+            if (fallback && std::any_of(rulePacks().begin(),rulePacks().end(),[&](const RulePack& p) {
+                return ruleBaseFile(p.file)==ruleBaseFile(fname);
+            })) continue; // Persisted edits/disabled copies override shipped defaults.
             try {
                 std::ifstream f(e.path(), std::ios::binary);
                 std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -5560,6 +5597,11 @@ public:
                 p.fullName = j.value("fullName", p.name);
                 p.version = j.value("version", "");
                 p.author = j.value("author", "");
+                p.mechanics = j.value("mechanics", "");
+                if (j.contains("options") && j["options"].is_object())
+                    for (const auto* key : {"bases", "specialties", "take5"})
+                        if (j["options"].contains(key) && j["options"][key].is_boolean())
+                            p.nativeOptions[key] = j["options"][key].get<bool>();
                 p.file = fname;
                 p.dir = dir;
                 p.ownerBundle = ownerBundle;
@@ -5613,6 +5655,7 @@ public:
         operation.phase("defaults_reset");
         int n = 0; for (const auto& d : dirs) n += loadRulePacks(d);
         loadRulePackBundles();   // 重新扫描 data/rulepacks/<包>/（并入各包 rules）
+        if (!dirs.empty()) n += loadRulePacks("i18n/rules", {}, {}, true);
         operation.phase("rule_files_loaded");
         loadModelTemplates();    // 规则 mod 的 model/*.xml 属性别名（alias 已被 resetAliases 清空，须重注册）
         operation.detail("packs=" + std::to_string(rulePacks().size()));
@@ -7389,16 +7432,16 @@ private:
     // acknowledge a change that neither `show` nor an actual check can observe.
     int getCocRule(const Message& msg) const {
         if (msg.targetId.empty()) return 0;
-        return parseIntOr(getGroupSetting(msg, "cocRule"), 0);
+        return parseIntOr(getGroupSetting(msg, coc7rOn(msg) ? "coc7r:houseRule" : "cocRule"), 0);
     }
     void setCocRule(const Message& msg, int rule) {
-        setGroupSetting(msg, "cocRule", std::to_string(rule));
+        setGroupSetting(msg, coc7rOn(msg) ? "coc7r:houseRule" : "cocRule", std::to_string(rule));
     }
     void clearCocRule(const Message& msg) {
         // Keep an explicit rule-0 value in the current scope. Removing an
         // account row would expose a possibly non-zero legacy shared fallback,
         // contradicting the command's "restore rule 0" result.
-        setGroupSetting(msg, "cocRule", "0");
+        setGroupSetting(msg, coc7rOn(msg) ? "coc7r:houseRule" : "cocRule", "0");
     }
 
     /// Map a named COC house rule to its numeric id, or -1 if unknown.
@@ -7408,6 +7451,7 @@ private:
     }
 
     std::optional<std::string> tryHandleSetcoc(Locale loc, const Message& msg, const std::string& cmd) {
+        if (toLower(trim(cmd)) == "setcoc7r") return tryHandleSet(loc, msg, "set coc7r");
         if (toLower(cmd).rfind("setcoc", 0) != 0) return std::nullopt;
         std::string rest = trim(cmd.substr(6));
         std::string lr = toLower(rest);
@@ -11552,6 +11596,8 @@ private:
     // 牌堆抽取，存卡片 __meta.texts）+ JS 表达式。参数冒号分隔依次生成（原版 buildv），
     // 缺省 "pc"。redo = 先清卡再生成（原版 buildCard(reset=true)）。
     std::string pcBuild(Locale loc, const Message& msg, std::string para, bool redo) {
+        if (coc7rOn(msg) && (trim(para).empty() || toLower(trim(para)) == "pc" || toLower(trim(para)) == "coc7r"))
+            return coc7rGenerate(loc, msg, 1); // Free allocation: never overwrite an existing card with an arbitrary ordering.
         const std::string user = msg.senderId, group = cardScope(msg), nick = displayName(msg);
         if (cards_.cardLocked(user, group, "w")) return i18n_.tr(loc, "card.locked_w");
         if (redo) { cards_.clear(user, group); for (auto& [k, v] : cards_.getTexts(user, group)) cards_.setText(user, group, k, ""); }
@@ -12447,6 +12493,8 @@ private:
         if (lc == "ti") temp = true;
         else if (lc == "li") temp = false;
         else return std::nullopt;
+        if (coc7rOn(msg)) return temp ? coc7rStatus(loc,msg,coc7r::sanityState(coc7rState(msg)))
+            : coc7rText(loc,"changed_help");
 
         int sym = engine_.roll("1d10").modifiedTotal;   // 1..10
         int dur = engine_.roll("1d10").modifiedTotal;
@@ -12569,11 +12617,16 @@ private:
     std::string runEnOne(Locale loc, const Message& msg, const std::string& spec) {
         const auto parsed = legacy_args::growth(spec);
         if (!parsed.valid) return i18n_.tr(loc, "card.en.usage");
-        const auto attr = parsed.attr.empty() ? i18n_.tr(loc, "card.en.default_name") : parsed.attr;
+        const auto attr = parsed.attr.empty() ? i18n_.tr(loc, "card.en.default_name") : profileAttribute(msg, parsed.attr);
+        if (coc7rOn(msg) && cards_.cardLocked(msg.senderId, cardScope(msg), "w")) return i18n_.tr(loc, "card.locked_w");
+        if (coc7rOn(msg) && attr == "幸运" && coc7r::sanityState(coc7rState(msg)).changed)
+            return coc7rText(loc, "changed_luck");
+        const auto profileCard = coc7rOn(msg) ? cards_.snapshot(msg.senderId,cards_.boundCard(msg.senderId,cardScope(msg)))
+            : std::optional<CharacterCardStore::Snapshot>{};
         int skill;
         if (parsed.value) skill = *parsed.value;
         else {
-            auto value = cards_.getAttr(msg.senderId, cardScope(msg), attr);
+            auto value = coc7rOn(msg) ? coc7rAttr(msg, attr) : cards_.getAttr(msg.senderId, cardScope(msg), attr);
             if (!value) return i18n_.tr(loc, "dice.check.no_card", {{"attr", attr}});
             skill = *value;
         }
@@ -12588,7 +12641,8 @@ private:
         args["res"] = res;
         args["change"] = "";
         args["final"] = std::to_string(skill);
-        const auto& expression = success ? parsed.success : parsed.failure;
+        auto expression = success ? parsed.success : parsed.failure;
+        if (success && coc7rOn(msg) && coc7rOption(msg, "take5") && coc7r::isSkill(attr) && !parsed.explicitGrowth) expression = "+5";
         auto renderGrowth = [&](const std::string& nativeKey, const std::string& compatibilityKey) {
             if (auto reply = i18n_.trCandidates(loc, check_reply::candidates("growth", success ? "regular" : "failure"), args)) return *reply;
             if (!i18n_.hasConfigured(loc, nativeKey) && (i18n_.hasConfigured(loc, "dice.compat.growth.base") ||
@@ -12606,11 +12660,25 @@ private:
         const int64_t final = static_cast<int64_t>(skill) + growth.modifiedTotal;
         if (final < (std::numeric_limits<int>::min)() || final > (std::numeric_limits<int>::max)())
             return i18n_.tr(loc, "card.en.usage");
-        cards_.setAttr(msg.senderId, cardScope(msg), attr, static_cast<int>(final));
+        std::string masteryNote;
+        if (profileCard) {
+            std::map<std::string,int> changed{{attr,static_cast<int>(final)}};
+            const auto previous=cards_.getAttr(msg.senderId,cardScope(msg),attr);
+            const auto san=cards_.getAttr(msg.senderId,cardScope(msg),"理智");
+            if (coc7r::isSkill(attr) && previous && *previous<90 && final>=90 && san && *san>0 && *san<=99) {
+                const auto gain=engine_.roll("2d6");
+                if (!gain.ok()) return i18n_.tr(loc,"dice.error.roll",{{"error",gain.error}});
+                const int next=(std::max)(*san,(std::min)(*san+gain.modifiedTotal,coc7rAttr(msg,"最大理智").value_or(99)));
+                changed["理智"]=next;
+                masteryNote="\n"+coc7rText(loc,"mastery",{{"gain",std::to_string(next-*san)},{"san",std::to_string(next)}});
+            }
+            if (!coc7rSave(msg,*profileCard,coc7r::sanityState(coc7rStateFrom(msg,profileCard->data)),changed))
+                return coc7rText(loc,"conflict");
+        } else cards_.setAttr(msg.senderId, cardScope(msg), attr, static_cast<int>(final));
         args["change"] = growth.detail.empty() ? expression + "=" + std::to_string(growth.modifiedTotal) : growth.detail;
         args["final"] = std::to_string(final);
         return renderGrowth(success ? "card.en.success" : "card.en.fail_grow",
-            success ? "dice.compat.growth.success" : "dice.compat.growth.failure");
+            success ? "dice.compat.growth.success" : "dice.compat.growth.failure") + masteryNote;
     }
 
     // ─── .nn 改名 ────────────────────────────────────────────

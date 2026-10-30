@@ -45,7 +45,7 @@ foreach ($entry in 'index.html', 'v1\index.html', 'v2\index.html', 'webui-versio
     }
 }
 if (-not $docsRoot) { Fail "未找到文档项目，请设置 DICENEXT_DOC_ROOT 或放在同级 Dice-Next-Doc" }
-foreach ($requiredDir in 'decks','helpdoc','plugins\js') {
+foreach ($requiredDir in 'decks','helpdoc','plugins\js','rules') {
     if (-not (Test-Path (Join-Path $defaultData $requiredDir))) {
         Fail "默认发行资源不完整：缺少 server\resources\default-data\$requiredDir"
     }
@@ -164,6 +164,7 @@ Copy-Item (Join-Path $server 'resources\update-mirrors.json') (Join-Path $stage 
 # server/data 读取；后者是本地运行数据，既会被 .gitignore 排除，也可能
 # 把开发机上的用户牌堆或插件误带进发行包。
 Copy-Item (Join-Path $defaultData 'decks') (Join-Path $stage 'decks') -Recurse
+Copy-Item (Join-Path $defaultData 'rules') (Join-Path $stage 'i18n\rules') -Recurse
 $dataStage = Join-Path $stage 'data'
 New-Item -ItemType Directory -Force -Path $dataStage | Out-Null
 Copy-Item (Join-Path $defaultData 'helpdoc') (Join-Path $dataStage 'helpdoc') -Recurse

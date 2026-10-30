@@ -3618,6 +3618,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         J disable = J::array(); for (auto& d : p.disableCmds) disable.push_back(d);
         return J{{"name", p.name}, {"fullName", p.fullName}, {"version", p.version},
                  {"author", p.author}, {"file", p.file}, {"diceSides", p.diceSides}, {"setKeys", keys},
+                 {"mechanics",p.mechanics}, {"options",p.nativeOptions},
                  {"aliasGroups", p.aliasGroups}, {"computedCount", p.computedCount},
                  {"manualCount", p.manualCount}, {"enabled", p.enabled},
                  {"customCmds", custom}, {"cmdAlias", alias}, {"disableCmds", disable},
@@ -3769,7 +3770,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         std::string file = baseName(req->getParameter("file"));
         if (file.empty()) { jsonReply(fail("file required"), std::move(cb)); return; }
         namespace fs = std::filesystem;
-        for (const char* d : {"data/rules", "rules"}) {
+        for (const char* d : {"data/rules", "rules", "i18n/rules"}) {
             fs::path p = fs::path(d) / file; std::error_code ec;
             if (fs::exists(p, ec)) {
                 std::ifstream f(p, std::ios::binary);
@@ -3824,6 +3825,14 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (file.empty()) { jsonReply(fail("file required"), std::move(cb)); return; }
             std::string base = CommandRouter::ruleBaseFile(file);   // 去 .disabled
             namespace fs = std::filesystem; std::error_code ec;
+            // Never rename installed resources: store a user copy so disabling
+            // the native profile survives an application update.
+            if (!fs::exists(fs::path("data/rules")/base) && !fs::exists(fs::path("data/rules")/(base+".disabled")) &&
+                !fs::exists(fs::path("rules")/base) && !fs::exists(fs::path("rules")/(base+".disabled")) &&
+                fs::is_regular_file(fs::path("i18n/rules")/base)) {
+                fs::create_directories("data/rules");
+                fs::copy_file(fs::path("i18n/rules")/base,fs::path("data/rules")/base);
+            }
             for (const char* d : {"data/rules", "rules"}) {
                 fs::path on = fs::path(d) / base, off = fs::path(d) / (base + ".disabled");
                 fs::path from = enable ? off : on, to = enable ? on : off;

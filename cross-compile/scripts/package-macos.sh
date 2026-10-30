@@ -26,7 +26,7 @@ for entry in index.html v1/index.html v2/index.html webui-versions.json; do
     [[ -f "$WEB_DIST/$entry" ]] || { echo "Missing dual-WebUI resource: $entry; assemble with .github/scripts/bundle-webui.py" >&2; exit 1; }
 done
 [[ -d "$DOCS_ROOT" ]] || { echo "Missing documentation project; set DICENEXT_DOC_ROOT" >&2; exit 1; }
-for required in decks helpdoc plugins/js; do
+for required in decks helpdoc plugins/js rules; do
     [[ -d "$DEFAULT_DATA/$required" ]] || { echo "Missing bundled resource: server/resources/default-data/$required" >&2; exit 1; }
 done
 [[ -f "$DEFAULT_DATA/decks/legacy-builtins.json" ]] || { echo "Missing bundled deck: legacy-builtins.json" >&2; exit 1; }
@@ -62,6 +62,7 @@ cp -a "$SERVER_DIR/resources/update-mirrors.json" "$STAGING_DIR/update-mirrors.j
 # Bundled defaults come only from the tracked resources tree. Never package
 # server/data: it is ignored runtime state and may contain private user data.
 cp -a "$DEFAULT_DATA/decks" "$STAGING_DIR/decks"
+cp -a "$DEFAULT_DATA/rules" "$STAGING_DIR/i18n/rules"
 DATA_STAGE="$STAGING_DIR/data"
 mkdir -p "$DATA_STAGE"
 cp -a "$DEFAULT_DATA/helpdoc" "$DATA_STAGE/helpdoc"
