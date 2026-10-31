@@ -40,18 +40,11 @@ TEST(CardSheetFormat, FullCocSheetGroupsAbilitiesVitalsAndSkills) {
     const std::string text = formatSheet(items, labels(), {});
     ASSERT_EQ(text,
         "属性\n"
-        "力量:50  体质:55  体型:65  敏捷:70\n"
-        "外貌:45  智力:80  意志:40  教育:75\n"
-        "\n"
+        "力量:50 体质:55 体型:65 敏捷:70 外貌:45 智力:80 意志:40 教育:75\n"
         "状态\n"
-        "生命值:13/10\n"
-        "理智:55/99\n"
-        "魔法值:8/8\n"
-        "\n"
+        "生命值:13/10 理智:55/99 魔法值:8/8\n"
         "技能\n"
-        "图书馆使用:70  侦察:60\n"
-        "心理学:40  急救:30\n"
-        "\n"
+        "图书馆使用:70 侦察:60 心理学:40 急救:30\n"
         "公式\n"
         "伤害加值=1d4(=2)");
 }
@@ -70,9 +63,7 @@ TEST(CardSheetFormat, DndAbilitiesUseDndOrderAndDropNothingIntoSkills) {
     const std::string text = formatSheet(items, labels(), {});
     ASSERT_EQ(text,
         "属性\n"
-        "力量:16  敏捷:14  体质:12  智力:8\n"
-        "感知:13  魅力:10\n"
-        "\n"
+        "力量:16 敏捷:14 体质:12 智力:8 感知:13 魅力:10\n"
         "钱币\n"
         "金币:20");
 }
@@ -91,10 +82,8 @@ TEST(CardSheetFormat, SmallDeltaIsOneLineAndDerivedChangesFollow) {
     const std::string text = formatSheet({con, hp, db}, labels(), {Mode::kDelta, false});
     ASSERT_EQ(text,
         "体质:50 → 60\n"
-        "\n"
         "连带\n"
-        "生命值:11/12 → 12/13\n"
-        "伤害加值:0");
+        "生命值:11/12 → 12/13 伤害加值:0");
 }
 
 TEST(CardSheetFormat, PastingAWholeSheetUsesTheSameGroupsWithoutArrows) {
@@ -106,10 +95,9 @@ TEST(CardSheetFormat, PastingAWholeSheetUsesTheSameGroupsWithoutArrows) {
     const std::string text = formatSheet(items, labels(), {Mode::kDelta, false});
     ASSERT_EQ(text,
         "属性\n"
-        "力量:50  体质:55  体型:65  敏捷:70\n"
-        "\n"
+        "力量:50 体质:55 体型:65 敏捷:70\n"
         "技能\n"
-        "侦查:60  聆听:40");
+        "侦查:60 聆听:40");
 }
 
 TEST(CardSheetFormat, SingleNewValueHasNoHeaderOrArrow) {

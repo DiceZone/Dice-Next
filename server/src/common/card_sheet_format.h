@@ -11,8 +11,9 @@
 namespace dice::card_sheet {
 
 // Human-readable character sheets. Numeric tokens stay `name:value` so one
-// line can still be copied into `.st`. Readability comes from groups and
-// line breaks, not from a second notation.
+// line can still be copied into `.st`. Each group is a title plus one line;
+// the chat window wraps that line, because a fixed column count breaks
+// differently on every window width.
 
 enum class Kind { kAbility, kVital, kSkill, kCoin, kFormula, kOther };
 enum class Mode { kFull, kDelta };
@@ -101,10 +102,9 @@ inline std::string cellText(const Item& item, const Options& options) {
     return item.name + ":" + previous + " → " + current;
 }
 
-inline void appendCells(std::string& out, const std::vector<std::string>& cells, int columns) {
-    if (columns < 1) columns = 1;
+inline void appendCells(std::string& out, const std::vector<std::string>& cells) {
     for (size_t i = 0; i < cells.size(); ++i) {
-        if (i) out += (i % static_cast<size_t>(columns) == 0) ? "\n" : "  ";
+        if (i) out += ' ';
         out += cells[i];
     }
 }
@@ -134,14 +134,6 @@ inline std::string formatSheet(std::vector<Item> items, const Labels& labels, co
         if (count >= 4) big = true;
     }
     const bool headers = options.mode == Mode::kFull || groups >= 2 || big;
-    const bool wide = options.mode == Mode::kFull || headers;
-
-    auto columns = [&](Kind kind) {
-        if (!wide) return 1;
-        if (kind == Kind::kAbility || kind == Kind::kCoin) return 4;
-        if (kind == Kind::kSkill) return 2;
-        return 1;
-    };
     auto byIndex = [](const Item* a, const Item* b) { return a->index < b->index; };
     auto sortMain = [&](std::vector<const Item*>& group, Kind kind) {
         if (kind == Kind::kFormula || kind == Kind::kOther) {
@@ -189,25 +181,25 @@ inline std::string formatSheet(std::vector<Item> items, const Labels& labels, co
         {Kind::kOther, &labels.other},
     };
     std::string out;
-    auto writeSection = [&](const std::string& label, std::vector<const Item*> group, int perLine, bool showLabel) {
+    auto writeSection = [&](const std::string& label, std::vector<const Item*> group, bool showLabel) {
         std::vector<std::string> cells;
         for (const Item* item : group) {
             std::string text = cellText(*item, options);
             if (!text.empty()) cells.push_back(std::move(text));
         }
         if (cells.empty()) return;
-        if (!out.empty()) out += "\n\n";
-        if (showLabel && !label.empty()) out += label + "\n";
-        appendCells(out, cells, perLine);
+        if (!out.empty()) out += '\n';
+        if (showLabel && !label.empty()) out += label + '\n';
+        appendCells(out, cells);
     };
     for (const auto& [kind, label] : sections) {
         std::vector<const Item*> group;
         for (const Item* item : main) if (item->kind == kind) group.push_back(item);
         sortMain(group, kind);
-        writeSection(*label, std::move(group), columns(kind), headers);
+        writeSection(*label, std::move(group), headers);
     }
     std::stable_sort(derived.begin(), derived.end(), byIndex);
-    writeSection(labels.derived, std::move(derived), 1, true);
+    writeSection(labels.derived, std::move(derived), true);
     return out;
 }
 
