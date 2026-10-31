@@ -43,6 +43,7 @@ DiceEngine::DiceEngine(ConfigManager& configMgr)
 // ═══════════════════════════════════════════════════════════════
 
 DiceResult DiceEngine::roll(const std::string& expression) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     DICE_LOG_DEBUG("正在计算掷骰表达式「{}」。", expression);
 
     DiceResult result = expression_.evaluate(expression);
@@ -84,6 +85,7 @@ DiceResult DiceEngine::roll(const std::string& expression) {
 }
 
 std::vector<int> DiceEngine::rollXdY(int x, int y) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<int> results;
     results.reserve(static_cast<size_t>(x));
     for (int i = 0; i < x; ++i) {
@@ -103,6 +105,7 @@ int DiceEngine::rollOneDie(int sides) {
 // ═══════════════════════════════════════════════════════════════
 
 DiceResult DiceEngine::rollCOC(int bonus) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     // COC D100: tens die (0-9) × 10 + ones die (0-9), range [0, 99]
     // 0 0 → 100, otherwise tens×10 + ones
     if (bonus < 0) bonus = 0;
@@ -141,6 +144,7 @@ DiceResult DiceEngine::rollCOC(int bonus) {
 }
 
 DiceResult DiceEngine::rollDND(bool advantage) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     // D20 roll
     int roll1 = rollOneDie(20);
     int roll2 = rollOneDie(20);
@@ -172,6 +176,7 @@ DiceResult DiceEngine::rollDND(bool advantage) {
 }
 
 DiceResult DiceEngine::rollFate() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     // 4dF: each die is {-1, 0, +1}
     std::uniform_int_distribution<int> fateDist(0, 2); // 0→-1, 1→0, 2→+1
     std::vector<int> results;
@@ -200,6 +205,7 @@ DiceResult DiceEngine::rollFate() {
 }
 
 DiceResult DiceEngine::rollL5R(int roll, int keep) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (roll < 1) roll = 1;
     if (keep < 1) keep = 1;
     if (keep > roll) keep = roll;
@@ -239,12 +245,14 @@ DiceResult DiceEngine::rollL5R(int roll, int keep) {
 // ═══════════════════════════════════════════════════════════════
 
 void DiceEngine::setRules(const DiceRules& rules) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     rules_ = rules;
     DICE_LOG_INFO("检定规则已更新：COC 大成功上限 {}，大失败下限 {}。",
         rules_.cocCriticalRange, rules_.cocFumbleRange);
 }
 
 void DiceEngine::reloadRules() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     try {
         json rulesJson = configMgr_.getAll();
         // Navigate to dice → rules

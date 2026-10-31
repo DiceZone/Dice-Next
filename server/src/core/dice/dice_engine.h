@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <mutex>
 
 namespace dice {
 
@@ -24,10 +25,10 @@ namespace dice {
  *   - Hot-reload: registers a ConfigManager callback to refresh
  *     DiceRules when the "dice/rules" config subtree changes.
  *
- * Thread-safety: the `roll*` methods are NOT internally
- * synchronized; it is the caller's responsibility to ensure
- * that only one thread calls the engine at a time, or to wrap
- * the engine in a mutex.
+ * Thread-safety: one engine is shared by every adapter thread, the
+ * HTTP API, plugins and the AI worker. The expression parser keeps
+ * its token cursor in members and std::mt19937 is not thread-safe,
+ * so the public roll and rule methods serialize on an internal mutex.
  */
 class DiceEngine {
 public:
@@ -144,6 +145,9 @@ private:
 
     // ─── Rules ───────────────────────────────────────────────
     DiceRules rules_;
+
+    // Recursive: rollL5R calls rollXdY while holding it.
+    mutable std::recursive_mutex mutex_;
 
     // ─── Expression engine ───────────────────────────────────
     DiceExpression expression_;
