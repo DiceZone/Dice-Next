@@ -17,6 +17,27 @@ TEST(outbound, qq_group_and_private_markdown_channel_plain_and_rejection_fallbac
     EXPECT_EQ(fallback["content"].get<std::string>(), "成功");
 }
 
+TEST(outbound, official_qq_name_card_prefixes_markdown_plain_and_rich_cards) {
+    const auto markdown = outbound::qqText("D100=50", ContentFormat::kPlainText, true, false,
+        nullptr, {}, "off", "off", "", false, 0, "茶叶 HP10/10");
+    EXPECT_EQ(markdown["markdown"]["content"].get<std::string>(),
+        "<font color=\"#FF0000\" size=\"1\">茶叶 HP10/10</font>\nD100=50");
+    const auto plain = outbound::qqText("D100=50", ContentFormat::kPlainText, false, false,
+        nullptr, {}, "off", "off", "", false, 0, "茶叶 HP10/10");
+    EXPECT_EQ(plain["content"].get<std::string>(), "茶叶 HP10/10\nD100=50");
+    const auto escaped = outbound::qqText("x", ContentFormat::kPlainText, true, false,
+        nullptr, {}, "off", "off", "", false, 0, "A<B>&C");
+    EXPECT_TRUE(escaped["markdown"]["content"].get<std::string>().find("A&lt;B&gt;&amp;C") != std::string::npos);
+    qq_rich::Card card;
+    card.original = "hello";
+    card.title = "状态";
+    card.statusOnly = true;
+    const auto rich = outbound::qqText("hello", ContentFormat::kPlainText, true, false,
+        &card, {}, "markdown", "off", "", false, 0, "茶叶");
+    EXPECT_EQ(rich["markdown"]["content"].get<std::string>().rfind(
+        "<font color=\"#FF0000\" size=\"1\">茶叶</font>\n", 0), size_t(0));
+}
+
 TEST(outbound, kook_card_and_downgrade_use_production_serializer) {
     auto body = outbound::kookText("target", "**成功**", ContentFormat::kMarkdown, true);
     EXPECT_EQ(body["type"].get<int>(), 10);

@@ -1183,6 +1183,30 @@ TEST(QQCharacterStatus, CompactionPreservesCustomRepliesAndOtherPlatforms) {
     ASSERT_EQ(f.router.lastOfficialCard()->original, custom);
 }
 
+TEST(LegacyCommands, OfficialQQPinsSnCardAboveLaterReplies) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    f.msg.platform = "qq_official";
+    f.cards.setAttr(f.msg.senderId, f.msg.targetId, "hp", 14);
+    const auto set = f.run(".sn");
+    const auto banner = f.router.officialSnBanner(f.msg);
+    ASSERT_FALSE(banner.empty());
+    ASSERT_TRUE(set.find(banner) != std::string::npos);
+    ASSERT_TRUE(banner.find("hp14") != std::string::npos);
+    f.cards.setAttr(f.msg.senderId, f.msg.targetId, "hp", 12);
+    ASSERT_TRUE(f.router.officialSnBanner(f.msg).find("hp12") != std::string::npos);
+    const auto longCard = f.run(".sn {nick}" + std::string(200, 'a'));
+    const auto truncated = f.router.officialSnBanner(f.msg);
+    ASSERT_TRUE(truncated.find("…") != std::string::npos);
+    ASSERT_TRUE(truncated.size() < longCard.size());
+    ASSERT_EQ(f.run(".sn off"), f.i18n.tr(Locale::kZhHans, "sn.cleared"));
+    ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
+    f.msg.platform = "onebot_v11";
+    ASSERT_TRUE(f.run(".sn").find("hp12") != std::string::npos);
+    f.msg.platform = "qq_official";
+    ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
+}
+
 TEST(LegacyCommands, InvalidGrowthNeverWritesTheCard) {
     LegacyFixture f;
     f.cards.setAttr(f.msg.senderId, f.msg.targetId, "侦查", 60);

@@ -7,11 +7,17 @@
 namespace dice::outbound {
 using Json = nlohmann::json;
 
+inline std::string officialNameCardPrefix(const std::string& card, bool markdown) {
+    if (card.empty()) return {};
+    if (!markdown) return card + "\n";
+    return "<font color=\"#FF0000\" size=\"1\">" + qq_rich::literal(card) + "</font>\n";
+}
 inline Json qqText(const std::string& text, ContentFormat format, bool useMarkdown,
                    bool channel, const qq_rich::Card* card = nullptr,
                    const std::vector<presentation::Action>& actions = {},
                    const std::string& richStyle = "off", const std::string& interactions = "off",
-                   const std::string& nativeUser = "", bool verifyImages = false, int fallbackLevel = 0) {
+                   const std::string& nativeUser = "", bool verifyImages = false, int fallbackLevel = 0,
+                   const std::string& nameCard = "") {
     const bool rich = useMarkdown && format == ContentFormat::kPlainText && richStyle != "off"
         && card && card->original == text;
     const bool interactive = useMarkdown && fallbackLevel == 0 && richStyle != "off" && !actions.empty();
@@ -21,8 +27,9 @@ inline Json qqText(const std::string& text, ContentFormat format, bool useMarkdo
         : (format == ContentFormat::kMarkdown ? markdown::toPlainText(text) : text);
     if (rich) wire = qq_rich::render(*card, fallbackLevel == 0 && richStyle == "math", false);
     if ((rich || interactive) && fallbackLevel == 0 && interactions == "links") wire += qq_rich::commandLinks(commands);
+    if (!nameCard.empty()) wire = officialNameCardPrefix(nameCard, useMarkdown) + wire;
     if (rich && wire.size() > 3500)
-        return qqText(text, format, false, channel, nullptr, {}, "off", "off", "", verifyImages, 2);
+        return qqText(text, format, false, channel, nullptr, {}, "off", "off", "", verifyImages, 2, nameCard);
     Json body = useMarkdown
         ? Json{{"content", " "}, {"msg_type", 2}, {"markdown", {{"content", wire}, {"force_verify_image_resource", verifyImages}}}}
         : Json{{"content", wire.empty() && !text.empty() ? text : wire}};

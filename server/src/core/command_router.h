@@ -263,6 +263,14 @@ public:
     void setLegacyLogEndHook(LegacyLogEndFn fn) { legacyLogEndHook_ = std::move(fn); }
     inline static thread_local std::shared_ptr<const qq_rich::Card> officialCard_;
     std::shared_ptr<const qq_rich::Card> lastOfficialCard() const { return officialCard_; }
+    /// Official QQ has no group-card API. After .sn, later replies carry that
+    /// card as their first line. Other platforms return empty and keep setGroupCard.
+    std::string officialSnBanner(const Message& msg) {
+        if (msg.platform != "qq_official" || msg.type == MessageType::kChannel) return {};
+        if (getUserSetting(msg, "snPinned") != "1" && !snAutoOn(msg) && getUserSetting(msg, "snTemplate").empty())
+            return {};
+        return compactSnCard(renderCurrentSn(msg));
+    }
 
     /// Process an incoming message and return the response (or empty string if no match).
     /// Called by adapter message callbacks.
@@ -9372,10 +9380,42 @@ private:
         if (!tmpl.empty()) return renderSn(msg, tmpl);
         return renderSnAttrs(msg, snAttrs(msg));
     }
-    // 把当前名片静默应用到群（不返回提示）。
+    // 把当前名片静默应用到群（不返回提示）。官方 QQ 没有这个接口。
     void applySnCard(const Message& msg) {
+        if (msg.platform == "qq_official") return;
         if (auto ad = adapters_.getAdapter(msg.adapterId))
             ad->setGroupCard(msg.targetId, msg.senderId, renderCurrentSn(msg));
+    }
+    void rememberOfficialSn(const Message& msg) {
+        if (msg.platform == "qq_official") setUserSetting(msg, "snPinned", "1");
+    }
+    static std::string compactSnCard(std::string text) {
+        std::string collapsed;
+        bool pendingSpace = false;
+        for (unsigned char c : text) {
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                pendingSpace = !collapsed.empty();
+                continue;
+            }
+            if (pendingSpace) { collapsed += ' '; pendingSpace = false; }
+            collapsed += static_cast<char>(c);
+        }
+        constexpr int kMaxRunes = 120;
+        size_t bytes = 0;
+        int runes = 0;
+        while (bytes < collapsed.size() && runes < kMaxRunes) {
+            const unsigned char lead = static_cast<unsigned char>(collapsed[bytes]);
+            const size_t width = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2
+                : (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
+            if (bytes + width > collapsed.size()) break;
+            bytes += width;
+            ++runes;
+        }
+        if (bytes < collapsed.size()) {
+            collapsed.resize(bytes);
+            collapsed += "…";
+        }
+        return collapsed;
     }
     bool snAutoOn(const Message& msg) const { return getUserSetting(msg, "snAuto") == "1"; }
     // .st 改卡后调用：若本群开了 .sn auto，则实时刷新群名片。
@@ -9390,7 +9430,9 @@ private:
         if (la == "off" || la == "clr") {
             setUserSetting(msg, "snTemplate", "");
             setUserSetting(msg, "snAuto", "");   // 关名片也关自动同步
-            if (auto ad = adapters_.getAdapter(msg.adapterId)) ad->setGroupCard(msg.targetId, msg.senderId, "");
+            setUserSetting(msg, "snPinned", "");
+            if (msg.platform != "qq_official")
+                if (auto ad = adapters_.getAdapter(msg.adapterId)) ad->setGroupCard(msg.targetId, msg.senderId, "");
             return i18n_.tr(loc, "sn.cleared");
         }
         // .sn auto [on|off]：监听属性变化、实时更新群名片。
@@ -9402,8 +9444,11 @@ private:
                 return i18n_.tr(loc, "sn.auto_off");
             }
             setUserSetting(msg, "snAuto", "1");
-            applySnCard(msg);   // 立即同步一次
-            return i18n_.tr(loc, "sn.auto_on", {{"card", renderCurrentSn(msg)}});
+            rememberOfficialSn(msg);
+            applySnCard(msg);   // 立即同步一次；官方 QQ 改为回复顶部展示
+            const std::string card = renderCurrentSn(msg);
+            return i18n_.tr(loc, msg.platform == "qq_official" ? "sn.auto_on_official" : "sn.auto_on",
+                {{"card", card}});
         }
         std::string card;
         if (!a.empty() && a.find('{') != std::string::npos) {
@@ -9414,8 +9459,10 @@ private:
             // Default: render from the group's configured attribute list.
             card = renderSnAttrs(msg, snAttrs(msg));
         }
-        if (auto ad = adapters_.getAdapter(msg.adapterId)) ad->setGroupCard(msg.targetId, msg.senderId, card);
-        return i18n_.tr(loc, "sn.done", {{"card", card}});
+        rememberOfficialSn(msg);
+        if (msg.platform != "qq_official")
+            if (auto ad = adapters_.getAdapter(msg.adapterId)) ad->setGroupCard(msg.targetId, msg.senderId, card);
+        return i18n_.tr(loc, msg.platform == "qq_official" ? "sn.done_official" : "sn.done", {{"card", card}});
     }
 
     // ─── .welcome 入群欢迎词（骰主设置，存 group_settings）────

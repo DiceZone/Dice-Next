@@ -57,6 +57,9 @@ struct Message {
     json extra;               // 平台特定附加数据（CQ码、附件等）
     // Outbound-only structured presentation; never deserialized from gateway data.
     std::shared_ptr<const qq_rich::Card> qqRichReply;
+    // Official QQ cannot set a group card. When the sender has an active .sn
+    // card, this is the plain text placed above the outgoing reply.
+    std::string snBanner;
     std::vector<presentation::Action> presentationActions;
     bool forcePlainText = false; // Outbound conversation preference, captured before async work.
     bool textPreferenceCaptured = false;
