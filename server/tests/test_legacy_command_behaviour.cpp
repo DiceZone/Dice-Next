@@ -1166,7 +1166,7 @@ TEST(QQCharacterStatus, CompactionPreservesCustomRepliesAndOtherPlatforms) {
         f.msg.platform = platform;
         f.run(".st hp14/14");
         const auto reply = f.run(".st hp-2");
-        ASSERT_EQ(reply, f.i18n.tr(Locale::kZhHans, "card.st.done", {{"nick", "<玩家>"}, {"detail", "生命值:12"}}));
+        ASSERT_EQ(reply, f.i18n.tr(Locale::kZhHans, "card.st.done", {{"nick", "<玩家>"}, {"detail", "生命值:14/14 → 12/14"}}));
         auto card = f.router.lastOfficialCard();
         if (f.msg.platform == "qq_official") {
             ASSERT_TRUE(card != nullptr);

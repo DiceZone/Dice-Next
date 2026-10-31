@@ -358,10 +358,19 @@
   "card": {
     "st": {
       "usage": "Character sheet .st\n.st <attr><value> // record or change an attribute, e.g. .st STR50 DEX60\n.st <attr>±<value> // adjust an attribute, dice allowed, e.g. hp-2, san+1d3\n.st show // show the current sheet\n.st clr // clear the sheet\n.st del <attr> // delete one attribute",
-      "done": "{nick}'s sheet updated: {detail}"
+      "done": "{nick}'s sheet updated:\n{detail}"
     },
-    "show": "{nick}'s character sheet: {detail}",
+    "show": "{nick}'s character sheet:\n{detail}",
     "show_one": "{nick}'s {attr}: {val}",
+    "sheet": {
+      "abilities": "Attributes",
+      "vitals": "Status",
+      "skills": "Skills",
+      "coins": "Coins",
+      "formulas": "Formulas",
+      "other": "Other",
+      "derived": "Also changed"
+    },
     "empty": "{nick} has no character-sheet attributes to display — set attributes with .st",
     "attr_missing": "Attribute \"{attr}\" not found",
     "cleared": "Cleared {nick}'s character sheet",
@@ -728,7 +737,7 @@
     "renamed": "{nick} renamed card \"{old}\" to \"{new}\"",
     "no_bound": "No character card is currently bound.",
     "unbound": "{nick} unbound card: {name} (the card is kept; .pc tag to rebind)",
-    "show": "{owner}'s card [{name}]: {detail}",
+    "show": "{owner}'s card [{name}]:\n{detail}",
     "show_empty": "{owner}'s card [{name}] is still empty.",
     "default_name": "Default",
     "build_done": "{nick}'s character card generated:\n{detail}",

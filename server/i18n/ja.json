@@ -359,10 +359,19 @@
   "card": {
     "st": {
       "usage": "シート .st\n.st <能力値><値> // 能力値を記録・変更。例 .st STR50 DEX60\n.st <能力値>±<値> // 能力値を増減。ダイス可。例 hp-2、san+1d3\n.st show // 現在のシートを表示\n.st clr // シートを消去\n.st del <能力値> // 能力値を1つ削除",
-      "done": "{nick} のシートを更新しました: {detail}"
+      "done": "{nick} のシートを更新しました:\n{detail}"
     },
-    "show": "{nick} のキャラクターシート: {detail}",
+    "show": "{nick} のキャラクターシート:\n{detail}",
     "show_one": "{nick} の{attr}: {val}",
+    "sheet": {
+      "abilities": "能力値",
+      "vitals": "状態",
+      "skills": "技能",
+      "coins": "通貨",
+      "formulas": "式",
+      "other": "その他",
+      "derived": "連動"
+    },
     "empty": "{nick} のシートには表示できる能力値がありません — .st で能力値を設定してください",
     "attr_missing": "能力値「{attr}」が見つかりません",
     "cleared": "{nick} のキャラクターシートをクリアしました",
@@ -729,7 +738,7 @@
     "renamed": "{nick} がシート「{old}」を「{new}」に改名しました",
     "no_bound": "現在紐付けられたキャラクターシートはありません。",
     "unbound": "{nick} がシートの紐付けを解除しました: {name}（シートは残ります。.pc tag で再紐付け）",
-    "show": "{owner} のシート [{name}]: {detail}",
+    "show": "{owner} のシート [{name}]:\n{detail}",
     "show_empty": "{owner} のシート [{name}] はまだ空です。",
     "default_name": "既定",
     "build_done": "{nick} のキャラシートを生成しました：\n{detail}",

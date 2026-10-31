@@ -365,10 +365,19 @@
   "card": {
     "st": {
       "usage": "录卡 .st\n.st <属性><值> // 录入或修改属性，如 .st 力量50 敏捷60\n.st <属性>±<值> // 增减属性，支持骰子，如 hp-2、理智+1d3\n.st show // 查看当前人物卡\n.st clr // 清空人物卡\n.st del <属性> // 删除某项属性",
-      "done": "{nick} 的人物卡已更新：{detail}"
+      "done": "{nick} 的人物卡已更新：\n{detail}"
     },
-    "show": "{nick} 的人物卡：{detail}",
+    "show": "{nick} 的人物卡：\n{detail}",
     "show_one": "{nick} 的 {attr}：{val}",
+    "sheet": {
+      "abilities": "属性",
+      "vitals": "状态",
+      "skills": "技能",
+      "coins": "钱币",
+      "formulas": "公式",
+      "other": "其他",
+      "derived": "连带"
+    },
     "empty": "{nick} 没有可展示的人物卡属性，请用 .st 录入属性",
     "attr_missing": "未找到属性「{attr}」",
     "cleared": "已清空 {nick} 的人物卡",
@@ -735,7 +744,7 @@
     "renamed": "{nick} 已将人物卡「{old}」更名为「{new}」",
     "no_bound": "当前没有绑定人物卡。",
     "unbound": "{nick} 已解除绑定人物卡：{name}（卡片仍保留，可 .pc tag 重新绑定）",
-    "show": "{owner} 的人物卡【{name}】：{detail}",
+    "show": "{owner} 的人物卡【{name}】：\n{detail}",
     "show_empty": "{owner} 的人物卡【{name}】还是空白的。",
     "default_name": "默认卡",
     "build_done": "{nick} 的人物卡已生成：\n{detail}",
