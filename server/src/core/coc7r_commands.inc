@@ -7,31 +7,46 @@ bool coc7rOn(const Message& msg) const {
 std::string coc7rText(Locale loc, const std::string& key, const I18n::Args& args = {}) const {
     return i18n_.tr(loc, "coc7r." + key, args);
 }
+// Group setting first, then the pack, then the built-in default. A pack saved
+// before a module existed keeps that module at its default instead of off.
 bool coc7rOption(const Message& msg, const std::string& key) const {
     const auto saved = getGroupSetting(msg, "coc7r:option:" + key);
     if (!saved.empty()) return saved == "1";
     auto pack = activeRulePack(msg);
-    return pack && pack->nativeOptions.count(key) && pack->nativeOptions.at(key);
+    if (pack && pack->nativeOptions.count(key)) return pack->nativeOptions.at(key);
+    return coc7r::optionDefault(key);
 }
+bool coc7rRule(const Message& msg, const std::string& key) const { return coc7rOn(msg) && coc7rOption(msg, key); }
 std::string profileAttribute(const Message& msg, const std::string& name) const {
-    if (!coc7rOn(msg)) return name;
+    if (!coc7rRule(msg, "skills")) return name;
     return coc7r::canonical(CharacterCardStore::canonical(coc7r::canonical(name)));
+}
+// Core lookup used while the revised skill list is switched off.
+std::optional<int> coc7rCoreAttr(const Message& msg, const std::string& raw) const {
+    const auto attr = CharacterCardStore::canonical(raw);
+    if (auto v = cards_.getAttr(msg.senderId, cardScope(msg), attr)) return v;
+    if (auto v = evalStrAttr(msg, attr)) return v;
+    if (auto v = derivedAttr(msg, attr)) return v;
+    return defaultAttr(attr);
 }
 std::optional<int> coc7rAttr(const Message& msg, const std::string& raw) const {
     const auto name = profileAttribute(msg, raw);
     // Do not merge old Charm/Fast Talk/Intimidate into Persuade. Explicit fields
     // remain untouched. Only subsequent input/check aliases use the new mapping.
     const auto lookup = [&](const std::string& key) { return cards_.getAttr(msg.senderId, cardScope(msg), key); };
-    if (name == "冲锋枪" || name == "宗教") return {};
-    if (name == "最大理智" || name == "最大理智值") return (std::max)(0, 99 - (std::clamp)(lookup("克苏鲁神话").value_or(0), 0, 99));
-    const bool familySkill=std::find(coc7r::fighting().begin(),coc7r::fighting().end(),name)!=coc7r::fighting().end()
-        || std::find(coc7r::firearms().begin(),coc7r::firearms().end(),name)!=coc7r::firearms().end();
-    if (!familySkill) if (auto v = lookup(name)) return v;
-    if (name == "移动") {
+    if (name == "最大理智" || name == "最大理智值" || CharacterCardStore::canonical(name) == "最大理智值")
+        return (std::max)(0, 99 - (std::clamp)(lookup("克苏鲁神话").value_or(0), 0, 99));
+    if (coc7r::canonical(raw) == "移动" && coc7rRule(msg, "movement") && !lookup("移动")) {
         auto str = lookup("力量"), dex = lookup("敏捷"), siz = lookup("体型");
         if (!str || !dex || !siz || *str < 0 || *dex < 0 || *siz < 0) return {};
         return coc7r::movement(*str, *dex, *siz, lookup("年龄").value_or(20));
     }
+    if (!coc7rRule(msg, "skills")) return coc7rCoreAttr(msg, raw);
+    if (name == "冲锋枪" || name == "宗教") return {};
+    const bool familySkill=std::find(coc7r::fighting().begin(),coc7r::fighting().end(),name)!=coc7r::fighting().end()
+        || std::find(coc7r::firearms().begin(),coc7r::firearms().end(),name)!=coc7r::firearms().end();
+    if (!familySkill) if (auto v = lookup(name)) return v;
+    if (name == "移动") return coreDerivedAttr(msg, name);   // movement off: core formula
     if (name == "兴趣点") {
         auto edu = lookup("教育"), intel = lookup("智力");
         if (!edu || !intel || *edu < 0 || *intel < 0 || int64_t(*edu)+*intel > 1000000) return {};
@@ -82,9 +97,9 @@ int coc7rRoll(const std::string& expr) {
     if (!roll.ok()) throw Coc7rRollError(roll.error);
     return roll.modifiedTotal;
 }
-std::string coc7rStatus(Locale loc, const Message& msg, const coc7r::SanityState& state) const {
+std::string coc7rStatus(Locale loc, const Message& msg, const coc7r::SanityState& state, const std::string& nick = {}) const {
     auto pow=coc7rAttr(msg,"意志");
-    return coc7rText(loc,"status", {{"nick",displayName(msg)},
+    return coc7rText(loc,"status", {{"nick",nick.empty()?displayName(msg):nick},
         {"loss",std::to_string(state.chapterLoss)},{"threshold",pow ? std::to_string(*pow/5) : "?"},
         {"shock",coc7rText(loc,state.shock?"yes":"no")},{"rounds",std::to_string(state.shockRounds)},
         {"aftershock",coc7rText(loc,state.aftershock?"yes":"no")},{"changed",coc7rText(loc,state.changed?"yes":"no")},
@@ -139,6 +154,10 @@ std::string coc7rSanityCheck(Locale loc, const Message& msg, const std::string& 
     // Unlike the old SC parser, malformed extra arguments cannot silently fall
     // back to the card and mutate it. Explicit SAN is a calculation only.
     std::istringstream stream(input); std::string costs, arg; stream>>costs;
+    if (toLower(costs)=="reality") {
+        std::string mode, extra; stream>>mode;
+        return (stream>>extra) ? coc7rText(loc,"sc_usage") : coc7rReality(loc,msg,toLower(mode));
+    }
     auto slash=costs.find('/');
     if (slash==std::string::npos) return coc7rText(loc,"sc_usage");
     auto success=costs.substr(0,slash), failure=costs.substr(slash+1);
@@ -176,54 +195,99 @@ std::string coc7rSanityCheck(Locale loc, const Message& msg, const std::string& 
     if (explicitSan) return lead+"\n"+coc7rText(loc,"calculation_only");
     return coc7rApplyLoss(loc,msg,*card,*san,loss,mythos,lead);
 }
+// p.89: a reality check is a Sanity roll; failure costs 1 SAN. "b" grants the
+// bonus die from another investigator's successful Reassure.
+std::string coc7rReality(Locale loc, const Message& msg, const std::string& mode) {
+    if (!mode.empty() && mode!="b" && mode!="assisted") return coc7rText(loc,"sc_usage");
+    auto card=cards_.snapshot(msg.senderId,cards_.boundCard(msg.senderId,cardScope(msg)));
+    if (!card) return coc7rText(loc,"need_stats");
+    if (cards_.cardLocked(msg.senderId,cardScope(msg),"w")) return i18n_.tr(loc,"card.locked_w");
+    auto san=cards_.getAttr(msg.senderId,cardScope(msg),"理智");
+    if (!san || *san<=0 || *san>99) return i18n_.tr(loc,"card.sc.invalid_san");
+    auto state=coc7r::sanityState(coc7rStateFrom(msg,card->data));
+    std::string detail; int r=mode.empty()?coc7rRoll("1d100"):rollBonusPenalty(1,true,loc,detail);
+    auto grade=rollSuccessLevel(r,*san,0);
+    std::string lead=coc7rText(loc,"reality_check",{{"roll",detail.empty()?std::to_string(r):detail},
+        {"san",std::to_string(*san)},{"level",i18n_.tr(loc,levelKey(grade))}});
+    if (grade==SuccessLevel::kFailure || grade==SuccessLevel::kFumble)
+        return coc7rApplyLoss(loc,msg,*card,*san,1,false,lead+"\n"+coc7rText(loc,"involuntary"));
+    state.realityProtected=true;
+    if (!coc7rSave(msg,*card,state)) return coc7rText(loc,"conflict");
+    return lead+"\n"+coc7rText(loc,"reality_success");
+}
+// Explicit, player-requested merge of the folded skills (p.17). Each target
+// keeps the highest value; the old keys are removed in the same atomic write.
+std::string coc7rMigrate(Locale loc, const Message& msg, const std::string& target) {
+    auto card=cards_.snapshot(target,cards_.boundCard(target,cardScope(msg)));
+    if (!card) return coc7rText(loc,"need_stats");
+    if (cards_.cardLocked(target,cardScope(msg),"w")) return i18n_.tr(loc,"card.locked_w");
+    auto data=card->data;
+    std::map<std::string,std::vector<std::string>> sources;
+    for (const auto& [key,value]:data.items())
+        if (value.is_number_integer()) if (auto into=coc7r::mergedSkill(key); !into.empty()) sources[into].push_back(key);
+    std::vector<std::string> lines;
+    for (const auto& [into,keys]:sources) {
+        int64_t best=data.contains(into) && data[into].is_number_integer() ? data[into].get<int64_t>() : (std::numeric_limits<int64_t>::min)();
+        std::string from;
+        for (const auto& key:keys) { best=(std::max)(best,data[key].get<int64_t>()); from+=(from.empty()?"":" ")+key; }
+        for (const auto& key:keys) data.erase(key);
+        data[into]=best;
+        lines.push_back(from+" -> "+into+" "+std::to_string(best));
+    }
+    const std::string smg=data.contains("冲锋枪") ? "\n"+coc7rText(loc,"migrate_smg") : "";
+    if (lines.empty()) return coc7rText(loc,"migrate_none")+smg;
+    if (!cards_.replaceSnapshot(target,*card,data)) return coc7rText(loc,"conflict");
+    std::string changes; for (const auto& line:lines) changes+=(changes.empty()?"":"\n")+line;
+    return coc7rText(loc,"migrate_done",{{"changes",changes}})+smg;
+}
 std::optional<std::string> tryHandleCoc7r(Locale loc, const Message& msg, const std::string& command) {
     try { return handleCoc7rCommand(loc,msg,command); }
     catch (const Coc7rRollError& e) { return i18n_.tr(loc,"dice.error.roll",{{"error",e.what()}}); }
 }
 std::optional<std::string> handleCoc7rCommand(Locale loc, const Message& msg, const std::string& command) {
     auto [raw,rest]=splitCommand(command);
-    if (toLower(raw)!="coc7r") return std::nullopt;
+    if (toLower(raw)!="coc7r" && toLower(raw)!="c7r") return std::nullopt;
     auto [action,param]=splitCommand(trim(rest)); action=toLower(action); param=trim(param);
     if (action=="help" || action=="?") return coc7rText(loc,"help");
+    // Calculators that never touch a card work in any group.
     if (action.empty() || isAllDigits(action)) {
         if (!param.empty()) return coc7rText(loc,"help");
         return coc7rGenerate(loc,msg,action.empty()?1:clampCount(parseIntOr(action,1)));
     }
-    if (!coc7rOn(msg)) return coc7rText(loc,"inactive");
-    if (action=="options") {
-        if (param.empty()) return coc7rText(loc,"options",{{"bases",coc7rOption(msg,"bases")?"on":"off"},
-            {"specialties",coc7rOption(msg,"specialties")?"on":"off"},{"take5",coc7rOption(msg,"take5")?"on":"off"}});
-        auto [key,value]=splitCommand(param);
-        if ((key!="bases" && key!="specialties" && key!="take5") || (value!="on" && value!="off"))
-            return coc7rText(loc,"options_usage");
-        if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc,"fun.set.no_perm");
-        setGroupSetting(msg,"coc7r:option:"+key,value=="on"?"1":"0");
-        return coc7rText(loc,"option_saved",{{"key",key},{"value",value}});
-    }
-    if (!groupFeatureEnabled(msg,"roll")) return std::string();
     if (action=="array") {
+        if (!groupFeatureEnabled(msg,"roll")) return std::string();
         auto index=coc7r::number(param,10);
         if (!index || *index<1) return coc7rText(loc,"array_usage");
         std::string values; for (int value:coc7r::arrays()[*index-1]) { if (!values.empty()) values+=" / "; values+=std::to_string(value); }
         return coc7rText(loc,"generate",{{"nick",displayName(msg)},{"values",values}});
     }
-    if (action=="points") return coc7rText(loc,"points");
+    if (action=="ri") {
+        // p.59: rolled once per combat; even passes left, odd passes right.
+        if (!groupFeatureEnabled(msg,"roll") || !param.empty()) return param.empty() ? std::string() : coc7rText(loc,"help");
+        const int r=coc7rRoll("1d6");
+        return coc7rText(loc,"round_table",{{"roll",std::to_string(r)},{"direction",coc7rText(loc,r%2==0?"left":"right")}});
+    }
+    if (!coc7rOn(msg)) return coc7rText(loc,"inactive");
+    if (action=="options") {
+        if (param.empty()) {
+            std::string list;
+            for (const auto& o:coc7r::options())
+                list+=(list.empty()?"":"\n")+coc7rText(loc,std::string("option_")+o.key)+" "+o.key+"="+(coc7rOption(msg,o.key)?"on":"off");
+            return coc7rText(loc,"options",{{"list",list}});
+        }
+        auto [key,value]=splitCommand(param);
+        key=toLower(key); value=toLower(value);
+        if (!coc7r::isOption(key) || (value!="on" && value!="off")) return coc7rText(loc,"options_usage");
+        if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc,"fun.set.no_perm");
+        setGroupSetting(msg,"coc7r:option:"+key,value=="on"?"1":"0");
+        return coc7rText(loc,"option_saved",{{"key",key},{"value",value}});
+    }
+    if (!groupFeatureEnabled(msg,"roll")) return std::string();
+    auto off=[&](const std::string& key) { return coc7rText(loc,"option_off",{{"key",key},{"name",coc7rText(loc,"option_"+key)}}); };
     if (action=="mov") {
+        if (!coc7rOption(msg,"movement")) return off("movement");
         auto mov=coc7rAttr(msg,"移动"); if (!mov || *mov<0 || *mov>1000) return coc7rText(loc,"need_stats");
         return coc7rText(loc,"movement",{{"mov",std::to_string(*mov)},{"action",std::to_string(*mov*2)},{"turn",std::to_string(*mov*4)}});
-    }
-    if (action=="fire") {
-        std::istringstream s(param); std::string rounds,damage,armor,extra; s>>rounds>>damage>>armor;
-        auto n=coc7r::number(rounds,100), d=coc7r::number(damage,10000), a=coc7r::number(armor,10000);
-        if (!n || !d || !a || (s>>extra) || !coc7r::automaticMultiplier(*n)) return coc7rText(loc,"fire_usage");
-        auto mult=coc7r::automaticMultiplier(*n);
-        return coc7rText(loc,"fire",{{"damage",std::to_string(*d*mult)},{"armor",std::to_string(*a*mult)},
-            {"net",std::to_string((std::max)(0,(*d-*a)*mult))}});
-    }
-    if (action=="spray") {
-        auto rounds=coc7r::number(param,100);
-        if (!rounds || !coc7r::sprayWidth(*rounds)) return coc7rText(loc,"fire_usage");
-        return coc7rText(loc,"spray",{{"width",std::to_string(coc7r::sprayWidth(*rounds))}});
     }
     if (action=="chase") {
         std::istringstream s(param); std::string points,result,place,extra; s>>points>>result>>place;
@@ -236,12 +300,31 @@ std::optional<std::string> handleCoc7rCommand(Locale loc, const Message& msg, co
             {"mvp",std::to_string(out.mvp)},{"location",std::to_string(out.location)},
             {"out",coc7rText(loc,out.out?"yes":"no")}});
     }
+    // Another investigator is named by @ (adapters strip it into atList) or by user ID.
+    const auto at=atTarget(msg);
+    if (action=="migrate") {
+        if (!coc7rOption(msg,"skills")) return off("skills");
+        const std::string target=!at.empty() ? at : param.empty() ? msg.senderId : param;
+        if (target.size()>128 || (at.empty() && !param.empty() && !isAllDigits(param))) return coc7rText(loc,"migrate_usage");
+        if (target!=msg.senderId && !senderIsGroupAdmin(msg)) return i18n_.tr(loc,"gate.no_perm");
+        return coc7rMigrate(loc,msg,target);
+    }
+    static const std::set<std::string> sanityActions={"show","status","loss","reassure","mythos","end","therapy","selfhelp"};
+    if (!sanityActions.count(action)) return coc7rText(loc,"help");
+    if (!coc7rOption(msg,"sanity")) return off("sanity");
+    if (action=="show" || action=="status") {
+        const std::string target=!at.empty() ? at : param.empty() ? msg.senderId : param;
+        if (target.size()>128 || (at.empty() && !param.empty() && !isAllDigits(param))) return coc7rText(loc,"help");
+        Message subject=msg; subject.senderId=target;
+        auto card=cards_.snapshot(target,cards_.boundCard(target,cardScope(msg)));
+        if (!card) return coc7rText(loc,"need_stats");
+        return coc7rStatus(loc,subject,coc7r::sanityState(coc7rStateFrom(subject,card->data)),target==msg.senderId?std::string():target);
+    }
     if (action=="reassure") {
         if (msg.type==MessageType::kPrivate) return i18n_.tr(loc,"fun.set.group_only");
         if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc,"gate.no_perm"); // Changing another player's SAN requires Keeper/admin authority.
         auto [target,mode]=splitCommand(param);
-        // Adapters strip @ segments from the text and list them in atList.
-        if (auto at=atTarget(msg); !at.empty()) { target=at; mode=param; }
+        if (!at.empty()) { target=at; mode=param; }
         if (target.empty() || target.size()>128 || (!mode.empty() && mode!="push")) return coc7rText(loc,"reassure_usage");
         if (target==msg.senderId) return coc7rText(loc,"reassure_self");
         Message recipient=msg; recipient.senderId=target;
@@ -269,33 +352,20 @@ std::optional<std::string> handleCoc7rCommand(Locale loc, const Message& msg, co
     auto card=cards_.snapshot(msg.senderId,cards_.boundCard(msg.senderId,cardScope(msg)));
     if (!card) return coc7rText(loc,"need_stats");
     auto state=coc7r::sanityState(coc7rStateFrom(msg,card->data));
-    if (action=="show") return coc7rStatus(loc,msg,state);
     if (cards_.cardLocked(msg.senderId,cardScope(msg),"w")) return i18n_.tr(loc,"card.locked_w");
-    if (action=="init" && param.empty()) {
-        if (cards_.getAttr(msg.senderId,cardScope(msg),"理智")) return coc7rText(loc,"san_exists");
-        auto pow=coc7rAttr(msg,"意志"); if (!pow || *pow<=0 || *pow>99) return coc7rText(loc,"need_stats");
-        int san=(std::min)(*pow,coc7rAttr(msg,"最大理智").value_or(99));
-        if (!coc7rSave(msg,*card,state,{{"理智",san}})) return coc7rText(loc,"conflict");
-        return coc7rText(loc,"san_initialized",{{"san",std::to_string(san)}});
-    }
-    if (action=="endshock" || action=="sleep" || action=="chapter" || action=="recover") {
-        if (param!="confirm") return coc7rText(loc,"state_confirm");
-        if (action=="chapter") { state.chapterLoss=0; state.reassured=false; }
-        if (action=="endshock" || action=="sleep") { state.shock=false; state.shockRounds=0; }
-        if (action=="sleep") state.aftershock=false;
-        if (action=="recover") state.changed=false; // Keeper-confirmed rest + backstory, not midnight.
+    if (action=="end") {
+        // The Keeper confirms each condition in play; nothing ends on a timer.
+        const auto what=toLower(param);
+        if (what=="chapter") { state.chapterLoss=0; state.reassured=false; }
+        else if (what=="shock") { state.shock=false; state.shockRounds=0; }
+        else if (what=="sleep" || what=="aftershock") { state.shock=false; state.shockRounds=0; state.aftershock=false; }
+        else if (what=="changed") state.changed=false; // Keeper-confirmed rest + backstory, not midnight.
+        else return coc7rText(loc,"end_usage");
         if (!coc7rSave(msg,*card,state)) return coc7rText(loc,"conflict");
         return coc7rStatus(loc,msg,state);
     }
     auto san=cards_.getAttr(msg.senderId,cardScope(msg),"理智");
     if (!san || *san<=0 || *san>99) return i18n_.tr(loc,"card.sc.invalid_san");
-    if (action=="reward") {
-        if (!coc7r::cost(param)) return coc7rText(loc,"recovery_usage");
-        const int gain=coc7rRoll(param);
-        const int next=(std::max)(*san,(std::min)(*san+gain,coc7rAttr(msg,"最大理智").value_or(99)));
-        if (!coc7rSave(msg,*card,state,{{"理智",next}})) return coc7rText(loc,"conflict");
-        return coc7rText(loc,"recovery",{{"gain",std::to_string(next-*san)},{"san",std::to_string(next)}});
-    }
     if (action=="therapy") {
         std::istringstream s(param); std::string rating,mode,extra; s>>rating>>mode;
         auto skill=coc7r::number(rating,1000);
@@ -314,7 +384,7 @@ std::optional<std::string> handleCoc7rCommand(Locale loc, const Message& msg, co
         // Settle an already rolled INT/POW result, allowing a legal Luck spend
         // chosen after the roll. It is not another random attempt.
         std::istringstream s(param); std::string trait,result,spend,extra; s>>trait>>result>>spend;
-        const auto attribute=profileAttribute(msg,trait);
+        const auto attribute=coc7r::canonical(CharacterCardStore::canonical(coc7r::canonical(trait)));
         auto roll=coc7r::number(result,100), luck=spend.empty()?std::optional<int>(0):coc7r::number(spend,99);
         auto value=coc7rAttr(msg,attribute);
         if ((attribute!="智力" && attribute!="意志") || !roll || *roll<1 || !luck || *luck>=*roll || !value || *value<0 || (s>>extra))
@@ -337,7 +407,8 @@ std::optional<std::string> handleCoc7rCommand(Locale loc, const Message& msg, co
         if (!coc7rSave(msg,*card,state,attrs)) return coc7rText(loc,"conflict");
         return coc7rText(loc,"recovery",{{"gain",std::to_string(next-*san)},{"san",std::to_string(next)}});
     }
-    if (action=="mythos" && (param=="first" || param=="later")) {
+    if (action=="mythos") {
+        if (param!="first" && param!="later") return coc7rText(loc,"help");
         if (!state.mythosPending) return coc7rText(loc,"no_mythos_pending");
         if (param=="first" && card->data.contains("__meta") && card->data["__meta"].is_object() &&
             card->data["__meta"].value("coc7rMythosKnown",json(false))==true) return coc7rText(loc,"mythos_already_known");
@@ -349,23 +420,9 @@ std::optional<std::string> handleCoc7rCommand(Locale loc, const Message& msg, co
         if (!coc7rSave(msg,*card,state,{{"理智",final},{"克苏鲁神话",skill+gain}},true)) return coc7rText(loc,"conflict");
         return coc7rText(loc,"mythos",{{"gain",std::to_string(gain)},{"value",std::to_string(skill+gain)},{"san",std::to_string(final)}});
     }
-    if (action=="reality") {
-        if (!param.empty() && param!="assisted") return coc7rText(loc,"reality_usage");
-        std::string detail; int r=param=="assisted"?rollBonusPenalty(1,true,loc,detail):coc7rRoll("1d100");
-        auto grade=rollSuccessLevel(r,*san,0);
-        std::string lead=coc7rText(loc,"reality_check",{{"roll",detail.empty()?std::to_string(r):detail},
-            {"san",std::to_string(*san)},{"level",i18n_.tr(loc,levelKey(grade))}});
-        if (grade==SuccessLevel::kFailure || grade==SuccessLevel::kFumble)
-            return coc7rApplyLoss(loc,msg,*card,*san,1,false,lead+"\n"+coc7rText(loc,"involuntary"));
-        state.realityProtected=true;
-        if (!coc7rSave(msg,*card,state)) return coc7rText(loc,"conflict");
-        return lead+"\n"+coc7rText(loc,"reality_success");
-    }
-    if (action=="loss") {
-        auto [expr,source]=splitCommand(param);
-        if (!coc7r::cost(expr) || (!source.empty() && source!="mythos")) return coc7rText(loc,"loss_usage");
-        return coc7rApplyLoss(loc,msg,*card,*san,coc7rRoll(expr),source=="mythos",coc7rText(loc,"direct_loss"));
-    }
-    return coc7rText(loc,"help");
+    // action=="loss"
+    auto [expr,source]=splitCommand(param);
+    if (!coc7r::cost(expr) || (!source.empty() && source!="mythos")) return coc7rText(loc,"loss_usage");
+    return coc7rApplyLoss(loc,msg,*card,*san,coc7rRoll(expr),source=="mythos",coc7rText(loc,"direct_loss"));
 }
 

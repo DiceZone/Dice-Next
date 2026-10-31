@@ -11,12 +11,16 @@
     "diceSides": 100
   },
   "options": {
+    "creation": true,
+    "skills": true,
+    "movement": true,
+    "sanity": true,
     "bases": false,
     "specialties": false,
     "take5": false
   },
   "help": {
-    "coc7r": "coc7r（Keeper Companion 2026 规则扩充）\n.set coc7r // 本群切换到 coc7r（群管理）\n.set coc7 // 切回核心 CoC7\n.coc7r options [<bases|specialties|take5> <on|off>] // 查看/切换可选规则：属性基础值、格斗射击最低值、成长取 5（群管理）\n.coc7r [组数] // 生成 8 项 (2D6+5)×5 属性池，自由分配，不写入人物卡\n.coc7r array <1-10> // 显示 480 点预设数组\n.coc7r points // 购点、兴趣点与自定义职业说明\n.coc7r mov // 按 STR/DEX/SIZ/年龄计算 MOV\n.coc7r init // 卡上没有 SAN 时按 POW 初始化\n.sc <成功损失>/<失败损失> [SAN] [mythos] // 理智检定；指定 SAN 只计算不存卡；不可奖惩骰、不可孤注一掷\n.coc7r show // 查看本章累计损失、震惊、余震、Changed\n.coc7r loss <表达式> [mythos] // 记录书籍、法术等不经检定的理智损失\n.coc7r reality [assisted] // 现实检定；assisted=已有他人安抚成功，获 1 奖励骰\n.coc7r reassure <@对方|用户ID> [push] // 安抚他人：成功 +2 SAN 并结束震惊，大失败/孤注失败 -1D4（群管理结算）\n.coc7r mythos <first|later> // 结算神话引起的 Shock/Changed：首次 +5，其后 +1\n.coc7r endshock confirm // 震惊回合结束\n.coc7r sleep confirm // 在安全地点睡过一夜，结束余震\n.coc7r chapter confirm // 新章节：清零累计损失与安抚次数，不解除 Changed\n.coc7r recover confirm // KP 确认休养一周并修订背景后解除 Changed\n.coc7r reward <表达式> // 章节结束的理智奖励\n.coc7r therapy <治疗师技能> [push|phobia] // 月度治疗：成功 +1D3 或移除恐惧症\n.coc7r selfhelp <INT|POW> <已掷结果> [花费幸运] // 结算自助检定：困难成功 +1D6，否则 -1\n.coc7r fire <20|50|100> <单次伤害> <护甲> // 集中自动射击：伤害与护甲同乘 5/10/20\n.coc7r spray <20|50|100> // 扫射区域宽度\n.coc7r chase <剩余MvP> <success|fail|pushfail> [当前位置] // 追逐地点挑战结算\n射程、命中、掩体、追逐难度与剧情效果仍由 KP 裁定。"
+    "coc7r": "coc7r（Keeper Companion 2026 规则扩充，指令可简写为 .c7r）\n.set coc7r // 本群切换到 coc7r（群管理）\n.set coc7 // 切回核心 CoC7\n.coc7r options [<规则> <on|off>] // 查看/切换本群各项规则（群管理），规则名见末尾\n.coc7r [组数] // 生成 8 项 (2D6+5)×5 属性池，自由分配，不写入人物卡\n.coc7r array <1-10> // 显示 480 点预设数组\n.coc7r mov // 按 STR/DEX/SIZ/年龄计算 MOV\n.coc7r ri // 圆桌先攻：每场战斗掷一次，偶数向左、奇数向右\n.coc7r chase <剩余MvP> <success|fail|pushfail> [当前位置] // 追逐地点挑战结算\n.coc7r migrate [@对方] // 旧卡取悦/话术/恐吓并入说服、学识并入神秘学、生存专精并入生存，取最高值（他人的卡需群管理）\n.sc <成功损失>/<失败损失> [SAN] [mythos] // 理智检定；指定 SAN 只计算不存卡；不可奖惩骰、不可孤注一掷\n.sc reality [b] // 现实检定：失败 -1 SAN；b=已有他人安抚成功，获 1 奖励骰\n.coc7r show [@对方] // 查看本章累计损失、震惊、余震、Changed\n.coc7r loss <表达式> [mythos] // 记录书籍、法术等不经检定的理智损失\n.coc7r reassure <@对方|用户ID> [push] // 安抚他人：成功 +2 SAN 并结束震惊，大失败/孤注失败 -1D4（群管理结算）\n.coc7r mythos <first|later> // 结算神话引起的 Shock/Changed：首次 +5，其后 +1\n.coc7r end <shock|sleep|chapter|changed> // 震惊结束／睡过一夜结束余震／新章节／KP 确认解除 Changed\n.coc7r therapy <治疗师技能> [push|phobia] // 月度治疗：成功 +1D3 或移除恐惧症\n.coc7r selfhelp <INT|POW> <已掷结果> [花费幸运] // 结算自助检定：困难成功 +1D6，否则 -1\n规则名：creation 修订建卡、skills 修订技能表、movement 修订 MOV、sanity 理智修订（默认开）；bases 属性决定基础值、specialties 格斗/射击最低值、take5 成长取 5（默认关）\n建卡：兴趣点＝EDU+INT；购点共 480 点、单项 30–90；自定义职业选 6–12 项职业技能（含信用评级）分配 300 点\n章节理智奖励用 .st 理智+<表达式>，不会超过 99−克苏鲁神话\n射程、命中、掩体、追逐难度与剧情效果仍由 KP 裁定。"
   },
   "source": {
     "title": "Call of Cthulhu Keeper Companion",

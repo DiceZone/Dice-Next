@@ -100,9 +100,7 @@ TEST(Coc7r, SafeStateParsingAndRealityProtection) {
     ASSERT_TRUE(coc7r::loseSanity(state,50,0,50).state.realityProtected);
     ASSERT_FALSE(coc7r::loseSanity(state,50,1,50).state.realityProtected);
 }
-TEST(Coc7r, ChaseAndAutomaticFireBoundaries) {
-    ASSERT_EQ(coc7r::automaticMultiplier(20),5); ASSERT_EQ(coc7r::automaticMultiplier(50),10);
-    ASSERT_EQ(coc7r::automaticMultiplier(100),20); ASSERT_EQ(coc7r::automaticMultiplier(30),0);
+TEST(Coc7r, ChaseBoundaries) {
     auto a=coc7r::chase(1,2,false,1); ASSERT_TRUE(a.out); ASSERT_EQ(a.location,2);
     auto b=coc7r::chase(7,2,false,6); ASSERT_FALSE(b.out); ASSERT_EQ(b.location,3); ASSERT_EQ(b.mvp,1);
     ASSERT_TRUE(coc7r::chase(9,2,false,0,true).out);
@@ -151,10 +149,11 @@ TEST(Coc7r, ChapterSleepAndChangedHaveDifferentLifetimes) {
     CocFixture f; f.stats();
     for (int i=0;i<10;++i) f.run(".coc7r loss 1");
     ASSERT_EQ(f.get("SAN"),40); ASSERT_TRUE(f.state().at("changed").get<bool>());
-    f.run(".coc7r sleep confirm"); ASSERT_TRUE(f.state().at("changed").get<bool>());
-    f.run(".coc7r chapter confirm"); ASSERT_TRUE(f.state().at("changed").get<bool>());
+    ASSERT_TRUE(f.run(".coc7r end").find("sleep")!=std::string::npos);
+    f.run(".coc7r end sleep"); ASSERT_TRUE(f.state().at("changed").get<bool>());
+    f.run(".coc7r end chapter"); ASSERT_TRUE(f.state().at("changed").get<bool>());
     ASSERT_EQ(f.state().at("chapterLoss").get<int>(),0);
-    f.run(".coc7r recover confirm"); ASSERT_FALSE(f.state().at("changed").get<bool>());
+    f.run(".coc7r end changed"); ASSERT_FALSE(f.state().at("changed").get<bool>());
 }
 TEST(Coc7r, LockedAndStaleCardsCannotBeUpdated) {
     CocFixture f; f.stats();
@@ -186,9 +185,9 @@ TEST(Coc7r, MythosRequiresConfirmedSourceAndCannotBeRepeated) {
     const auto before=f.data();
     f.run(".coc7r mythos first"); ASSERT_TRUE(f.data()==before);
 }
-TEST(Coc7r, InitAndCharacterGenerationAreNonDestructive) {
+TEST(Coc7r, CharacterGenerationIsNonDestructive) {
     CocFixture f; f.stats(); const auto before=f.data();
-    for (const auto* cmd:{".coc7r",".coc7r array 1",".coc7r array 10",".coc",".pc build",".coc7r init"})
+    for (const auto* cmd:{".coc7r",".c7r array 1",".coc7r array 10",".coc",".pc build",".coc7r ri"})
         ASSERT_TRUE(!f.run(cmd).empty());
     ASSERT_TRUE(f.data()==before);
     ASSERT_TRUE(f.run(".coc7").find("coc7r")==std::string::npos);
@@ -204,7 +203,6 @@ TEST(Coc7r, AutoCardStartsSanityAtPow) {
     CocFixture f;
     f.run(".st 力量60 体质60 体型50 意志55 智力70");
     ASSERT_EQ(f.get("理智"),55);
-    ASSERT_TRUE(f.run(".coc7r init").find("已有")!=std::string::npos);
     f.run(".st 意志65");                 // POW does not drive the SAN ceiling
     ASSERT_EQ(f.get("理智"),55);
     f.msg.senderId="1002"; f.set("POW",60,"1002"); f.set("INT",50,"1002");
@@ -266,12 +264,81 @@ TEST(Coc7r, SkillChecksKeepStandardThresholdsAndAliases) {
     }
 }
 
-TEST(Coc7r, RewardsRespectCapAndDoNotReduceChapterLoss) {
+TEST(Coc7r, StSanityRespectsCapAndKeepsChapterLoss) {
+    // p.86: SAN never rises above 99 − Cthulhu Mythos; awards go through .st.
     CocFixture f; f.stats(); f.set("CM",47);
-    f.run(".coc7r loss 1"); f.run(".coc7r reward 100");
+    f.run(".coc7r loss 1"); f.run(".st 理智+100");
     ASSERT_EQ(f.get("SAN"),52); ASSERT_EQ(f.state().at("chapterLoss").get<int>(),1);
-    f.set("SAN",0); const auto before=f.data();
-    f.run(".coc7r reward 100"); ASSERT_TRUE(f.data()==before);
+    f.run(".coc7r options sanity off"); f.run(".st 理智+100");
+    ASSERT_EQ(f.get("SAN"),152);         // core CoC7 keeps its existing .st behavior
+}
+TEST(Coc7r, EveryModuleIsAnIndependentOption) {
+    // Introduction p.5: each revised rule is adopted separately.
+    for (const auto* key:{"creation","skills","movement","sanity"}) ASSERT_TRUE(coc7r::optionDefault(key));
+    for (const auto* key:{"bases","specialties","take5"}) ASSERT_FALSE(coc7r::optionDefault(key));
+    ASSERT_FALSE(coc7r::isOption("fire"));
+    CocFixture f; f.stats(); f.set("STR",60); f.set("DEX",65); f.set("SIZ",50);
+    const auto listing=f.run(".coc7r options");
+    for (const auto* entry:{"creation=on","skills=on","movement=on","sanity=on","bases=off","specialties=off","take5=off"})
+        ASSERT_TRUE(listing.find(entry)!=std::string::npos);
+    ASSERT_TRUE(f.run(".coc").find("coc7r")!=std::string::npos);
+    f.run(".coc7r options creation off");
+    ASSERT_TRUE(f.run(".coc").find("coc7r")==std::string::npos);
+    f.run(".coc7r options skills off");
+    f.run(".st 取悦55"); ASSERT_EQ(f.get("取悦"),55); ASSERT_EQ(f.get("说服"),-999);
+    ASSERT_TRUE(f.run(".coc7r migrate").find("skills")!=std::string::npos);
+    ASSERT_TRUE(f.run(".coc7r mov").find("MOV=9")!=std::string::npos);   // movement stays on
+    f.run(".coc7r options movement off");
+    ASSERT_TRUE(f.run(".coc7r mov").find("movement")!=std::string::npos);
+    f.run(".coc7r options sanity off");
+    ASSERT_TRUE(f.run(".coc7r loss 1").find("sanity")!=std::string::npos);
+    f.run(".sc 1/1"); ASSERT_TRUE(f.state().empty());                     // core .sc keeps no chapter state
+    ASSERT_EQ(f.get("SAN"),49);
+    ASSERT_TRUE(f.run(".coc7r options sanity maybe").find("creation")!=std::string::npos);
+}
+TEST(Coc7r, RealityCheckRunsThroughSc) {
+    CocFixture f; f.stats();
+    auto out=f.run(".sc reality");
+    ASSERT_TRUE(out.find("现实检定")!=std::string::npos);
+    ASSERT_TRUE(f.get("SAN")==49 || f.state().at("realityProtected").get<bool>());
+    ASSERT_TRUE(f.run(".sc reality b").find("现实检定")!=std::string::npos);
+    const auto before=f.data();
+    ASSERT_TRUE(f.run(".sc reality x").find(".sc reality")!=std::string::npos);
+    ASSERT_TRUE(f.data()==before);
+}
+TEST(Coc7r, RoundTableInitiativeNeedsNoProfile) {
+    CocFixture f; f.setting("ruleSystem","coc7");
+    for (int i=0;i<20;++i) {
+        auto out=f.run(".c7r ri");
+        ASSERT_TRUE(out.find("1D6=")!=std::string::npos);
+        ASSERT_TRUE(out.find("向左")!=std::string::npos || out.find("向右")!=std::string::npos);
+    }
+}
+TEST(Coc7r, MigrateFoldsSkillsOnlyOnRequest) {
+    CocFixture f; f.stats();
+    for (auto [k,v]:{std::pair{"取悦",40},{"话术",70},{"恐吓",20},{"说服",50},{"学识",30},{"生存(沙漠)",45},{"冲锋枪",35}}) f.set(k,v);
+    ASSERT_EQ(f.data().at("话术").get<int>(),70);                         // switching never merges by itself
+    auto out=f.run(".coc7r migrate");
+    ASSERT_TRUE(out.find("说服 70")!=std::string::npos && out.find("冲锋枪")!=std::string::npos);
+    ASSERT_EQ(f.get("说服"),70); ASSERT_EQ(f.get("神秘学"),30); ASSERT_EQ(f.get("生存"),45);
+    for (const auto* old:{"取悦","话术","恐吓","学识","生存(沙漠)"}) ASSERT_FALSE(f.data().contains(old));
+    ASSERT_EQ(f.data().at("冲锋枪").get<int>(),35);
+    ASSERT_TRUE(f.run(".coc7r migrate").find("没有")!=std::string::npos);
+    f.set("话术",10,"2001");
+    f.msg.extra={{"role","member"}}; f.msg.atList={"2001"};
+    ASSERT_EQ(f.run(".coc7r migrate"),f.i18n.tr(Locale::kZhHans,"gate.no_perm"));
+    f.msg.extra={{"role","admin"}};
+    f.run(".c7r migrate");
+    ASSERT_EQ(f.cards.getAttr("2001","2000","说服").value_or(-1),10);
+}
+TEST(Coc7r, ShowAcceptsAnotherInvestigator) {
+    CocFixture f; f.stats();
+    for (auto [k,v]:{std::pair{"POW",50},{"INT",50},{"SAN",40}}) f.set(k,v,"2001");
+    f.msg.atList={"2001"};
+    ASSERT_TRUE(f.run(".coc7r show").find("2001")!=std::string::npos);
+    f.msg.atList={};
+    ASSERT_TRUE(f.run(".c7r show 2001").find("2001")!=std::string::npos);
+    ASSERT_TRUE(f.run(".c7r show").find("2001")==std::string::npos);
 }
 TEST(Coc7r, SelfHelpSettlesExistingRollAndSpendsLuckAtomically) {
     CocFixture f; f.stats(); f.set("luck",10);

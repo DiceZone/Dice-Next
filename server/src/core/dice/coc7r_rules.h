@@ -17,6 +17,24 @@
 
 namespace dice::coc7r {
 inline constexpr const char* profile = "keeper-companion-2026";
+// Introduction p.5: the revised rules are options to adopt one by one. Each
+// module below is a separate per-group switch; the defaults follow the pack.
+struct Option { const char* key; bool enabled; };
+inline const std::array<Option, 7>& options() {
+    static const std::array<Option, 7> list = {{
+        {"creation", true}, {"skills", true}, {"movement", true}, {"sanity", true},
+        {"bases", false}, {"specialties", false}, {"take5", false},
+    }};
+    return list;
+}
+inline bool isOption(const std::string& key) {
+    for (const auto& o : options()) if (key == o.key) return true;
+    return false;
+}
+inline bool optionDefault(const std::string& key) {
+    for (const auto& o : options()) if (key == o.key) return o.enabled;
+    return false;
+}
 using Lookup = std::function<std::optional<int>(const std::string&)>;
 inline const std::map<std::string, int>& bases();
 
@@ -111,6 +129,19 @@ inline bool isSkill(const std::string& name) {
     return false;
 }
 inline constexpr const char* reassureFailureCost = "1d4"; // p.22, user-selected resolution of p.94 conflict.
+
+// p.17: skills folded into one. Values merge only on an explicit request
+// (.coc7r migrate); SMG has no target until the weapon is known.
+inline std::string mergedSkill(const std::string& key) {
+    static const std::map<std::string, std::string> merged = {
+        {"取悦", "说服"}, {"魅惑", "说服"}, {"话术", "说服"}, {"快速交谈", "说服"}, {"恐吓", "说服"},
+        {"学识", "神秘学"},
+    };
+    if (auto it = merged.find(key); it != merged.end()) return it->second;
+    for (const auto* prefix : {"生存(", "生存（", "生存:", "生存："})
+        if (key.rfind(prefix, 0) == 0 && key.size() > std::string(prefix).size()) return "生存";
+    return {};
+}
 
 struct BaseFormula { std::string first, second; int divisor; };
 inline const std::map<std::string, BaseFormula>& attributeBases() {
@@ -292,9 +323,6 @@ inline SanityOutcome loseSanity(SanityState state, int san, int requestedLoss, i
     return out;
 }
 
-// p.65/67: numerical helpers, no assumptions about range, armor types or hits.
-inline int automaticMultiplier(int rounds) { return rounds == 20 ? 5 : rounds == 50 ? 10 : rounds == 100 ? 20 : 0; }
-inline int sprayWidth(int rounds) { return rounds == 20 ? 5 : rounds == 50 ? 10 : rounds == 100 ? 20 : 0; }
 struct ChaseResult { int mvp, location; bool out; };
 inline ChaseResult chase(int mvp, int location, bool success, int loss, bool failedPush = false) {
     const int next = failedPush ? 0 : success ? mvp : (std::max)(0, mvp - loss);
