@@ -471,7 +471,13 @@ jobs:
   macos-arm64:
     name: macOS (arm64)
     needs: webui
-    runs-on: macos-14
+    # macOS 14 runner images retire on 2026-11-02 (actions/runner-images#13518).
+    # The package keeps the macOS 14 minimum it had when built on macos-14;
+    # vcpkg receives the same target through its clean build environment.
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      VCPKG_KEEP_ENV_VARS: MACOSX_DEPLOYMENT_TARGET
     steps:
       - uses: actions/checkout@v4
         with:

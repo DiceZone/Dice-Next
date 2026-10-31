@@ -90,6 +90,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
+      # Same macOS minimum as the release package; ignored on other platforms.
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'macos-arm64' && '14.0' || '' }}
+      VCPKG_KEEP_ENV_VARS: ${{ matrix.platform == 'macos-arm64' && 'MACOSX_DEPLOYMENT_TARGET' || '' }}
       # Linux compiles through ccache; Windows (MSVC) cannot cache precompiled-
       # header compilations, so it relies on the precompiled header alone.
       # No CCACHE_BASEDIR: it rewrites __FILE__ to relative paths, and tests
@@ -114,7 +117,7 @@ jobs:
             arch: arm64
             build_dir: build-arm64
           - platform: macos-arm64
-            runner: macos-14
+            runner: macos-15
             triplet: arm64-osx
             arch: arm64
             build_dir: build
