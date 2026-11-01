@@ -2998,6 +2998,7 @@ static int realMain(int argc, char* argv[]) {
                 extra["autoAcknowledgeInteractions"] = a.value("auto_acknowledge_interactions", a.value("autoAcknowledgeInteractions", true));
                 extra["qqRichReplies"] = dice::qq_rich::style(a.value("qq_rich_replies", a.value("qqRichReplies", std::string("off"))));
                 extra["qqInteractions"] = dice::qq_rich::interaction(a.value("qq_interactions", a.value("qqInteractions", std::string("links"))));
+                extra["receiveMode"] = dice::qqwebhook::isWebhook(a.value("receive_mode", a.value("receiveMode", a.value("qqReceiveMode", std::string("gateway"))))) ? "webhook" : "gateway";
             }
             row.config = extra.dump();
             return row;
@@ -3021,6 +3022,7 @@ static int realMain(int argc, char* argv[]) {
                 a["auto_acknowledge_interactions"] = extra.value("autoAcknowledgeInteractions", true);
                 a["qq_rich_replies"] = extra.value("qqRichReplies", std::string("off"));
                 a["qq_interactions"] = extra.value("qqInteractions", std::string("links"));
+                a["receive_mode"] = dice::qqwebhook::isWebhook(extra.value("receiveMode", std::string())) ? "webhook" : "gateway";
             }
             if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
                 a["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));
