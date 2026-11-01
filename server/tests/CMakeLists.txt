@@ -16,7 +16,7 @@ set(TEST_SOURCES
     test_script_execution_windows_macros.cpp
     test_startup_guard.cpp
     test_tray_settings.cpp
-    test_webui_versions.cpp
+    test_webui_legacy.cpp
     test_cooldown_manager.cpp
     test_counter_store.cpp
     test_log_usage.cpp

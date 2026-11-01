@@ -6,7 +6,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { mkdtemp, readdir, readFile, writeFile, mkdir, stat, rename, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, writeFile, mkdir, stat, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -70,51 +70,41 @@ async function start() {
   }
   throw new Error('Packaged core startup timed out');
 }
-async function state() {
-  const response = await request('/api/system/webui-version', { headers: { 'X-API-Key': apiKey } });
-  assert.equal(response.status, 200);
-  return (await response.json()).data;
-}
-async function select(version, status = 200) {
-  const response = await request('/api/system/webui-version', {
-    method: 'PUT', headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ version }),
-  });
-  assert.equal(response.status, status);
-}
-async function entries(version) {
-  for (const entry of ['/', '/index.html']) {
+async function entry() {
+  for (const route of ['/', '/index.html']) {
     for (const method of ['GET', 'HEAD']) {
-      const response = await request(`${entry}?sso=bound&test=upgrade`, { method });
-      assert.equal(response.status, 302, `${method} ${entry} must redirect, not return 404`);
-      assert.equal(response.headers.get('location'), `./${version}/?sso=bound&test=upgrade`);
-      assert.equal(response.headers.get('cache-control'), 'no-store');
-      if (method === 'HEAD') assert.equal(await response.text(), '');
+      const response = await request(route, { method });
+      assert.equal(response.status, 200, `${method} ${route}`);
+      assert.match(response.headers.get('content-type'), /text\/html/);
     }
   }
-  const followed = await request('/', { redirect: 'follow' });
-  assert.equal(followed.status, 200);
-  assert.equal(new URL(followed.url).pathname, `/${version}/`);
-}
-async function assets(version) {
-  const response = await request(`/${version}/`);
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get('content-type'), /text\/html/);
-  const html = await response.text();
+  const html = await (await request('/')).text();
   assert.match(html, /id="root"/);
-  assert.equal((await request(`/${version}/index.html`)).status, 200);
   const references = [...html.matchAll(/(?:src|href)=["']([^"']*assets\/[^"']+)["']/g)].map(match => match[1]);
-  assert.ok(references.some(file => file.endsWith('.js')), `${version}: missing JavaScript entry`);
-  assert.ok(references.some(file => file.endsWith('.css')), `${version}: missing stylesheet`);
+  assert.ok(references.some(file => file.endsWith('.js')), 'missing JavaScript entry');
+  assert.ok(references.some(file => file.endsWith('.css')), 'missing stylesheet');
   for (const reference of references) {
-    const url = new URL(reference, `${origin}/${version}/`);
+    const url = new URL(reference, `${origin}/`);
     assert.equal(url.origin, origin, 'Packaged assets must not depend on a remote origin');
-    assert.ok(url.pathname.startsWith(`/${version}/assets/`), 'Versions must keep separate assets');
+    assert.ok(url.pathname.startsWith('/assets/'), 'Assets must stay relative to the single UI');
     const asset = await request(url.pathname);
     assert.equal(asset.status, 200, url.pathname);
     assert.match(asset.headers.get('content-type'), reference.endsWith('.js') ? /javascript/ : /css/);
     assert.ok((await asset.arrayBuffer()).byteLength > 0);
   }
+}
+async function legacyRedirects() {
+  for (const [route, location] of [['/v1/', '../'], ['/v2/', '../'], ['/v1/index.html', '../'], ['/v2', './']]) {
+    for (const method of ['GET', 'HEAD']) {
+      const response = await request(`${route}?sso=bound&test=upgrade`, { method });
+      assert.equal(response.status, 302, `${method} ${route} must return to the single UI`);
+      assert.equal(response.headers.get('location'), `${location}?sso=bound&test=upgrade`);
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+    }
+  }
+  const followed = await request('/v2/', { redirect: 'follow' });
+  assert.equal(followed.status, 200);
+  assert.equal(new URL(followed.url).pathname, '/');
 }
 try {
   if (process.platform === 'win32') {
@@ -135,59 +125,34 @@ try {
   const directories = (await readdir(sandbox, { withFileTypes: true })).filter(entry => entry.isDirectory());
   assert.equal(directories.length, 1, 'Expected one package root');
   root = path.join(sandbox, directories[0].name);
-  for (const file of ['web/dist/index.html', 'web/dist/v1/index.html', 'web/dist/v2/index.html', 'web/dist/webui-versions.json']) {
-    assert.ok((await stat(path.join(root, file))).isFile(), `Missing ${file}`);
+  assert.ok((await stat(path.join(root, 'web/dist/index.html'))).isFile(), 'Missing web/dist/index.html');
+  for (const stale of ['web/dist/v1', 'web/dist/v2', 'web/dist/webui-versions.json']) {
+    await assert.rejects(stat(path.join(root, stale)), `${stale} belongs to the retired dual bundle`);
   }
-  // Model an existing installation: no ui_version field; the API credential
-  // and unrelated preferences must survive the first version switch.
+  // Model an installation upgraded from the dual-bundle era: its webui.json
+  // still carries ui_version, which must neither block startup nor be erased.
   apiKey = randomUUID();
   await mkdir(path.join(root, 'config'), { recursive: true });
   const sections = {
     server: { host: '127.0.0.1', port: 18088, api_key: apiKey, db_path: './data/webui-smoke.db', log_level: 'error' },
-    adapters: [], events: {}, webui: { password: '', fixture_existing_preference: 'preserve-me' },
+    adapters: [], events: {}, webui: { password: '', ui_version: 'v1', fixture_existing_preference: 'preserve-me' },
     i18n: { resource_dir: 'i18n', default_locale: 'zh-Hans' },
     dice: { heart_enabled: false, cloudban_enabled: false, console_start_hidden: true },
     update: { auto_check: false, auto_action: 'notify' }, backup: { auto_enabled: false }, hot_reload: { enabled: false },
   };
   for (const [name, value] of Object.entries(sections)) await writeFile(path.join(root, 'config', name + '.json'), JSON.stringify(value));
-  phase = 'old configuration -> default V1';
-  await start(); await entries('v1'); await assets('v1'); await assets('v2');
-  assert.deepEqual((await state()).available, { v1: true, v2: true });
-  phase = 'authenticated version switch';
-  assert.equal((await request('/api/system/webui-version')).status, 401);
-  assert.equal((await request('/api/system/webui-version', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{"version":"v2"}' })).status, 401);
-  await select('v2'); await entries('v2'); await assets('v1');
-  await select('v1'); await entries('v1');
-  await select('v2');
+  phase = 'upgraded configuration serves the single UI';
+  await start(); await entry();
+  phase = 'old /v1/ and /v2/ bookmarks';
+  await legacyRedirects();
+  phase = 'retired version API';
+  assert.equal((await request('/api/system/webui-version', { headers: { 'X-API-Key': apiKey } })).status, 404);
+  phase = 'restart keeps existing settings';
+  await stop(); await start(); await entry();
   const saved = JSON.parse(await readFile(path.join(root, 'config/webui.json'), 'utf8'));
-  assert.equal(saved.ui_version, 'v2'); assert.equal(saved.password, '');
-  assert.equal(saved.fixture_existing_preference, 'preserve-me');
-  phase = 'restart retains selected V2';
-  await stop(); await start(); await entries('v2');
-  phase = 'missing V2 falls back to V1 without erasing selection';
-  await stop();
-  await rename(path.join(root, 'web/dist/v2'), path.join(root, 'fixture-v2-held'));
-  await start(); await entries('v1');
-  assert.equal((await state()).selected, 'v2');
-  await select('v2', 400);
-  phase = 'legacy single-bundle entry remains accessible';
-  await stop();
-  await rename(path.join(root, 'web/dist'), path.join(root, 'fixture-dual-held'));
-  await mkdir(path.join(root, 'web/dist'));
-  await writeFile(path.join(root, 'web/dist/index.html'), '<!doctype html><html><body>legacy-ui-fixture</body></html>');
-  await start();
-  for (const route of ['/', '/index.html']) {
-    const response = await request(route);
-    assert.equal(response.status, 200);
-    assert.equal(response.headers.get('cache-control'), 'no-store');
-    assert.match(await response.text(), /legacy-ui-fixture/);
-    assert.equal((await request(route, { method: 'HEAD' })).status, 200);
-  }
-  const legacy = await state();
-  assert.equal(legacy.legacy, true); assert.equal(legacy.effective, 'v1');
-  assert.equal(legacy.selected, 'v2');
+  assert.equal(saved.password, ''); assert.equal(saved.fixture_existing_preference, 'preserve-me');
   success = true;
-  console.log('PASS packaged WebUI HTTP: root/index GET+HEAD, V1/V2 assets, old settings, auth, switching, restart, fallback and legacy bundle');
+  console.log('PASS packaged WebUI HTTP: root/index GET+HEAD, relative assets, old /v1/ /v2/ redirects, upgraded settings and restart');
 } catch (error) {
   throw new Error(`${phase}: ${error.message}\nIsolated package retained at ${sandbox}\n${output.replaceAll(apiKey || 'never-a-key', '<redacted>')}`, { cause: error });
 } finally {

@@ -21,7 +21,7 @@
 #include "service/mcp_service.h"
 #include "service/http_auth_path.h"
 #include "service/web_auth.h"          // WebUI 登录鉴权
-#include "service/webui_entry.h"
+#include "service/webui_legacy.h"
 #include "service/sso_routes.h"        // WebUI 第三方登录（OpenID Connect）
 #include "service/chat_image.h"        // 模拟聊天图片本地化
 #include "service/image_host.h"        // 图床（QQ 官方富媒体需要公网 URL）
@@ -3511,36 +3511,22 @@ static int realMain(int argc, char* argv[]) {
     if (fs::exists(webRoot)) {
         app.setDocumentRoot(webRoot);
         app.setStaticFilesCacheTime(0);
-        // Only the entry is selected dynamically; /v1/ and /v2/ retain separate
-        // assets, while cookies, APIs and application data stay on one origin.
-        dice::webui::registerEntryRoutes(app, configMgr, webRoot);
         DICE_LOG_DEBUG_M("管理面板", "前端资源目录为「{}」。", webRoot);
     } else {
         DICE_LOG_WARN_M("管理面板", "前端资源目录「{}」不存在，请检查安装包是否完整。", webRoot);
     }
 
-    app.registerHandler("/api/system/webui-version", [&configMgr, webRoot](const drogon::HttpRequestPtr& req,
-            std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
-        auto response = drogon::HttpResponse::newHttpResponse();
-        response->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-        response->addHeader("Cache-Control", "no-store");
-        try {
-            if (req->method() == drogon::Put) {
-                std::string error;
-                const auto body = nlohmann::json::parse(req->getBody(), nullptr, false);
-                if (!dice::webui::selectVersion(configMgr, webRoot, body, error)) {
-                    response->setStatusCode(drogon::k400BadRequest);
-                    response->setBody(nlohmann::json({{"code", 400}, {"message", error}}).dump());
-                    cb(response); return;
-                }
-            }
-            response->setBody(nlohmann::json({{"code", 0}, {"data", dice::webui::versions(configMgr, webRoot)}}).dump());
-        } catch (...) {
-            response->setStatusCode(drogon::k500InternalServerError);
-            response->setBody(R"({"code":500,"message":"读取 WebUI 版本失败。"})");
-        }
-        cb(response);
-    }, {drogon::Get, drogon::Put});
+    // Old /v1/ and /v2/ bookmarks from the dual-bundle era return to the root.
+    // Registered handlers take precedence over leftover static directories.
+    for (const char* legacy : {"/v1", "/v2", "/v1/", "/v2/", "/v1/index.html", "/v2/index.html"}) {
+        app.registerHandler(legacy, [](const drogon::HttpRequestPtr& req,
+                std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+            auto response = drogon::HttpResponse::newRedirectionResponse(
+                dice::webui::legacyEntryLocation(req->path(), req->query()));
+            response->addHeader("Cache-Control", "no-store");
+            cb(response);
+        }, {drogon::Get, drogon::Head});
+    }
 
     // (Removed dead SPA-fallback route table: the frontend uses hash routing,
     // so the browser only ever requests "/" — those per-path handlers never fired

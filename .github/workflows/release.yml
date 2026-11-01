@@ -140,7 +140,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
-      source_sha_v2: ${{ steps.source-v2.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -155,58 +154,26 @@ jobs:
         id: source
         working-directory: web
         run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
-        with:
-          repository: DiceZone/Dice-Next-WebUI
-          ref: webui-v2
-          path: web-v2
-          token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
-      - name: Record WebUI V2 build source
-        id: source-v2
-        working-directory: web-v2
-        run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           check-latest: true
           cache: npm
-          cache-dependency-path: |
-            web/package-lock.json
-            web-v2/package-lock.json
+          cache-dependency-path: web/package-lock.json
       - name: Build WebUI
         working-directory: web
         run: |
           node scripts/check-node-version.mjs
           npm ci
           npm test
-          npm run build
-      - name: Build WebUI V2 preview
-        working-directory: web-v2
-        run: |
-          node scripts/check-node-version.mjs
-          npm ci
-          npm test
           npm run quality
           npm run build
-      - name: Assemble both WebUI versions
-        run: |
-          python3 -m unittest discover -s core/.github/scripts -p 'test_bundle_webui.py'
-          python3 core/.github/scripts/bundle-webui.py --v1 web/dist --v2 web-v2/dist \
-            --output webui-bundle/dist --v1-sha '${{ steps.source.outputs.sha }}' --v2-sha '${{ steps.source-v2.outputs.sha }}'
-      - name: Test WebUI V1/V2 switching in Chromium
+          # Relative assets keep reverse-proxy prefixes working.
+          if grep -Eq '(src|href)="/assets/' dist/index.html; then echo "WebUI must be built with Vite base './'" >&2; exit 1; fi
+      - name: Test pages, themes and interactions in Chromium
         working-directory: web
-        env:
-          WEBUI_V2_DIST: ${{ github.workspace }}/web-v2/dist
         run: |
           npx --no-install playwright install --with-deps chromium --only-shell
-          npx --no-install playwright test --config playwright.webui-version.config.mjs
-      - name: Test MCP WebUI in Chromium
-        working-directory: web
-        run: |
-          npm run test:mcp-browser
-      - name: Test V2 pages, themes and interactions in Chromium
-        working-directory: web-v2
-        run: |
           npm run test:v2-browser
           npm run test:notice-browser
           npm run test:mcp-browser
@@ -215,14 +182,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: webui-browser-diagnostics
-          path: |
-            web/test-results/
-            web-v2/test-results/
+          path: web/test-results/
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: webui-dist
-          path: webui-bundle/dist
+          path: web/dist
           if-no-files-found: error
   linux:
     name: Linux (${{ matrix.arch }})
@@ -712,7 +677,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CORE_SHA: ${{ github.sha }}
           WEBUI_SHA: ${{ needs.webui.outputs.source_sha }}
-          WEBUI_V2_SHA: ${{ needs.webui.outputs.source_sha_v2 }}
           RELEASE_TAG: ${{ steps.build.outputs.tag }}
         run: |
           set -euo pipefail
@@ -722,7 +686,6 @@ jobs:
           python3 release-notes-generator.py \
             --core-path . --core-sha "$CORE_SHA" \
             --webui-path release-webui --webui-sha "$WEBUI_SHA" \
-            --webui-v2-sha "$WEBUI_V2_SHA" \
             --tag "$RELEASE_TAG" \
             --output release-notes.md --sources-output release-sources.json
           # Reuse the user-facing notes, without the full source/commit history.

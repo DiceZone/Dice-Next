@@ -1,17 +1,14 @@
 # Repository-local agent rules
 
-## WebUI V1 / V2 transition (mandatory)
+## WebUI (single version)
 
-- WebUI `main` maintains V1; `webui-v2` maintains V2 (preview) in the separate
-  Dice-Next-WebUI repository. Keep these branches distinct.
-- Until the human explicitly establishes V2 as stable and removes V1, every
-  feature addition/removal or behavior/API change affecting the WebUI MUST be
-  implemented and tested in BOTH versions (including i18n, search and docs).
-  Do not implement a feature only in the version currently open in the browser.
-- Preserve the dual bundle (`web/dist/v1`, `web/dist/v2`), the instance-wide
-  `config/webui.json` preference, shared authentication and fallback to V1.
-- Report any blocked counterpart sync explicitly. Never claim parity based on
-  copying built assets, and never silently merge the V2 redesign into V1.
+- On 2026-11-02 the human established the former V2 as the only WebUI. It is
+  maintained on `main` of the separate Dice-Next-WebUI repository and packaged
+  directly as `web/dist`. The old V1 is archived, read-only, on `v1-webui`.
+- Do not reintroduce a version switch, a dual bundle or V1 fallbacks. Old
+  `/v1/` and `/v2/` URLs only redirect to the root (`service/webui_legacy.h`).
+- WebUI behavior/API changes still need their translations, search entries,
+  help, tests and docs updated together.
 
 - Do not create a Git commit unless the user explicitly asks for one.
 - When a commit is requested, use the repository's existing human-configured
