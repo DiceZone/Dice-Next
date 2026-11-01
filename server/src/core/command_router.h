@@ -6467,8 +6467,10 @@ private:
         // 自动成为当前官机骰主）；仍未命中时群聊不退回公共号判定（官方群内不可信），
         // 私聊退回别名归并。
         if (msg.platform == "qq_official") {
-            const std::string native = msg.extra.value("__identity_native_sender", std::string());
-            const std::string bot = msg.extra.value("official_bot_id", std::string());
+            // 合成消息（测试台、定时任务等）可能没有 extra；null 上调用 value() 会抛异常。
+            const bool hasExtra = msg.extra.is_object();
+            const std::string native = hasExtra ? msg.extra.value("__identity_native_sender", std::string()) : std::string();
+            const std::string bot = hasExtra ? msg.extra.value("official_bot_id", std::string()) : std::string();
             if (!native.empty() && isMaster("qq_official", native, msg.adapterId)) return true;
             if (!native.empty() && masterInheritEnabled() && inheritedOfficialMaster(native, bot)) return true;
             if (msg.type == MessageType::kGroup) return false;
