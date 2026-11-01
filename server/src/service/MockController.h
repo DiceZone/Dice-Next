@@ -44,8 +44,9 @@ private:
             return m == drogon::Put ? ok(nullptr) : ok({{"host","0.0.0.0"},{"port",18088},{"log_level","info"}});
 
         if (p == "/api/dashboard/stats")
-            return ok({{"uptime_seconds", 3600}, {"active_connections", 2}, {"total_rules", 5},
-                       {"active_sessions", 1}, {"recent_logs", json::array({
+            return ok({{"uptime_seconds", 3600}, {"active_connections", 2}, {"player_count", 3}, {"group_count", 1},
+                       {"active_logs", 1}, {"total_logs", 3}, {"total_rules", 5},
+                       {"active_sessions", 3}, {"recent_logs", json::array({
                            {{"timestamp","2026-06-14T02:00:00Z"},{"level","info"},{"message","系统启动"}},
                            {{"timestamp","2026-06-14T02:01:00Z"},{"level","info"},{"message","OneBot 适配器已连接"}}
                        })}});

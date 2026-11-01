@@ -55,6 +55,7 @@
 #include "adapter/qq_official_adapter.h"
 #include "core/command_router.h"
 #include "core/plugin_command_priority.h"
+#include "core/playground_reply.h"
 #include "core/friend_approval_policy.h"
 #include "core/causal/causal_rule_manager.h"
 #include "core/causal/cooldown_manager.h"
@@ -2998,6 +2999,7 @@ static int realMain(int argc, char* argv[]) {
                 extra["autoAcknowledgeInteractions"] = a.value("auto_acknowledge_interactions", a.value("autoAcknowledgeInteractions", true));
                 extra["qqRichReplies"] = dice::qq_rich::style(a.value("qq_rich_replies", a.value("qqRichReplies", std::string("off"))));
                 extra["qqInteractions"] = dice::qq_rich::interaction(a.value("qq_interactions", a.value("qqInteractions", std::string("links"))));
+                extra["receiveMode"] = dice::qqwebhook::isWebhook(a.value("receive_mode", a.value("receiveMode", a.value("qqReceiveMode", std::string("gateway"))))) ? "webhook" : "gateway";
             }
             row.config = extra.dump();
             return row;
@@ -3021,6 +3023,7 @@ static int realMain(int argc, char* argv[]) {
                 a["auto_acknowledge_interactions"] = extra.value("autoAcknowledgeInteractions", true);
                 a["qq_rich_replies"] = extra.value("qqRichReplies", std::string("off"));
                 a["qq_interactions"] = extra.value("qqInteractions", std::string("links"));
+                a["receive_mode"] = dice::qqwebhook::isWebhook(extra.value("receiveMode", std::string())) ? "webhook" : "gateway";
             }
             if (row.type == static_cast<int>(dice::AdapterType::kMilky)) {
                 a["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));
@@ -3792,7 +3795,7 @@ static int realMain(int argc, char* argv[]) {
         }, {drogon::Post});
 
     app.registerHandler("/api/test/message",
-        [&cmdRouter, &jsMod, &luaMod, &configMgr, &db, &makeAiTool, replyFallback](const drogon::HttpRequestPtr& req,
+        [&cmdRouter, &jsMod, &luaMod, &configMgr, &db, &adapterMgr, &makeAiTool, replyFallback](const drogon::HttpRequestPtr& req,
                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
             nlohmann::json out;
             try {
@@ -3804,6 +3807,7 @@ static int realMain(int argc, char* argv[]) {
                 msg.content    = body.value("text", std::string(""));
                 msg.rawContent = body.value("rawContent", msg.content);   // 可带 CQ 图码测识图
                 msg.displayContent = msg.content;
+                msg.extra      = nlohmann::json::object();   // 与适配器入站一致，不能留 null
                 msg.senderId   = body.value("userId", std::string("10001"));
                 msg.senderName = body.value("nickname", std::string("\xe6\xb5\x8b\xe8\xaf\x95\xe5\x91\x98"));
                 const std::string messageType =
@@ -3841,6 +3845,20 @@ static int realMain(int argc, char* argv[]) {
                     std::string lc = body["locale"].get<std::string>();
                     if (!lc.empty()) forced = dice::localeFromString(lc);
                 }
+                // 出站格式与 live 管线相同：优先用该平台的适配器（指定的或第一个同平台的），
+                // 没有时按平台规则推断。
+                std::shared_ptr<dice::IAdapter> formatAdapter = adapterMgr.getAdapter(msg.adapterId);
+                if (!formatAdapter)
+                    for (auto& a : adapterMgr.allAdapters())
+                        if (a && a->platform() == msg.platform) { formatAdapter = a; break; }
+                const dice::PresentationStyle replyStyle = formatAdapter
+                    ? formatAdapter->effectivePresentationStyle() : dice::IAdapter::presentationStyle();
+                dice::ContentFormat preferredReplyFormat = formatAdapter
+                    ? formatAdapter->preferredReplyFormat(msg)
+                    : dice::playground::defaultReplyFormat(msg.platform, replyStyle);
+                if (cmdRouter.conversationPlainText(msg) || cmdRouter.isTextControl(msg))
+                    preferredReplyFormat = dice::ContentFormat::kPlainText;
+                dice::ContentFormat replyFormat = dice::ContentFormat::kPlainText;
                 std::string reply;
                 if (!cmdRouter.mentionsOtherKnownDiceBot(msg)
                     && (!cmdRouter.isForAnotherBot(msg) || pluginCommandMatches(jsMod, luaMod, cmdRouter, msg))
@@ -3850,11 +3868,20 @@ static int realMain(int argc, char* argv[]) {
                         && dice::CommandRouter::isAtSelf(msg) && !cmdRouter.isGroupLocked(msg);
                     bool replyOff = msg.type == dice::MessageType::kGroup && !msg.targetId.empty()
                                     && cmdRouter.isReplyDisabledFor(msg.platform, msg.targetId, msg.adapterId);
-                    reply = cmdRouter.handleMessage(msg, forced);
+                    {
+                        // 抛异常时也要结束捕获：线程局部状态会残留到这个 HTTP 线程的下一个请求。
+                        struct CaptureEnd { bool open = true; ~CaptureEnd() { if (open) dice::I18n::endOutboundCapture(); } } capture;
+                        dice::I18n::beginOutboundCapture(preferredReplyFormat, replyStyle);
+                        reply = cmdRouter.handleMessage(msg, forced);
+                        capture.open = false;
+                        replyFormat = dice::I18n::endOutboundCapture();
+                    }
                     bool didCommand = !reply.empty();
                     std::string replySrc = "builtin";   // 来源分类（同 live 管线）
-                    if (reply.empty() && (!disabled || forcedByAt))
+                    if (reply.empty() && (!disabled || forcedByAt)) {
                         reply = replyFallback(msg, replySrc);   // 与 live 完全同链（含因果规则）
+                        replyFormat = dice::ContentFormat::kPlainText;
+                    }
                     if (replySrc == "plugin_command") didCommand = true;
                     // 智能化阶段A：测试台也走 AI 对话（无其它回复+触发时），方便骰主预览。
                     // 测试台不读 chat.db 上下文（用空上下文），仅验证触发+生成+发送。
@@ -3900,13 +3927,19 @@ static int realMain(int argc, char* argv[]) {
                                     pcur += "\n\xef\xbc\x88\xe6\x88\x91\xe5\x8f\x91\xe7\x9a\x84\xe5\x9b\xbe\xe7\x89\x87\xe5\x86\x85\xe5\xae\xb9\xef\xbc\x9a" + vd + "\xef\xbc\x89";
                             }
                             std::string ar = dice::aichat::generate(configMgr, "", sn, pcur, memBg, texec, sysOv, modelOv);
-                            if (!ar.empty()) reply = ar;
+                            if (!ar.empty()) { reply = ar; replyFormat = dice::ContentFormat::kPlainText; }
                         }
                     }
                     // Note: triggered broadcast is NOT applied here — the playground
                     // shouldn't consume a real broadcast push; it only fires on live
                     // group messages (see adapterMgr.onMessage above).
-                    if (!reply.empty()) reply = cmdRouter.applySelf(msg, reply);
+                    if (!reply.empty()) {
+                        reply = cmdRouter.applySelf(msg, reply, replyFormat);
+                        reply = cmdRouter.resolveBarAttributes(msg, reply);
+                        auto expanded = dice::presentation::expandComponents(reply, replyStyle, preferredReplyFormat);
+                        reply = std::move(expanded.text);
+                        if (expanded.usedMarkdown) replyFormat = dice::ContentFormat::kMarkdown;
+                    }
                     // 测试台同样走 AI 润色 + 翻译（与 live 一致），方便骰主在
                     // 「指令测试」页直接预览效果；失败/破坏数字回退原文。
                     std::string aiCat = (replySrc == "plugin" || replySrc == "plugin_command") ? "plugin"
@@ -3914,20 +3947,34 @@ static int realMain(int argc, char* argv[]) {
                                       : cmdRouter.lastReplyCategory();
                     if (!reply.empty()
                         && dice::aipolish::enabled(configMgr) && dice::aipolish::covers(configMgr, aiCat)) {
-                        reply = dice::aipolish::polish(configMgr, msg.content, reply);
+                        reply = dice::aipolish::polish(configMgr, msg.content, reply, replyFormat);
                     }
                     if (!reply.empty() && dice::aitrans::enabled(configMgr)) {
                         std::string tgt = cmdRouter.aiLangFor(msg);
                         if (!tgt.empty() && dice::aitrans::covers(configMgr, aiCat))
-                            reply = dice::aitrans::translate(configMgr, tgt, reply);
+                            reply = dice::aitrans::translate(configMgr, tgt, reply, replyFormat);
                     }
                     cmdRouter.recordMessage(msg, reply);
                     // 测试台沿用统计行为，但绝不能伪造真实的群聊使用资格。
                     cmdRouter.recordPlayerActivity(msg, didCommand, false);
                 }
-                out["reply"]   = reply;
-                out["matched"] = !reply.empty();
-                if (!reply.empty()) out["segments"] = cmdRouter.segmentReply(reply);   // 分段预览
+                // 按平台出站规则转成用户实际看到的文字：纯文本平台去掉 Markdown，
+                // Discord/KOOK 卡片保留 Markdown（markdown=true 时前端按富文本显示）。
+                const bool plainOnly = preferredReplyFormat == dice::ContentFormat::kPlainText;
+                bool markdown = false;
+                if (!reply.empty()) {
+                    auto shown = dice::playground::render(reply, replyFormat, msg.platform, msg.type, replyStyle, plainOnly);
+                    markdown = shown["markdown"].get<bool>();
+                    nlohmann::json segments = nlohmann::json::array();   // 分段预览
+                    for (const auto& seg : cmdRouter.segmentReply(reply, msg.platform))
+                        segments.push_back(dice::playground::render(seg, replyFormat, msg.platform, msg.type,
+                            replyStyle, plainOnly)["text"]);
+                    reply = shown["text"].get<std::string>();
+                    out["segments"] = std::move(segments);
+                }
+                out["reply"]    = reply;
+                out["markdown"] = markdown;
+                out["matched"]  = !reply.empty();
             } catch (const std::exception& e) {
                 out["error"] = e.what();
             }

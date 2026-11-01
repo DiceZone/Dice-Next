@@ -66,6 +66,7 @@ set(TEST_SOURCES
     test_command_prefix_policy.cpp
     test_command_shortcuts.cpp
     test_me_command.cpp
+    test_playground_reply.cpp
     test_nickname_command.cpp
     test_log_bot_off.cpp
     test_log_nickname.cpp
@@ -80,6 +81,7 @@ set(TEST_SOURCES
     test_qq_official_adapter.cpp
     test_qq_official_names.cpp
     test_qq_official_protocol.cpp
+    test_qq_official_webhook.cpp
     test_identity_email.cpp
     test_milky_adapter.cpp
     test_adapter_manager_start.cpp

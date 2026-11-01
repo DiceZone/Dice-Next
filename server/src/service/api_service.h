@@ -201,6 +201,43 @@ static std::string replyRuleValidate(const ReplyRule& rule) {
     return {};
 }
 
+static std::string requireOfficialReceiveMode(const J& source) {
+    const char* key = source.contains("qqReceiveMode") ? "qqReceiveMode"
+        : source.contains("receiveMode") ? "receiveMode" : nullptr;
+    if (!key) return "gateway";
+    if (!source[key].is_string()) throw std::runtime_error("接收方式只能是 gateway 或 webhook");
+    const auto mode = source[key].get<std::string>();
+    if (mode != "gateway" && mode != "webhook") throw std::runtime_error("接收方式只能是 gateway 或 webhook");
+    return mode;
+}
+
+static std::string storedReceiveMode(const J& cfg) {
+    return qqwebhook::isWebhook(cfg.value("receiveMode", std::string())) ? "webhook" : "gateway";
+}
+
+template <typename Storage>
+static void audienceCounts(Storage* st, int& players, int& groups) {
+    players = 0;
+    groups = 0;
+    if (!st) return;
+    try { players = static_cast<int>(st->template count<PlayerProfileRow>()); } catch (...) {}
+    try {
+        // 与群组页相同：去掉已标记移除的群，账号级记录仍算入。
+        std::set<std::string> live, removed;
+        for (const auto& row : st->template get_all<GroupSettingRow>()) {
+            if (row.groupId.empty()) continue;
+            const auto id = row.platform + '\x1f' + row.groupId;
+            if (row.key == "__removed" && row.value == "1") removed.insert(id);
+            else live.insert(id);
+        }
+        for (const auto& row : st->template get_all<GroupAccountSettingRow>()) {
+            if (!row.groupId.empty()) live.insert(row.platform + '\x1f' + row.groupId);
+        }
+        for (const auto& id : removed) live.erase(id);
+        groups = static_cast<int>(live.size());
+    } catch (...) {}
+}
+
 static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std::string()) {
     J cfg = J::parse(a.config, nullptr, false);
     if (!cfg.is_object()) cfg = J::object();
@@ -227,6 +264,7 @@ static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std:
         {"autoAcknowledgeInteractions", official && cfg.is_object() ? cfg.value("autoAcknowledgeInteractions", true) : true},
         {"qqRichReplies", official ? qq_rich::style(cfg.value("qqRichReplies", std::string("off"))) : "off"},
         {"qqInteractions", official ? qq_rich::interaction(cfg.value("qqInteractions", std::string("links"))) : "off"},
+        {"qqReceiveMode", official ? storedReceiveMode(cfg) : "gateway"},
         {"personaSelection", cfg.value("personaSelection", std::string("all"))},
         {"selectablePersonaIds", cfg.value("selectablePersonaIds", J::array())},
         {"defaultPersonaId", cfg.value("defaultPersonaId", 0)},
@@ -257,6 +295,7 @@ static J adapterToConfigJson(const AdapterRow& a) {
         out["auto_acknowledge_interactions"] = extra.value("autoAcknowledgeInteractions", true);
         out["qq_rich_replies"] = extra.value("qqRichReplies", std::string("off"));
         out["qq_interactions"] = extra.value("qqInteractions", std::string("links"));
+        out["receive_mode"] = storedReceiveMode(extra);
     }
     if (a.type == static_cast<int>(AdapterType::kMilky)) {
         out["event_endpoint"] = extra.value("eventEndpoint", extra.value("event_endpoint", std::string()));
@@ -319,6 +358,7 @@ static AdapterPtr makeRuntimeAdapter(const AdapterRow& a) {
                             {"autoAcknowledgeInteractions", cfg.value("autoAcknowledgeInteractions", true)},
                             {"qqRichReplies", cfg.value("qqRichReplies", std::string("off"))},
                             {"qqInteractions", cfg.value("qqInteractions", std::string("links"))},
+                            {"receiveMode", storedReceiveMode(cfg)},
                             {"message_format", cfg.value("message_format", std::string())}});
         return adapter;
     }
@@ -2410,11 +2450,19 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Get});
 
     app.registerHandler("/api/dashboard/stats", [st, lst, &adapterMgr, &db](Req, CB&& cb) {
+        // 与跑团记录页一致：status 0 为进行中，总量包含暂停和已结束。
+        int activeLogs = 0, totalLogs = 0;
+        try {
+            if (lst) {
+                totalLogs = static_cast<int>(lst->count<GameLogRow>());
+                activeLogs = static_cast<int>(lst->count<GameLogRow>(
+                    orm::where(orm::c(&GameLogRow::status) == static_cast<int>(GameLogStatus::kActive))));
+            }
+        } catch (...) {}
         try {
             int adapters = (int)st->count<AdapterRow>();
             int rules    = (int)st->count<ReplyRuleRow>();
 
-            int sessions = (int)lst->count<GameLogRow>();
             int connectedCount = 0;
             for (auto& a : adapterMgr.allAdapters())
                 if (a->isConnected()) ++connectedCount;
@@ -2508,26 +2556,38 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
                 return arr;
             };
+            int playerCount = 0, groupCount = 0;
+            audienceCounts(st, playerCount, groupCount);
             jsonReply(ok(J{
                 {"uptime_seconds", static_cast<int>(std::time(nullptr) - utils::getStartupEpoch())},
                 {"active_connections", connectedCount},
+                {"player_count", playerCount},
+                {"group_count", groupCount},
+                {"active_logs", activeLogs},
+                {"total_logs", totalLogs},
                 {"total_adapters", adapters},
                 {"total_commands", static_cast<int>(CommandRouter::commandCount())},
                 {"total_rules", rules},
-                {"active_sessions", sessions},
+                {"active_sessions", totalLogs},
                 {"system", sysInfoJson(db.path())},
                 {"recent_logs", readRecentLogs()}
             }), std::move(cb));
         } catch (const std::exception&) {
             // Fallback: return stats without logs if log parsing fails
             DICE_LOG_WARN_EXCEPTION("dashboard statistics/log loading; returning fallback");
+            int playerCount = 0, groupCount = 0;
+            audienceCounts(st, playerCount, groupCount);
             jsonReply(ok(J{
                 {"uptime_seconds", static_cast<int>(std::time(nullptr) - utils::getStartupEpoch())},
                 {"active_connections", 0},
+                {"player_count", playerCount},
+                {"group_count", groupCount},
+                {"active_logs", activeLogs},
+                {"total_logs", totalLogs},
                 {"total_adapters", (int)st->count<AdapterRow>()},
                 {"total_commands", static_cast<int>(CommandRouter::commandCount())},
                 {"total_rules", (int)st->count<ReplyRuleRow>()},
-                {"active_sessions", (int)lst->count<GameLogRow>()},
+                {"active_sessions", totalLogs},
                 {"system", sysInfoJson(db.path())},
                 {"recent_logs", J::array()}
             }), std::move(cb));
@@ -2545,6 +2605,31 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             jsonReply(r.ok ? ok(r.data) : fail(r.error), std::move(cb));
         });
     }, {drogon::Get});
+
+    // QQ 官方 API v2 Webhook。不能放在 /api 下，否则登录拦截会把开放平台的回调挡成 401。
+    app.registerHandler("/qq-official/webhook", [](Req req, CB&& cb) {
+        auto reply = [](int status, std::string body) {
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(static_cast<drogon::HttpStatusCode>(status));
+            if (!body.empty()) {
+                resp->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+                resp->setBody(std::move(body));
+            }
+            return resp;
+        };
+        try {
+            const std::string raw(req->getBody());
+            auto adapter = QQOfficialAdapter::findWebhook(req->getHeader("X-Bot-Appid"));
+            if (!adapter) { cb(reply(404, {})); return; }
+            const auto result = adapter->acceptWebhook(
+                req->getHeader("X-Signature-Timestamp"),
+                req->getHeader("X-Signature-Ed25519"), raw);
+            cb(reply(result.status, result.body));
+        } catch (const std::exception& e) {
+            DICE_LOG_WARN("QQ webhook: {}", e.what());
+            cb(reply(500, {}));
+        }
+    }, {drogon::Post});
 
     // ── Adapters (DB-backed, status from AdapterManager) ──────
     app.registerHandler("/api/adapters", [st, &adapterMgr, &cfg](Req req, CB&& cb) {
@@ -2589,6 +2674,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                                  {"autoAcknowledgeInteractions", j.value("autoAcknowledgeInteractions", true)},
                                  {"qqRichReplies", qq_rich::style(j.value("qqRichReplies", std::string("off")))},
                                  {"qqInteractions", qq_rich::interaction(j.value("qqInteractions", std::string("links")))},
+                                 {"receiveMode", requireOfficialReceiveMode(j)},
                                  {"heartApiKey", heartApiKey}}.dump();
                 } else if (a.type == static_cast<int>(AdapterType::kDiscord)
                            || a.type == static_cast<int>(AdapterType::kKook)) {
@@ -2685,6 +2771,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         if (!j[key].is_boolean()) throw std::runtime_error(std::string(key) + " must be a boolean");
                         runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value(key, std::string(key) == "autoAcknowledgeInteractions") != j[key].get<bool>();
                         adapterCfg[key] = j[key];
+                    }
+                    if (j.contains("qqReceiveMode") || j.contains("receiveMode")) {
+                        const auto mode = requireOfficialReceiveMode(j);
+                        runtimeConfigChanged = runtimeConfigChanged || adapterCfg.value("receiveMode", std::string("gateway")) != mode;
+                        adapterCfg["receiveMode"] = mode;
                     }
                     if (adapterCfg.value("appId", std::string()).empty() || adapterCfg.value("appSecret", std::string()).empty()) throw std::runtime_error("QQ 官方机器人需要 AppID 和 AppSecret");
                     for (const auto* key : {"qqRichReplies", "qqInteractions"}) if (j.contains(key)) {
