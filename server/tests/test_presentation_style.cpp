@@ -56,6 +56,22 @@ TEST(PresentationStyle, TurnsVisualUsageLinesIntoPrefillActions) {
     ASSERT_TRUE(standard.actions.empty());
 }
 
+TEST(PresentationStyle, BarPlaceholdersStayInsideTheComponentUntilLookedUp) {
+    const std::string input = "[[bar:HP|{hp}|{hpmax}]] {hp}";
+    ASSERT_TRUE(presentation::variableOnlyInBar(input, "hpmax"));
+    ASSERT_FALSE(presentation::variableOnlyInBar(input, "hp"));
+    const auto filled = presentation::resolveBarPlaceholders(input, [](std::string_view name) -> std::optional<int> {
+        if (name == "hp") return 8;
+        if (name == "hpmax") return 12;
+        return std::nullopt;
+    });
+    ASSERT_EQ(filled, std::string("[[bar:HP|8|12]] {hp}"));
+    ASSERT_EQ(presentation::expandComponents(filled, PresentationStyle::kTraditional,
+        ContentFormat::kPlainText).text, std::string("HP 8/12 {hp}"));
+    ASSERT_EQ(presentation::resolveBarPlaceholders("[[bar:HP|{missing}|10]]",
+        [](std::string_view) { return std::optional<int>{}; }), std::string("[[bar:HP|{missing}|10]]"));
+}
+
 TEST(PresentationStyle, LeavesMalformedOrUnknownComponentsIntact) {
     const std::string input = "[[bar:HP|oops|10]] [[future:value]] [[unterminated";
     ASSERT_EQ(presentation::expandComponents(input, PresentationStyle::kVisual,

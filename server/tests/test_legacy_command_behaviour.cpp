@@ -1359,3 +1359,18 @@ TEST(LegacyCommands, GroupClearMasksLegacyWithoutTouchingOtherAccountsOrLogs) {
     ASSERT_TRUE(f.router.groupFeatureEnabled(f.msg, "roll"));
     ASSERT_TRUE(f.router.isLogRecording(f.msg));
 }
+
+TEST(LegacyCommands, StatusBarReadsHpAndItsMaximumFromTheCard) {
+    LegacyFixture f;
+    f.cards.setAttr(f.msg.senderId, f.msg.targetId, "hp", 8);
+    f.cards.setAttr(f.msg.senderId, f.msg.targetId, "hpmax", 12);
+    f.cards.setAttr(f.msg.senderId, f.msg.targetId, "临时生命值", 2);
+    const auto filled = f.router.resolveBarAttributes(f.msg, "[[bar:HP|{hp}|{hpmax}]] 旁边 {hp}");
+    ASSERT_EQ(filled, std::string("[[bar:HP|10|12]] 旁边 {hp}"));
+    const auto drawn = presentation::expandComponents(
+        filled, PresentationStyle::kTraditional, ContentFormat::kPlainText);
+    ASSERT_EQ(drawn.text, std::string("HP 10/12 旁边 {hp}"));
+    // 理智上限不依赖当前理智：没有克苏鲁神话时按 99 计算。当前值缺失则保持原样。
+    ASSERT_EQ(f.router.resolveBarAttributes(f.msg, "[[bar:SAN|{san}|{sanmax}]]"),
+        std::string("[[bar:SAN|{san}|99]]"));
+}

@@ -1749,6 +1749,10 @@ static int realMain(int argc, char* argv[]) {
             // text — works for both command replies and custom replies.
             if (!reply.empty())     reply = cmdRouter.applySelf(msg, reply, replyFormat);
             if (!broadcast.empty()) broadcast = cmdRouter.applySelf(msg, broadcast);
+            // Card values inside [[bar:{current}|{max}]] are not ordinary template
+            // arguments. Fill them before the bar is drawn.
+            if (!reply.empty()) reply = cmdRouter.resolveBarAttributes(msg, reply);
+            if (!broadcast.empty()) broadcast = cmdRouter.resolveBarAttributes(msg, broadcast);
             // Resolve semantic presentation components after all ordinary
             // template variables, but before AI and logging. The same advanced
             // reply therefore renders appropriately on every adapter.
@@ -2792,6 +2796,7 @@ static int realMain(int argc, char* argv[]) {
             auto format = dice::I18n::endOutboundCapture();
             if (reply.empty()) return;
             reply = cmdRouter.applySelf(pm, reply, format);
+            reply = cmdRouter.resolveBarAttributes(pm, reply);
             auto expanded = dice::presentation::expandComponents(reply, style, preferred);
             reply = std::move(expanded.text);
             if (expanded.usedMarkdown) format = dice::ContentFormat::kMarkdown;
