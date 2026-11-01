@@ -12357,6 +12357,38 @@ public:
     void setForwardNodes(std::vector<std::string> nodes) { forwardNodes_ = std::move(nodes); }
     std::vector<std::string> takeForwardNodes() { auto v = std::move(forwardNodes_); forwardNodes_.clear(); return v; }
 
+    // [[bar:HP|{hp}|{hpmax}]] reads the sender's card. Maxima use the same cap as
+    // the character sheet (explicit max, saved max, or the derived formula).
+    std::string resolveBarAttributes(const Message& msg, const std::string& text) const {
+        if (text.find("[[bar:") == std::string::npos) return text;
+        return presentation::resolveBarPlaceholders(text, [&](std::string_view raw) -> std::optional<int> {
+            const std::string name(raw);
+            std::string key = name;
+            for (char& c : key)
+                if (static_cast<unsigned char>(c) < 128)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            auto maxOf = [&](const std::string& base) {
+                for (const auto& alias : explicitMaxNamesFor(base)) {
+                    std::string folded = alias;
+                    for (char& c : folded)
+                        if (static_cast<unsigned char>(c) < 128)
+                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    if (folded == key || alias == name) return true;
+                }
+                return false;
+            };
+            for (const char* base : {"\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc", "\xe7\x90\x86\xe6\x99\xba", "\xe9\xad\x94\xe6\xb3\x95\xe5\x80\xbc"})
+                if (maxOf(base)) return attrMax(base, msg);
+            const auto canon = CharacterCardStore::canonical(name);
+            auto value = cards_.getAttr(msg.senderId, cardScope(msg), canon);
+            if (!value) return std::nullopt;
+            if (canon == "\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc")
+                if (auto shield = cards_.getAttr(msg.senderId, cardScope(msg), "\xe4\xb8\xb4\xe6\x97\xb6\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc"))
+                    return *value + *shield;
+            return value;
+        });
+    }
+
     std::string applySelf(const Message& msg, std::string text,
                           ContentFormat format = ContentFormat::kPlainText) const {
         if (text.find('{') == std::string::npos) return text;

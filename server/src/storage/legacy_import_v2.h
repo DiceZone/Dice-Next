@@ -1326,6 +1326,8 @@ inline int importNotices(ConfigManager& cfg, const fs::path& confDir, const Impo
         if (duplicate) continue;
         int mask = item.value("type", 15);
         if (mask <= 0) continue;
+        // Older Dice! masks can set bits above the four areas Dice!Next understands.
+        mask &= 15;
         notice["windows"].push_back(json{{"platform", opts.targetPlatform}, {"adapter_id", opts.targetAdapterId}, {"chat_id", id},
             {"is_group", group}, {"level_mask", mask}, {"events", json::array()}});
         ++imported;

@@ -41,6 +41,26 @@ TEST(NoticeRules, ImportedEmptyEventListsUseTheirMaskWithoutBeingRewritten) {
     ASSERT_TRUE(subscribed(rows[0], 8, "error"));
     ASSERT_EQ(before, old.dump());
 }
+TEST(NoticeRules, MasksFromOlderDiceKeepOnlyTheFourKnownAreas) {
+    auto r = rule();
+    r["level_mask"] = 31;
+    ASSERT_EQ(normalize(r)["level_mask"], 15);
+    r["level_mask"] = 17;
+    ASSERT_EQ(normalize(r)["level_mask"], 1);
+    r["level_mask"] = 16;
+    ASSERT_EQ(normalize(r)["level_mask"], 0);
+    r["level_mask"] = -1;
+    ASSERT_TRUE(rejected(r));
+    Json stored{{"rules", Json::array({rule()})}};
+    stored["rules"][0]["level_mask"] = 31;
+    const auto before = stored.dump();
+    const auto shown = dice::notice_windows::all(stored);
+    ASSERT_EQ(before, stored.dump());
+    ASSERT_EQ(shown[0]["subscriptions"][0]["level_mask"], 15);
+    const auto saved = dice::notice_windows::normalize(shown[0]);
+    ASSERT_EQ(saved["subscriptions"][0]["level_mask"], 15);
+}
+
 TEST(NoticeRules, ExplicitEmptyEventsAndZeroMasksReallyDisableDelivery) {
     auto r = rule();
     r["subscription"] = "events";

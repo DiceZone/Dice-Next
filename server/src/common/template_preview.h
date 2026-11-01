@@ -1,6 +1,7 @@
 #pragma once
 #include "weighted_templates.h"
 #include "reply_preview.h"
+#include "presentation_style.h"
 #include "template_preview_context.h"
 #include "../storage/legacy_message_keys.h"
 #include "../i18n/i18n.h"
@@ -47,6 +48,7 @@ inline json templatePreview(const json& body, const I18n* i18n = nullptr) {
         const auto locale = localeFromString(body.value("locale", std::string("zh-Hans")));
         text = i18n->previewWithReferences(locale, text, args, format);
     } else text = I18n::previewTemplate(text, args, format);
+    text = presentation::resolveBarPlaceholders(text, presentation::previewBarSample);
     json result{{"templateVersion", 1}, {"preview", replyPreview(text, format,
             body.value("platform", std::string("qq_group")), style, body.value("forcePlain", false))},
         {"markdown", replyPreview(text, format, "qq_group", style)["text"]},
@@ -64,6 +66,7 @@ inline json templatePreview(const json& body, const I18n* i18n = nullptr) {
             for (const auto& variable : program.variables)
                 if (!args.count(variable) && std::find(program.locals.begin(), program.locals.end(), variable) == program.locals.end() &&
                     (!i18n || i18n->getDefault(localeFromString(body.value("locale", std::string("zh-Hans"))), variable).empty()) &&
+                    !presentation::variableOnlyInBar(variant["text"].get<std::string>(), variable) &&
                     std::find(unresolved.begin(), unresolved.end(), json(variable)) == unresolved.end()) unresolved.push_back(variable);
             for (const auto& issue : program.issues) issues.push_back(issue);
         }

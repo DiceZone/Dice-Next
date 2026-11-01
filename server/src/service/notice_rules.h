@@ -88,9 +88,13 @@ inline Json normalize(const Json &in) {
     const auto mode = in.value("subscription", std::string("levels"));
     if (mode != "levels" && mode != "events")
         throw std::invalid_argument("Invalid subscription mode");
-    const int mask = in.value("level_mask", 15);
-    if (mask < 0 || mask > 15)
+    const int rawMask = in.value("level_mask", 15);
+    // Dice! and the legacy .notice command stored extra high bits. Dice!Next only
+    // has four areas, so keep those and drop the rest; otherwise an imported
+    // window cannot be edited ("Invalid level mask").
+    if (rawMask < 0)
         throw std::invalid_argument("Invalid level mask");
+    const int mask = rawMask & 15;
     Json events = strings(in.value("events", Json::array()));
     for (const auto &event : events)
         if (std::none_of(catalog().begin(), catalog().end(),
@@ -170,7 +174,7 @@ inline Json all(const Json &conf) {
                            {"enabled", w.value("enabled", true)},
                            {"subscription", w.value("subscription", events.empty() ? std::string("levels")
                                                                                    : std::string("events"))},
-                           {"level_mask", w.value("level_mask", 15)},
+                           {"level_mask", (std::max)(0, w.value("level_mask", 15)) & 15},
                            {"events", events},
                            {"source",
                             {{"mode", id.empty() ? "all" : "accounts"},
@@ -204,7 +208,7 @@ inline Json all(const Json &conf) {
                            {"enabled", old.value("enabled", false)},
                            {"subscription", "levels"},
                            {"events", Json::array()},
-                           {"level_mask", old.value("level_mask", 15)},
+                           {"level_mask", (std::max)(0, old.value("level_mask", 15)) & 15},
                            {"source",
                             {{"mode", "all"},
                              {"include_system", true},
@@ -213,8 +217,12 @@ inline Json all(const Json &conf) {
                            {"channels", Json::array({ch})}});
         }
     for (const auto &r : conf.value("rules", Json::array()))
-        if (r.is_object())
-            out.push_back(r);
+        if (r.is_object()) {
+            auto copy = r;
+            if (copy.contains("level_mask") && copy["level_mask"].is_number_integer())
+                copy["level_mask"] = (std::max)(0, copy["level_mask"].get<int>()) & 15;
+            out.push_back(std::move(copy));
+        }
     return out;
 }
 inline bool subscribed(const Json &r, int level, const std::string &op) {

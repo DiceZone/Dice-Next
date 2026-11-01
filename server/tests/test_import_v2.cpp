@@ -950,15 +950,17 @@ TEST(ImportNotices, ConvertsUserAndGroupWindows) {
     fs::path root = makeTempDir("notices_valid");
     fs::create_directories(root / "conf");
     { std::ofstream out(root / "conf" / "NoticeList.json");
-      out << R"([{"uid":10001,"type":14},{"gid":20001,"type":3},{"gid":0,"type":15}])"; }
+      out << R"([{"uid":10001,"type":14},{"gid":20001,"type":3},{"gid":0,"type":15},{"gid":20002,"type":31},{"uid":10002,"type":16}])"; }
     ConfigManager cfg((root / "config").string()); ASSERT_TRUE(cfg.load());
-    ASSERT_EQ(importNotices(cfg, root / "conf"), 2);
+    ASSERT_EQ(importNotices(cfg, root / "conf"), 4);
     auto windows = cfg.get<json>("dice/notice/windows", json::array());
-    ASSERT_EQ(windows.size(), (size_t)2);
+    ASSERT_EQ(windows.size(), (size_t)4);
     ASSERT_EQ(windows[0]["chat_id"], "10001"); ASSERT_EQ(windows[0]["is_group"], false);
     ASSERT_EQ(windows[0]["level_mask"], 14);
     ASSERT_EQ(windows[1]["chat_id"], "20001"); ASSERT_EQ(windows[1]["is_group"], true);
     ASSERT_EQ(windows[1]["level_mask"], 3);
+    ASSERT_EQ(windows[2]["chat_id"], "20002"); ASSERT_EQ(windows[2]["level_mask"], 15);
+    ASSERT_EQ(windows[3]["chat_id"], "10002"); ASSERT_EQ(windows[3]["level_mask"], 0);
     cleanupTempDir(root);
 }
 

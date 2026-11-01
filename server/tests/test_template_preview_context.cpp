@@ -179,6 +179,13 @@ TEST(TemplateSimulation, UnknownVariablesAreReportedAndNeverInventedOrEvaluated)
     const auto literal =
         outbound::templatePreview({{"text", "{nick}"}, {"args", {{"nick", "{sample:BAD|BAD}"}}}}, &i18n);
     ASSERT_EQ(literal["onebot"].get<std::string>(), "{sample:BAD|BAD}");
+    const auto bar = outbound::templatePreview(
+        {{"text", "[[bar:HP|{hp}|{hpmax}]] {not_a_variable}"}, {"style", "traditional"}}, &i18n);
+    ASSERT_EQ(bar["onebot"].get<std::string>(), "HP 6/10 {not_a_variable}");
+    const auto reported = outbound::templatePreview(
+        {{"text", "[[bar:HP|{hp}|{hpmax}]] {not_a_variable}"},
+         {"style", "traditional"}, {"simulation", example("card.sc.result")}}, &i18n);
+    ASSERT_EQ(reported["simulation"]["unresolved"].dump(), "[\"not_a_variable\"]");
 }
 
 TEST(TemplateSimulation, RejectsMalformedAndConflictingSimulationInputs) {

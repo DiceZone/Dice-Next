@@ -174,6 +174,85 @@ inline std::string action(std::string_view label, std::string_view command,
     return std::string(label) + "：" + std::string(command);
 }
 
+// {hp} inside [[bar:...]] is a character-card value, not a command argument.
+// A name that appears only there must not be reported as an unknown template variable.
+inline bool variableOnlyInBar(const std::string& text, const std::string& name) {
+    if (name.empty() || name.find('{') != std::string::npos || name.find('}') != std::string::npos) return false;
+    const std::string token = "{" + name + "}";
+    bool saw = false;
+    for (size_t pos = 0; (pos = text.find(token, pos)) != std::string::npos; ) {
+        saw = true;
+        const auto open = text.rfind("[[", pos);
+        const auto close = text.find("]]", pos);
+        if (open == std::string::npos || close == std::string::npos || text.find("]]", open + 2) != close
+            || text.compare(open + 2, 4, "bar:") != 0) return false;
+        pos += token.size();
+    }
+    return saw;
+}
+
+// Replace a whole bar field that is still `{attribute}` using the caller's card lookup.
+// Missing attributes stay visible so a bar is not drawn from an invented maximum.
+template <typename Lookup>
+inline std::string resolveBarPlaceholders(const std::string& input, Lookup&& lookup) {
+    std::string out;
+    out.reserve(input.size());
+    size_t pos = 0;
+    while (pos < input.size()) {
+        const size_t open = input.find("[[", pos);
+        if (open == std::string::npos) { out.append(input, pos, std::string::npos); break; }
+        out.append(input, pos, open - pos);
+        const size_t close = input.find("]]", open + 2);
+        if (close == std::string::npos) { out.append(input, open, std::string::npos); break; }
+        std::string token = input.substr(open + 2, close - open - 2);
+        if (token.rfind("bar:", 0) == 0) {
+            std::string rebuilt;
+            size_t start = 0;
+            int field = 0;
+            while (true) {
+                const size_t bar = token.find('|', start);
+                std::string part = token.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+                if (field > 0) {
+                    size_t begin = 0, end = part.size();
+                    while (begin < end && part[begin] == ' ') ++begin;
+                    while (end > begin && part[end - 1] == ' ') --end;
+                    if (end > begin + 1 && part[begin] == '{' && part[end - 1] == '}') {
+                        std::string name = part.substr(begin + 1, end - begin - 2);
+                        size_t nameBegin = 0, nameEnd = name.size();
+                        while (nameBegin < nameEnd && name[nameBegin] == ' ') ++nameBegin;
+                        while (nameEnd > nameBegin && name[nameEnd - 1] == ' ') --nameEnd;
+                        name = name.substr(nameBegin, nameEnd - nameBegin);
+                        if (!name.empty() && name.find('{') == std::string::npos && name.find('}') == std::string::npos)
+                            if (auto value = lookup(std::string_view(name))) part = std::to_string(*value);
+                    }
+                }
+                if (field) rebuilt += '|';
+                rebuilt += part;
+                ++field;
+                if (bar == std::string::npos) break;
+                start = bar + 1;
+            }
+            token = std::move(rebuilt);
+        }
+        out += "[[";
+        out += token;
+        out += "]]";
+        pos = close + 2;
+    }
+    return out;
+}
+
+// Preview has no character card. The documented example still has to render a bar.
+inline std::optional<int> previewBarSample(std::string_view name) {
+    std::string key(name);
+    for (char& c : key)
+        if (static_cast<unsigned char>(c) < 128)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (key.find("max") != std::string::npos || name.find("上限") != std::string::npos
+        || name.find("最大") != std::string::npos) return 10;
+    return 6;
+}
+
 // Semantic components may be used by built-in, persona and advanced-reply
 // templates alike.  Existing {variables} are expanded first, so a template can
 // write [[bar:HP|{hp}|{hpmax}]] without teaching every adapter a new syntax.
