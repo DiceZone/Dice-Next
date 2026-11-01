@@ -3,3 +3,10 @@ title = "Dice!Next gitleaks config"
 [extend]
 useDefault = true
 
+[allowlist]
+description = "Published QQ official bot webhook test vectors (signing example key, plain_token), used only by server/tests/test_qq_official_webhook.cpp"
+regexes = [
+  '''DG5g3B4j9X2KOErG''',
+  '''naOC0ocQE3shWLAfffVLB1rhYPG7''',
+  '''Arq0D5A61EgUu4OxUvOp''',
+]
