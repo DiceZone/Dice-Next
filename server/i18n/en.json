@@ -358,10 +358,19 @@
   "card": {
     "st": {
       "usage": "Character sheet .st\n.st <attr><value> // record or change an attribute, e.g. .st STR50 DEX60\n.st <attr>±<value> // adjust an attribute, dice allowed, e.g. hp-2, san+1d3\n.st show // show the current sheet\n.st clr // clear the sheet\n.st del <attr> // delete one attribute",
-      "done": "{nick}'s sheet updated: {detail}"
+      "done": "{nick}'s sheet updated:\n{detail}"
     },
-    "show": "{nick}'s character sheet: {detail}",
+    "show": "{nick}'s character sheet:\n{detail}",
     "show_one": "{nick}'s {attr}: {val}",
+    "sheet": {
+      "abilities": "Attributes",
+      "vitals": "Status",
+      "skills": "Skills",
+      "coins": "Coins",
+      "formulas": "Formulas",
+      "other": "Other",
+      "derived": "Also changed"
+    },
     "empty": "{nick} has no character-sheet attributes to display — set attributes with .st",
     "attr_missing": "Attribute \"{attr}\" not found",
     "cleared": "Cleared {nick}'s character sheet",
@@ -479,7 +488,7 @@
       "favor": "Favor system\n好感 // show {self}'s favor toward you and your title\n好感排行 // show the favor ranking\n群内好感排行 // show this group's favor ranking\n.favor add [n] [@someone] // raise favor; requires master or trust >= 4\n.favor grow [@someone] // raise it by the growth rule; same permission\n.favor set <n> [@someone] // write the favor value directly; same permission\n.favor clr [@someone] // clear the favor record; same permission\nHigher favor grows slower.",
       "hiy": "Stats .hiy\n.hiy // overall check stats\n.hiy <skill> // that skill's rolls, successes, rate and level breakdown",
       "setsn": "Group card .setsn\n.setsn <attrs...> // choose which attributes the group .sn card shows; up to 5, default hp san dex, owner or admin only",
-      "sn": "Group card .sn\n.sn [template] // set your own group card from a template\n.sn off // clear your group card\nAffected by the .setsn setting.",
+      "sn": "Group card .sn\n.sn [template] // set your own group card from a template\n.sn off // clear your group card\nAffected by the .setsn setting.\nThe official QQ bot cannot change group cards, so this text is shown at the top of later replies.",
       "ri": "Initiative .ri\n.ri [±mod] [name] // roll d20+mod and join the initiative list\n.init // show the initiative order\n.init clr // clear the list\n.init del <name> // remove an entry",
       "welcome": "Welcome message .welcome\n.welcome <text> // set the join welcome; {at} is supported\n.welcome show // view the current welcome\n.welcome off // turn it off",
       "dismiss": "Leave .dismiss\n.dismiss // make the bot leave this group; requires group admin or master",
@@ -728,7 +737,7 @@
     "renamed": "{nick} renamed card \"{old}\" to \"{new}\"",
     "no_bound": "No character card is currently bound.",
     "unbound": "{nick} unbound card: {name} (the card is kept; .pc tag to rebind)",
-    "show": "{owner}'s card [{name}]: {detail}",
+    "show": "{owner}'s card [{name}]:\n{detail}",
     "show_empty": "{owner}'s card [{name}] is still empty.",
     "default_name": "Default",
     "build_done": "{nick}'s character card generated:\n{detail}",
@@ -1098,7 +1107,9 @@
     "group_only": "Set-name only works in groups.",
     "cleared": "Your group-card template was cleared.",
     "done": "Your group card is now: {card}",
+    "done_official": "The official QQ bot cannot change group cards. Later replies will start with: {card}",
     "auto_on": "Auto card-sync on: your group card updates live as attributes change. Now: {card}",
+    "auto_on_official": "Auto card-sync on. The official QQ bot cannot change group cards, so later replies will start with: {card}",
     "auto_off": "Auto card-sync off.",
     "default_template": "{nick} STR{力量} DEX{敏捷} POW{意志} HP{生命值} SAN{理智}"
   },

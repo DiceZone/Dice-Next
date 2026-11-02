@@ -2016,7 +2016,7 @@ public:
         auto body = outbound::qqText(text, format, useMarkdown, m.type == MessageType::kChannel,
             m.platform == "qq_official" ? m.qqRichReply.get() : nullptr, m.presentationActions,
             m.platform == "qq_official" ? richStyle_ : "off", interactions_, nativeUser,
-            forceVerifyImageResource_, fallbackLevel);
+            forceVerifyImageResource_, fallbackLevel, m.snBanner);
         auto reference = qqprotocol::text(m.extra, "__qq_quote_reference");
         if (!reference.empty() && reference == m.id) reference = qqprotocol::text(m.extra, "message_reference_id");
         if (!reference.empty() && m.type != MessageType::kChannel) {

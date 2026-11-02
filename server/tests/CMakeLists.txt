@@ -42,6 +42,7 @@ set(TEST_SOURCES
     test_template_preview_context.cpp
     test_sample_template.cpp
     test_presentation_style.cpp
+    test_card_sheet_format.cpp
     test_import_v2.cpp
     test_legacy_import_release.cpp
     test_group_account_scoping.cpp

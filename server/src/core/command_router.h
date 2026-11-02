@@ -57,6 +57,7 @@
 #include "../common/utils.h"
 #include "../platform/system_info.h"
 #include "../i18n/i18n.h"
+#include "../common/card_sheet_format.h"
 #include "../i18n/locale_resolver.h"
 #include "../service/log_service.h"
 #include "../service/image_host.h"
@@ -82,6 +83,7 @@
 #include <cctype>
 #include <algorithm>
 #include <array>
+#include <iterator>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -261,6 +263,14 @@ public:
     void setLegacyLogEndHook(LegacyLogEndFn fn) { legacyLogEndHook_ = std::move(fn); }
     inline static thread_local std::shared_ptr<const qq_rich::Card> officialCard_;
     std::shared_ptr<const qq_rich::Card> lastOfficialCard() const { return officialCard_; }
+    /// Official QQ has no group-card API. After .sn, later replies carry that
+    /// card as their first line. Other platforms return empty and keep setGroupCard.
+    std::string officialSnBanner(const Message& msg) {
+        if (msg.platform != "qq_official" || msg.type == MessageType::kChannel) return {};
+        if (getUserSetting(msg, "snPinned") != "1" && !snAutoOn(msg) && getUserSetting(msg, "snTemplate").empty())
+            return {};
+        return compactSnCard(renderCurrentSn(msg));
+    }
 
     /// Process an incoming message and return the response (or empty string if no match).
     /// Called by adapter message callbacks.
@@ -3689,25 +3699,37 @@ private:
             std::string attr = trim(rest.substr(4));
             if (attr.empty()) {
                 auto attrs = cards_.getAttrs(user, group);
-                std::string detail = joinAttrsVital(attrs, attrMax("\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc", msg));
-                // 关联/表达式属性：附在后面，显示「属性=表达式（=当前值）」。
+                std::vector<card_sheet::Item> items;
+                appendNumericSheet(items, attrs, sheetMaxima(attrs, &msg, user, group));
                 for (auto& [k, e] : listStrAttrs(msg)) {
-                    if (!detail.empty()) detail += " ";
-                    detail += k + "=" + e;
-                    if (auto cv = evalComputedFormula(e, msg)) detail += "(=" + std::to_string(*cv) + ")";
+                    card_sheet::Item item;
+                    item.kind = card_sheet::Kind::kFormula;
+                    item.literal = k + "=" + e;
+                    if (auto cv = evalComputedFormula(e, msg)) item.literal += "(=" + std::to_string(*cv) + ")";
+                    items.push_back(std::move(item));
                 }
                 // items() is a view: the owning JSON must outlive the loop.
                 // Chaining it on getValuesByName() leaves a dangling view in C++20.
                 const auto values = cards_.getValuesByName(user, cards_.boundCard(user, group));
                 for (const auto& [key, value] : values.items()) {
                     if (key.empty() || key.front() == '&' || value.is_number_integer()) continue;
-                    if (!detail.empty()) detail += " ";
-                    detail += key + "=" + value.dump();
+                    card_sheet::Item item;
+                    item.kind = card_sheet::Kind::kOther;
+                    item.literal = key + "=" + value.dump();
+                    items.push_back(std::move(item));
                 }
                 if (dndModeOn(msg)) for (auto& [k, v] : listDndSkills(msg)) {
-                    if (!detail.empty()) detail += " ";
-                    detail += "技能." + k + ":" + std::to_string(v);
+                    bool present = false;
+                    for (const auto& item : items) if (item.name == k) present = true;
+                    if (present) continue;
+                    card_sheet::Item item;
+                    item.name = k;
+                    item.kind = card_sheet::Kind::kSkill;
+                    item.value = v;
+                    items.push_back(std::move(item));
                 }
+                if (items.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
+                const auto detail = renderSheet(loc, std::move(items), card_sheet::Mode::kFull);
                 if (detail.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
                 return withOfficialCard(loc, msg, i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail", detail}}));
             }
@@ -3717,26 +3739,35 @@ private:
                 std::map<std::string, int> hi;
                 for (auto& [k, v] : cards_.getAttrs(user, group)) if (v >= th) hi[k] = v;
                 if (hi.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
-                return i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail", joinAttrs(hi)}});
+                std::vector<card_sheet::Item> items;
+                appendNumericSheet(items, hi, sheetMaxima(hi, &msg, user, group));
+                return i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail",
+                    renderSheet(loc, std::move(items), card_sheet::Mode::kFull)}});
             }
             // ".st show 力量 敏捷 …" → show several specific attributes.
             if (attr.find(' ') != std::string::npos) {
                 std::map<std::string, int> picked;
-                std::string typedPicked;
+                std::vector<std::string> typedPicked;
                 std::istringstream iss(attr); std::string tk;
                 while (iss >> tk) {
                     std::string canonical = CharacterCardStore::canonical(tk);
                     auto v = coc7rRule(msg, "skills") ? coc7rAttr(msg, tk) : cards_.getAttr(user, group, tk);
                     if (!v && dndModeOn(msg) && !isDndCardSpecialInput(tk)) v = dndSkillValue(msg, canonical);
                     if (v) picked[canonical] = *v;
-                    else if (auto value = cards_.getValueByName(user, cards_.boundCard(user, group), tk)) {
-                        if (!typedPicked.empty()) typedPicked += " ";
-                        typedPicked += tk + "=" + (value->is_string() ? value->get<std::string>() : value->dump());
-                    }
+                    else if (auto value = cards_.getValueByName(user, cards_.boundCard(user, group), tk))
+                        typedPicked.push_back(tk + "=" + (value->is_string() ? value->get<std::string>() : value->dump()));
                 }
                 if (picked.empty() && typedPicked.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
-                const auto numbers = joinAttrs(picked);
-                return i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail", numbers + (!numbers.empty() && !typedPicked.empty() ? " " : "") + typedPicked}});
+                std::vector<card_sheet::Item> items;
+                appendNumericSheet(items, picked, sheetMaxima(picked, &msg, user, group));
+                for (const auto& typed : typedPicked) {
+                    card_sheet::Item item;
+                    item.kind = card_sheet::Kind::kOther;
+                    item.literal = typed;
+                    items.push_back(std::move(item));
+                }
+                return i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail",
+                    renderSheet(loc, std::move(items), card_sheet::Mode::kFull)}});
             }
             std::string canonical = CharacterCardStore::canonical(attr);
             auto v = coc7rRule(msg, "skills") ? coc7rAttr(msg, attr) : cards_.getAttr(user, group, attr);
@@ -3860,7 +3891,13 @@ private:
         }
 
         // Attribute entry: "力量50 敏捷60 hp-2 理智+1d3" ...
-        const auto originalAttrs = msg.platform == "qq_official" ? cards_.getAttrs(user, group) : std::map<std::string, int>{};
+        // 各平台都记下改前数值，变化回执才能写出「旧 → 新」。上限只记真实上限，避免回退成当前值。
+        const auto originalAttrs = cards_.getAttrs(user, group);
+        std::map<std::string, int> capsBefore;
+        for (const char* name : {"生命值", "理智", "魔法值"})
+            if (auto cap = sheetCap(name, msg)) capsBefore[name] = *cap;
+        std::map<std::string, int> skillBefore;
+        std::map<std::string, std::string> formulaBefore;
         std::map<std::string, int> changes;
         std::map<std::string, std::string> formulaChanges;   // 公式属性（伤害加值）：存原文
         std::map<std::string, std::string> strChanges;       // 关联/表达式属性：存原文
@@ -4002,9 +4039,11 @@ private:
             // 公式属性（伤害加值 DB）：存投掷公式原文，不摇成数。.st db=+1d4 带 + 不报错。
             if (std::string fcanon = CharacterCardStore::canonical(attr); isFormulaAttr(fcanon)) {
                 std::string formula = (modifier && sign < 0 ? "-" : "") + valTok;   // 去掉前导 +，保留 -
+                const std::string previous = getFormulaAttr(msg, fcanon);
                 setFormulaAttr(msg, fcanon, formula);
                 setUserSetting(msg, "attrfauto:" + fcanon, "0");   // 手动录入 → 关自动，优先保留
                 setFormulaAuto(msg, fcanon, false);
+                if (!previous.empty() && previous != formula) formulaBefore[fcanon] = previous;
                 formulaChanges[fcanon] = formula;
                 continue;
             }
@@ -4071,7 +4110,9 @@ private:
             // DND 的技能检定加值与六项属性值分区保存。技能曾被录在普通卡
             // 属性中的旧数据仍可由 dndSkillValue 读取；一旦修改即迁移到独立 dndskill: 键。
             if (dndModeOn(msg) && !isDndCardSpecialInput(attr)) {
-                int newVal = modifier ? dndSkillValue(msg, key).value_or(0) + value : value;
+                const auto previousSkill = dndSkillValue(msg, key);
+                int newVal = modifier ? previousSkill.value_or(0) + value : value;
+                if (previousSkill) skillBefore[key] = *previousSkill;
                 setUserSetting(msg, "dndskill:" + key, std::to_string(newVal));
                 cards_.eraseAttr(user, group, key); // remove legacy same-name skill to avoid split ambiguity
                 changes["技能." + key] = newVal;
@@ -4085,18 +4126,46 @@ private:
             changes[key] = newVal;
         }
         if (changes.empty() && formulaChanges.empty() && strChanges.empty()) return i18n_.tr(loc, "card.st.usage");
-        // 公式属性（伤害加值）单独拼进 detail（值是公式原文，不是数）。
-        std::string fdetail = joinAttrs(changes);
-        for (auto& [k, f] : formulaChanges) { if (!fdetail.empty()) fdetail += " "; fdetail += k + ":" + f; }
-        // 关联/表达式属性：显示「属性=表达式（=当前值）」。
-        for (auto& [k, e] : strChanges) {
-            if (!fdetail.empty()) fdetail += " ";
-            fdetail += k + "=" + e;
-            if (auto v = evalComputedFormula(e, msg)) fdetail += "(=" + std::to_string(*v) + ")";
+        static const std::string skillKeyPrefix = "技能.";
+        std::vector<card_sheet::Item> edited;
+        auto changedItem = [&](std::string key, int value) {
+            card_sheet::Item item;
+            item.value = value;
+            if (key.rfind(skillKeyPrefix, 0) == 0) {
+                item.name = key.substr(skillKeyPrefix.size());
+                item.kind = card_sheet::Kind::kSkill;
+                if (auto it = skillBefore.find(item.name); it != skillBefore.end()) item.before = it->second;
+            } else {
+                item.name = std::move(key);
+                item.kind = card_sheet::classify(item.name);
+            }
+            if (!item.before)
+                if (auto it = originalAttrs.find(item.name); it != originalAttrs.end()) item.before = it->second;
+            if (auto cap = sheetCap(item.name, msg)) item.maximum = *cap;
+            if (auto old = capsBefore.find(item.name); old != capsBefore.end()) item.beforeMaximum = old->second;
+            edited.push_back(std::move(item));
+        };
+        for (const auto& [key, value] : changes) changedItem(key, value);
+        for (const auto& [key, formula] : formulaChanges) {
+            card_sheet::Item item;
+            item.kind = card_sheet::Kind::kFormula;
+            item.name = key;
+            item.literal = formulaBefore.count(key)
+                ? key + ":" + formulaBefore[key] + " → " + formula
+                : key + ":" + formula;
+            edited.push_back(std::move(item));
+        }
+        for (const auto& [key, expression] : strChanges) {
+            card_sheet::Item item;
+            item.kind = card_sheet::Kind::kFormula;
+            item.literal = key + "=" + expression;
+            if (auto value = evalComputedFormula(expression, msg))
+                item.literal += "(=" + std::to_string(*value) + ")";
+            edited.push_back(std::move(item));
         }
         // 自动卡面：基础属性(体质/体型/意志/克苏鲁神话)变化 → 重算三围上限，并按「上限变化量」
-        // 同步当前值（用户本次没显式改的才动）。只把「真正变化」的项汇报给用户，没变就不输出。
-        std::string recalcDetail;
+        // 同步当前值（用户本次没显式改的才动）。连带变化收进同一张回执，不再另起一句。
+        std::vector<card_sheet::Item> derived;
         if (autoCardOn && touchesVital(changes)) {
             for (auto& vs : vitalSnap) {
                 if (changes.count(vs.canon)) continue;        // 本次显式改了 → 尊重用户输入
@@ -4125,18 +4194,19 @@ private:
                 }
                 if (newCur == vs.oldCur) continue;             // 实际没变 → 不汇报
                 cards_.setAttr(user, group, vs.canon, *newCur);
-                if (!recalcDetail.empty()) recalcDetail += "，";
-                if (!vs.oldCur)
-                    recalcDetail += vs.zh + " " + std::to_string(*newCur) + "/" + std::to_string(*newMax);
-                else
-                    recalcDetail += vs.zh + " " + std::to_string(*vs.oldCur) + "/"
-                                  + std::to_string(vs.oldMax ? *vs.oldMax : *newCur)
-                                  + " → " + std::to_string(*newCur) + "/" + std::to_string(*newMax);
+                card_sheet::Item item;
+                item.name = vs.zh;
+                item.kind = card_sheet::classify(vs.zh);
+                item.derived = true;
+                item.value = *newCur;
+                item.before = vs.oldCur;
+                if (auto cap = sheetCap(vs.canon, msg)) item.maximum = *cap;
+                if (auto old = capsBefore.find(vs.canon); old != capsBefore.end()) item.beforeMaximum = old->second;
+                derived.push_back(std::move(item));
             }
         }
         // 伤害加值(DB) 自动计算。力量/体型有变、且 DB 非手动、本次未显式录 DB 时，
         // 按 STR+SIZ 查表算 DB 存为公式属性（手动录入的自定义 DB 优先，不覆盖）。
-        std::string dbDetail;
         {
             static const std::string DB = "\xe4\xbc\xa4\xe5\xae\xb3\xe5\x8a\xa0\xe5\x80\xbc";   // 伤害加值
             std::string cs = CharacterCardStore::canonical("\xe5\x8a\x9b\xe9\x87\x8f");   // 力量
@@ -4152,26 +4222,20 @@ private:
                     setFormulaAttr(msg, DB, dbf);
                     setUserSetting(msg, "attrfauto:" + DB, "1");
                     setFormulaAuto(msg, DB, true);
-                    if (dbf != oldDb) dbDetail = dbf;   // 只在变化时汇报
+                    if (dbf != oldDb) {
+                        card_sheet::Item item;
+                        item.kind = card_sheet::Kind::kFormula;
+                        item.derived = true;
+                        item.literal = oldDb.empty() ? DB + ":" + dbf : DB + ":" + oldDb + " → " + dbf;
+                        derived.push_back(std::move(item));
+                    }
                 }
             }
         }
+        edited.insert(edited.end(), std::make_move_iterator(derived.begin()), std::make_move_iterator(derived.end()));
+        const std::string fdetail = renderSheet(loc, std::move(edited), card_sheet::Mode::kDelta);
         std::string reply = i18n_.tr(loc, "card.st.done", {{"nick", nick}, {"detail", fdetail}});
         const auto baseReceipt = reply;
-        if (!recalcDetail.empty()) {
-            // 列出本次触发重算的基础属性。
-            std::string causes;
-            for (const char* base : {
-                    "\xe4\xbd\x93\xe8\xb4\xa8","\xe4\xbd\x93\xe5\x9e\x8b","\xe6\x84\x8f\xe5\xbf\x97",
-                    "\xe5\x85\x8b\xe8\x8b\x8f\xe9\xb2\x81\xe7\xa5\x9e\xe8\xaf\x9d",  // 体质 体型 意志 克苏鲁神话
-                    "\xe7\x94\x9f\xe5\x91\xbd","\xe7\x90\x86\xe6\x99\xba","\xe9\xad\x94\xe6\xb3\x95" }) { // 生命 理智 魔法
-                if (changes.count(CharacterCardStore::canonical(base))) { if (!causes.empty()) causes += "\xe3\x80\x81"; causes += base; }
-            }
-            if (causes.empty()) causes = i18n_.tr(loc, "card.autocard.direct_change");
-            reply += "\n" + i18n_.tr(loc, "card.autocard.recalc", {{"causes", causes}, {"detail", recalcDetail}});
-        }
-        if (!dbDetail.empty())   // 告知自动算出的 DB
-            reply += "\n" + i18n_.tr(loc, "card.db.auto", {{"db", dbDetail}});
         maybeAutoSn(msg);   // .sn auto：属性变化后实时刷新群名片
         std::optional<std::string> compactBody;
         if (msg.platform == "qq_official" && formulaChanges.empty() && strChanges.empty()
@@ -4200,28 +4264,97 @@ private:
         return s.str();
     }
 
-    // 像 joinAttrs，但把「临时生命值」折进「生命值」——显示为 有效值[/上限]（如 13/10），
-    // 临时>0 时体现「护盾」。@p hpMax 为空则不显示 /上限（改注「(+临时N)」）。
-    static std::string joinAttrsVital(const std::map<std::string, int>& attrs, std::optional<int> hpMax) {
-        static const std::string HP = "\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc";              // 生命值
-        static const std::string TEMP = "\xe4\xb8\xb4\xe6\x97\xb6\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc";  // 临时生命值
-        auto ti = attrs.find(TEMP);
-        int temp = ti != attrs.end() ? ti->second : 0;
-        std::ostringstream s; bool first = true;
-        for (const auto& [k, v] : attrs) {
-            if (k == TEMP) continue;                        // 折进生命值，不单列
-            if (!first) s << " "; first = false;
-            if (k == HP) {
-                int eff = v + temp;
-                if (hpMax && I18n::outboundPresentationStyle() == PresentationStyle::kVisual)
-                    s << "[[bar:HP|" << eff << "|" << *hpMax << "]]";
-                else s << k << ":" << eff;
-                if (hpMax && I18n::outboundPresentationStyle() != PresentationStyle::kVisual) s << "/" << *hpMax;
-                else if (temp > 0) s << "(+\xe4\xb8\xb4\xe6\x97\xb6" << temp << ")";   // (+临时N)
-            } else s << k << ":" << v;
+    card_sheet::Labels sheetLabels(Locale loc) const {
+        return {
+            i18n_.tr(loc, "card.sheet.abilities"),
+            i18n_.tr(loc, "card.sheet.vitals"),
+            i18n_.tr(loc, "card.sheet.skills"),
+            i18n_.tr(loc, "card.sheet.coins"),
+            i18n_.tr(loc, "card.sheet.formulas"),
+            i18n_.tr(loc, "card.sheet.other"),
+            i18n_.tr(loc, "card.sheet.derived"),
+        };
+    }
+    std::string renderSheet(Locale loc, std::vector<card_sheet::Item> items, card_sheet::Mode mode) const {
+        card_sheet::Options options;
+        options.mode = mode;
+        options.bars = mode == card_sheet::Mode::kFull
+            && I18n::outboundPresentationStyle() == PresentationStyle::kVisual;
+        return card_sheet::formatSheet(std::move(items), sheetLabels(loc), options);
+    }
+    // 人物卡展示用的上限：显式上限、max: 设置、衍生公式。不把「公式失败时回退到当前值」当成上限。
+    std::optional<int> sheetCap(const std::string& canon, const Message& msg) const {
+        for (const auto& name : explicitMaxNamesFor(canon))
+            if (auto value = cards_.getAttr(msg.senderId, cardScope(msg), name)) return value;
+        const std::string stored = getUserSetting(msg, "max:" + canon);
+        if (!stored.empty()) { try { return std::stoi(stored); } catch (...) {} }
+        std::string formula;
+        {
+            std::shared_lock<std::shared_mutex> lock(rulesLock());
+            const auto it = computedRegistry().find(canon);
+            if (it == computedRegistry().end()) return std::nullopt;
+            formula = it->second;
         }
-        if (temp > 0 && !attrs.count(HP)) { if (!first) s << " "; s << TEMP << ":" << temp; }
-        return s.str();
+        return evalComputedFormula(formula, msg);
+    }
+    std::map<std::string, int> sheetMaxima(const std::map<std::string, int>& attrs,
+                                           const Message* viewer, const std::string& user,
+                                           const std::string& scope) const {
+        std::map<std::string, int> maxima;
+        auto explicitMax = [&](const std::string& canon) -> std::optional<int> {
+            for (const auto& name : explicitMaxNamesFor(canon)) {
+                if (auto it = attrs.find(CharacterCardStore::canonical(name)); it != attrs.end()) return it->second;
+                if (auto it = attrs.find(name); it != attrs.end()) return it->second;
+            }
+            return std::nullopt;
+        };
+        if (auto cap = explicitMax("生命值")) maxima["生命值"] = *cap;
+        else if (auto con = attrs.find("体质"), siz = attrs.find("体型");
+                 con != attrs.end() && siz != attrs.end())
+            maxima["生命值"] = (con->second + siz->second) / 10;
+        if (auto cap = explicitMax("理智")) maxima["理智"] = *cap;
+        else if (attrs.count("理智")) {
+            int mythos = 0;
+            if (auto it = attrs.find("克苏鲁神话"); it != attrs.end()) mythos = it->second;
+            maxima["理智"] = (std::max)(0, 99 - mythos);
+        }
+        if (auto cap = explicitMax("魔法值")) maxima["魔法值"] = *cap;
+        else if (auto pow = attrs.find("意志"); pow != attrs.end())
+            maxima["魔法值"] = pow->second / 5;
+        if (viewer && viewer->senderId == user && cardScope(*viewer) == scope)
+            for (const char* name : {"生命值", "理智", "魔法值"})
+                if (auto cap = sheetCap(name, *viewer)) maxima[name] = *cap;
+        return maxima;
+    }
+    void appendNumericSheet(std::vector<card_sheet::Item>& items,
+                            const std::map<std::string, int>& attrs,
+                            const std::map<std::string, int>& maxima) const {
+        static const std::string HP = "生命值";
+        static const std::string TEMP = "临时生命值";
+        int shield = 0;
+        if (auto it = attrs.find(TEMP); it != attrs.end()) shield = it->second;
+        bool sawHp = false;
+        for (const auto& [name, value] : attrs) {
+            if (name == TEMP) continue;
+            card_sheet::Item item;
+            item.name = name;
+            item.kind = card_sheet::classify(name);
+            item.value = value;
+            if (name == HP) {
+                sawHp = true;
+                item.value = value + shield;
+                item.shield = shield;
+            }
+            if (auto cap = maxima.find(name); cap != maxima.end()) item.maximum = cap->second;
+            items.push_back(std::move(item));
+        }
+        if (shield > 0 && !sawHp) {
+            card_sheet::Item item;
+            item.name = TEMP;
+            item.kind = card_sheet::Kind::kVital;
+            item.value = shield;
+            items.push_back(std::move(item));
+        }
     }
 
     // ─── .sc — sanity check ──────────────────────────────────
@@ -9249,10 +9382,42 @@ private:
         if (!tmpl.empty()) return renderSn(msg, tmpl);
         return renderSnAttrs(msg, snAttrs(msg));
     }
-    // 把当前名片静默应用到群（不返回提示）。
+    // 把当前名片静默应用到群（不返回提示）。官方 QQ 没有这个接口。
     void applySnCard(const Message& msg) {
+        if (msg.platform == "qq_official") return;
         if (auto ad = adapters_.getAdapter(msg.adapterId))
             ad->setGroupCard(msg.targetId, msg.senderId, renderCurrentSn(msg));
+    }
+    void rememberOfficialSn(const Message& msg) {
+        if (msg.platform == "qq_official") setUserSetting(msg, "snPinned", "1");
+    }
+    static std::string compactSnCard(std::string text) {
+        std::string collapsed;
+        bool pendingSpace = false;
+        for (unsigned char c : text) {
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                pendingSpace = !collapsed.empty();
+                continue;
+            }
+            if (pendingSpace) { collapsed += ' '; pendingSpace = false; }
+            collapsed += static_cast<char>(c);
+        }
+        constexpr int kMaxRunes = 120;
+        size_t bytes = 0;
+        int runes = 0;
+        while (bytes < collapsed.size() && runes < kMaxRunes) {
+            const unsigned char lead = static_cast<unsigned char>(collapsed[bytes]);
+            const size_t width = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2
+                : (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
+            if (bytes + width > collapsed.size()) break;
+            bytes += width;
+            ++runes;
+        }
+        if (bytes < collapsed.size()) {
+            collapsed.resize(bytes);
+            collapsed += "…";
+        }
+        return collapsed;
     }
     bool snAutoOn(const Message& msg) const { return getUserSetting(msg, "snAuto") == "1"; }
     // .st 改卡后调用：若本群开了 .sn auto，则实时刷新群名片。
@@ -9267,7 +9432,9 @@ private:
         if (la == "off" || la == "clr") {
             setUserSetting(msg, "snTemplate", "");
             setUserSetting(msg, "snAuto", "");   // 关名片也关自动同步
-            if (auto ad = adapters_.getAdapter(msg.adapterId)) ad->setGroupCard(msg.targetId, msg.senderId, "");
+            setUserSetting(msg, "snPinned", "");
+            if (msg.platform != "qq_official")
+                if (auto ad = adapters_.getAdapter(msg.adapterId)) ad->setGroupCard(msg.targetId, msg.senderId, "");
             return i18n_.tr(loc, "sn.cleared");
         }
         // .sn auto [on|off]：监听属性变化、实时更新群名片。
@@ -9279,8 +9446,11 @@ private:
                 return i18n_.tr(loc, "sn.auto_off");
             }
             setUserSetting(msg, "snAuto", "1");
-            applySnCard(msg);   // 立即同步一次
-            return i18n_.tr(loc, "sn.auto_on", {{"card", renderCurrentSn(msg)}});
+            rememberOfficialSn(msg);
+            applySnCard(msg);   // 立即同步一次；官方 QQ 改为回复顶部展示
+            const std::string card = renderCurrentSn(msg);
+            return i18n_.tr(loc, msg.platform == "qq_official" ? "sn.auto_on_official" : "sn.auto_on",
+                {{"card", card}});
         }
         std::string card;
         if (!a.empty() && a.find('{') != std::string::npos) {
@@ -9291,8 +9461,10 @@ private:
             // Default: render from the group's configured attribute list.
             card = renderSnAttrs(msg, snAttrs(msg));
         }
-        if (auto ad = adapters_.getAdapter(msg.adapterId)) ad->setGroupCard(msg.targetId, msg.senderId, card);
-        return i18n_.tr(loc, "sn.done", {{"card", card}});
+        rememberOfficialSn(msg);
+        if (msg.platform != "qq_official")
+            if (auto ad = adapters_.getAdapter(msg.adapterId)) ad->setGroupCard(msg.targetId, msg.senderId, card);
+        return i18n_.tr(loc, msg.platform == "qq_official" ? "sn.done_official" : "sn.done", {{"card", card}});
     }
 
     // ─── .welcome 入群欢迎词（骰主设置，存 group_settings）────
@@ -11181,20 +11353,20 @@ private:
 
     /// Render one user's bound card in @p scope as "owner【name】: attrs".
     std::string renderCard(Locale loc, const std::string& user, const std::string& scope,
-                           const std::string& owner) {
+                           const std::string& owner, const Message* viewer = nullptr) {
         std::string name = cards_.boundCard(user, scope);
         auto attrs = cards_.getAttrs(user, scope);
         if (attrs.empty())
             return i18n_.tr(loc, "pc.show_empty",
                 {{"owner", owner}, {"name", cardLabel(loc, name)}});
-        // 折叠临时生命值（renderCard 无 msg 上下文，上限尽力从卡上显式上限属性取）。
-        std::optional<int> hpMax;
-        for (const auto& mn : explicitMaxNamesFor("\xe7\x94\x9f\xe5\x91\xbd\xe5\x80\xbc")) {
-            auto it = attrs.find(CharacterCardStore::canonical(mn));
-            if (it != attrs.end()) { hpMax = it->second; break; }
-        }
+        std::vector<card_sheet::Item> items;
+        appendNumericSheet(items, attrs, sheetMaxima(attrs, viewer, user, scope));
+        const auto detail = renderSheet(loc, std::move(items), card_sheet::Mode::kFull);
+        if (detail.empty())
+            return i18n_.tr(loc, "pc.show_empty",
+                {{"owner", owner}, {"name", cardLabel(loc, name)}});
         return i18n_.tr(loc, "pc.show",
-            {{"owner", owner}, {"name", cardLabel(loc, name)}, {"detail", joinAttrsVital(attrs, hpMax)}});
+            {{"owner", owner}, {"name", cardLabel(loc, name)}, {"detail", detail}});
     }
 
     // 「人」的称呼，区别于人物卡名：nn 优先，否则真实昵称，否则 userId。
@@ -11350,7 +11522,7 @@ private:
             // ".pc show" / ".pc show @某人" → view current (or target) card.
             if (!target.empty()) return renderCard(loc, target, scope, personNameOf(msg, target));
             if (cards_.cardLocked(user, scope, "r")) return i18n_.tr(loc, "card.locked_r");
-            return withOfficialCard(loc, msg, renderCard(loc, user, scope, nick));
+            return withOfficialCard(loc, msg, renderCard(loc, user, scope, nick, &msg));
         }
         if (sub == "stat") return handleHiy(loc, name, msg);
 
@@ -11670,9 +11842,15 @@ private:
         }
         // 生成后展示整卡（数字属性 + 文本属性），对齐原版 strPcCardBuild 的 show(true)。
         auto attrs = cards_.getAttrs(user, group);
-        std::string detail = joinAttrs(attrs);
-        for (auto& [k, v] : cards_.getTexts(user, group))
-            detail += (detail.empty() ? "" : " ") + k + ":" + v;
+        std::vector<card_sheet::Item> items;
+        appendNumericSheet(items, attrs, sheetMaxima(attrs, &msg, user, group));
+        for (auto& [k, v] : cards_.getTexts(user, group)) {
+            card_sheet::Item item;
+            item.kind = card_sheet::Kind::kOther;
+            item.literal = k + ":" + v;
+            items.push_back(std::move(item));
+        }
+        std::string detail = renderSheet(loc, std::move(items), card_sheet::Mode::kFull);
         if (detail.empty()) detail = i18n_.tr(loc, "pc.build_empty");
         return i18n_.tr(loc, redo ? "pc.redo_done" : "pc.build_done", {{"nick", nick}, {"detail", detail}});
     }

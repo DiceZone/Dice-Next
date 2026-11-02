@@ -1797,14 +1797,17 @@ static int realMain(int argc, char* argv[]) {
                 }
             }
             if (reply.empty() && broadcast.empty()) return;
+            // 官方 QQ 不能改群名片。.sn 的内容改放到回复第一行；日志与转发看到的是同一段文字。
+            const std::string snBanner = reply.empty() ? std::string() : cmdRouter.officialSnBanner(msg);
+            const std::string visibleReply = snBanner.empty() ? reply : snBanner + "\n" + reply;
             // .link：骰娘回复按最终文本转发到链接目标。
             if (linkReplyOk && !reply.empty()
                 && msg.type == dice::MessageType::kGroup && !msg.targetId.empty() && !msg.fromSelf) {
                 for (auto& aim : cmdRouter.linkAimsFor(msg.platform, msg.targetId))
-                    cmdRouter.linkForward(msg, aim, reply);
+                    cmdRouter.linkForward(msg, aim, visibleReply);
             }
             // .log 游戏日志：骰娘回复按最终发送文本记录（入站已在消息线程记过）。
-            if (!reply.empty()) cmdRouter.recordBotReply(msg, reply);
+            if (!reply.empty()) cmdRouter.recordBotReply(msg, visibleReply);
             // 模拟聊天窗 + chat.db 持久化（骰娘侧）。私聊使用稳定的
             // private:<用户号> 作用域，避免不同私聊混在旧的空 groupId 中。
             if ((msg.type == dice::MessageType::kGroup && !msg.targetId.empty())
@@ -1816,7 +1819,7 @@ static int realMain(int argc, char* argv[]) {
                 std::string botName;
                 if (auto ba = adapterMgr.getAdapter(msg.adapterId)) botName = ba->getLoginName();
                 if (botName.empty()) botName = "\xe9\xaa\xb0\xe5\xa8\x98";   // 骰娘
-                if (!reply.empty()) dice::GroupChatLog::instance().add(key, botName, msg.selfId, reply, true);
+                if (!reply.empty()) dice::GroupChatLog::instance().add(key, botName, msg.selfId, visibleReply, true);
                 if (!broadcast.empty()) dice::GroupChatLog::instance().add(key, "\xF0\x9F\x93\xA2", msg.selfId, broadcast, true);
                 if (!reply.empty() && dice::chat_persistence::enabledFor(
                         configMgr, cmdRouter, msg.platform, msg.adapterId, chatScope)) {
@@ -1825,7 +1828,7 @@ static int realMain(int argc, char* argv[]) {
                             dice::ChatMsgRow rout;
                             rout.platform = msg.platform; rout.adapterId = msg.adapterId; rout.groupId = chatScope;
                             rout.userId = msg.selfId; rout.sender = botName;
-                            rout.content = reply; rout.self = 1;
+                            rout.content = visibleReply; rout.self = 1;
                             rout.time = static_cast<int64_t>(std::time(nullptr));
                             cst->insert(rout);
                         } catch (...) { DICE_LOG_EXCEPTION("outgoing chat message database write"); }
@@ -1855,6 +1858,7 @@ static int realMain(int argc, char* argv[]) {
                 // A handler may ask to quote a DIFFERENT message (e.g. .log on quotes
                 // the previous .log off). Override the quoted id on a copy of msg.
                 dice::Message replyMsg = msg;
+                replyMsg.snBanner = snBanner;
                 replyMsg.forcePlainText = forcePlainText;
                 replyMsg.textPreferenceCaptured = true;
                 if (!forcePlainText) replyMsg.presentationActions = replyActions;
@@ -1905,9 +1909,14 @@ static int realMain(int argc, char* argv[]) {
                     replyMsg.extra["__qq_quote_reference"] = quoteId.empty() ? msg.id : quoteId;
                 auto sendSegs = [&](const auto& a) {
                     dice::OutboundScope outputScope(replyPlan);
-                    if (wantForward && !fwdNodes.empty() && a->sendGroupForwardMsgFormatted(msg.targetId, fwdNodes, replyFormat)) {
-                        notifySent(a, reply, false);
-                        return;
+                    if (wantForward && !fwdNodes.empty()) {
+                        auto nodes = fwdNodes;
+                        if (!replyMsg.snBanner.empty() && !nodes.front().empty())
+                            nodes.front() = replyMsg.snBanner + "\n" + nodes.front();
+                        if (a->sendGroupForwardMsgFormatted(msg.targetId, nodes, replyFormat)) {
+                            notifySent(a, visibleReply, false);
+                            return;
+                        }
                     }
                     for (size_t k = 0; k < segs.size(); ++k) {
                         dice::OutboundScope partScope(replyPlan, k + 1, segs.size());
@@ -1919,6 +1928,7 @@ static int realMain(int argc, char* argv[]) {
                             if (k > 0) {
                                 part.presentationActions.clear();
                                 part.qqRichReply.reset();
+                                part.snBanner.clear();
                             }
                             if (!(k == 0 && quoteFirst) && a->platform() != "qq_official") part.id.clear();
                             a->sendReplyFormatted(part, segs[k], replyFormat);
@@ -1928,7 +1938,9 @@ static int realMain(int argc, char* argv[]) {
                         // =对话对方，避免回复发给骰娘自己）。sendReply 亦用 targetId，一致。
                         else if (priv) a->sendPrivateMessageFormatted(msg.targetId, segs[k], replyFormat);
                         else a->sendGroupMessageFormatted(msg.targetId, segs[k], replyFormat);
-                        notifySent(a, segs[k], priv);
+                        const std::string sent = (k == 0 && !replyMsg.snBanner.empty())
+                            ? replyMsg.snBanner + "\n" + segs[k] : segs[k];
+                        notifySent(a, sent, priv);
                     }
                 };
                 // 只通过消息来源的那个适配器回复，避免多账号/多适配器时串台。
@@ -2802,6 +2814,7 @@ static int realMain(int argc, char* argv[]) {
             reply = std::move(expanded.text);
             if (expanded.usedMarkdown) format = dice::ContentFormat::kMarkdown;
             pm.presentationActions = std::move(expanded.actions);
+            pm.snBanner = cmdRouter.officialSnBanner(pm);
             a->sendReplyFormatted(pm, reply, format);
             DICE_LOG_INFO_M("群管理", "事件： poked by {} in group {}", e.operatorId, e.groupId);
         } else if (e.type == ET::kFriendAdd) {
