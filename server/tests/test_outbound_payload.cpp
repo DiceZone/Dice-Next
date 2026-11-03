@@ -17,6 +17,15 @@ TEST(outbound, qq_group_and_private_markdown_channel_plain_and_rejection_fallbac
     EXPECT_EQ(fallback["content"].get<std::string>(), "成功");
 }
 
+TEST(outbound, qq_v2_native_markdown_media_and_everyone_tags_remain_intact) {
+    const std::string markdown = "<qqbot-at-everyone />\n![封面 #200px #100px](qqbot-media://image/v1/token)";
+    const auto body = outbound::qqText(markdown, ContentFormat::kMarkdown, true, false);
+    EXPECT_FALSE(body.contains("content")); // v2 forbids content alongside Markdown.
+    EXPECT_EQ(body["markdown"]["content"].get<std::string>(), markdown);
+    const auto plain = outbound::qqText("<qqbot-at-everyone />通知", ContentFormat::kPlainText, false, false);
+    EXPECT_EQ(plain["content"].get<std::string>(), "<qqbot-at-everyone />通知");
+}
+
 TEST(outbound, official_qq_name_card_prefixes_markdown_plain_and_rich_cards) {
     const auto markdown = outbound::qqText("D100=50", ContentFormat::kPlainText, true, false,
         nullptr, {}, "off", "off", "", false, 0, "茶叶 HP10/10");

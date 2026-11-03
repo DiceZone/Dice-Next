@@ -76,7 +76,11 @@ TEST(OfficialProtocol, AllAdvertisedApiActionsHaveADocumentedWireRoute) {
         {"qq_send_message", "/v2/groups/g/messages", drogon::Post}, {"qq_input_notify", "/v2/users/u/messages", drogon::Post},
         {"qq_wakeup_message", "/v2/users/u/messages", drogon::Post}, {"qq_media_files", "/v2/groups/g/files", drogon::Post},
         {"qq_upload_prepare", "/v2/groups/g/upload_prepare", drogon::Post}, {"qq_upload_part_finish", "/v2/groups/g/upload_part_finish", drogon::Post},
-        {"qq_gateway", "/gateway", drogon::Get}
+        {"qq_gateway", "/gateway", drogon::Get},
+        {"qq_material_prepare", "/v2/media-images/prepare", drogon::Post},
+        {"qq_material_complete", "/v2/media-images/complete", drogon::Post},
+        {"qq_material_list", "/v2/media-images", drogon::Get},
+        {"qq_material_delete", "/v2/media-images/image/delete", drogon::Delete}
     };
     std::set<std::string> tested;
     for (const auto& route : routes) {
@@ -87,6 +91,10 @@ TEST(OfficialProtocol, AllAdvertisedApiActionsHaveADocumentedWireRoute) {
             {"members", json::array({{{"op", "add"}, {"member_openid", "u"}, {"mute_expire_at", "2026-10-30T10:00:00+08:00"}}})},
             {"body", {{"content", "fixture-only"}, {"code", 0}}}};
         if (route.action == "qq_input_notify" || route.action == "qq_wakeup_message" || route.action == "qq_stream_message") params.erase("groupId");
+        if (route.action == "qq_material_prepare" || route.action == "qq_material_complete")
+            params["body"] = {{"file_name", "demo.png"}, {"file_size", 4}, {"content_type", "image/png"},
+                {"md5", std::string(32, 'a')}, {"sha1", std::string(40, 'b')}, {"upload_id", "upload"}};
+        params["imageId"] = "image";
         f.call(route.action, params);
         ASSERT_TRUE(f.result.is_object() && f.result.value("ok", false));
         ASSERT_EQ(f.requests.size(), size_t(1)); ASSERT_EQ(f.requests[0].path, route.path); ASSERT_EQ(f.requests[0].method, route.method);
@@ -94,6 +102,44 @@ TEST(OfficialProtocol, AllAdvertisedApiActionsHaveADocumentedWireRoute) {
     }
     const auto advertised = qqprotocol::actions(); ASSERT_EQ(tested.size(), advertised.size());
     for (const auto& action : advertised) ASSERT_TRUE(tested.count(action.get<std::string>()));
+}
+
+TEST(OfficialProtocol, MaterialsValidateMetadataAndPreserveAccountScopedReferences) {
+    OfficialProtocolFixture f;
+    json metadata = {{"file_name", "demo.png"}, {"file_size", 1024}, {"content_type", "image/png"},
+        {"md5", std::string(32, 'a')}, {"sha1", std::string(40, 'b')}};
+    for (const auto& [field, value] : std::vector<std::pair<std::string, json>>{
+            {"file_size", 0}, {"file_size", 10485761}, {"file_size", "1024"},
+            {"file_name", "../demo.png"}, {"content_type", "image/jpeg"}, {"md5", "bad"}, {"sha1", nullptr}}) {
+        auto bad = metadata; bad[field] = value;
+        f.call("qq_material_prepare", {{"body", bad}});
+        ASSERT_FALSE(f.result.value("ok", true));
+    }
+    f.call("qq_material_complete", {{"body", {{"md5", std::string(32, 'a')}}}});
+    ASSERT_FALSE(f.result.value("ok", true));
+    f.call("qq_material_delete", {{"imageId", ""}});
+    ASSERT_FALSE(f.result.value("ok", true));
+    ASSERT_TRUE(f.requests.empty());
+    f.response = {{"images", json::array()}, {"next_cursor", "next"}, {"total", 0}};
+    f.call("qq_material_list", {{"cursor", "page2"}});
+    ASSERT_EQ(f.requests.back().body["cursor"].get<std::string>(), "page2");
+    ASSERT_EQ(f.result["data"]["next_cursor"].get<std::string>(), "next");
+    f.call("qq_material_delete", {{"imageId", "a/b?x"}});
+    ASSERT_TRUE(f.requests.back().path.find("a/b?x") == std::string::npos);
+}
+
+TEST(OfficialProtocol, V2PictureCardsAreSentUnchangedInGroupsAndPrivateChats) {
+    const json body = {{"msg_type", 8}, {"card", {{"type", "tuwen"}, {"content", {
+        {"title", "调查员日报"}, {"description", "本周团务"},
+        {"url", "https://dice.example/news"}, {"pic_url", "https://dice.example/cover.png"}}}}}};
+    for (bool group : {false, true}) {
+        OfficialProtocolFixture f;
+        f.call("qq_send_message", {{group ? "groupId" : "userOpenId", "peer"}, {"body", body}});
+        ASSERT_TRUE(f.result.value("ok", false));
+        ASSERT_EQ(f.requests.size(), size_t(1));
+        ASSERT_EQ(f.requests.front().path, group ? "/v2/groups/peer/messages" : "/v2/users/peer/messages");
+        ASSERT_TRUE(f.requests.front().body == body);
+    }
 }
 
 TEST(OfficialProtocol, InvalidParametersCannotIssuePlatformRequests) {

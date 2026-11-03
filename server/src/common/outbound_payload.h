@@ -28,7 +28,7 @@ inline Json qqText(const std::string& text, ContentFormat format, bool useMarkdo
     if (rich && wire.size() > 3500)
         return qqText(text, format, false, channel, nullptr, {}, "off", "off", "", verifyImages, 2, nameCard, nameCardStyle, nameCardTemplate);
     Json body = useMarkdown
-        ? Json{{"content", " "}, {"msg_type", 2}, {"markdown", {{"content", wire}, {"force_verify_image_resource", verifyImages}}}}
+        ? Json{{"msg_type", 2}, {"markdown", {{"content", wire}, {"force_verify_image_resource", verifyImages}}}}
         : Json{{"content", wire.empty() && !text.empty() ? text : wire}};
     if (!useMarkdown && !channel) body["msg_type"] = 0;
     if ((rich || interactive) && fallbackLevel == 0 && interactions == "buttons") {

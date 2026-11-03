@@ -3,6 +3,8 @@
 #include "../common/utils.h"
 #include "../message/qq_official_message.h"
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <cctype>
 #include <ctime>
 #include <climits>
 #include <string>
@@ -105,16 +107,45 @@ inline json actions() {
         "qq_recall", "qq_stream_message", "qq_get_menu", "qq_set_menu", "qq_list_panels", "qq_create_panel", "qq_get_panel", "qq_update_panel",
         "qq_delete_panel", "qq_panel_target", "qq_me", "qq_my_guilds", "qq_guild", "qq_guild_channels", "qq_create_channel", "qq_channel",
         "qq_update_channel", "qq_delete_channel", "qq_interaction", "qq_generate_share_url", "qq_send_message", "qq_input_notify", "qq_wakeup_message",
-        "qq_media_files", "qq_upload_prepare", "qq_upload_part_finish", "qq_gateway"});
+        "qq_media_files", "qq_upload_prepare", "qq_upload_part_finish", "qq_gateway",
+        "qq_material_prepare", "qq_material_complete", "qq_material_list", "qq_material_delete"});
 }
 
 inline std::string validate(const std::string& action, const json& params) {
     if (!params.is_object()) return "params 必须为 JSON 对象。";
-    for (const char* field : {"groupId", "userOpenId", "memberOpenId", "strategyId", "panelId", "messageId", "guildId", "channelId", "interactionId", "cursor", "scope", "op", "callbackData"}) {
+    for (const char* field : {"groupId", "userOpenId", "memberOpenId", "strategyId", "panelId", "messageId", "guildId", "channelId", "interactionId", "cursor", "scope", "op", "callbackData", "imageId"}) {
         const auto it = params.find(field);
         if (it != params.end() && (!it->is_string() || it->get_ref<const std::string&>().size() > 4096)) return std::string(field) + " 必须为字符串，且长度不超过 4096 字节。";
     }
     if (params.contains("body") && !params["body"].is_object()) return "body 必须为 JSON 对象。";
+    if (action == "qq_material_prepare" || action == "qq_material_complete") {
+        const auto body = object(params, "body");
+        const auto hex = [](const std::string& value, size_t length) {
+            return value.size() == length && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            });
+        };
+        if (!hex(text(body, "md5"), 32)) return "md5 必须是文件的 32 位十六进制摘要。";
+        if (action == "qq_material_prepare") {
+            const auto name = text(body, "file_name"), mime = text(body, "content_type");
+            const auto dot = name.rfind('.');
+            if (name.empty() || name.size() > 255 || name.find_first_of("/\\\r\n") != std::string::npos || dot == std::string::npos)
+                return "file_name 必须是带图片扩展名的文件名。";
+            auto extension = name.substr(dot);
+            std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const bool supported = (mime == "image/png" && extension == ".png")
+                || (mime == "image/jpeg" && (extension == ".jpg" || extension == ".jpeg"))
+                || (mime == "image/gif" && extension == ".gif") || (mime == "image/webp" && extension == ".webp");
+            if (!supported) return "图片扩展名与 content_type 须匹配（png/jpeg/gif/webp）。";
+            const auto size = body.find("file_size");
+            if (size == body.end() || !size->is_number_integer() || *size <= 0 || *size > 10 * 1024 * 1024)
+                return "图片 file_size 必须为 1–10485760 字节。";
+            if (!hex(text(body, "sha1"), 40)) return "sha1 必须是文件的 40 位十六进制摘要。";
+        } else if (text(body, "upload_id").empty() || text(body, "upload_id").size() > 4096) {
+            return "upload_id 必须是 prepare 返回的有效上传任务标识。";
+        }
+    }
+    if (action == "qq_material_delete" && text(params, "imageId").empty()) return "imageId 必填。";
     for (const char* field : {"seconds", "msg_seq"}) if (params.contains(field) && !params[field].is_number_integer()) return std::string(field) + " 必须为整数。";
     if (params.contains("msg_id") && params.contains("event_id")) return "msg_id 与 event_id 不能同时提供。";
     if ((action == "qq_set_blacklist" || action == "qq_remove_members") && !params.contains("memberOpenIds")) return "memberOpenIds 必填。";

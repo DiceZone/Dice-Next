@@ -424,6 +424,16 @@ public:
             officialApi(drogon::Put, "/interactions/" + urlEncode(interactionId), body, std::move(cb));
         } else if (action == "qq_generate_share_url") {
             officialApi(drogon::Post, "/v2/generate_url_link", json{{"callback_data", params.value("callbackData", std::string())}}, std::move(cb));
+        } else if (action == "qq_material_prepare" || action == "qq_material_complete") {
+            officialApi(drogon::Post, action == "qq_material_prepare" ? "/v2/media-images/prepare" : "/v2/media-images/complete",
+                params.value("body", json::object()), std::move(cb));
+        } else if (action == "qq_material_list") {
+            json query = json::object();
+            if (const auto cursor = qqprotocol::text(params, "cursor"); !cursor.empty()) query["cursor"] = cursor;
+            officialApi(drogon::Get, "/v2/media-images", query, std::move(cb));
+        } else if (action == "qq_material_delete") {
+            officialApi(drogon::Delete, "/v2/media-images/" + urlEncode(qqprotocol::text(params, "imageId")) + "/delete",
+                json::object(), std::move(cb));
         } else if (action == "qq_gateway") {
             officialApi(drogon::Get, "/gateway", json::object(), std::move(cb));
         } else if ((action == "qq_send_message" || action == "qq_media_files" || action == "qq_upload_prepare" || action == "qq_upload_part_finish") && hasPeer) {
