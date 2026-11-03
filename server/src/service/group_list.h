@@ -24,7 +24,8 @@ inline void discoverRecords(Database& db, AdapterManager& adapterMgr) {
                 group = identity::BindingStore::instance().observeVirtual(db, platform, adapterId, endpoint, identity::Kind::Group);
             if (group.empty()) group = endpoint;
             std::lock_guard lock(groupPresenceMutex());
-            if (groupDiscoveryBlocked(*st, adapterId, platform, group)) continue;
+            if (groupDiscoveryBlocked(*st, adapterId, platform, group)
+                || accountGroupSetting(*st, adapterId, platform, group, "__recordExpired") == "1") continue;
             live[group] = endpoint;
             setAccountGroupSetting(*st, adapterId, platform, group, endpoint, "__removed", "0");
             setAccountGroupSetting(*st, adapterId, platform, group, endpoint, "left", "0");
@@ -70,7 +71,7 @@ inline nlohmann::json listRecords(Database& db, AdapterManager& adapterMgr, Conf
     // adapter endpoint as metadata instead of rendering duplicate cards.
     std::map<std::string, std::string> selectedByGroup;
     for (auto& [pg, kv] : groups) {
-        if (kv.count("__removed") && kv["__removed"] == "1") continue;
+        if (kv["__removed"] == "1" || kv["__recordExpired"] == "1") continue;
         auto sep = pg.find('\x1f');
         std::string plat = pg.substr(0, sep), gid = pg.substr(sep + 1);
         auto it = selectedByGroup.find(gid);
@@ -97,7 +98,7 @@ inline nlohmann::json listRecords(Database& db, AdapterManager& adapterMgr, Conf
     J arr = J::array();
     for (auto& [gid, pg] : selectedByGroup) {
         auto& kv = groups[pg];
-        if (kv.count("__removed") && kv["__removed"] == "1") continue;   // 隐藏已移除的群
+        if (kv["__removed"] == "1" || kv["__recordExpired"] == "1") continue;   // 隐藏已移除的群
         auto sep = pg.find('\x1f');
         std::string plat = pg.substr(0, sep);
         std::string name = (kv.count("name") && !kv["name"].empty()) ? kv["name"] : gid;
@@ -105,7 +106,7 @@ inline nlohmann::json listRecords(Database& db, AdapterManager& adapterMgr, Conf
         J accounts = J::array();
         if (accountGroups.count(gid)) {
             for (auto& [aid, akv] : accountGroups[gid]) {
-                if (akv.count("__removed") && akv["__removed"] == "1") continue;
+                if (akv["__removed"] == "1" || akv["__recordExpired"] == "1") continue;
                 auto meta = accountMeta[gid + "\x1f" + aid];
                 const std::string aplat = meta.first.empty() ? plat : meta.first;
                 const std::string endpoint = meta.second.empty() ? gid : meta.second;

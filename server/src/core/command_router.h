@@ -1,4 +1,5 @@
 #pragma once
+#include "common/auto_cleanup.h"
 #include "../common/legacy_conf_value.h"
 #include "../common/legacy_lua_event.h"
 #include "../common/legacy_model.h"
@@ -629,11 +630,11 @@ public:
 private:
     // ─── Command Parsing ─────────────────────────────────────
 
-    /// Strip a single leading prefix character. ASCII prefixes (. !) are one
+    /// Strip a single leading prefix character. ASCII prefixes (. ! /) are one
     /// byte; full-width 。and ！are three UTF-8 bytes each.
     static std::string stripPrefix(const std::string& text) {
         if (text.empty()) return text;
-        if (text[0] == '.' || text[0] == '!') return text.substr(1);
+        if (text[0] == '.' || text[0] == '!' || text[0] == '/') return text.substr(1);
         if (text.rfind("\xe3\x80\x82", 0) == 0 ||   // 。
             text.rfind("\xef\xbc\x81", 0) == 0)      // ！
             return text.substr(3);
@@ -962,14 +963,11 @@ private:
         std::unordered_set<std::string> missing;
     };
 
-    static uint64_t diceScriptRandom(void*, uint64_t upperBound) {
+    static uint64_t diceScriptRandom(void* failure, uint64_t upperBound) {
         if (upperBound <= 1) return 0;
-        static thread_local std::mt19937_64 rng([] {
-            std::random_device rd;
-            return (static_cast<uint64_t>(rd()) << 32) ^
-                   static_cast<uint64_t>(rd());
-        }());
-        return std::uniform_int_distribution<uint64_t>(0, upperBound - 1)(rng);
+        // Never unwind through the C ABI. Discard the result if entropy fails.
+        try { return secure_random::below(upperBound); }
+        catch (...) { if (failure) *static_cast<bool*>(failure) = true; return 0; }
     }
 
     static size_t diceScriptLoad(void* userdata, const char* name,
@@ -1019,7 +1017,7 @@ private:
                 // syntax is still eligible, so evaluate it exactly once with the
                 // real random source; any real failure stops the chain below.
                 if (auto fate = tryFate(expr)) return {true, *fate, {}, id, {}};
-                auto result = onedice::eval(expr, 100);
+                auto result = onedice::eval(expr, 100, secure_random::die);
                 if (!result.ok) return {false, {}, result.error, id, {}};
                 return {true, result.detail, {}, id, {}};
             }
@@ -1028,7 +1026,8 @@ private:
                 dicescript_default_runtime_options(&options);
                 options.dice.default_faces = 100;
                 options.dice.random = diceScriptRandom;
-                options.dice.random_userdata = nullptr;
+                bool randomFailed = false;
+                options.dice.random_userdata = &randomFailed;
                 options.enable_default_dice = 1;
                 std::snprintf(options.default_dice_side_expression,
                               sizeof(options.default_dice_side_expression), "100");
@@ -1060,8 +1059,9 @@ private:
                 }
 
                 dicescript_script_result result{};
-                if (!dicescript_context_eval(context.get(), expr.c_str(), &result))
-                    return {false, {}, result.error, id, {}};
+                const bool evaluated = dicescript_context_eval(context.get(), expr.c_str(), &result);
+                if (randomFailed) return {false, {}, "Secure random source unavailable", id, {}};
+                if (!evaluated) return {false, {}, result.error, id, {}};
                 if (!roll_command::isNumericResult(result.type))
                     return {false, {}, "expression result is not numeric", id, {},
                             "dice.error.non_numeric"};
@@ -1433,7 +1433,7 @@ private:
         // a = OneDice 无限加骰骰池（WoD/数成功，≥加骰线重骰累加、数≥成功线个数），
         // 不同于双十字(c 求和)。交给 OneDice 引擎求值并展示全过程（与 .r 一致）。
         if (lc.find('a') != std::string::npos) {
-            auto od = onedice::eval(poolSpec, 10);   // 池默认 d10
+            auto od = onedice::eval(poolSpec, 10, secure_random::die);   // 池默认 d10
             if (!od.ok) return i18n_.tr(loc, "dice.dx.usage");
             return i18n_.tr(loc, reason.empty() ? "dice.roll.result" : "dice.roll.result_reason",
                 {{"nick", displayName(msg)}, {"reason", reason}, {"res", od.detail}});
@@ -6478,8 +6478,8 @@ private:
                 if (!v.empty()) return v;
             }
         } catch (...) {}
-        // Default: . 。 ! ！
-        return {".", "\xe3\x80\x82", "!", "\xef\xbc\x81"};
+        // Default: . 。 ! ！ /
+        return {".", "\xe3\x80\x82", "!", "\xef\xbc\x81", "/"};
     }
 
     // ─── Master & cross-target messaging (.send) ─────────────
@@ -6687,6 +6687,89 @@ public:
         m.type = MessageType::kGroup;
         return getGroupSetting(m, key);
     }
+    bool groupCleanupProtected(const std::string& platform, const std::string& groupId,
+                            const std::string& adapterId = {}) const {
+        if (banlistHas(1, 1, groupId)) return true;
+        for (const auto* key : {"cleanupExempt", "locked"})
+            if (getGroupSettingFor(platform, groupId, key, adapterId) == "1") return true;
+        return !getGroupSettingFor(platform, groupId, "activeLog", adapterId).empty();
+    }
+
+    bool groupCleanupExempt(const std::string& platform, const std::string& groupId,
+                            const std::string& adapterId = {}) const {
+        if (groupCleanupProtected(platform, groupId, adapterId)) return true;
+        for (const auto* key : {"leaving", "left", "__removed"})
+            if (getGroupSettingFor(platform, groupId, key, adapterId) == "1") return true;
+        return false;
+    }
+
+    bool groupCommandInactiveFor(const std::string& platform, const std::string& groupId,
+                                 const std::string& adapterId, int days) const {
+        auto* st = db_.getStorage(); if (!st || adapterId.empty() || days <= 0) return false;
+        namespace orm = sqlite_orm;
+        // Never inherit a different bot's shared lastCommandAt for a platform action.
+        const auto rows = st->get_all<GroupAccountSettingRow>(orm::where(
+            orm::c(&GroupAccountSettingRow::adapterId) == adapterId and
+            orm::c(&GroupAccountSettingRow::platform) == platform and
+            orm::c(&GroupAccountSettingRow::groupId) == groupId and
+            orm::c(&GroupAccountSettingRow::key) == std::string("lastCommandAt")));
+        return !rows.empty() && auto_cleanup::inactive(rows.front().value, days);
+    }
+
+    // The record-retention pass never calls a platform API. Keep cards, transcripts,
+    // identities, policy and plugin variables; expire only management records.
+    std::pair<int, int> cleanupLocalRecords(int userDays, int groupDays) {
+        auto* st = db_.getStorage(); if (!st) return {};
+        namespace orm = sqlite_orm;
+        std::lock_guard lock(groupPresenceMutex());
+        int users = 0, groups = 0;
+        st->transaction([&] {
+            if (userDays > 0) for (const auto& row : st->get_all<PlayerProfileRow>()) {
+                if (row.trustLevel > 0 || isMasterUser(row.platform, row.userId)
+                    || isUserWhitelisted(row.userId)) continue;
+                bool self = false;
+                for (const auto& a : adapters_.allAdapters())
+                    if (a->platform() == row.platform && a->getLoginId() == row.userId) self = true;
+                if (self) continue;
+                const auto last = (std::max)({row.lastSeenAt, row.lastCmdAt, row.createdAt});
+                if (!auto_cleanup::inactive(last, userDays)) continue;
+                st->remove<PlayerProfileRow>(row.id); ++users;
+            }
+            if (groupDays <= 0) return true;
+            using Key = std::tuple<std::string, std::string, std::string>;
+            std::map<Key, std::map<std::string, std::string>> records;
+            std::set<std::pair<std::string, std::string>> bound;
+            for (const auto& row : st->get_all<GroupAccountSettingRow>()) {
+                records[{row.platform, row.groupId, row.adapterId}][row.key] = row.value;
+                bound.emplace(row.platform, row.groupId);
+            }
+            for (const auto& row : st->get_all<GroupSettingRow>())
+                if (!bound.count({row.platform, row.groupId}))
+                    records[{row.platform, row.groupId, ""}][row.key] = row.value;
+            for (auto& [key, values] : records) {
+                const auto& [platform, gid, aid] = key;
+                if (values["__recordExpired"] == "1" || values["__removed"] == "1"
+                    || groupCleanupProtected(platform, gid, aid)) continue;
+                const auto last = (std::max)(values["lastSeenAt"], values["lastCommandAt"]);
+                if (!auto_cleanup::inactive(last, groupDays)) continue;
+                // Keep activity needed by the independent leave policy, and every
+                // group switch. Remove stale display metadata, then hide the record
+                // until a real incoming message recreates it (discovery is not activity).
+                for (const auto* field : {"name", "legacyGroupName", "memberCount", "botRole"}) {
+                    if (aid.empty()) st->remove_all<GroupSettingRow>(orm::where(
+                        orm::c(&GroupSettingRow::platform) == platform and orm::c(&GroupSettingRow::groupId) == gid
+                        and orm::c(&GroupSettingRow::key) == std::string(field)));
+                    else st->remove_all<GroupAccountSettingRow>(orm::where(
+                        orm::c(&GroupAccountSettingRow::adapterId) == aid and orm::c(&GroupAccountSettingRow::groupId) == gid
+                        and orm::c(&GroupAccountSettingRow::key) == std::string(field)));
+                }
+                setGroupSettingFor(platform, gid, "__recordExpired", "1", aid); ++groups;
+            }
+            return true;
+        });
+        return {users, groups};
+    }
+
     /// 本群 AI 功能开关（group_settings key "aiEnabled"，缺省=开）。
     bool aiEnabledForGroup(const std::string& platform, const std::string& groupId,
                            const std::string& adapterId = {}) const {
@@ -7606,6 +7689,7 @@ private:
         if (toLower(cmd).rfind("setcoc", 0) != 0) return std::nullopt;
         std::string rest = trim(cmd.substr(6));
         std::string lr = toLower(rest);
+        if (lr == "help" || lr == "list" || lr == "?") return i18n_.tr(loc, "help.topic.setcoc");
         if (rest.empty() || lr == "show") {
             int r = getCocRule(msg);
             return i18n_.tr(loc, "setcoc.show", {{"rule", std::to_string(r)}});
@@ -8432,7 +8516,7 @@ private:
         if (native.ok() || native.failureKind != DiceFailureKind::kUnsupportedSyntax) return native;
         // Legacy k/p and omitted-face dice need OneDice. Never reroll an
         // evaluation failure (such as a randomly produced zero denominator).
-        const auto result = onedice::eval(expression, defaultFaces);
+        const auto result = onedice::eval(expression, defaultFaces, secure_random::die);
         if (!result.ok) return DiceResult::failure(expression, result.error, 2001,
             result.errorKind == onedice::ErrorKind::Evaluation
                 ? DiceFailureKind::kEvaluation : DiceFailureKind::kUnsupportedSyntax);
@@ -10816,18 +10900,31 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                 r.groupCmdCount = didCommand && countGroupHistory && msg.type == MessageType::kGroup ? 1 : 0;
                 r.lastCmdAt = didCommand ? nowIso() : "";
                 r.createdAt = nowIso();
+                r.lastSeenAt = r.createdAt;
                 st->insert(r);
             } else {
                 auto r = rows.front();
                 const bool fallbackName = msg.extra.is_object()
                     && msg.extra.value("__sender_name_fallback", false);
                 if (!fallbackName && !msg.senderName.empty()) r.nickname = msg.senderName;
+                r.lastSeenAt = nowIso();
                 if (didCommand) {
                     r.cmdCount += 1;
                     if (countGroupHistory && msg.type == MessageType::kGroup) r.groupCmdCount += 1;
                     r.lastCmdAt = nowIso();
                 }
                 st->update(r);
+            }
+            if (msg.type == MessageType::kGroup && !msg.targetId.empty()) {
+                std::lock_guard lock(groupPresenceMutex());
+                // Retention is measured in days; coalesce group writes within a minute.
+                auto at = nowIso(); at.replace(17, at.size() - 17, "00.000Z");
+                if (getGroupSettingFor(msg.platform, msg.targetId, "lastSeenAt", msg.adapterId) != at)
+                    setGroupSettingFor(msg.platform, msg.targetId, "lastSeenAt", at, msg.adapterId,
+                        msg.extra.is_object() ? msg.extra.value("__identity_native_target", msg.targetId) : msg.targetId);
+                for (const auto& aid : {msg.adapterId, std::string()})
+                    if (getGroupSettingFor(msg.platform, msg.targetId, "__recordExpired", aid) == "1")
+                        setGroupSettingFor(msg.platform, msg.targetId, "__recordExpired", "0", aid);
             }
             if (didCommand) {
                 recordUsageHour(1, 0);
@@ -11835,7 +11932,7 @@ private:
                     if (cards_.getAttr(user, group, canon)) continue;       // 已有值跳过（原版）
                     int v = 0;
                     if (auto res = engine_.roll(it.src); res.ok()) v = res.modifiedTotal;
-                    else { auto od = onedice::eval(it.src, 100); if (!od.ok) continue; v = (int)od.value; }
+                    else { auto od = onedice::eval(it.src, 100, secure_random::die); if (!od.ok) continue; v = (int)od.value; }
                     cards_.setAttr(user, group, canon, v);
                 }
             }

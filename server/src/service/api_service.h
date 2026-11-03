@@ -222,18 +222,25 @@ static void audienceCounts(Storage* st, int& players, int& groups) {
     if (!st) return;
     try { players = static_cast<int>(st->template count<PlayerProfileRow>()); } catch (...) {}
     try {
-        // 与群组页相同：去掉已标记移除的群，账号级记录仍算入。
-        std::set<std::string> live, removed;
+        // Match the group listing: account records override shared discovery data.
+        std::set<std::string> live, sharedHidden, bound;
+        std::map<std::string, std::pair<std::string, bool>> accounts;
         for (const auto& row : st->template get_all<GroupSettingRow>()) {
             if (row.groupId.empty()) continue;
             const auto id = row.platform + '\x1f' + row.groupId;
-            if (row.key == "__removed" && row.value == "1") removed.insert(id);
-            else live.insert(id);
+            live.insert(id);
+            if ((row.key == "__removed" || row.key == "__recordExpired") && row.value == "1") sharedHidden.insert(id);
         }
         for (const auto& row : st->template get_all<GroupAccountSettingRow>()) {
-            if (!row.groupId.empty()) live.insert(row.platform + '\x1f' + row.groupId);
+            if (row.groupId.empty()) continue;
+            const auto id = row.platform + '\x1f' + row.groupId;
+            bound.insert(id);
+            auto& item = accounts[row.adapterId + '\x1f' + id]; item.first = id;
+            if ((row.key == "__removed" || row.key == "__recordExpired") && row.value == "1") item.second = true;
         }
-        for (const auto& id : removed) live.erase(id);
+        for (const auto& id : bound) live.erase(id);
+        for (const auto& [_, item] : accounts) if (!item.second) live.insert(item.first);
+        for (const auto& id : sharedHidden) live.erase(id);
         groups = static_cast<int>(live.size());
     } catch (...) {}
 }
@@ -3146,9 +3153,24 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
+    // Random sources apply to the whole instance.
+    app.registerHandler("/api/system/random-source", [&cfg](Req req, CB&& cb) {
+        try {
+            if (req->method() == drogon::Put) {
+                const auto body = J::parse(req->body());
+                const auto value = body.at("source").get<std::string>();
+                if (value != "system" && value != "openssl") throw std::invalid_argument("Invalid random source");
+                if (!cfg.setAndSave("dice/random_source", value))
+                    throw std::runtime_error("Failed to save random source; previous setting retained");
+                secure_random::setSource(value == "openssl" ? secure_random::Source::OpenSSL : secure_random::Source::System);
+            }
+            jsonReply(ok(J{{"source", cfg.get<std::string>("dice/random_source", "system")}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Put});
+
     // ── 指令前缀 ───────────────────────────────────────────────
     app.registerHandler("/api/system/prefixes", [&cfg](Req req, CB&& cb) {
-        static const std::vector<std::string> kDefault = {".", "\xe3\x80\x82", "!", "\xef\xbc\x81"};
+        static const std::vector<std::string> kDefault = {".", "\xe3\x80\x82", "!", "\xef\xbc\x81", "/"};
         try {
             if (req->method() == drogon::Get) {
                 J all = cfg.getAll();
@@ -6328,28 +6350,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // 自动清理好友与群聊：好友不活跃天数、单轮最多退群数、最大群规模。
+    // Record retention is independent of destructive platform actions.
     app.registerHandler("/api/system/friend-clean", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
-                auto j = J::parse(req->body());
-                if (j.contains("days")) {
-                    int d = j["days"].get<int>();
-                    if (d < 0) d = 0; if (d > 3650) d = 3650;
-                    cfg.set<int>("dice/friend_clean_days", d);
-                }
-                if (j.contains("groupLimit")) {
-                    int n = j["groupLimit"].get<int>();
-                    cfg.set<int>("dice/group_clear_limit", (std::clamp)(n, 0, 10000));
-                }
-                if (j.contains("maxGroupSize")) {
-                    int n = j["maxGroupSize"].get<int>();
-                    cfg.set<int>("dice/max_group_size", (std::clamp)(n, 0, 1000000));
-                }
-                cfg.save();
+                const auto next = auto_cleanup::patched(cfg.get<J>("dice", J::object()), J::parse(req->body()));
+                if (!cfg.setAndSave("dice", next)) throw std::runtime_error("无法保存清理设置");
             }
             jsonReply(ok(J{
                 {"days", cfg.get<int>("dice/friend_clean_days", 0)},
+                {"groupDays", cfg.get<int>("dice/group_clean_days", 0)},
+                {"userRecordDays", cfg.get<int>("dice/user_record_days", 0)},
+                {"groupRecordDays", cfg.get<int>("dice/group_record_days", 0)},
                 {"groupLimit", cfg.get<int>("dice/group_clear_limit", 20)},
                 {"maxGroupSize", cfg.get<int>("dice/max_group_size", 0)}
             }), std::move(cb));

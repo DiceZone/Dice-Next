@@ -2,6 +2,7 @@
 #include "http_auth_path.h"
 #include "../config/config_manager.h"
 #include "../common/logger.h"
+#include "../common/secure_random.h"
 #include "../core/dice/dice_expression.h"
 #include "../core/dice/dice_result.h"
 #include <drogon/drogon.h>
@@ -240,12 +241,11 @@ Json roll(const std::string& expression, const QueryContext& context) {
         if (c == ')' && --depth < 0) throw std::invalid_argument("表达式括号不匹配");
     }
     if (depth) throw std::invalid_argument("表达式括号不匹配");
-    static thread_local std::mt19937 rng(std::random_device{}());
     int samples = 0;
     DiceExpression engine([&](int sides) {
         context.checkpoint();
         if (sides < 1 || sides > 1000000 || ++samples > 1000) throw std::invalid_argument("单次最多 1000 个随机出值，单骰最多 1000000 面");
-        return std::uniform_int_distribution<int>(1, sides)(rng);
+        return static_cast<int>(secure_random::die(sides));
     }, true);
     auto result = engine.evaluate(expression);
     Json out{{"engine", "dicenext"}, {"expression", expression}, {"detail", result.formattedOutput},

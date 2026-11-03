@@ -241,7 +241,8 @@ bool Database::open(const std::string& path) {
                     orm::make_column("group_cmd_count", &PlayerProfileRow::groupCmdCount, orm::default_value(0)),
                     orm::make_column("favor", &PlayerProfileRow::favor),
                     orm::make_column("last_cmd_at", &PlayerProfileRow::lastCmdAt),
-                    orm::make_column("created_at", &PlayerProfileRow::createdAt)
+                    orm::make_column("created_at", &PlayerProfileRow::createdAt),
+                    orm::make_column("last_seen_at", &PlayerProfileRow::lastSeenAt, orm::default_value(""))
                 ),
                 // ── roll_stats (.hiy 骰点统计) ──
                 orm::make_table("roll_stats",

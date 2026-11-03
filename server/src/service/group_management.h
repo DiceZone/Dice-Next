@@ -27,13 +27,13 @@ void restoreRecord(Storage& st, const std::string& adapterId, const std::string&
                     const std::string& groupId, const std::string& endpointId = {}) {
     std::lock_guard lock(groupPresenceMutex());
     namespace orm = sqlite_orm;
-    for (const auto* key : {"__removed", "left", "leaving", kLeaveRequestedAt})
+    for (const auto* key : {"__removed", "__recordExpired", "left", "leaving", kLeaveRequestedAt})
         st.template remove_all<GroupSettingRow>(orm::where(
             orm::c(&GroupSettingRow::platform) == platform and
             orm::c(&GroupSettingRow::groupId) == groupId and
             orm::c(&GroupSettingRow::key) == std::string(key)));
     if (!adapterId.empty()) {
-        for (const auto* key : {"__removed", "left", "leaving", kLeaveRequestedAt})
+        for (const auto* key : {"__removed", "__recordExpired", "left", "leaving", kLeaveRequestedAt})
             setAccountGroupSetting(st, adapterId, platform, groupId, endpointId, key,
                 key == kLeaveRequestedAt ? "" : "0");
     } else {
@@ -41,7 +41,7 @@ void restoreRecord(Storage& st, const std::string& adapterId, const std::string&
             orm::c(&GroupAccountSettingRow::platform) == platform and
             orm::c(&GroupAccountSettingRow::groupId) == groupId));
         for (auto& row : rows)
-            if (row.key == "__removed" || row.key == "left" || row.key == "leaving" || row.key == kLeaveRequestedAt) {
+            if (row.key == "__removed" || row.key == "__recordExpired" || row.key == "left" || row.key == "leaving" || row.key == kLeaveRequestedAt) {
                 row.value = row.key == kLeaveRequestedAt ? "" : "0"; st.update(row);
             }
     }

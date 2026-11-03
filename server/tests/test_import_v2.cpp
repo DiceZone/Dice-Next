@@ -908,17 +908,18 @@ TEST(ImportBinaryGroups, KeepsCoreAndLuaCompatibleSettings) {
         std::ofstream out(root / "user" / "ChatConf.dat", std::ios::binary);
         writeRaw<int32_t>(out, 1); writeRaw<int64_t>(out, 20001); writeRaw<int64_t>(out, 20001);
         writeRaw<int16_t>(out, 4); writeLegacyStr(out, "旧群名");
-        writeRaw<int16_t>(out, 11); writeRaw<int16_t>(out, 4);
+        writeRaw<int16_t>(out, 11); writeRaw<int16_t>(out, 5);
         writeLegacyStr(out, "停用指令"); writeLegacyInt(out, 1);
         writeLegacyStr(out, "rc房规"); writeLegacyInt(out, 6);
         writeLegacyStr(out, "入群欢迎"); writeLegacyUtf8(out, "欢迎 {at}");
+        writeLegacyStr(out, "免清"); writeLegacyInt(out, 1);
         writeLegacyStr(out, "pluginOption"); writeLegacyInt(out, 9);
         writeRaw<int16_t>(out, -1);
     }
     Database db; ASSERT_TRUE(db.open((root / "app.db").string()));
     LuaPluginManager lua;
     int groups = 0;
-    ASSERT_EQ(importChatConf(db, root / "user", groups, &lua), 4);
+    ASSERT_EQ(importChatConf(db, root / "user", groups, &lua), 5);
     ASSERT_EQ(groups, 1);
     ASSERT_EQ(lua.confGet("g:20001", "pluginOption"), "9");
     auto rows = db.getStorage()->get_all<GroupSettingRow>();
@@ -926,6 +927,7 @@ TEST(ImportBinaryGroups, KeepsCoreAndLuaCompatibleSettings) {
     for (const auto& row : rows) values[row.key] = row.value;
     ASSERT_EQ(values["legacyGroupName"], "旧群名");
     ASSERT_EQ(values["enabled"], "0");
+    ASSERT_EQ(values["cleanupExempt"], "1");
     ASSERT_EQ(values["cocRule"], "6");
     ASSERT_EQ(values["welcome"], "欢迎 {at}");
     db.close(); cleanupTempDir(root);
@@ -1307,6 +1309,7 @@ TEST(LegacyConsole, MigratesSettingsIntoActiveCapabilities) {
         std::ofstream out(root / "conf" / "console.yaml");
         out << "master: 1707642\nconfig:\n"
                "  InactiveUserLine: 180\n"
+               "  InactiveGroupLine: 90\n"
                "  GroupClearLimit: 12\n"
                "  GroupInvalidSize: 600\n"
                "  DisabledListenAt: 1\n"
@@ -1316,7 +1319,10 @@ TEST(LegacyConsole, MigratesSettingsIntoActiveCapabilities) {
     ConfigManager cfg((root / "config").string());
     ASSERT_TRUE(cfg.load());
     ASSERT_TRUE(importMasters(cfg, root / "conf") > 0);
-    ASSERT_EQ(cfg.get<int>("dice/friend_clean_days"), 180);
+    ASSERT_EQ(cfg.get<int>("dice/user_record_days"), 180);
+    ASSERT_EQ(cfg.get<int>("dice/group_record_days"), 90);
+    ASSERT_EQ(cfg.get<int>("dice/friend_clean_days"), 0);
+    ASSERT_EQ(cfg.get<int>("dice/group_clean_days"), 0);
     ASSERT_EQ(cfg.get<int>("dice/group_clear_limit"), 12);
     ASSERT_EQ(cfg.get<int>("dice/max_group_size"), 600);
     ASSERT_FALSE(cfg.get<bool>("dice/listen_at_when_off"));

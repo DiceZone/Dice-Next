@@ -6,6 +6,7 @@
 #include "../../config/config_manager.h"
 
 #include <random>
+#include "../../common/secure_random.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -18,7 +19,7 @@ namespace dice {
  * @brief Core dice-rolling engine.
  *
  * Manages:
- *   - Random number generation (Mersenne Twister via std::mt19937)
+ *   - Random number generation (operating-system/OpenSSL secure randomness)
  *   - Dice expression parsing and evaluation (via DiceExpression)
  *   - RPG system-specific rolling rules (COC, DnD, Fate, L5R)
  *   - Critical/fumble detection based on current DiceRules
@@ -27,7 +28,7 @@ namespace dice {
  *
  * Thread-safety: one engine is shared by every adapter thread, the
  * HTTP API, plugins and the AI worker. The expression parser keeps
- * its token cursor in members and std::mt19937 is not thread-safe,
+ * its token cursor and mutable rules in members,
  * so the public roll and rule methods serialize on an internal mutex.
  */
 class DiceEngine {
@@ -136,7 +137,7 @@ public:
 
 private:
     // ─── RNG ─────────────────────────────────────────────────
-    std::mt19937 rng_;
+    secure_random::Engine rng_;
     std::uniform_int_distribution<int> dist100_{1, 100};
     std::uniform_int_distribution<int> dist10_{0, 9};
 

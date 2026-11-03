@@ -1125,7 +1125,9 @@ inline int importMasters(ConfigManager& cfg, const fs::path& confDir,
     mapBool("ListenFriendAdd", "dice/listen_friend_add");
     mapBool("LeaveBlackQQ", "dice/leave_black_qq");
     mapBool("ReferMsgReply", "dice/quote_reply");
-    mapInt("InactiveUserLine", "dice/friend_clean_days", 0, 3650);
+    // Original Dice retention is local record cleanup, never delete_friend / leave_group.
+    mapInt("InactiveUserLine", "dice/user_record_days", 0, 3650);
+    mapInt("InactiveGroupLine", "dice/group_record_days", 0, 3650);
     mapInt("GroupClearLimit", "dice/group_clear_limit", 0, 10000);
     mapInt("GroupInvalidSize", "dice/max_group_size", 0, 1000000);
     if (auto allow = get("AllowStranger"); allow) {
@@ -2012,6 +2014,7 @@ inline int importChatConf(Database& db, const fs::path& userDir, int& groups,
             if (!chat.name.empty()) write("legacyGroupName", chat.name);
             if (chat.conf.count("停用指令")) write("enabled", on("停用指令") ? "0" : "1");
             if (chat.conf.count("忽略")) write("locked", on("忽略") ? "1" : "0");
+            if (chat.conf.count("免清")) write("cleanupExempt", on("免清") ? "1" : "0");
             if (chat.conf.count("禁用回复")) write("replyDisabled", on("禁用回复") ? "1" : "0");
             if (const auto it = chat.conf.find("rc房规"); it != chat.conf.end()) {
                 const auto rule = it->second.asInt();
@@ -2031,7 +2034,7 @@ inline int importChatConf(Database& db, const fs::path& userDir, int& groups,
                 std::string list; for (const auto& command : disabled) { if (!list.empty()) list += ','; list += command; }
                 write("disabledCmds", list);
             }
-            for (const auto* flag : {"免清", "免黑", "许可使用", "未审核", "协议无效"})
+            for (const auto* flag : {"免黑", "许可使用", "未审核", "协议无效"})
                 if (on(flag)) detail(group + "/" + flag, "旧许可/清理策略没有等价的安全映射；已保留兼容变量，需在新版确认");
             if (!chat.channels.empty()) {
                 if (luaMod) values.emplace_back(scope, "__legacyChannels", legacy_conf::encode(chat.channels));

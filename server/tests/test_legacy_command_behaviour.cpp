@@ -5,6 +5,7 @@
 #include "common/weighted_reply.h"
 #include "core/reply/poke_reply.h"
 #include "core/causal/causal_rule_manager.h"
+#include "common/secure_random.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -14,6 +15,20 @@
 #include <thread>
 
 using namespace dice;
+
+TEST(SecureRandom, UniformRejectionAndBothProviders) {
+    int calls = 0;
+    EXPECT_EQ(secure_random::below(6, [&]() -> uint64_t { return calls++ == 0 ? 0 : 7; }), 1u);
+    EXPECT_EQ(calls, 2);
+    for (auto source : {secure_random::Source::System, secure_random::Source::OpenSSL}) {
+        secure_random::setSource(source);
+        for (int i = 0; i < 200; ++i) {
+            const auto die = secure_random::die(100);
+            EXPECT_TRUE(die >= 1 && die <= 100);
+        }
+    }
+    secure_random::setSource(secure_random::Source::System);
+}
 
 namespace {
 
@@ -1116,6 +1131,41 @@ TEST(LegacyCommands, GrowthParsesCompactValuesAndWritesTheCorrectSign) {
     ASSERT_EQ(f.cards.getAttr(f.msg.senderId, f.msg.targetId, "侦查").value_or(-999), 1);
 }
 
+TEST(LegacyCommands, SlashDefaultPrefixPreservesExplicitCustomPrefixes) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    ASSERT_FALSE(f.run("/r1d1").empty());
+    ASSERT_EQ(f.run("/help /r"), f.run(".help .r"));
+    f.msg.platform = "qq_official";
+    ASSERT_FALSE(f.run("/r1d1").empty());
+    f.cfg.set<json>("dice/command_prefixes", json::array({"!"}));
+    ASSERT_TRUE(f.run("/r1d1").empty());
+    ASSERT_FALSE(f.run("!r1d1").empty());
+}
+
+TEST(SecureRandom, BothProvidersWorkThroughAllExpressionEnginesAndReload) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    f.cfg.set<std::string>("dice/expression_mode", "custom");
+    ASSERT_TRUE(f.cfg.save()); // Initialize the complete configuration before testing section-only updates.
+    for (const auto* source : {"openssl", "system"}) {
+        ASSERT_TRUE(f.cfg.setAndSave("dice/random_source", source));
+        ConfigManager persisted{u8str(f.dir.path / "config")};
+        ASSERT_TRUE(persisted.load());
+        ASSERT_EQ(persisted.get<std::string>("dice/random_source", ""), std::string(source));
+        f.cfg.emitConfigChanged();
+        ASSERT_TRUE(secure_random::source() == (std::string(source) == "openssl"
+            ? secure_random::Source::OpenSSL : secure_random::Source::System));
+        for (const auto* engine : {"dicenext", "onedice", "dicescript"}) {
+            f.cfg.set<json>("dice/expression_order", json::array({engine}));
+            const auto reply = f.run(".r 4d6");
+            ASSERT_FALSE(reply.empty());
+            ASSERT_TRUE(reply.find("错误") == std::string::npos);
+            ASSERT_TRUE(reply.find("4d6") != std::string::npos || reply.find("4D6") != std::string::npos);
+        }
+    }
+}
+
 TEST(QQCharacterStatus, UsesStoredValuesAndActualAttributeChanges) {
     LegacyFixture f;
     f.msg.platform = "qq_official";
@@ -1193,6 +1243,10 @@ TEST(LegacyCommands, OfficialQQPinsSnCardAboveLaterReplies) {
     ASSERT_FALSE(banner.empty());
     ASSERT_TRUE(set.find(banner) != std::string::npos);
     ASSERT_TRUE(banner.find("hp14") != std::string::npos);
+    f.run("/sn off");
+    ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
+    f.run("/sn");
+    ASSERT_EQ(f.router.officialSnBanner(f.msg), banner);
     f.cards.setAttr(f.msg.senderId, f.msg.targetId, "hp", 12);
     ASSERT_TRUE(f.router.officialSnBanner(f.msg).find("hp12") != std::string::npos);
     const auto longCard = f.run(".sn {nick}" + std::string(200, 'a'));
@@ -1397,4 +1451,67 @@ TEST(LegacyCommands, StatusBarReadsHpAndItsMaximumFromTheCard) {
     // 理智上限不依赖当前理智：没有克苏鲁神话时按 99 计算。当前值缺失则保持原样。
     ASSERT_EQ(f.router.resolveBarAttributes(f.msg, "[[bar:SAN|{san}|{sanmax}]]"),
         std::string("[[bar:SAN|{san}|99]]"));
+}
+
+TEST(LegacyCommands, SetcocHelpListsEveryRuleWithoutChangingSettingsOrRequiringAdmin) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    f.setting("cocRule", "3");
+    f.msg.extra["role"] = "member";
+    for (const auto* command : {".setcoc help", ".setcoc list", ".help setcoc", "/setcoc ?"}) {
+        const auto reply = f.run(command);
+        for (int rule = 0; rule <= 7; ++rule)
+            ASSERT_NE(reply.find(std::to_string(rule)), std::string::npos);
+        ASSERT_NE(reply.find("D<A/10"), std::string::npos);
+        ASSERT_EQ(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, "cocRule", f.msg.adapterId), "3");
+    }
+}
+
+TEST(AutoCleanup, LocalRetentionPreservesCardsRulesPermissionsAndOtherAccounts) {
+    LegacyFixture f;
+    auto* st = f.db.getStorage();
+    const std::string old = "2020-01-01T00:00:00.000Z";
+    PlayerProfileRow profile; profile.platform = f.msg.platform; profile.userId = f.msg.senderId;
+    profile.createdAt = old; profile.lastCmdAt = old; profile.lastSeenAt = old;
+    st->insert(profile);
+    auto trusted = profile; trusted.userId = "trusted"; trusted.trustLevel = 1; st->insert(trusted);
+    auto talking = profile; talking.userId = "talking"; talking.lastSeenAt = utils::nowIso8601(); st->insert(talking);
+    f.cards.setAttr(f.msg.senderId, f.msg.targetId, "HP", 10);
+    f.setting("lastCommandAt", old); f.setting("lastSeenAt", old); f.setting("cocRule", "4"); f.setting("enabled", "0");
+    f.router.setGroupSettingFor(f.msg.platform, f.msg.targetId, "lastSeenAt", utils::nowIso8601(), "other");
+    ScheduledTaskRow task; task.name = "existing"; task.enabled = 1; task.action = "leave"; task.targetId = "*";
+    st->insert(task);
+    const auto counts = f.router.cleanupLocalRecords(30, 30);
+    ASSERT_EQ(counts.first, 1); ASSERT_EQ(counts.second, 1);
+    ASSERT_EQ(st->count<PlayerProfileRow>(), 2);
+    ASSERT_EQ(f.cards.getAttr(f.msg.senderId, f.msg.targetId, "HP").value_or(0), 10);
+    ASSERT_EQ(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, "cocRule", f.msg.adapterId), "4");
+    ASSERT_EQ(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, "enabled", f.msg.adapterId), "0");
+    ASSERT_EQ(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, "__recordExpired", f.msg.adapterId), "1");
+    ASSERT_NE(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, "__recordExpired", "other"), "1");
+    ASSERT_EQ(st->get_all<ScheduledTaskRow>().front().enabled, 1);
+    ASSERT_EQ(st->get_all<ScheduledTaskRow>().front().name, "existing");
+    ASSERT_EQ(f.router.cleanupLocalRecords(30, 30).second, 0);
+    f.router.recordPlayerActivity(f.msg, false);
+    ASSERT_EQ(f.router.getGroupSettingFor(f.msg.platform, f.msg.targetId, "__recordExpired", f.msg.adapterId), "0");
+    ASSERT_EQ(f.router.cleanupLocalRecords(30, 30).second, 0);
+}
+
+TEST(AutoCleanup, MissingHistoryAndProtectedGroupsNeverQualifyForInactivity) {
+    LegacyFixture f;
+    const auto old = "2020-01-01T00:00:00.000Z";
+    f.router.setGroupSettingFor(f.msg.platform, f.msg.targetId, "lastCommandAt", old);
+    ASSERT_FALSE(f.router.groupCommandInactiveFor(f.msg.platform, f.msg.targetId, f.msg.adapterId, 30));
+    f.setting("lastCommandAt", old);
+    ASSERT_TRUE(f.router.groupCommandInactiveFor(f.msg.platform, f.msg.targetId, f.msg.adapterId, 30));
+    ASSERT_FALSE(f.router.groupCommandInactiveFor(f.msg.platform, f.msg.targetId, "other", 30));
+    for (const auto* key : {"cleanupExempt", "locked", "activeLog"}) {
+        f.setting(key, "1");
+        ASSERT_TRUE(f.router.groupCleanupExempt(f.msg.platform, f.msg.targetId, f.msg.adapterId));
+        ASSERT_EQ(f.router.cleanupLocalRecords(0, 30).second, 0);
+        f.setting(key, "");
+    }
+    f.setting("lastCommandAt", "broken");
+    ASSERT_FALSE(f.router.groupCommandInactiveFor(f.msg.platform, f.msg.targetId, f.msg.adapterId, 30));
+    ASSERT_EQ(f.router.cleanupLocalRecords(0, 30).second, 0);
 }

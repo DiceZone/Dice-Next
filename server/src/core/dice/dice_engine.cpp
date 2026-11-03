@@ -17,14 +17,6 @@ DiceEngine::DiceEngine(ConfigManager& configMgr)
     : configMgr_(configMgr)
     , expression_([this](int sides) { return this->rollOneDie(sides); }) {
 
-    // Seed the Mersenne Twister
-    std::random_device rd;
-    // Combine random_device with high-res clock for extra entropy
-    auto seed = rd() ^
-        static_cast<uint64_t>(
-            std::chrono::high_resolution_clock::now().time_since_epoch().count());
-    rng_.seed(static_cast<std::mt19937::result_type>(seed));
-
     // Load initial rules from config
     reloadRules();
 
@@ -254,6 +246,8 @@ void DiceEngine::setRules(const DiceRules& rules) {
 void DiceEngine::reloadRules() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     try {
+        secure_random::setSource(configMgr_.get<std::string>("dice/random_source", "system") == "openssl"
+            ? secure_random::Source::OpenSSL : secure_random::Source::System);
         json rulesJson = configMgr_.getAll();
         // Navigate to dice → rules
         if (rulesJson.contains("dice") && rulesJson["dice"].contains("rules")) {

@@ -89,6 +89,7 @@ void syncAccountGroupPresence(Storage& st, const std::string& adapterId,
         orm::c(&GroupAccountSettingRow::key) == std::string("enabled")));
     for (auto& r : accountRows) {
         if (livePublicGroups.count(r.groupId)) continue;
+        if (accountGroupSetting(st, adapterId, platform, r.groupId, "__recordExpired") == "1") continue;
         const std::string left = accountGroupSetting(st, adapterId, platform, r.groupId, "left");
         const std::string removed = accountGroupSetting(st, adapterId, platform, r.groupId, "__removed");
         const std::string leaving = accountGroupSetting(st, adapterId, platform, r.groupId, "leaving");

@@ -120,6 +120,12 @@ target_include_directories(dice-md4c PUBLIC
 )
 set_target_properties(dice-md4c PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
 
+# Shared operating-system/OpenSSL entropy for dice engines and the MCP roller.
+add_library(dice-secure-random STATIC src/common/secure_random.cpp)
+target_link_libraries(dice-secure-random PUBLIC OpenSSL::Crypto)
+if(WIN32)
+    target_link_libraries(dice-secure-random PUBLIC bcrypt)
+endif()
 # onedice-cpp-lib — sibling dice-string engine project
 set(ONEDICE_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../onedice-cpp-lib
@@ -234,6 +240,7 @@ target_compile_definitions(dice-next-server PRIVATE
 )
 
 target_link_libraries(dice-next-server PRIVATE
+    dice-secure-random
     Drogon::Drogon
     OpenSSL::Crypto
     OpenSSL::SSL

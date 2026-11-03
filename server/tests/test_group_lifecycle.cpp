@@ -216,3 +216,15 @@ TEST(GroupLifecycle, CleanupKeepsCharacterCardsAndGameTranscripts) {
     ASSERT_EQ(f.db.getCardStorage()->count<CharacterCardRow>(), 1);
     ASSERT_EQ(f.db.getLogStorage()->count<GameLogRow>(), 1);
 }
+
+TEST(GroupLifecycle, RetentionIsHiddenWithoutLeavingAndExplicitRestoreRevealsIt) {
+    LifecycleFixture f;
+    f.set("cocRule", "3");
+    f.set("__recordExpired", "1");
+    ASSERT_TRUE(f.list().empty());
+    ASSERT_NE(f.get("left"), "1");
+    ASSERT_EQ(f.get("cocRule"), "3");
+    group_management::restoreRecord(f.storage(), "a", "onebot_v11", "5001");
+    ASSERT_EQ(f.list().size(), size_t(1));
+    ASSERT_EQ(f.get("cocRule"), "3");
+}

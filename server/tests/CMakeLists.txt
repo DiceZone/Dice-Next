@@ -32,6 +32,7 @@ set(TEST_SOURCES
     test_help_catalog.cpp
     test_legacy_templates.cpp
     test_lua_event_bridge.cpp
+    test_auto_cleanup.cpp
     test_config_manager.cpp
     test_bot_info.cpp
     test_message_break.cpp
@@ -146,6 +147,7 @@ target_include_directories(dice-next-tests PRIVATE
 
 # Link against the same dependencies as the main server
 target_link_libraries(dice-next-tests PRIVATE
+    dice-secure-random
     OpenSSL::Crypto
     # qq_gateway_socket.h 是 header-only 的 TLS 客户端，直接用 libssl。测试一旦
     # 构造 QQOfficialAdapter，这些符号就会落进测试的目标文件里，和服务端一样需要
@@ -249,7 +251,7 @@ if(DICENEXT_MCP_NODE)
         ../src/core/dice/dice_expression.cpp
     )
     target_include_directories(dice-next-mcp-probe PRIVATE ../src)
-    target_link_libraries(dice-next-mcp-probe PRIVATE Drogon::Drogon OpenSSL::Crypto
+    target_link_libraries(dice-next-mcp-probe PRIVATE dice-secure-random Drogon::Drogon OpenSSL::Crypto
         nlohmann_json::nlohmann_json spdlog::spdlog unofficial::sqlite3::sqlite3)
     if(MSVC)
         target_compile_options(dice-next-mcp-probe PRIVATE /utf-8 /bigobj)

@@ -258,6 +258,7 @@ struct PlayerProfileRow {
     int favor = 0;            // 好感度 (DiceFavor)
     std::string lastCmdAt;    // 上次指令时间 (ISO 8601)
     std::string createdAt;    // 首次建档时间 (ISO 8601)
+    std::string lastSeenAt;   // 最近收到消息；本地记录保留期限不等同于指令活跃期限
 };
 
 /// Per-(platform, user) skill-check roll statistics (.hiy 骰点统计). One row per
@@ -625,7 +626,8 @@ private:
             orm::make_column("group_cmd_count", &PlayerProfileRow::groupCmdCount, orm::default_value(0)),
             orm::make_column("favor", &PlayerProfileRow::favor),
             orm::make_column("last_cmd_at", &PlayerProfileRow::lastCmdAt),
-            orm::make_column("created_at", &PlayerProfileRow::createdAt)
+            orm::make_column("created_at", &PlayerProfileRow::createdAt),
+            orm::make_column("last_seen_at", &PlayerProfileRow::lastSeenAt, orm::default_value(""))
         ),
         orm::make_table("roll_stats",
             orm::make_column("id", &RollStatRow::id,

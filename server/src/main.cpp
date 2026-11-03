@@ -437,7 +437,7 @@ static int realMain(int argc, char* argv[]) {
                 std::clamp(diceCfg[oldKey].get<int>(), lo, hi));
             changed = configMgr.erase(std::string("dice/") + oldKey) || changed;
         };
-        moveInt("inactive_user_line", "friend_clean_days", 0, 3650);
+        moveInt("inactive_user_line", "user_record_days", 0, 3650);
         moveInt("group_invalid_size", "max_group_size", 0, 100000);
         if (diceCfg.contains("allow_stranger") && diceCfg["allow_stranger"].is_number_integer()) {
             const int policy = diceCfg["allow_stranger"].get<int>();
@@ -1711,7 +1711,7 @@ static int realMain(int argc, char* argv[]) {
                 bool isLinkCmd = false;
                 if (st != std::string::npos) {
                     std::string t = body.substr(st);
-                    if (!t.empty() && (t[0] == '.' || t[0] == '!' || (unsigned char)t[0] >= 0xE0)) {   // 前缀 . ! 。 ！
+                    if (!t.empty() && (t[0] == '.' || t[0] == '!' || t[0] == '/' || (unsigned char)t[0] >= 0xE0)) {   // 前缀 . ! / 。 ！
                         size_t k = ((unsigned char)t[0] >= 0xE0) ? 3 : 1;   // CJK 前缀 3 字节
                         if (t.size() > k && t.compare(k, 4, "link") == 0) isLinkCmd = true;
                     }
@@ -4860,29 +4860,13 @@ static int realMain(int argc, char* argv[]) {
     // dice/friend_clean_days（0=关闭）。豁免：骰主/白名单(信任)用户/trustLevel>0。
     // 无玩家档案的好友跳过（无法判断，宁可不删）；lastCmdAt 为空回退 createdAt。
     {
-        auto parseIsoUtc = [](const std::string& s) -> int64_t {
-            std::tm tm{}; int y, mo, d, h, mi, se;
-#if defined(_WIN32)
-            if (sscanf_s(s.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6) return 0;
-#else
-            if (std::sscanf(s.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6) return 0;
-#endif
-            tm.tm_year = y - 1900; tm.tm_mon = mo - 1; tm.tm_mday = d;
-            tm.tm_hour = h; tm.tm_min = mi; tm.tm_sec = se;
-#if defined(_WIN32)
-            return static_cast<int64_t>(_mkgmtime(&tm));
-#else
-            return static_cast<int64_t>(timegm(&tm));
-#endif
-        };
-        auto friendCleanup = [&db, &configMgr, &adapterMgr, &cmdRouter, parseIsoUtc]() {
+        auto friendCleanup = [&db, &configMgr, &adapterMgr, &cmdRouter]() {
             int days = configMgr.get<int>("dice/friend_clean_days", 0);
             if (days <= 0) return;
             auto* st = db.getStorage(); if (!st) return;
-            int64_t cutoff = static_cast<int64_t>(std::time(nullptr)) - (int64_t)days * 86400;
             namespace orm = sqlite_orm;
             for (auto& a : adapterMgr.allAdapters()) {
-                if (!a->isConnected()) continue;
+                if (!a->isConnected() || !a->capabilities().value("friend_delete", false)) continue;
                 for (const auto& uid : a->getFriendList()) {
                     if (uid.empty() || uid == a->getLoginId()) continue;
                     if (cmdRouter.isMasterUser(a->platform(), uid)) continue;   // 骰主豁免
@@ -4895,8 +4879,7 @@ static int realMain(int argc, char* argv[]) {
                         const auto& p = rows.front();
                         if (p.trustLevel > 0) continue;                         // 有信任等级豁免
                         std::string lastIso = p.lastCmdAt.empty() ? p.createdAt : p.lastCmdAt;
-                        int64_t last = parseIsoUtc(lastIso);
-                        if (last <= 0 || last >= cutoff) continue;
+                        if (!dice::auto_cleanup::inactive(lastIso, days)) continue;
                         a->deleteFriend(uid);
                         DICE_LOG_INFO("自动清理好友：{}（{} 天无指令，最后 {}）", uid, days, lastIso);
                     } catch (...) {}
@@ -4910,15 +4893,18 @@ static int realMain(int argc, char* argv[]) {
             const nlohmann::json all = configMgr.getAll();
             int leftCount = 0;
             for (const auto& adapter : adapterMgr.allAdapters()) {
-                if (!adapter->isConnected()) continue;
+                if (!adapter->isConnected() || !adapter->supportsGroupLeave()) continue;
                 const nlohmann::json settings = dice::scoped_settings::resolveSection(
                     all, "dice", adapter->platform(), adapter->id());
                 const int limit = settings.value("group_clear_limit", 20);
                 const int maxSize = settings.value("max_group_size", 0);
+                const int inactiveDays = settings.value("group_clean_days", 0);
                 const bool leaveBlack = settings.value("leave_black_qq", false);
+                if (inactiveDays <= 0 && maxSize <= 0 && !leaveBlack) continue;
                 adapter->refreshGroupList();
                 for (const auto& [groupId, groupName] : adapter->getGroupList()) {
                     if (limit > 0 && leftCount >= limit) return;
+                    if (cmdRouter.groupCleanupExempt(adapter->platform(), groupId, adapter->id())) continue;
                     std::string reason;
                     const int members = adapter->getGroupMemberCount(groupId);
                     if (maxSize > 0 && members > maxSize) {
@@ -4941,6 +4927,9 @@ static int realMain(int argc, char* argv[]) {
                             }
                         } catch (...) {}
                     }
+                    if (reason.empty() && cmdRouter.groupCommandInactiveFor(
+                        adapter->platform(), groupId, adapter->id(), inactiveDays))
+                        reason = std::to_string(inactiveDays) + " 天未使用指令";
                     if (reason.empty()) continue;
                     if (!cmdRouter.requestGroupLeave(adapter, groupId, "定期群聊清理", "group_auto_clean", reason)) continue;
                     ++leftCount;
@@ -4951,6 +4940,15 @@ static int realMain(int argc, char* argv[]) {
         };
         app.getLoop()->runAfter(330.0, groupCleanup);
         app.getLoop()->runEvery(43200.0, groupCleanup);
+        auto recordCleanup = [&configMgr, &cmdRouter]() {
+            try {
+                const auto [users, groups] = cmdRouter.cleanupLocalRecords(
+                    configMgr.get<int>("dice/user_record_days", 0), configMgr.get<int>("dice/group_record_days", 0));
+                if (users || groups) DICE_LOG_INFO("本地记录清理：清理 {} 条用户档案、{} 条群列表资料；未删除好友或退出群聊", users, groups);
+            } catch (const std::exception& error) { DICE_LOG_ERROR("本地记录清理失败：{}", error.what()); }
+        };
+        app.getLoop()->runAfter(360.0, recordCleanup);
+        app.getLoop()->runEvery(43200.0, recordCleanup);
     }
 
     // ── 旧「不活跃自动退群」配置 → 定时任务迁移 ─────────────────

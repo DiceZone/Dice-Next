@@ -35,6 +35,7 @@ static json makeDefaultConfig() {
         }},
         {"dice", {
             {"command_prefix", "."},
+            {"random_source", "system"},
             {"self_name", ""},                   // strSelfName: 自我介绍场合的名称（空=用登录昵称）
             {"self_call", ""},                   // strSelfCall: 回执自称，{self} 的重定向目标（空=用 self_name）
             {"bot_msg", kDefaultBotMessage},     // .bot 三行固定信息之后的可编辑附加说明
@@ -45,6 +46,9 @@ static json makeDefaultConfig() {
             {"chat_retention_days", 7},
             {"chat_persist", false},             // 是否把群聊记录写入 chat.db（启用 AI 的群始终保存）
             {"friend_clean_days", 0},
+            {"group_clean_days", 0},
+            {"user_record_days", 0},
+            {"group_record_days", 0},
             {"group_clear_limit", 20},
             {"max_group_size", 0},
             {"blacklist_quit_level", "member"},  // 黑名单退群默认等级: member=任一成员触发 / admin=仅群主级触发
