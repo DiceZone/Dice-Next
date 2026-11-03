@@ -9,7 +9,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 #elif defined(__APPLE__)
-#include <unistd.h>
+#include <sys/random.h> // Darwin declares getentropy here, not in unistd.h.
 #else
 #include <sys/random.h>
 #endif
