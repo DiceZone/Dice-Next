@@ -60,6 +60,8 @@ struct Message {
     // Official QQ cannot set a group card. When the sender has an active .sn
     // card, this is the plain text placed above the outgoing reply.
     std::string snBanner;
+    std::string snBannerStyle = "small_red"; // Scoped setting captured before asynchronous sends/retries.
+    std::string snBannerTemplate = "> {sn}";
     std::vector<presentation::Action> presentationActions;
     bool forcePlainText = false; // Outbound conversation preference, captured before async work.
     bool textPreferenceCaptured = false;

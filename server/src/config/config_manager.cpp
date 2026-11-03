@@ -40,6 +40,8 @@ static json makeDefaultConfig() {
             {"self_call", ""},                   // strSelfCall: 回执自称，{self} 的重定向目标（空=用 self_name）
             {"bot_msg", kDefaultBotMessage},     // .bot 三行固定信息之后的可编辑附加说明
             {"message_format", "traditional"},   // 出站消息表现形式：traditional / standard / visual
+            {"qq_sn_banner", "small_red"},       // QQ 官方 .sn 顶部状态样式（含 off）
+            {"qq_sn_template", "> {sn}"},       // 自定义 Markdown，{sn_tex} 用于公式内的文字
             {"save_log_images", false},
             {"image_send", {{"mode", "base64"}, {"host", ""}}},
             {"image_host", {{"mode", "none"}}},

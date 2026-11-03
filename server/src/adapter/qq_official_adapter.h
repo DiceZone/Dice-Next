@@ -2016,7 +2016,7 @@ public:
         auto body = outbound::qqText(text, format, useMarkdown, m.type == MessageType::kChannel,
             m.platform == "qq_official" ? m.qqRichReply.get() : nullptr, m.presentationActions,
             m.platform == "qq_official" ? richStyle_ : "off", interactions_, nativeUser,
-            forceVerifyImageResource_, fallbackLevel, m.snBanner);
+            forceVerifyImageResource_, fallbackLevel, m.snBanner, m.snBannerStyle, m.snBannerTemplate);
         auto reference = qqprotocol::text(m.extra, "__qq_quote_reference");
         if (!reference.empty() && reference == m.id) reference = qqprotocol::text(m.extra, "message_reference_id");
         if (!reference.empty() && m.type != MessageType::kChannel) {
@@ -2080,7 +2080,8 @@ private:
             const bool rejectedFormat = response && (response->statusCode() == 400
                 || response->statusCode() == 403 || response->statusCode() == 422);
             if (useMarkdown && rejectedFormat) {
-                if (fallbackLevel == 0 && message.qqRichReply && self->richStyle_ != "off") {
+                if (fallbackLevel == 0 && ((message.qqRichReply && self->richStyle_ != "off")
+                    || qq_sn::styled(message.snBanner, message.snBannerStyle))) {
                     DICE_LOG_WARN_M("消息", "QQ 官方「{}」富文本请求被拒绝，移除公式与交互后重试。{}", self->name_, outgoing.suffix());
                     self->sendTextTo(message, text, format, 1); // Drop TeX/interaction first, preserve the card.
                     return;

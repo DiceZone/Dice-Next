@@ -13,6 +13,24 @@ QQ 官方适配器支持把 `.st` 查看／修改、`.pc show` 和 `.pc status` 
 
 配置文件使用 `qq_rich_replies`（`off` / `markdown` / `math`）和 `qq_interactions`（`off` / `links` / `buttons`），适配器 API 使用对应的 `qqRichReplies` / `qqInteractions`。
 
+## `.sn` 回复顶部状态行
+
+群内 `.sn` / `/sn` 启用玩家自己的状态行，`.sn off` 关闭。骰主可在
+**基础设置 → 回复与显示 → QQ 官方 SN 状态行**选择红色小字（默认）、引用、
+普通文字、自定义格式或关闭；支持全局、类型、账号覆盖，修改后立即生效。
+这与人物卡富回复样式独立，但同样遵守传统文字及会话纯文本设置。
+
+配置保存在 `dice/qq_sn_banner`（`small_red` / `quote` / `plain` / `custom` / `off`）
+和 `dice/qq_sn_template`（默认 `> {sn}`）。自定义格式最多 2048 UTF-8 字节，
+必须有 `{sn}` 或 `{sn_tex}`。前者插入转义后的 Markdown 文字；后者用于
+`\text{…}` 内，转义 TeX 特殊字符，单次替换不会再展开昵称中的占位符。
+默认红色小字发送 `$\scriptsize\textcolor{#E5484D}{\text{…}}$`，不发送 HTML 字体标签。
+
+公式或自定义格式被平台明确拒绝时，先降级为普通 Markdown 状态文字，再按原逻辑
+尝试纯文本。超时与 5xx 不重发。关闭顶部显示保留玩家模板，并在 `.sn` 回执中
+说明当前未展示。预览使用示例人物卡；本次仅验证序列化及浏览器预览，实际 QQ
+客户端呈现仍需实机确认（接口成功不能证明客户端支持所有公式宏）。
+
 ## 当前会话使用普通文字
 
 - `.bot text`：以普通文字显示当前会话状态和用法，不修改设置。

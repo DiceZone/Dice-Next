@@ -16,6 +16,7 @@
 
 #include "../adapter/adapter_interface.h"
 #include "../common/qq_rich_reply.h"
+#include "../common/qq_sn_banner.h"
 #include "../common/sample_template.h"
 #include "../common/check_reply.h"
 #include "../common/check_rules.h"
@@ -266,11 +267,23 @@ public:
     std::shared_ptr<const qq_rich::Card> lastOfficialCard() const { return officialCard_; }
     /// Official QQ has no group-card API. After .sn, later replies carry that
     /// card as their first line. Other platforms return empty and keep setGroupCard.
+    std::string officialSnBannerStyle(const Message& msg) const {
+        const auto settings = diceSettingsFor(msg);
+        const auto it = settings.find("qq_sn_banner");
+        return it != settings.end() && it->is_string() ? qq_sn::style(it->get<std::string>()) : "small_red";
+    }
     std::string officialSnBanner(const Message& msg) {
         if (msg.platform != "qq_official" || msg.type == MessageType::kChannel) return {};
+        if (officialSnBannerStyle(msg) == "off") return {};
         if (getUserSetting(msg, "snPinned") != "1" && !snAutoOn(msg) && getUserSetting(msg, "snTemplate").empty())
             return {};
         return compactSnCard(renderCurrentSn(msg));
+    }
+    std::string officialSnBannerTemplate(const Message& msg) const {
+        const auto settings = diceSettingsFor(msg);
+        const auto it = settings.find("qq_sn_template");
+        return it != settings.end() && it->is_string() && qq_sn::validTemplate(it->get<std::string>())
+            ? it->get<std::string>() : "> {sn}";
     }
 
     /// Process an incoming message and return the response (or empty string if no match).
@@ -9533,7 +9546,8 @@ private:
             rememberOfficialSn(msg);
             applySnCard(msg);   // 立即同步一次；官方 QQ 改为回复顶部展示
             const std::string card = renderCurrentSn(msg);
-            return i18n_.tr(loc, msg.platform == "qq_official" ? "sn.auto_on_official" : "sn.auto_on",
+            return i18n_.tr(loc, msg.platform == "qq_official"
+                ? (officialSnBannerStyle(msg) == "off" ? "sn.saved_official_hidden" : "sn.auto_on_official") : "sn.auto_on",
                 {{"card", card}});
         }
         std::string card;
@@ -9548,7 +9562,8 @@ private:
         rememberOfficialSn(msg);
         if (msg.platform != "qq_official")
             if (auto ad = adapters_.getAdapter(msg.adapterId)) ad->setGroupCard(msg.targetId, msg.senderId, card);
-        return i18n_.tr(loc, msg.platform == "qq_official" ? "sn.done_official" : "sn.done", {{"card", card}});
+        return i18n_.tr(loc, msg.platform == "qq_official"
+            ? (officialSnBannerStyle(msg) == "off" ? "sn.saved_official_hidden" : "sn.done_official") : "sn.done", {{"card", card}});
     }
 
     // ─── .welcome 入群欢迎词（骰主设置，存 group_settings）────

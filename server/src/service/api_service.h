@@ -3040,6 +3040,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             {"allow_official_direct_bind", false},
             {"api_enabled", false}, {"api_timeout", 5},
             {"message_format", "traditional"},
+            {"qq_sn_banner", "small_red"},
+            {"qq_sn_template", "> {sn}"},
             {"bot_msg", kDefaultBotMessage}, {"bot_header", ""},
             {"save_log_images", false},
             {"image_send", J{{"mode", "base64"}, {"host", ""}}},
@@ -3063,6 +3065,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             return std::tuple<std::string,std::string,std::string>{scope,target,platform};
         };
         auto validateValue = [](const std::string& key, const J& value) -> bool {
+            if (key == "qq_sn_banner")
+                return value.is_string() && qq_sn::validStyle(value.get<std::string>());
+            if (key == "qq_sn_template")
+                return value.is_string() && qq_sn::validTemplate(value.get<std::string>());
             if (key == "message_format")
                 return value.is_string() && (value == "traditional" || value == "standard"
                     || value == "visual" || value == "card");

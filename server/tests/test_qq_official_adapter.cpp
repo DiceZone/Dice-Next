@@ -322,6 +322,33 @@ TEST(QQRichReply, OversizePresentationFallsBackWithoutTruncation) {
     ASSERT_EQ(body["content"].get<std::string>(), card->original);
 }
 
+TEST(QQRichReply, SnBannerWorksWithoutRichCardsAndDowngradesWithoutFormulaLeakage) {
+    CardModeScope mode;
+    QQOfficialAdapter adapter("test");
+    ASSERT_TRUE(adapter.configure({{"appId", "test"}, {"appSecret", "test"}, {"qqRichReplies", "off"}}));
+    Message msg;
+    msg.platform = "qq_official";
+    msg.snBanner = "希亚 SAN50 HP0/0 DEX0";
+    auto body = adapter.textPayload(msg, "D100=50", ContentFormat::kPlainText);
+    ASSERT_EQ(body["markdown"]["content"].get<std::string>(),
+        "$\\scriptsize\\textcolor{#E5484D}{\\text{希亚 SAN50 HP0/0 DEX0}}$\n\nD100=50");
+    for (const auto* style : {"small_red", "quote", "plain", "custom"}) {
+        msg.snBannerStyle = style;
+        msg.snBannerTemplate = "**{sn}**";
+        body = adapter.textPayload(msg, "D100=50", ContentFormat::kPlainText, 1);
+        ASSERT_EQ(body["markdown"]["content"].get<std::string>(), msg.snBanner + "\n\nD100=50");
+        body = adapter.textPayload(msg, "**D100=50**", ContentFormat::kMarkdown, 2);
+        ASSERT_EQ(body["content"].get<std::string>(), msg.snBanner + "\nD100=50");
+    }
+    msg.forcePlainText = true;
+    msg.textPreferenceCaptured = true;
+    body = adapter.textPayload(msg, "D100=50", ContentFormat::kPlainText);
+    ASSERT_FALSE(body.contains("markdown"));
+    ASSERT_EQ(body["content"].get<std::string>(), msg.snBanner + "\nD100=50");
+    msg.snBannerStyle = "off";
+    ASSERT_EQ(adapter.textPayload(msg, "x", ContentFormat::kPlainText)["content"].get<std::string>(), "x");
+}
+
 TEST(QQRichReply, CompactCardKeepsTrueValuesAndBoundedNumericMath) {
     auto card = *statusReply().qqRichReply;
     card.body = "";

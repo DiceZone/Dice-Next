@@ -21,13 +21,13 @@ TEST(outbound, official_qq_name_card_prefixes_markdown_plain_and_rich_cards) {
     const auto markdown = outbound::qqText("D100=50", ContentFormat::kPlainText, true, false,
         nullptr, {}, "off", "off", "", false, 0, "茶叶 HP10/10");
     EXPECT_EQ(markdown["markdown"]["content"].get<std::string>(),
-        "<font color=\"#FF0000\" size=\"1\">茶叶 HP10/10</font>\nD100=50");
+        "$\\scriptsize\\textcolor{#E5484D}{\\text{茶叶 HP10/10}}$\n\nD100=50");
     const auto plain = outbound::qqText("D100=50", ContentFormat::kPlainText, false, false,
         nullptr, {}, "off", "off", "", false, 0, "茶叶 HP10/10");
     EXPECT_EQ(plain["content"].get<std::string>(), "茶叶 HP10/10\nD100=50");
     const auto escaped = outbound::qqText("x", ContentFormat::kPlainText, true, false,
         nullptr, {}, "off", "off", "", false, 0, "A<B>&C");
-    EXPECT_TRUE(escaped["markdown"]["content"].get<std::string>().find("A&lt;B&gt;&amp;C") != std::string::npos);
+    EXPECT_TRUE(escaped["markdown"]["content"].get<std::string>().find("A\\textless{}B\\textgreater{}\\&C") != std::string::npos);
     qq_rich::Card card;
     card.original = "hello";
     card.title = "状态";
@@ -35,7 +35,49 @@ TEST(outbound, official_qq_name_card_prefixes_markdown_plain_and_rich_cards) {
     const auto rich = outbound::qqText("hello", ContentFormat::kPlainText, true, false,
         &card, {}, "markdown", "off", "", false, 0, "茶叶");
     EXPECT_EQ(rich["markdown"]["content"].get<std::string>().rfind(
-        "<font color=\"#FF0000\" size=\"1\">茶叶</font>\n", 0), size_t(0));
+        "$\\scriptsize\\textcolor{#E5484D}{\\text{茶叶}}$\n\n", 0), size_t(0));
+}
+
+TEST(outbound, official_sn_presets_custom_templates_and_literal_fallback) {
+    const std::string card = "希亚 SAN50 HP0/0 DEX0";
+    EXPECT_EQ(qq_sn::prefix(card, true, "quote"), "> " + card + "\n\n");
+    EXPECT_EQ(qq_sn::prefix(card, true, "plain"), card + "\n\n");
+    EXPECT_EQ(qq_sn::prefix(card, true, "custom", 0, "**{sn}**"), "**" + card + "**\n\n");
+    EXPECT_EQ(qq_sn::prefix(card, true, "custom", 0, "$\\text{{sn_tex}}$"), "$\\text{" + card + "}$\n\n");
+    EXPECT_EQ(qq_sn::renderTemplate("{sn}", "{sn_tex}"), "{sn\\_tex}");
+    for (const auto* mode : {"small_red", "quote", "plain", "custom"}) {
+        EXPECT_EQ(qq_sn::prefix(card, false, mode), card + "\n");
+        EXPECT_EQ(qq_sn::prefix(card, true, mode, 1, "**{sn}**"), card + "\n\n");
+    }
+    EXPECT_TRUE(qq_sn::prefix(card, true, "off").empty());
+    EXPECT_TRUE(qq_sn::prefix(card, false, "off").empty());
+    EXPECT_FALSE(qq_sn::validStyle("<font>"));
+    EXPECT_FALSE(qq_sn::validTemplate("missing placeholder"));
+    EXPECT_FALSE(qq_sn::validTemplate(std::string(2045, 'x') + "{sn}"));
+    EXPECT_TRUE(qq_sn::validTemplate(std::string(2044, 'x') + "{sn}"));
+    EXPECT_EQ(qq_sn::renderTemplate("bad persisted config", card), card);
+    std::string repeated;
+    for (int i = 0; i < 100; ++i) repeated += "{sn}";
+    const std::string longName(120, 'a');
+    EXPECT_EQ(qq_sn::renderTemplate(repeated, longName), longName);
+    const auto richFallback = outbound::qqText("**成功**", ContentFormat::kMarkdown, true, false,
+        nullptr, {}, "off", "off", "", false, 1, card, "custom", "$\\text{{sn_tex}}$");
+    EXPECT_EQ(richFallback["markdown"]["content"].get<std::string>(), card + "\n\n**成功**");
+}
+
+TEST(outbound, official_sn_tex_keeps_names_literal_and_cannot_inject_markup) {
+    const std::string name = "希亚😀 }$\\href{evil}{x}%#&_~^<qqbot-cmd>[CQ:image,file=x]`\n\t";
+    const auto encoded = qq_sn::texText(name);
+    EXPECT_TRUE(encoded.find("希亚😀") != std::string::npos);
+    EXPECT_TRUE(encoded.find("$\\href") == std::string::npos);
+    EXPECT_TRUE(encoded.find("\\href") == std::string::npos);
+    EXPECT_TRUE(encoded.find("<qqbot") == std::string::npos);
+    EXPECT_TRUE(encoded.find("[CQ:") == std::string::npos);
+    EXPECT_TRUE(encoded.find("\n") == std::string::npos);
+    EXPECT_TRUE(encoded.find("\\textdollar{}\\textbackslash{}href\\textbraceleft{}") != std::string::npos);
+    EXPECT_TRUE(encoded.find("\\%\\#\\&\\_\\textasciitilde{}\\textasciicircum{}") != std::string::npos);
+    EXPECT_EQ(qq_sn::prefix(name, false), name + "\n");
+    EXPECT_EQ(qq_sn::prefix("**名字**", true, "plain"), "\\*\\*名字\\*\\*\n\n");
 }
 
 TEST(outbound, kook_card_and_downgrade_use_production_serializer) {

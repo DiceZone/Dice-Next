@@ -3,6 +3,23 @@
 Historical baseline date: 2026-09-03. Later entries below record their own scope;
 targeted checks must not be presented as a fresh full-suite or live-platform run.
 
+## 2026-11-03: Official QQ SN presentation settings (local)
+
+- Replaced the unsupported HTML font wrapper with small red TeX text; added
+  quote, plain, custom Markdown and hidden presets. Escaped names cannot insert
+  TeX commands, QQ tags or CQ images. Custom `{sn}` / `{sn_tex}` expansion is single-pass.
+- Scoped style/template persistence and precedence, reset inheritance, retained
+  player opt-in, updated attributes, disabled-owner receipts, explicit plain
+  conversation preference, rich cards and both fallback payloads are covered.
+- Release build passed; CTest 4/4 passed: 1082 core cases (67991 assertions),
+  67 Lua cases (616 assertions), MCP HTTP and MCP SDK interop. No live bot was started.
+- WebUI build, 380 legacy tests (5 pre-existing skips), 35 unit tests and three
+  targeted browser cases (desktop, mobile and dark) passed. Browser checks cover
+  all four presets, custom formula preview, validation, saves, reload and reset.
+- Documentation builds and four-language catalog checks passed (976 texts).
+  QQ client-side rendering and live network fallback still require bot credentials;
+  these results verify the actual payload serializer, not platform acceptance.
+
 ## 2026-10-22: Bare `.st show` card-data lifetime fix (local)
 
 - The no-argument branch iterated `getValuesByName(...).items()` directly.

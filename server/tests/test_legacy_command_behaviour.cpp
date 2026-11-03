@@ -1261,6 +1261,41 @@ TEST(LegacyCommands, OfficialQQPinsSnCardAboveLaterReplies) {
     ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
 }
 
+TEST(LegacyCommands, OfficialSnRespectsScopedSettingsAndRetainsPlayerOptIn) {
+    LegacyFixture f;
+    f.msg.platform = "qq_official";
+    ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
+    ASSERT_EQ(f.router.officialSnBannerStyle(f.msg), "small_red");
+    f.run(".sn");
+    const auto card = f.router.officialSnBanner(f.msg);
+    ASSERT_FALSE(card.empty());
+    f.cfg.set<std::string>("dice/qq_sn_banner", "off");
+    ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
+    ASSERT_EQ(f.run(".sn"), "sn.saved_official_hidden");
+    ASSERT_EQ(f.run(".sn auto"), "sn.saved_official_hidden");
+    scoped_settings::setSection(f.cfg, "adapter", "qq_official", "dice", {{"qq_sn_banner", "quote"}});
+    ASSERT_EQ(f.router.officialSnBannerStyle(f.msg), "quote");
+    ASSERT_EQ(f.router.officialSnBanner(f.msg), card);
+    scoped_settings::setSection(f.cfg, "account", f.msg.adapterId, "dice",
+        {{"qq_sn_banner", "custom"}, {"qq_sn_template", "**{sn}**"}});
+    ASSERT_EQ(f.router.officialSnBannerStyle(f.msg), "custom");
+    ASSERT_EQ(f.router.officialSnBannerTemplate(f.msg), "**{sn}**");
+    ASSERT_TRUE(f.cfg.save());
+    ASSERT_TRUE(f.cfg.load());
+    ASSERT_EQ(f.router.officialSnBannerTemplate(f.msg), "**{sn}**");
+    scoped_settings::setSection(f.cfg, "account", f.msg.adapterId, "dice", json::object(),
+        json::array({"qq_sn_banner", "qq_sn_template"}));
+    ASSERT_EQ(f.router.officialSnBannerStyle(f.msg), "quote");
+    ASSERT_EQ(f.router.officialSnBannerTemplate(f.msg), "> {sn}");
+    f.msg.type = MessageType::kChannel;
+    ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
+    f.msg.type = MessageType::kGroup;
+    f.run(".sn off");
+    ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
+    f.cfg.set<std::string>("dice/qq_sn_banner", "plain");
+    ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
+}
+
 TEST(LegacyCommands, InvalidGrowthNeverWritesTheCard) {
     LegacyFixture f;
     f.cards.setAttr(f.msg.senderId, f.msg.targetId, "侦查", 60);

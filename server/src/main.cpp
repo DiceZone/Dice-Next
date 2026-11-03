@@ -1859,6 +1859,10 @@ static int realMain(int argc, char* argv[]) {
                 // the previous .log off). Override the quoted id on a copy of msg.
                 dice::Message replyMsg = msg;
                 replyMsg.snBanner = snBanner;
+                if (!snBanner.empty()) {
+                    replyMsg.snBannerStyle = cmdRouter.officialSnBannerStyle(msg);
+                    replyMsg.snBannerTemplate = cmdRouter.officialSnBannerTemplate(msg);
+                }
                 replyMsg.forcePlainText = forcePlainText;
                 replyMsg.textPreferenceCaptured = true;
                 if (!forcePlainText) replyMsg.presentationActions = replyActions;
@@ -2815,6 +2819,10 @@ static int realMain(int argc, char* argv[]) {
             if (expanded.usedMarkdown) format = dice::ContentFormat::kMarkdown;
             pm.presentationActions = std::move(expanded.actions);
             pm.snBanner = cmdRouter.officialSnBanner(pm);
+            if (!pm.snBanner.empty()) {
+                pm.snBannerStyle = cmdRouter.officialSnBannerStyle(pm);
+                pm.snBannerTemplate = cmdRouter.officialSnBannerTemplate(pm);
+            }
             a->sendReplyFormatted(pm, reply, format);
             DICE_LOG_INFO_M("群管理", "事件： poked by {} in group {}", e.operatorId, e.groupId);
         } else if (e.type == ET::kFriendAdd) {
