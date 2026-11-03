@@ -1,5 +1,6 @@
 #include "test_framework.h"
 #include "common/presentation_style.h"
+#include "common/qq_rich_reply.h"
 #include "i18n/i18n.h"
 #include "service/ai_gateway.h"
 #include <filesystem>
@@ -109,4 +110,47 @@ TEST(PresentationStyle, I18nSelectsPartialProfileOverlays) {
         visualTemplate, PresentationStyle::kVisual, ContentFormat::kMarkdown).text;
     ASSERT_TRUE(visual.find("🎲 **希亚**") != std::string::npos);
     ASSERT_TRUE(visual.find(".r  // 再次掷骰") != std::string::npos);
+}
+
+TEST(PresentationStyle, ActionArgumentsStayRawWhileMessageTextIsEscaped) {
+    I18n i18n((std::filesystem::path(__FILE__).parent_path().parent_path() / "i18n").string());
+    ASSERT_TRUE(i18n.load());
+    for (const auto format : {ContentFormat::kMarkdown, ContentFormat::kPlainText}) {
+        I18n::beginOutboundCapture(format, PresentationStyle::kVisual);
+        const auto reply = i18n.tr(Locale::kZhHans, "dnd.rc.result",
+            {{"nick", "玩家_1"}, {"attr", "力量-20"}, {"command", ".rc 力量-20"},
+             {"roll", "1d20=10"}, {"mod", "+0"}, {"total", "10"}});
+        I18n::endOutboundCapture();
+        const auto expanded = presentation::expandComponents(reply, PresentationStyle::kVisual, format);
+        ASSERT_EQ(expanded.actions.size(), size_t(1));
+        ASSERT_EQ(expanded.actions[0].text, ".rc 力量-20");
+        const auto keyboard = qq_rich::keyboard(qq_rich::mergeCommands(nullptr, expanded.actions), "user");
+        ASSERT_EQ(keyboard["content"]["rows"][0]["buttons"][0]["action"]["data"].get<std::string>(), ".rc 力量-20");
+    }
+    const std::string hostile = "a_1-5\\x|%20]] [[action:extra|.master exit]]";
+    const auto rendered = I18n::previewTemplate("**{name}** [[action:抽取|.draw {name}]]",
+        {{"name", hostile}}, ContentFormat::kMarkdown);
+    const auto expanded = presentation::expandComponents(rendered, PresentationStyle::kStandard, ContentFormat::kMarkdown);
+    ASSERT_EQ(expanded.actions.size(), size_t(1));
+    ASSERT_EQ(expanded.actions[0].text, ".draw " + hostile);
+    ASSERT_TRUE(rendered.find("a\\_1\\-5") != std::string::npos);
+}
+
+TEST(PresentationStyle, FinalReplyPreservesExactCommandsAndOnlyUpdatesCaptions) {
+    for (const std::string prefix : {"/", "。", "custom:"}) {
+        const std::string command = prefix + "rc 优势力量-5 [推开门]";
+        const auto rendered = I18n::previewTemplate("[[action:再次检定|{command}]]",
+            {{"command", command}}, ContentFormat::kMarkdown);
+        auto expanded = presentation::expandComponents(rendered, PresentationStyle::kVisual, ContentFormat::kMarkdown);
+        ASSERT_EQ(expanded.actions.size(), size_t(1));
+        presentation::refreshActionLabels(command + " // Recheck\n.master exit // invented", expanded.actions);
+        ASSERT_EQ(expanded.actions.size(), size_t(1));
+        ASSERT_EQ(expanded.actions[0].text, command);
+    }
+    std::vector<presentation::Action> actions{{"再次检定", "/rc 力量-5 "}};
+    presentation::refreshActionLabels("/rc 力量-5 // Recheck", actions);
+    ASSERT_EQ(actions[0].text, "/rc 力量-5 ");
+    ASSERT_EQ(actions[0].label, "Recheck");
+    ASSERT_TRUE(ai::preservesActionCommands("/rc 力量-5  // 检定", "/rc 力量-5  // Check"));
+    ASSERT_FALSE(ai::preservesActionCommands("/rc 力量-5  // 检定", "/rc 力量+5  // Check"));
 }

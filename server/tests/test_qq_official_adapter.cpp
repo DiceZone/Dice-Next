@@ -288,7 +288,25 @@ TEST(QQRichReply, UsageKeyboardFitsTenSafeShortLabels) {
     ASSERT_EQ(keys["content"]["rows"].size(), static_cast<size_t>(5));
     ASSERT_EQ(keys["content"]["rows"][4]["buttons"].size(), static_cast<size_t>(2));
     ASSERT_EQ(keys["content"]["rows"][0]["buttons"][0]["render_data"]["label"].get<std::string>(),
-              std::string("这是一个很长的操作按"));
+              std::string("这是一个很长的操作…"));
+}
+
+TEST(QQRichReply, ButtonCaptionsOmitExamplesWithoutTruncatingCommands) {
+    const std::vector<qq_rich::Command> commands = {
+        {"设置默认骰，如 .set 20", ".set "},
+        {"恢复默认骰（100 面）", ".set"},
+        {"Check again, e.g. .rc STR-20", ".rc STR-20"}
+    };
+    const auto keys = qq_rich::keyboard(commands, "real-openid");
+    const auto& button = keys["content"]["rows"][0]["buttons"][0];
+    ASSERT_EQ(button["render_data"]["label"].get<std::string>(), "设置默认骰");
+    ASSERT_EQ(button["render_data"]["visited_label"].get<std::string>(), "设置默认骰");
+    ASSERT_EQ(button["action"]["data"].get<std::string>(), ".set ");
+    ASSERT_EQ(qq_rich::shortLabel(commands[1].label), "恢复默认骰");
+    ASSERT_EQ(qq_rich::shortLabel(commands[2].label), "Check…");
+    ASSERT_EQ(qq_rich::shortLabel("1234567890"), "1234567890");
+    ASSERT_EQ(qq_rich::shortLabel("12345678901"), "123456789…");
+    ASSERT_TRUE(qq_rich::commandLinks(commands).find("show=\"" + qq_rich::urlEncode("设置默认骰") + "\"") != std::string::npos);
 }
 
 TEST(QQRichReply, DynamicTextCannotInjectActionsImagesOrMath) {

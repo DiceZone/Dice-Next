@@ -118,7 +118,8 @@ inline std::vector<std::string> extractActionCommands(const std::string& text) {
             std::string command = line.substr(0, label);
             const size_t begin = command.find_first_not_of(" \t");
             const size_t last = command.find_last_not_of(" \t");
-            if (begin != std::string::npos && command[begin] == '.')
+            if (begin != std::string::npos && (command[begin] == '.' || command[begin] == '!'
+                || command[begin] == '/' || command.compare(begin, std::string("。").size(), "。") == 0))
                 commands.push_back(command.substr(begin, last - begin + 1));
         }
         if (end == std::string::npos) break;

@@ -1781,20 +1781,10 @@ static int realMain(int argc, char* argv[]) {
                     reply = dice::aitrans::translate(configMgr, tgt, reply, replyFormat);
             }
             // AI may translate the human-facing action labels. Visual replies
-            // retain the command hint syntax, so rebuild their actions from the
-            // final text while preserving every command verbatim.
+            // retain the command hint syntax. Update labels only: rediscovering
+            // commands would discard custom prefixes or parse arguments as help.
             if (!reply.empty() && replyStyle == dice::PresentationStyle::kVisual) {
-                const auto templateActions = replyActions;
-                replyActions.clear();
-                dice::presentation::discoverUsageActions(reply, replyActions);
-                for (auto& action : replyActions) {
-                    const auto it = std::find_if(templateActions.begin(), templateActions.end(),
-                        [&](const auto& original) {
-                            return dice::presentation::trim(original.text)
-                                == dice::presentation::trim(action.text);
-                        });
-                    if (it != templateActions.end()) action.text = it->text;
-                }
+                dice::presentation::refreshActionLabels(reply, replyActions);
             }
             if (reply.empty() && broadcast.empty()) return;
             // 官方 QQ 不能改群名片。.sn 的内容改放到回复第一行；日志与转发看到的是同一段文字。

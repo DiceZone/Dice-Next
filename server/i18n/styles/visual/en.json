@@ -7,8 +7,8 @@
       "multi_reason": "🎲 **{nick}** · {reason} · {turn} rolls\n{res}\n[[action:Roll again|.r]]"
     },
     "check": {
-      "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**\n[[action:Check again|.ra {attr} {rate}]]",
-      "result_reason": "🎯 **{nick}** · {attr} · {reason}\n`{roll}/{rate}`　**{level}**\n[[action:Check again|.ra {attr} {rate}]]"
+      "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**\n[[action:Recheck|{command}]]",
+      "result_reason": "🎯 **{nick}** · {attr} · {reason}\n`{roll}/{rate}`　**{level}**\n[[action:Recheck|{command}]]"
     },
     "brp": {
       "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**",
@@ -16,8 +16,8 @@
     },
     "pool": { "result": "🎲 **{nick}** · dice pool\n`{expr}`" },
     "rav": { "result": "⚔️ **{nick}** · opposed check\n> **{la}**　`1D100={ra}/{va}`　{lva}\n> **{lb}**　`1D100={rb}/{vb}`　{lvb}\n🏁 **{outcome}**" },
-    "sc": { "result": "🧠 **Sanity check**\n{output}\n[[action:Check sanity again|.sc]]" },
-    "st": { "result": "📋 **Skill check**\n{output}\n[[action:Edit card attributes|.st ]]" },
+    "sc": { "result": "🧠 **Sanity check**\n{output}\n[[action:SAN check|.sc]]" },
+    "st": { "result": "📋 **Skill check**\n{output}\n[[action:Edit card|.st ]]" },
     "coc": { "build": "🕵️ **{nick}** · investigator\n{res}" },
     "dnd": { "build": "🛡️ **{nick}** · ability scores (descending)\n{res}" },
     "rx": {
@@ -26,29 +26,29 @@
     }
   },
   "card": {
-    "st": { "done": "📋 **{nick}**'s character card was updated\n{detail}\n[[action:View card status|.pc status]]" },
-    "show": "📋 **{nick}**'s character card\n{detail}\n[[action:View full card|.pc show]]",
+    "st": { "done": "📋 **{nick}**'s character card was updated\n{detail}\n[[action:Status|.pc status]]" },
+    "show": "📋 **{nick}**'s character card\n{detail}\n[[action:View card|.pc show]]",
     "show_one": "📋 **{nick}** · {attr}\n`{val}`",
     "sc": {
-      "result": "🧠 **{nick}** · Sanity check\n`1D100={res}/{san}`　**{grade}**\nSAN `{san} → {final}`　loss **{loss}**\n[[action:Check sanity again|.sc]]",
-      "result_noloss": "🧠 **{nick}** · Sanity check\n`1D100={res}/{san}`　**{grade}**\nNo Sanity loss\n[[action:Check sanity again|.sc]]"
+      "result": "🧠 **{nick}** · Sanity check\n`1D100={res}/{san}`　**{grade}**\nSAN `{san} → {final}`　loss **{loss}**\n[[action:SAN check|.sc]]",
+      "result_noloss": "🧠 **{nick}** · Sanity check\n`1D100={res}/{san}`　**{grade}**\nNo Sanity loss\n[[action:SAN check|.sc]]"
     }
   },
   "pc": {
-    "list": "📚 **{nick}** · {count} character cards\n{list}\n[[action:View current card|.pc show]]",
-    "show": "📋 **{owner}**'s character card · {name}\n{detail}\n[[action:View status panel|.pc status]]",
-    "build_done": "🧩 **{nick}**'s character card was generated\n{detail}\n[[action:View full card|.pc show]]",
-    "redo_done": "🔄 **{nick}**'s character card was regenerated\n{detail}\n[[action:View full card|.pc show]]"
+    "list": "📚 **{nick}** · {count} character cards\n{list}\n[[action:View card|.pc show]]",
+    "show": "📋 **{owner}**'s character card · {name}\n{detail}\n[[action:Status|.pc status]]",
+    "build_done": "🧩 **{nick}**'s character card was generated\n{detail}\n[[action:View card|.pc show]]",
+    "redo_done": "🔄 **{nick}**'s character card was regenerated\n{detail}\n[[action:View card|.pc show]]"
   },
   "deck": {
     "result": "🃏 **{nick}** drew from “{name}”\n> {res}\n[[action:Draw again|.draw {name}]]",
     "list": "🗂️ **Available decks · {count}**\n{list}",
-    "default_show": "🃏 Group default deck: **{name}**\n[[action:Draw from default deck|.draw]]"
+    "default_show": "🃏 Group default deck: **{name}**\n[[action:Draw|.draw]]"
   },
   "log": {
     "stat": "📊 **“{name}” log statistics**\n**{count}** messages · **{players}** participants\nPeriod `{from} ~ {to}`\nMost active: {tops}",
-    "status": "📝 **Recording #{id} · {name}**\n**{count}** entries\n[[action:Pause logging|.log off]]",
-    "paused_status": "⏸️ **An unfinished log is paused**\n#{id} · {name} · last entry {date}\n[[action:Resume logging|.log on {name}]]",
+    "status": "📝 **Recording #{id} · {name}**\n**{count}** entries\n[[action:Pause log|.log off]]",
+    "paused_status": "⏸️ **An unfinished log is paused**\n#{id} · {name} · last entry {date}\n[[action:Resume log|.log on {name}]]",
     "list": "📚 **Group logs · {total} total**\nShowing {from}-{to}\n{list}{more}",
     "type_show": "📄 Group-file export format: **{type}**\n[[action:Use HTML|.log type html]]",
     "timer": {
@@ -67,17 +67,17 @@
   "rule": { "result": "📖 **{book} · {item}**\n{desc}" },
   "fun": { "name": { "result": "🎭 **{nick}** · random name\n> {res}" } },
   "dnd": {
-    "rc": { "result": "🎯 **{nick}** · {attr}\n`{roll} {mod} = {total}`\n[[action:Check again|.rc {attr}]]" },
-    "rdc": { "result": "🎯 **{nick}** · {attr}{reason}\n{detail}\n[[action:Check again|.rdc {attr}]]" },
+    "rc": { "result": "🎯 **{nick}** · {attr}\n`{roll} {mod} = {total}`\n[[action:Recheck|{command}]]" },
+    "rdc": { "result": "🎯 **{nick}** · {attr}{reason}\n{detail}\n[[action:Recheck|.rdc {attr}]]" },
     "ss": {
-      "show": "✨ **{nick}** · spell slots\n{detail}\n[[action:Restore all spell slots|.ss rest]]",
+      "show": "✨ **{nick}** · spell slots\n{detail}\n[[action:Restore|.ss rest]]",
       "set": "✨ **{nick}**'s spell slots were set\n{detail}",
-      "rested": "✨ **{nick}** restored all spell slots\n[[action:View spell slots|.ss]]",
+      "rested": "✨ **{nick}** restored all spell slots\n[[action:Slots|.ss]]",
       "changed": "✨ **{nick}** · level {ring} spell slots\n[[bar:Level {ring}|{cur}|{max}]]"
     },
-    "longrest": { "done": "🌙 **{nick}** completed a long rest\nHP restored to **{hp}**; spell slots and death saves were reset.\n[[action:View card status|.pc status]]" },
+    "longrest": { "done": "🌙 **{nick}** completed a long rest\nHP restored to **{hp}**; spell slots and death saves were reset.\n[[action:Status|.pc status]]" },
     "ds": {
-      "result": "☠️ **{nick}** · death save\n`1D20={roll}` → `{total}`　**{outcome}**\n[[action:View death saves|.ds stat]]",
+      "result": "☠️ **{nick}** · death save\n`1D20={roll}` → `{total}`　**{outcome}**\n[[action:Death save|.ds stat]]",
       "stat": "☠️ **{nick}** · death saves\n[[bar:Success|{s}|3]]\n[[bar:Failure|{f}|3]]"
     }
   }

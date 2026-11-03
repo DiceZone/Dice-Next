@@ -3,6 +3,7 @@
 #include "../common/logger.h"
 #include "../common/markdown.h"
 #include "../common/sample_template.h"
+#include "../common/presentation_style.h"
 #include "../storage/legacy_message_keys.h"
 #include <algorithm>
 
@@ -528,11 +529,27 @@ std::string I18n::renderTemplate(const TemplateValue& source, const Args& args, 
     budget.read = safe_template::contextRead;
     budget.length = safe_template::contextLength;
     budget.delay = safe_template::contextDelay;
-    const std::string tmpl = expandTemplate(value, args, outputFormat, owner, loc, 0, budget);
+    std::string tmpl = expandTemplate(value, args, outputFormat, owner, loc, 0, budget);
     // Every evaluated variable is already an opaque slot. Keeping original
     // argument names here would interpolate escaped literals a second time.
     Args values;
     for (const auto& [key, computed] : budget.values) values[key] = computed;
+    // Action payloads are commands, not Markdown prose. Materialize only the
+    // authored component's fields once and encode them before escaping text.
+    // This also keeps ']]', '|', backslashes and template-looking user data
+    // literal rather than letting them create another button.
+    for (size_t pos = 0; (pos = tmpl.find("[[action:", pos)) != std::string::npos;) {
+        const auto close = tmpl.find("]]", pos + 9);
+        if (close == std::string::npos) break;
+        const auto split = tmpl.find('|', pos + 9);
+        if (split == std::string::npos || split > close) { pos = close + 2; continue; }
+        const auto label = interpolate(tmpl.substr(pos + 9, split - pos - 9), values);
+        const auto command = interpolate(tmpl.substr(split + 1, close - split - 1), values);
+        const auto component = "[[action-data:" + presentation::encodeActionField(label) + "|"
+            + presentation::encodeActionField(command) + "]]";
+        tmpl.replace(pos, close + 2 - pos, component);
+        pos += component.size();
+    }
     noteOutboundFormat(outputFormat);
     if (outputFormat != ContentFormat::kMarkdown || values.empty())
         return interpolate(tmpl, values);

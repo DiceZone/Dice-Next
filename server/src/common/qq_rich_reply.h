@@ -117,16 +117,33 @@ inline bool validCommand(const Command& command) {
         && command.label.find_first_of("\r\n") == std::string::npos;
 }
 inline std::string shortLabel(const std::string& value, size_t maxCharacters = 10) {
+    if (maxCharacters == 0) return {};
+    // Usage descriptions often contain examples or caveats. Keep those in the
+    // message, rather than cutting a command example halfway through a button.
+    std::string caption = value;
+    for (const auto* separator : {"，", "；", "。", "（", " (", ", ", "; ", " — ", " // "}) {
+        const auto at = caption.find(separator);
+        if (at != std::string::npos && at > 0) caption.resize(at);
+    }
+    caption = presentation::trim(caption);
     size_t bytes = 0, characters = 0;
-    while (bytes < value.size() && characters < maxCharacters) {
-        const unsigned char lead = static_cast<unsigned char>(value[bytes]);
+    size_t beforeLast = 0;
+    while (bytes < caption.size() && characters < maxCharacters) {
+        beforeLast = bytes;
+        const unsigned char lead = static_cast<unsigned char>(caption[bytes]);
         size_t width = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2
             : (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
-        if (bytes + width > value.size()) break;
+        if (bytes + width > caption.size()) break;
         bytes += width;
         ++characters;
     }
-    return value.substr(0, bytes);
+    if (bytes == caption.size()) return caption;
+    auto shortened = caption.substr(0, beforeLast);
+    // Prefer whole words for translated captions, with a visible truncation
+    // marker. The action payload always retains the original command.
+    const auto space = shortened.rfind(' ');
+    if (space != std::string::npos && space >= shortened.size() / 2) shortened.resize(space);
+    return presentation::trim(shortened) + "…";
 }
 inline std::vector<Command> mergeCommands(const Card* card,
                                            const std::vector<presentation::Action>& actions) {

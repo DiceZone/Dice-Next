@@ -1685,6 +1685,17 @@ private:
         return handleCheck(loc, msg, trim(cmd.substr(j)), hidden, glued);
     }
 
+    // Both ordinary checks and temporary +/- adjustments must resolve the same
+    // stored/linked/derived value, from the checked player's bound card.
+    std::optional<int> checkAttribute(const Message& msg, const std::string& name) const {
+        if (coc7rRule(msg, "skills")) return coc7rAttr(msg, name);
+        auto value = cards_.getAttr(msg.senderId, cardScope(msg), name);
+        if (!value) value = evalStrAttr(msg, CharacterCardStore::canonical(name));
+        if (!value) value = derivedAttr(msg, name);
+        if (!value) value = defaultAttr(name);
+        return value;
+    }
+
     /// Parse ".ra" arguments: `<属性>[成功率] [原因]`. Whitespace is the separator
     /// (faithful to original), so a trailing reason is NEVER folded into the
     /// attribute/value. Forms handled: "力量"、"力量 哈哈"、"力量 60"、"力量 60 攻击"、
@@ -1693,7 +1704,6 @@ private:
     bool resolveRate(Locale loc, const Message& msg, const std::string& rest,
                      std::string& attr, int& rate, std::string& reason, std::string& err,
                      const std::string& cardUser = "") {
-        const std::string group = cardScope(msg);
         const std::string owner = cardUser.empty() ? msg.senderId : cardUser;  // .ra @某人 用对方卡
         std::string s = trim(rest);
         // First whitespace-delimited token = the attribute (may carry an inline rate).
@@ -1712,13 +1722,10 @@ private:
                     if (!std::isdigit(static_cast<unsigned char>(adj[i]))) adjOk = false;
                 if (adjOk && nm.find_first_of("0123456789") == std::string::npos) {
                     auto perspective = msg; perspective.senderId = owner;
-                    auto v = coc7rRule(msg, "skills") ? coc7rAttr(perspective, nm) : cards_.getAttr(owner, group, nm);
-                    if (coc7rRule(msg, "skills") && !v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", nm}}); return false; }
-                    if (!v && owner == msg.senderId && group == cardScope(msg)) v = derivedAttr(msg, nm);  // model.xml 衍生值
-                    if (!v) v = defaultAttr(nm);   // 未录入 → 规则默认值（如 急救30）
+                    auto v = checkAttribute(perspective, nm);
                     if (!v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", nm}}); return false; }
-                    rate = *v + parseIntOr(adj, 0);
-                    if (rate < 1) rate = 1;
+                    rate = static_cast<int>((std::clamp)(int64_t(*v) + parseIntOr(adj, 0),
+                        int64_t(1), int64_t((std::numeric_limits<int>::max)())));
                     attr = nm + adj;          // display "侦查+10"
                     reason = remainder;
                     return true;
@@ -1755,11 +1762,7 @@ private:
 
         // No inline/next rate → read the value from the card; remainder is the reason.
         auto perspective = msg; perspective.senderId = owner;
-        auto v = coc7rRule(msg, "skills") ? coc7rAttr(perspective, attr) : cards_.getAttr(owner, group, attr);
-        if (coc7rRule(msg, "skills") && !v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", attr}}); return false; }
-        if (!v && owner == msg.senderId && group == cardScope(msg)) v = evalStrAttr(msg, CharacterCardStore::canonical(attr));  // 关联属性
-        if (!v && owner == msg.senderId && group == cardScope(msg)) v = derivedAttr(msg, attr);  // model.xml 衍生值
-        if (!v) v = defaultAttr(attr);   // 未录入 → 规则默认值（如 急救30、聆听20）
+        auto v = checkAttribute(perspective, attr);
         if (!v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", attr}}); return false; }
         rate = *v;
         reason = remainder;
@@ -1780,6 +1783,7 @@ private:
         const std::string nick = displayName(msg);
         const auto grade = replyGrade(lv);
         auto args = outcomeArgs(nick, attr, reason, rollDetail, rollValue, rate, i18n_.tr(loc, levelKey(lv)));
+        args["command"] = trim(msg.content);
         if (rounds == 1)
             if (auto oldLevel = i18n_.trConfigured(loc, legacy_check_replies::single(grade), args)) args["level"] = args["outcome"] = *oldLevel;
         if (auto result = i18n_.trCandidates(loc, check_reply::candidates(family, grade), args)) return *result;
@@ -3065,7 +3069,37 @@ private:
 
     // ─── DND5e mode toggle + d20 .rc + .buff (临时属性) ───────
 
-    bool dndModeOn(const Message& msg) const { return getGroupSetting(msg, "dndMode") == "1"; }
+    static bool dndSystem(const std::string& name) {
+        const auto key = toLower(name);
+        return key == "dnd" || key == "dnd5e" || key == "dnd5" || key == "5e" || key == "d&d";
+    }
+    bool dndModeOn(const Message& msg) const {
+        // Old releases left dndMode=1 behind after .pc type/.set selected CoC.
+        // Respect that explicit rule system before reading the legacy toggle.
+        if (const auto pack = activeRulePack(msg)) {
+            if (pack->mechanics == coc7r::profile || toLower(pack->name) == "coc7") return false;
+        }
+        const auto system = toLower(getGroupSetting(msg, "ruleSystem"));
+        if (system == "coc7" || system == "coc7r") return false;
+        const auto saved = getGroupSetting(msg, "dndMode");
+        return saved.empty() ? dndSystem(system) : saved == "1";
+    }
+    void selectDndMode(const Message& msg, bool enabled) {
+        setGroupSetting(msg, "dndMode", enabled ? "1" : "0");
+        if (enabled) {
+            setGroupSetting(msg, "ruleSystem", "dnd5e");
+            setGroupSetting(msg, "groupDefaultDice", "20");
+        } else if (dndSystem(getGroupSetting(msg, "ruleSystem"))) {
+            setGroupSetting(msg, "ruleSystem", "coc7");
+            setGroupSetting(msg, "groupDefaultDice", "100");
+        }
+    }
+    void selectCocMode(const Message& msg) {
+        const bool revised = coc7rOn(msg);
+        setGroupSetting(msg, "dndMode", "0");
+        setGroupSetting(msg, "ruleSystem", revised ? "coc7r" : "coc7");
+        setGroupSetting(msg, "groupDefaultDice", "100");
+    }
 
     static std::optional<std::string> dndAbilityName(const std::string& name) {
         // DND six abilities have stable storage names. Do not depend solely on the
@@ -3128,10 +3162,10 @@ private:
         std::string a = toLower(trim(cmd.substr(6)));
         // 群模式切换需群管权限（与 .setcoc 同级，对齐原版 canRoomHost 门控）。
         if (a != "show" && !senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
-        if (a == "off" || a == "0" || a == "clr") { setGroupSetting(msg, "dndMode", "0"); return i18n_.tr(loc, "setdnd.off"); }
-        if (a == "on" || a == "1")               { setGroupSetting(msg, "dndMode", "1"); return i18n_.tr(loc, "setdnd.on"); }
+        if (a == "off" || a == "0" || a == "clr") { selectDndMode(msg, false); return i18n_.tr(loc, "setdnd.off"); }
+        if (a == "on" || a == "1")               { selectDndMode(msg, true); return i18n_.tr(loc, "setdnd.on"); }
         if (a == "show") return i18n_.tr(loc, dndModeOn(msg) ? "setdnd.on" : "setdnd.off");
-        if (a.empty()) { bool on = dndModeOn(msg); setGroupSetting(msg, "dndMode", on ? "0" : "1");  // .setdnd 切换
+        if (a.empty()) { bool on = dndModeOn(msg); selectDndMode(msg, !on);  // .setdnd 切换
             return i18n_.tr(loc, on ? "setdnd.off" : "setdnd.on"); }
         return i18n_.tr(loc, "setdnd.usage");
     }
@@ -3432,7 +3466,7 @@ private:
         std::string label = remainder.empty() ? first : remainder;
         return i18n_.tr(loc, "dnd.rc.result",
             {{"nick", displayName(msg)}, {"attr", label}, {"roll", rollStr},
-             {"mod", modStr}, {"total", std::to_string(total)}});
+             {"mod", modStr}, {"total", std::to_string(total)}, {"command", trim(msg.content)}});
     }
 
     // DND ability-modifier check. Ability scores are converted with
@@ -7710,18 +7744,21 @@ private:
         // 改动房规需群管权限（原版 DiceEvent.cpp:1699 canRoomHost 门控 .setcoc）。
         if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "gate.no_perm");
         if (lr == "clr" || lr == "clear") {
+            selectCocMode(msg);
             clearCocRule(msg);
             return i18n_.tr(loc, "setcoc.cleared");
         }
         // Named rules (SealDice ".setcoc dg" → Delta Green: doubles 11/22…=大成功/
         // 大失败, mapped to house rule 6).
         if (int named = namedCocRule(lr); named >= 0) {
+            selectCocMode(msg);
             setCocRule(msg, named);
             return i18n_.tr(loc, "setcoc.set", {{"rule", lr}});
         }
         if (isAllDigits(rest)) {
             int r = parseIntOr(rest, -1);
             if (r < 0 || r > 7) return i18n_.tr(loc, "setcoc.invalid");
+            selectCocMode(msg);
             setCocRule(msg, r);
             return i18n_.tr(loc, "setcoc.set", {{"rule", std::to_string(r)}});
         }
@@ -13081,6 +13118,9 @@ private:
             if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "fun.set.group_only");
             if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "fun.set.no_perm");
             setGroupSetting(msg, "ruleSystem", rp->name);
+            const bool dnd = dndSystem(rp->name) || std::any_of(rp->setKeys.begin(), rp->setKeys.end(),
+                [](const auto& key) { return dndSystem(key); });
+            setGroupSetting(msg, "dndMode", dnd ? "1" : "0");
             if (rp->diceSides > 0) setGroupSetting(msg, "groupDefaultDice", std::to_string(rp->diceSides));
             return i18n_.tr(loc, "fun.set.rule",
                 {{"nick", nick}, {"name", rp->fullName}, {"sides", std::to_string(rp->diceSides)}});
@@ -13099,6 +13139,7 @@ private:
                 if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "fun.set.group_only");
                 if (!senderIsGroupAdmin(msg)) return i18n_.tr(loc, "fun.set.no_perm");
                 setGroupSetting(msg, "ruleSystem", bkey);
+                setGroupSetting(msg, "dndMode", dndSystem(bkey) ? "1" : "0");
                 return i18n_.tr(loc, "fun.set.rule", {{"nick", nick}, {"name", bname}, {"sides", "100"}});
             }
         }

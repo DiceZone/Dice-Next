@@ -53,6 +53,27 @@ struct Expanded {
     std::vector<Action> actions;
 };
 
+// Internal encoding for evaluated action fields. Keep raw command data out of
+// Markdown interpolation and prevent substituted text from closing a component.
+inline std::string encodeActionField(std::string_view value) {
+    constexpr char digits[] = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char ch : value) { out += digits[ch >> 4]; out += digits[ch & 15]; }
+    return out;
+}
+inline std::optional<std::string> decodeActionField(std::string_view value) {
+    if (value.size() % 2) return std::nullopt;
+    const auto digit = [](char c) -> int { return c >= '0' && c <= '9' ? c - '0'
+        : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+    std::string out;
+    for (size_t i = 0; i < value.size(); i += 2) {
+        const int hi = digit(value[i]), lo = digit(value[i + 1]);
+        if (hi < 0 || lo < 0) return std::nullopt;
+        out += static_cast<char>((hi << 4) | lo);
+    }
+    return out;
+}
+
 inline std::string trim(std::string_view value) {
     const auto first = value.find_first_not_of(" \t\r\n");
     if (first == std::string_view::npos) return {};
@@ -123,7 +144,8 @@ inline void discoverUsageActions(const std::string& text, std::vector<Action>& a
         // Built-in usage entries use `.command ... // explanation`. Requiring
         // the command prefix and delimiter avoids turning ordinary prose or a
         // URL into an interaction.
-        if (!line.empty() && (line.front() == '.' || line.front() == '!')) {
+        if (!line.empty() && (line.front() == '.' || line.front() == '!'
+            || line.front() == '/' || line.rfind("。", 0) == 0)) {
             const size_t delimiter = line.find(" // ");
             if (delimiter != std::string::npos) {
                 const std::string commandTemplate = trim(std::string_view(line).substr(0, delimiter));
@@ -136,6 +158,19 @@ inline void discoverUsageActions(const std::string& text, std::vector<Action>& a
         }
         if (lineEnd == std::string::npos) break;
         lineStart = lineEnd + 1;
+    }
+}
+
+// AI can change a caption, but the executable command remains the one captured
+// from the template. Never infer replacements (or extra buttons) from its prose.
+inline void refreshActionLabels(const std::string& text, std::vector<Action>& actions) {
+    std::vector<Action> discovered;
+    discoverUsageActions(text, discovered);
+    for (auto& action : actions) {
+        const auto found = std::find_if(discovered.begin(), discovered.end(), [&](const auto& candidate) {
+            return trim(candidate.text) == trim(action.text);
+        });
+        if (found != discovered.end()) action.label = found->label;
     }
 }
 
@@ -279,12 +314,19 @@ inline Expanded expandComponents(const std::string& input, PresentationStyle sty
                     replacement = statusBar(std::string_view(token).substr(4, first - 4),
                                             *current, *maximum, style, output);
             }
-        } else if (token.rfind("action:", 0) == 0) {
-            const size_t split = token.find('|', 7);
+        } else if (token.rfind("action:", 0) == 0 || token.rfind("action-data:", 0) == 0) {
+            const bool encoded = token.rfind("action-data:", 0) == 0;
+            const size_t start = encoded ? 12 : 7;
+            const size_t split = token.find('|', start);
             if (split != std::string::npos) {
-                appendAction(result.actions, token.substr(7, split - 7), token.substr(split + 1));
-                replacement = action(std::string_view(token).substr(7, split - 7),
-                                     std::string_view(token).substr(split + 1), style, output);
+                auto label = encoded ? decodeActionField(std::string_view(token).substr(start, split - start))
+                                     : std::optional<std::string>(token.substr(start, split - start));
+                auto command = encoded ? decodeActionField(std::string_view(token).substr(split + 1))
+                                       : std::optional<std::string>(token.substr(split + 1));
+                if (label && command) {
+                    appendAction(result.actions, *label, *command);
+                    replacement = action(*label, *command, style, output);
+                }
             }
         }
         if (replacement.empty()) result.text.append(input, open, close + 2 - open);
@@ -298,7 +340,8 @@ inline Expanded expandComponents(const std::string& input, PresentationStyle sty
     // Visual-profile usage text already contains stable, translator-editable
     // `.command // explanation` lines. Reuse those lines as semantic actions
     // instead of maintaining a second hard-coded command list.
-    if (style == PresentationStyle::kVisual) discoverUsageActions(result.text, result.actions);
+    if (style == PresentationStyle::kVisual && result.actions.empty())
+        discoverUsageActions(result.text, result.actions);
     return result;
 }
 

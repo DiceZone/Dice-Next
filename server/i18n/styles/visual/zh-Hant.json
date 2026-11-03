@@ -7,8 +7,8 @@
       "multi_reason": "🎲 **{nick}** · {reason} · {turn} 次\n{res}\n[[action:再次擲骰|.r]]"
     },
     "check": {
-      "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**\n[[action:再次檢定|.ra {attr} {rate}]]",
-      "result_reason": "🎯 **{nick}** · {attr} · {reason}\n`{roll}/{rate}`　**{level}**\n[[action:再次檢定|.ra {attr} {rate}]]"
+      "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**\n[[action:再次檢定|{command}]]",
+      "result_reason": "🎯 **{nick}** · {attr} · {reason}\n`{roll}/{rate}`　**{level}**\n[[action:再次檢定|{command}]]"
     },
     "brp": {
       "result": "🎯 **{nick}** · {attr}\n`{roll}/{rate}`　**{level}**",
@@ -67,7 +67,7 @@
   "rule": { "result": "📖 **{book} · {item}**\n{desc}" },
   "fun": { "name": { "result": "🎭 **{nick}** 的隨機名\n> {res}" } },
   "dnd": {
-    "rc": { "result": "🎯 **{nick}** · {attr}\n`{roll} {mod} = {total}`\n[[action:再次檢定|.rc {attr}]]" },
+    "rc": { "result": "🎯 **{nick}** · {attr}\n`{roll} {mod} = {total}`\n[[action:再次檢定|{command}]]" },
     "rdc": { "result": "🎯 **{nick}** · {attr}{reason}\n{detail}\n[[action:再次檢定|.rdc {attr}]]" },
     "ss": {
       "show": "✨ **{nick}** 的法術位\n{detail}\n[[action:恢復全部法術位|.ss rest]]",

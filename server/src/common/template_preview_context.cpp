@@ -568,7 +568,8 @@ PreviewContext templatePreviewContext(const json &request, const I18n *i18n) {
             ex.number("f", grade == "fumble" ? 2 : grade == "failure" ? (sourceKey == "dnd.ds.dead" ? 3 : 1) : 0);
             ex.number("hp", grade == "critical" ? 1 : 0);
         }
-        c.command = death ? ".ds" : ".rdc +3 " + a["attr"] + " 15";
+        c.command = death ? ".ds" : starts(key, "dnd.rc.") ? ".rc " + a["attr"] : ".rdc +3 " + a["attr"] + " 15";
+        a["command"] = c.command;
     } else {
         if (c.command.empty())
             c.command = ".r 1d100";

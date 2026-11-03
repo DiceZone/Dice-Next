@@ -115,6 +115,77 @@ TEST(Coc7r, ActivationAndNoGlobalAliasLeak) {
     ASSERT_TRUE(f.run(".st show 取悦").find("80")!=std::string::npos);
     ASSERT_EQ(CharacterCardStore::canonical("取悦"),std::string("取悦"));
 }
+
+TEST(CheckRegression62, SwitchingFromDndStoresAndChecksTheCocCard) {
+    CocFixture f;
+    f.setting("ruleSystem", "");
+    f.run(".setdnd on");
+    f.run(".pc type coc7r");
+    f.run(".st 侦查50 力量50");
+    ASSERT_EQ(f.get("侦查"), 50);
+    for (const auto* verb : {".ra", ".rc"}) {
+        for (const auto& [suffix, expected] : std::vector<std::pair<std::string, int>>{
+                 {"侦查", 50}, {"侦查-20", 30}, {"侦查+20", 70}, {"力量-5", 45}}) {
+            const auto reply = f.run(std::string(verb) + "(90)" + suffix);
+            ASSERT_TRUE(reply.find("90/" + std::to_string(expected)) != std::string::npos);
+            ASSERT_TRUE(reply.find("1d20") == std::string::npos);
+        }
+    }
+    ASSERT_EQ(f.get("侦查"), 50); // Temporary modifiers never change the card.
+    ASSERT_EQ(f.get("力量"), 50);
+    f.run(".setdnd on");
+    f.run(".st 力量18");
+    ASSERT_TRUE(f.run(".rc力量-5").find(" -1 = ") != std::string::npos);
+    f.run(".setcoc 3");
+    ASSERT_TRUE(f.run(".rc(90)力量").find("90/18") != std::string::npos);
+}
+
+TEST(CheckRegression62, ExistingMixedSettingsAndDefaultChecksUseD100) {
+    CocFixture f;
+    f.setting("dndMode", "1"); // Stored by an older release before selecting coc7r.
+    f.run(".st 侦查50");
+    ASSERT_EQ(f.get("侦查"), 50);
+    ASSERT_TRUE(f.run(".rc(90)侦查-20").find("90/30") != std::string::npos);
+    f.setting("ruleSystem", ""); f.setting("dndMode", "");
+    ASSERT_TRUE(f.run(".rc(90)侦查+20").find("90/70") != std::string::npos);
+    f.msg.adapterId = "another-bot";
+    ASSERT_TRUE(f.run(".rc(90)侦查").find("90/50") != std::string::npos);
+}
+
+TEST(CheckRegression62, ModifiedChecksUseLinkedAttributesAndExplicitZero) {
+    CocFixture f;
+    f.run(".set coc7");
+    f.run(".st 力量50 &侦查=力量");
+    ASSERT_TRUE(f.run(".ra(90)侦查").find("90/50") != std::string::npos);
+    ASSERT_TRUE(f.run(".ra(90)侦查-20").find("90/30") != std::string::npos);
+    f.run(".st 侦查0");
+    ASSERT_TRUE(f.run(".ra(90)侦查+20").find("90/20") != std::string::npos);
+}
+
+TEST(CheckRegression62, OfficialRecheckKeepsModifiersReasonsAndConfiguredPrefix) {
+    CocFixture f;
+    f.cfg.set<json>("dice/command_prefixes", json::array({"/"}));
+    f.run("/setdnd on");
+    f.run("/st 力量18");
+    const std::string command = "/rc 优势力量-5 打开门";
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown, PresentationStyle::kVisual);
+    const auto reply = f.run(command);
+    I18n::endOutboundCapture();
+    const auto expanded = presentation::expandComponents(reply, PresentationStyle::kVisual, ContentFormat::kMarkdown);
+    ASSERT_EQ(expanded.actions.size(), size_t(1));
+    ASSERT_EQ(expanded.actions[0].text, command);
+    const auto result = f.run(expanded.actions[0].text);
+    ASSERT_TRUE(result.find(" -1 = ") != std::string::npos);
+    f.run("/pc type coc7r");
+    f.run("/st 侦查50");
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown, PresentationStyle::kVisual);
+    const auto check = f.run("/rc(90)侦查-20 搜索房间");
+    I18n::endOutboundCapture();
+    const auto coc = presentation::expandComponents(check, PresentationStyle::kVisual, ContentFormat::kMarkdown);
+    ASSERT_EQ(coc.actions.size(), size_t(1));
+    ASSERT_EQ(coc.actions[0].text, "/rc(90)侦查-20 搜索房间");
+    ASSERT_TRUE(f.run(coc.actions[0].text).find("90/30") != std::string::npos);
+}
 TEST(Coc7r, ProfileInputAliasesAndUnknownSkillIsolation) {
     CocFixture f; f.stats();
     f.run(".st 取悦55"); ASSERT_EQ(f.get("说服"),55);

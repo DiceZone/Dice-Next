@@ -33,7 +33,11 @@ std::optional<int> coc7rAttr(const Message& msg, const std::string& raw) const {
     const auto name = profileAttribute(msg, raw);
     // Do not merge old Charm/Fast Talk/Intimidate into Persuade. Explicit fields
     // remain untouched. Only subsequent input/check aliases use the new mapping.
-    const auto lookup = [&](const std::string& key) { return cards_.getAttr(msg.senderId, cardScope(msg), key); };
+    const auto lookup = [&](const std::string& key) {
+        auto value = cards_.getAttr(msg.senderId, cardScope(msg), key);
+        if (!value) value = evalStrAttr(msg, CharacterCardStore::canonical(key));
+        return value;
+    };
     if (name == "最大理智" || name == "最大理智值" || CharacterCardStore::canonical(name) == "最大理智值")
         return (std::max)(0, 99 - (std::clamp)(lookup("克苏鲁神话").value_or(0), 0, 99));
     if (coc7r::canonical(raw) == "移动" && coc7rRule(msg, "movement") && !lookup("移动")) {
