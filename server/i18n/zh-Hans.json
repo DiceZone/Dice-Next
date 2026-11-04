@@ -620,12 +620,12 @@
   },
   "send": {
     "empty": "要转交什么给 Master 呢？用法：.send <留言>",
-    "done": "✅ 已转交给 Master，谢谢你的反馈！",
+    "done": "已转交给 Master，谢谢你的反馈！",
     "no_master": "本骰娘还没有设置 Master，无法转交。",
-    "from_private": "📨 来自私聊 {user}({uid}) 的留言：",
-    "from_group": "📨 来自群 {group} 的 {user}({uid}) 的留言：",
+    "from_private": "来自私聊 {user}({uid}) 的留言：",
+    "from_group": "来自群 {group} 的 {user}({uid}) 的留言：",
     "master_usage": "骰主发送 .send\n.send group <群号> <消息> // 发送到指定群\n.send user <QQ号> <消息> // 发送给指定用户",
-    "master_done": "✅ 已发送到 {target}"
+    "master_done": "已发送到 {target}"
   },
   "dismiss": {
     "leaving": "骰子正在退出本群……",
@@ -670,7 +670,7 @@
   },
   "log": {
     "usage": "跑团日志 .log\n.log new [名称] // 新建日志\n.log on/off // 继续或暂停记录\n.log end // 结束并上传\n.log halt // 结束但不上传\n.log list // 列出本窗口日志\n.log get [名称] // 取回日志\n.log del [名称] // 删除日志\n.log stat [名称] // 查看统计\n.log export [名称] // 导出日志\n.log type txt/html // 设定群文件格式\n.log time/timer // 计时\n.log // 不带参数时查看当前状态",
-    "unofficial_site": "⚠️ 当前配置的日志站并非官方站点，链接安全性请自行确认。",
+    "unofficial_site": "注意：当前配置的日志站并非官方站点，链接安全性请自行确认。",
     "halted": "已强行结束本次记录（未上传）。",
     "not_found": "没有找到日志「{name}」。用 .log list 查看本群日志。",
     "getting": "正在重新上传日志，请稍候……",
@@ -711,10 +711,10 @@
       "unit_h": "小时",
       "unit_m": "分",
       "unit_s": "秒",
-      "started": "⏱ 已开始计时。",
-      "resumed": "⏱ 继续计时，累计时长 {total}。",
-      "stopped": "⏱ 本次时长 {current}，累计 {total}。",
-      "show": "⏱ 记录「{name}」累计时长 {total}{running}",
+      "started": "已开始计时。",
+      "resumed": "继续计时，累计时长 {total}。",
+      "stopped": "本次时长 {current}，累计 {total}。",
+      "show": "记录「{name}」累计时长 {total}{running}",
       "running": "（本次进行中 {current}）",
       "show_none": "本群暂无可计时的跑团记录。",
       "is_off": "本群跑团计时未开启（.log timer on 开启）。",
@@ -820,7 +820,7 @@
   "ob": {
     "group_only": "旁观功能只能在群里使用哦。",
     "empty": "当前没有旁观者。",
-    "list": "👀 旁观者（{count}）：\n{list}",
+    "list": "旁观者（{count}）：\n{list}",
     "cleared": "{nick} 已清空旁观名单。",
     "exit": "{nick} 已退出旁观。",
     "joined": "{nick} 开始旁观本群跑团。",
