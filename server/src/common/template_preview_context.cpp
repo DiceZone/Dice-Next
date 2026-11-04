@@ -29,16 +29,20 @@ struct Example {
     int die(int sides) { return 1 + static_cast<int>(random() % static_cast<unsigned>(sides)); }
     int between(int low, int high) { return low + die(high - low + 1) - 1; }
     std::string word(const char *zh, const char *en) const { return chinese ? zh : en; }
-    std::string tr(const std::string &key, const I18n::Args &args = {}) const {
-        const auto fragment = I18n::captureFragment([&] {
+    ReplyContent fragment(const std::string &key, const I18n::Args &args = {}) const {
+        return I18n::captureFragment([&] {
             return i18n ? i18n->tr(locale, key, args) : I18n::interpolate(key, args);
         });
-        // Only this trusted, computed fragment is Markdown. Values such as a
-        // player's name remain literal arguments, never template source. This
-        // also covers styled grade labels, receipts and generated totals.
-        return fragment.format == ContentFormat::kMarkdown ? markdown::toPlainText(fragment.text)
-                                                           : fragment.text;
     }
+    // Text spliced into another example value (totals, details) is plain.
+    // Values such as a player's name remain literal arguments, never template source.
+    std::string tr(const std::string &key, const I18n::Args &args = {}) const {
+        const auto text = fragment(key, args);
+        return text.format == ContentFormat::kMarkdown ? markdown::toPlainText(text.text) : text.text;
+    }
+    // Grade labels and receipts are whole reply texts, inserted like the real
+    // command does: a Markdown label keeps its style in a Markdown reply.
+    void put(const std::string &name, const ReplyContent &value) { I18n::putFragment(context.args, name, value); }
     void number(const std::string &key, int value) { context.args[key] = std::to_string(value); }
     DiceResult roll(const std::string &expression) {
         DiceExpression engine([this](int sides) { return die(sides); });
@@ -55,19 +59,24 @@ struct Example {
         number("total", value.modifiedTotal);
         a["roll"] = value.formattedOutput;
     }
-    std::string label(const std::string &grade, bool brp = false) const {
+    ReplyContent label(const std::string &grade, bool brp = false) const {
         if (grade == "tie")
-            return tr("dice.rav.tie");
+            return fragment("dice.rav.tie");
         if (brp)
-            return tr("dice.brp." + (grade == "regular" ? std::string("success") : grade));
+            return fragment("dice.brp." + (grade == "regular" ? std::string("success") : grade));
         if (grade == "special")
-            return tr("dice.brp.special");
-        return tr("dice.level." + grade);
+            return fragment("dice.brp.special");
+        return fragment("dice.level." + grade);
+    }
+    static std::string plain(const ReplyContent &value) {
+        return value.format == ContentFormat::kMarkdown ? markdown::toPlainText(value.text) : value.text;
     }
     void outcome(const std::string &family, const std::string &grade) {
         context.family = family;
         context.grade = grade;
-        context.args["level"] = context.args["outcome"] = label(grade, family == "brp");
+        const auto level = label(grade, family == "brp");
+        put("level", level);
+        put("outcome", level);
     }
     int percentile(const std::string &wanted, bool brp = false, int rate = 60) {
         std::vector<int> candidates;
@@ -321,8 +330,10 @@ struct Example {
         result(roll("1d100"));
         number("rate", 60);
         const auto grade = check_rules::grade(check_rules::coc(std::stoi(a["result"]), 60));
-        a["level"] = a["outcome"] = label(grade);
-        a["grade"] = a["level"];
+        const auto level = label(grade);
+        put("level", level);
+        put("outcome", level);
+        put("grade", level);
     }
 };
 
@@ -464,7 +475,7 @@ PreviewContext templatePreviewContext(const json &request, const I18n *i18n) {
             ex.number("san", 60);
             ex.number("loss", loss);
             ex.number("final", (std::max)(0, 60 - loss));
-            a["grade"] = ex.label(c.grade == "fumble" ? "fumble" : failed ? "failure" : "regular");
+            ex.put("grade", ex.label(c.grade == "fumble" ? "fumble" : failed ? "failure" : "regular"));
             a["res"] = a["result"];
             a["change"] = c.grade == "fumble" ? "Max{1d6}=6" : lossRoll.formattedOutput;
             ex.number("rank", c.grade == "fumble" ? 0
@@ -477,7 +488,7 @@ PreviewContext templatePreviewContext(const json &request, const I18n *i18n) {
         } else if (family == "psychology") {
             a["attr"] = ex.word("心理学", "Psychology");
             a["roll"] = a["result"];
-            a["receipt"] = ex.tr("dice.rx.msg." + c.grade, a);
+            ex.put("receipt", ex.fragment("dice.rx.msg." + c.grade, a));
             c.command = ".rx " + a["target"] + " 60";
         }
     } else if (family == "growth") {
@@ -496,7 +507,7 @@ PreviewContext templatePreviewContext(const json &request, const I18n *i18n) {
         c.facts["changeValue"] = growth.modifiedTotal;
         c.command = ".en " + a["attr"] + (failedGrowth ? " 60 -1d4/+1d10" : " 60");
         if (starts(sourceKey, "dice.compat.growth."))
-            a["res"] += " " + a["level"];
+            a["res"] += " " + Example::plain(ex.label(success ? "regular" : "failure"));
     } else if (family == "opposed") {
         const auto grade =
             wanted.empty() ? std::vector<std::string>{"regular", "failure", "tie"}[ex.die(3) - 1] : wanted;
@@ -513,13 +524,15 @@ PreviewContext templatePreviewContext(const json &request, const I18n *i18n) {
         ex.number("vb", 60);
         ex.number("result", left);
         ex.number("rate", 60);
-        a["lva"] = ex.label(check_rules::grade(check_rules::coc(left, 60)));
-        a["lvb"] = ex.label(check_rules::grade(check_rules::coc(right, 60)));
+        ex.put("lva", ex.label(check_rules::grade(check_rules::coc(left, 60))));
+        ex.put("lvb", ex.label(check_rules::grade(check_rules::coc(right, 60))));
         a["roll"] = a["res"] = "1D100=" + a["ra"] + " vs 1D100=" + a["rb"];
-        a["level"] = a["outcome"] = ex.tr(grade == "tie"       ? "dice.rav.tie"
-                                          : grade == "regular" ? "dice.rav.a_wins"
-                                                               : "dice.rav.b_wins",
-                                          a);
+        const auto opposed = ex.fragment(grade == "tie"       ? "dice.rav.tie"
+                                         : grade == "regular" ? "dice.rav.a_wins"
+                                                              : "dice.rav.b_wins",
+                                         a);
+        ex.put("level", opposed);
+        ex.put("outcome", opposed);
         c.command = ".rav 60 60";
     } else if (family == "resist") {
         const int active = 12, passive = 10, target = 50 + (active - passive) * 5;
@@ -534,7 +547,9 @@ PreviewContext templatePreviewContext(const json &request, const I18n *i18n) {
         ex.number("rate", target);
         ex.number("result", value);
         a["roll"] = a["res"] = "1D100=" + a["result"];
-        a["level"] = a["outcome"] = ex.tr(win ? "dice.brp.resist_win" : "dice.brp.resist_lose", a);
+        const auto resisted = ex.fragment(win ? "dice.brp.resist_win" : "dice.brp.resist_lose", a);
+        ex.put("level", resisted);
+        ex.put("outcome", resisted);
         c.command = ".bav 12 10";
     } else if (family == "dnd_check" || family == "death_save") {
         const bool death = family == "death_save";
@@ -556,14 +571,16 @@ PreviewContext templatePreviewContext(const json &request, const I18n *i18n) {
         a["expr"] = "1d20";
         a["roll"] = death ? std::to_string(value) : "1D20=" + std::to_string(value);
         a["res"] = "1D20=" + std::to_string(value) + a["mod"] + "=" + a["total"];
-        a["detail"] = a["res"] + " " + a["level"];
+        a["detail"] = a["res"] + " " + Example::plain(ex.label(grade));
         a["attr"] = ex.word("力量", "STR");
         if (death) {
             const auto message = grade == "critical"  ? "miracle"
                                  : grade == "fumble"  ? "critfail"
                                  : grade == "regular" ? "success"
                                                       : "fail";
-            a["level"] = a["outcome"] = ex.tr(std::string("dnd.ds.") + message, a);
+            const auto saved = ex.fragment(std::string("dnd.ds.") + message, a);
+            ex.put("level", saved);
+            ex.put("outcome", saved);
             ex.number("s", grade == "regular" ? (sourceKey == "dnd.ds.stabilized" ? 3 : 1) : 0);
             ex.number("f", grade == "fumble" ? 2 : grade == "failure" ? (sourceKey == "dnd.ds.dead" ? 3 : 1) : 0);
             ex.number("hp", grade == "critical" ? 1 : 0);

@@ -283,6 +283,10 @@ TEST(TemplateSimulation, StyledGradeFragmentsDoNotLeakMarkdownFromOverridesOrPer
         {"simulation",example("dice.outcome.standard.failure")}};
     const auto global = outbound::templatePreview(request,&i18n);
     ASSERT_EQ(global["onebot"].get<std::string>(),"失败");
+    // The editor shows the label's style, as the real Markdown reply does.
+    ASSERT_EQ(global["markdown"].get<std::string>(),"**失败**");
+    ASSERT_TRUE(global["simulation"]["args"].contains("level"));
+    for (const auto& [name, value] : global["simulation"]["args"].items()) ASSERT_FALSE(I18n::isFragmentMarker(name));
     i18n.setPersonaBundles(7998,Locale::kZhHans,{{"dice.level.failure","**人格失败**"}},
         {{"dice.level.failure","markdown"}});
     request["personaId"] = 7998;
@@ -292,4 +296,5 @@ TEST(TemplateSimulation, StyledGradeFragmentsDoNotLeakMarkdownFromOverridesOrPer
     request["personaId"] = 0;
     const auto literal = outbound::templatePreview(request,&i18n);
     ASSERT_EQ(literal["onebot"].get<std::string>(),"**字面文本**");
+    ASSERT_EQ(literal["markdown"].get<std::string>(),"\\*\\*字面文本\\*\\*");
 }

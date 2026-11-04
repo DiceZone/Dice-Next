@@ -137,8 +137,7 @@ std::string coc7rApplyLoss(Locale loc, const Message& msg,
         const auto grade=rollSuccessLevel(r,*intel,0);
         const bool passed=grade!=SuccessLevel::kFailure && grade!=SuccessLevel::kFumble;
         result=coc7r::loseSanity(state,san,requestedLoss,*pow,passed);
-        detail+="\n"+coc7rText(loc,"int_check",{{"roll",std::to_string(r)},{"value",std::to_string(*intel)},
-            {"level",i18n_.tr(loc,levelKey(grade))}});
+        detail+="\n"+coc7rText(loc,"int_check",withLevel(loc,grade,{{"roll",std::to_string(r)},{"value",std::to_string(*intel)}}));
     }
     if (result.newShock) {
         result.state.shockRounds=coc7rRoll("1d10");
@@ -190,8 +189,8 @@ std::string coc7rSanityCheck(Locale loc, const Message& msg, const std::string& 
     auto grade=rollSuccessLevel(r,*san,0);
     const bool failed=grade==SuccessLevel::kFailure || grade==SuccessLevel::kFumble;
     const int loss=grade==SuccessLevel::kFumble ? failBounds->maximum : coc7rRoll(failed?failure:success);
-    auto args=outcomeArgs(displayName(msg),"理智","","1D100="+std::to_string(r),r,*san,i18n_.tr(loc,levelKey(grade)));
-    args["res"]=std::to_string(r); args["san"]=std::to_string(*san); args["grade"]=i18n_.tr(loc,levelKey(grade));
+    auto args=outcomeArgs(displayName(msg),"理智","","1D100="+std::to_string(r),r,*san,i18n_.trFragment(loc,levelKey(grade)));
+    args["res"]=std::to_string(r); args["san"]=std::to_string(*san); I18n::putFragment(args,"grade",i18n_.trFragment(loc,levelKey(grade)));
     args["loss"]=std::to_string((std::min)(loss,*san)); args["final"]=std::to_string((std::max)(0,*san-loss));
     auto custom=i18n_.trCandidates(loc,check_reply::candidates("sanity",replyGrade(grade)),args);
     std::string lead=custom.value_or(i18n_.tr(loc,loss?"card.sc.result":"card.sc.result_noloss",args));
@@ -211,8 +210,8 @@ std::string coc7rReality(Locale loc, const Message& msg, const std::string& mode
     auto state=coc7r::sanityState(coc7rStateFrom(msg,card->data));
     std::string detail; int r=mode.empty()?coc7rRoll("1d100"):rollBonusPenalty(1,true,loc,detail);
     auto grade=rollSuccessLevel(r,*san,0);
-    std::string lead=coc7rText(loc,"reality_check",{{"roll",detail.empty()?std::to_string(r):detail},
-        {"san",std::to_string(*san)},{"level",i18n_.tr(loc,levelKey(grade))}});
+    std::string lead=coc7rText(loc,"reality_check",withLevel(loc,grade,{{"roll",detail.empty()?std::to_string(r):detail},
+        {"san",std::to_string(*san)}}));
     if (grade==SuccessLevel::kFailure || grade==SuccessLevel::kFumble)
         return coc7rApplyLoss(loc,msg,*card,*san,1,false,lead+"\n"+coc7rText(loc,"involuntary"));
     state.realityProtected=true;
@@ -340,8 +339,8 @@ std::optional<std::string> handleCoc7rCommand(Locale loc, const Message& msg, co
         if (cards_.cardLocked(target,cardScope(msg),"w")) return i18n_.tr(loc,"card.locked_w");
         auto state=coc7r::sanityState(coc7rStateFrom(recipient,card->data));
         int r=coc7rRoll("1d100"); auto grade=rollSuccessLevel(r,*skill,0);
-        std::string lead=coc7rText(loc,"reassure_check",{{"target",target},{"roll",std::to_string(r)},
-            {"value",std::to_string(*skill)},{"level",i18n_.tr(loc,levelKey(grade))}});
+        std::string lead=coc7rText(loc,"reassure_check",withLevel(loc,grade,{{"target",target},{"roll",std::to_string(r)},
+            {"value",std::to_string(*skill)}}));
         if (grade==SuccessLevel::kFumble || (grade==SuccessLevel::kFailure && mode=="push"))
             return coc7rApplyLoss(loc,recipient,*card,*san,coc7rRoll(coc7r::reassureFailureCost),false,lead);
         if (grade==SuccessLevel::kFailure) return lead;
@@ -375,7 +374,7 @@ std::optional<std::string> handleCoc7rCommand(Locale loc, const Message& msg, co
         auto skill=coc7r::number(rating,1000);
         if (!skill || (s>>extra) || (!mode.empty() && mode!="push" && mode!="phobia")) return coc7rText(loc,"recovery_usage");
         const int r=coc7rRoll("1d100"); const auto grade=rollSuccessLevel(r,*skill,0);
-        auto lead=coc7rText(loc,"therapy_check",{{"roll",std::to_string(r)},{"skill",rating},{"level",i18n_.tr(loc,levelKey(grade))}});
+        auto lead=coc7rText(loc,"therapy_check",withLevel(loc,grade,{{"roll",std::to_string(r)},{"skill",rating}}));
         if (grade==SuccessLevel::kFumble || (grade==SuccessLevel::kFailure && mode=="push"))
             return coc7rApplyLoss(loc,msg,*card,*san,coc7rRoll("1d6"),false,lead+"\n"+coc7rText(loc,"therapy_end"));
         if (grade==SuccessLevel::kFailure) return lead;

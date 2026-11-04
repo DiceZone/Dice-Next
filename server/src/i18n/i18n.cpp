@@ -414,6 +414,46 @@ std::optional<std::string> I18n::trConfigured(Locale loc, const std::string& key
     return std::nullopt;
 }
 
+ReplyContent I18n::trFragment(Locale loc, const std::string& key, const Args& args) const {
+    return captureFragment([&] { return tr(loc, key, args); });
+}
+
+std::optional<ReplyContent> I18n::trConfiguredFragment(Locale loc, const std::string& key,
+                                                       const Args& args) const {
+    std::optional<std::string> rendered;
+    auto fragment = captureFragment([&] {
+        rendered = trConfigured(loc, key, args);
+        return rendered.value_or(std::string());
+    });
+    if (!rendered) return std::nullopt;
+    return fragment;
+}
+
+namespace {
+// '\x1e' never appears in an authored placeholder name, so a template cannot
+// read or forge these entries.
+constexpr char kFragmentMarker = '\x1e';
+}
+
+void I18n::putFragment(Args& args, const std::string& name, const ReplyContent& fragment) {
+    args[name] = fragment.text;
+    args[std::string(1, kFragmentMarker) + name] =
+        (fragment.format == ContentFormat::kMarkdown ? "m" : "p") + fragment.text;
+}
+
+bool I18n::isFragmentMarker(const std::string& name) {
+    return !name.empty() && name.front() == kFragmentMarker;
+}
+
+std::string I18n::fragmentPlainText(const Args& args, const std::string& name) {
+    const auto value = args.find(name);
+    if (value == args.end()) return {};
+    const auto mark = args.find(std::string(1, kFragmentMarker) + name);
+    const bool markdownFragment = mark != args.end() && !mark->second.empty() && mark->second.front() == 'm'
+        && std::string_view(mark->second).substr(1) == value->second;
+    return markdownFragment ? markdown::toPlainText(value->second) : value->second;
+}
+
 ContentFormat I18n::trustedTemplateFormat(const std::string& value) {
     return markdown::hasFormatting(value) ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
 }
@@ -517,7 +557,31 @@ std::string I18n::expandTemplate(const TemplateValue& value, const Args& args, C
     safe_template::Literal literal;
     if (output == ContentFormat::kMarkdown && selected.format == ContentFormat::kPlainText)
         literal = [](std::string_view text) { return markdown::escapeLiteral(std::string(text)); };
-    return safe_template::expand(program.nodes, args, resolve, depth, budget, literal);
+
+    // Fragments (see putFragment) are read through the named resolver so they
+    // can be converted for this output and kept out of argument escaping.
+    std::map<std::string, ContentFormat> fragments;
+    for (const auto& [name, mark] : args) {
+        if (!isFragmentMarker(name) || mark.empty()) continue;
+        const auto value = args.find(name.substr(1));
+        if (value != args.end() && std::string_view(mark).substr(1) == value->second)
+            fragments[value->first] = mark.front() == 'm' ? ContentFormat::kMarkdown : ContentFormat::kPlainText;
+    }
+    if (fragments.empty()) return safe_template::expand(program.nodes, args, resolve, depth, budget, literal);
+    Args visible;
+    for (const auto& [name, value] : args)
+        if (!isFragmentMarker(name) && !fragments.contains(name)) visible.emplace(name, value);
+    const safe_template::Resolve named = [&](const std::string& field, unsigned, safe_template::Budget& remaining)
+            -> std::optional<std::string> {
+        const auto found = fragments.find(field);
+        if (found == fragments.end()) return std::nullopt;
+        const auto& text = args.at(field);
+        const bool markdownFragment = found->second == ContentFormat::kMarkdown;
+        if (output == ContentFormat::kMarkdown)
+            return safe_template::holdAuthored(markdownFragment ? text : markdown::escapeLiteral(text), remaining);
+        return safe_template::holdAuthored(markdownFragment ? markdown::toPlainText(text) : text, remaining);
+    };
+    return safe_template::expand(program.nodes, visible, resolve, depth, budget, literal, named);
 }
 
 std::string I18n::renderTemplate(const TemplateValue& source, const Args& args, const I18n* owner, Locale loc) {
@@ -570,7 +634,8 @@ std::string I18n::renderTemplate(const TemplateValue& source, const Args& args, 
     // Markdown arguments normally need escaping, but doing so inside a code
     // span changes the visible text. Code-span placeholders stay literal.
     Args escaped;
-    for (const auto& [name, arg] : values) escaped[name] = markdown::escapeLiteral(arg);
+    for (const auto& [name, arg] : values)
+        escaped[name] = budget.authored.contains(name) ? arg : markdown::escapeLiteral(arg);
 
     std::string out;
     out.reserve(tmpl.size() + 32);

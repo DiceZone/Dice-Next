@@ -71,8 +71,10 @@ inline json templatePreview(const json& body, const I18n* i18n = nullptr) {
                     std::find(unresolved.begin(), unresolved.end(), json(variable)) == unresolved.end()) unresolved.push_back(variable);
             for (const auto& issue : program.issues) issues.push_back(issue);
         }
+        json shownArgs = json::object();
+        for (const auto& [key, value] : args) if (!I18n::isFragmentMarker(key)) shownArgs[key] = value;
         result["simulation"] = {{"version", 1}, {"seed", simulation->seed}, {"command", simulation->command},
-            {"family", simulation->family}, {"grade", simulation->grade}, {"args", args}, {"facts", simulation->facts},
+            {"family", simulation->family}, {"grade", simulation->grade}, {"args", shownArgs}, {"facts", simulation->facts},
             {"unresolved", unresolved}, {"issues", issues}};
     }
     return result;
