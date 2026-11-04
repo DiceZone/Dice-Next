@@ -62,7 +62,8 @@ inline json templatePreview(const json& body, const I18n* i18n = nullptr) {
         auto variants = weighted_templates::decode(authored);
         if (variants.empty()) variants = json::array({{{"text", authored}, {"weight", 1}}});
         for (const auto& variant : variants) {
-            const auto program = safe_template::compile(legacyv2::normalizeLegacyReferences(variant["text"].get<std::string>()));
+            const auto program = safe_template::compile(legacyv2::normalizeLegacyReferences(
+                presentation::protectMathTemplates(variant["text"].get<std::string>())));
             for (const auto& variable : program.variables)
                 if (!args.count(variable) && std::find(program.locals.begin(), program.locals.end(), variable) == program.locals.end() &&
                     (!i18n || i18n->getDefault(localeFromString(body.value("locale", std::string("zh-Hans"))), variable).empty()) &&

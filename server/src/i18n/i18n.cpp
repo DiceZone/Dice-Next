@@ -429,10 +429,11 @@ I18n::TemplateValue I18n::prepareTemplate(const std::string& value,
         prepared.choices.push_back(std::move(candidate));
     }
     if (!prepared.choices.empty()) { prepared.format = format; return prepared; }
+    const auto authored = presentation::protectMathTemplates(value);
     prepared.plainValue = format == ContentFormat::kMarkdown
-        ? markdown::toPlainText(value) : value;
+        ? markdown::toPlainText(authored) : authored;
     prepared.format = format;
-    prepared.program = safe_template::compile(legacyv2::normalizeLegacyReferences(value));
+    prepared.program = safe_template::compile(legacyv2::normalizeLegacyReferences(authored));
     prepared.plainProgram = safe_template::compile(legacyv2::normalizeLegacyReferences(prepared.plainValue));
     return prepared;
 }
@@ -534,6 +535,18 @@ std::string I18n::renderTemplate(const TemplateValue& source, const Args& args, 
     // argument names here would interpolate escaped literals a second time.
     Args values;
     for (const auto& [key, computed] : budget.values) values[key] = computed;
+    for (size_t pos = 0; (pos = tmpl.find("[[math-template:", pos)) != std::string::npos;) {
+        const auto close = tmpl.find("]]", pos + 16), split = tmpl.find('|', pos + 16);
+        if (close == std::string::npos) break;
+        if (split == std::string::npos || split > close) { pos = close + 2; continue; }
+        const auto formula = presentation::decodeActionField(std::string_view(tmpl).substr(pos + 16, split - pos - 16));
+        if (!formula) { pos = close + 2; continue; }
+        const auto fallback = interpolate(tmpl.substr(split + 1, close - split - 1), values);
+        const auto component = "[[math-data:" + presentation::encodeActionField(presentation::expandMathVariables(*formula, args))
+            + "|" + presentation::encodeActionField(fallback) + "]]";
+        tmpl.replace(pos, close + 2 - pos, component);
+        pos += component.size();
+    }
     // Action payloads are commands, not Markdown prose. Materialize only the
     // authored component's fields once and encode them before escaping text.
     // This also keeps ']]', '|', backslashes and template-looking user data
@@ -662,18 +675,53 @@ ContentFormat I18n::getOverrideFormat(Locale loc, const std::string& key) const 
     return kt == it->second.end() ? ContentFormat::kPlainText : kt->second.format;
 }
 
-std::string I18n::getDefault(Locale loc, const std::string& key) const {
+json I18n::defaultTemplates(Locale loc, const std::string& key) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    const json* node = lookupNode(loc, key);
-    if (!node && loc != defaultLocale_) node = lookupNode(defaultLocale_, key);
-    return node ? node->get<std::string>() : std::string();
+    json result = json::object();
+    for (const auto style : {PresentationStyle::kTraditional, PresentationStyle::kStandard, PresentationStyle::kVisual}) {
+        const TemplateValue* found = nullptr;
+        for (const auto locale : {loc, defaultLocale_}) {
+            const auto overlay = preparedStyleBundles_.find(style);
+            if (overlay != preparedStyleBundles_.end()) {
+                const auto language = overlay->second.find(locale);
+                if (language != overlay->second.end()) {
+                    const auto entry = language->second.find(key);
+                    if (entry != language->second.end()) found = &entry->second;
+                }
+            }
+            if (!found) {
+                const auto language = preparedBundles_.find(locale);
+                if (language != preparedBundles_.end()) {
+                    const auto entry = language->second.find(key);
+                    if (entry != language->second.end()) found = &entry->second;
+                }
+            }
+            if (found) break;
+        }
+        result[presentationStyleName(style)] = {{"value", found ? found->value : ""},
+            {"format", contentFormatName(found ? found->format : ContentFormat::kPlainText)}};
+    }
+    return result;
 }
 
-ContentFormat I18n::getDefaultFormat(Locale loc, const std::string& key) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const json* node = lookupNode(loc, key);
-    if (!node && loc != defaultLocale_) node = lookupNode(defaultLocale_, key);
-    return node ? trustedTemplateFormat(node->get<std::string>()) : ContentFormat::kPlainText;
+std::string I18n::getDefault(Locale loc, const std::string& key, PresentationStyle style) const {
+    if (style == PresentationStyle::kStandard) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const json* node = lookupNode(loc, key);
+        if (!node && loc != defaultLocale_) node = lookupNode(defaultLocale_, key);
+        return node ? node->get<std::string>() : std::string();
+    }
+    return defaultTemplates(loc, key)[presentationStyleName(style)]["value"].get<std::string>();
+}
+
+ContentFormat I18n::getDefaultFormat(Locale loc, const std::string& key, PresentationStyle style) const {
+    if (style == PresentationStyle::kStandard) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const json* node = lookupNode(loc, key);
+        if (!node && loc != defaultLocale_) node = lookupNode(defaultLocale_, key);
+        return node ? trustedTemplateFormat(node->get<std::string>()) : ContentFormat::kPlainText;
+    }
+    return contentFormatFromString(defaultTemplates(loc, key)[presentationStyleName(style)]["format"].get<std::string>());
 }
 
 // ═══════════════════════════════════════════════════════════════

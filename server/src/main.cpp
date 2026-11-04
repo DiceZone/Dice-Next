@@ -1759,7 +1759,7 @@ static int realMain(int argc, char* argv[]) {
             // reply therefore renders appropriately on every adapter.
             if (!reply.empty()) {
                 auto expanded = dice::presentation::expandComponents(
-                    reply, replyStyle, preferredReplyFormat);
+                    reply, replyStyle, preferredReplyFormat, msg.platform == "qq_official");
                 reply = std::move(expanded.text);
                 replyActions = std::move(expanded.actions);
                 if (expanded.usedMarkdown) replyFormat = dice::ContentFormat::kMarkdown;
@@ -2806,7 +2806,7 @@ static int realMain(int argc, char* argv[]) {
             if (reply.empty()) return;
             reply = cmdRouter.applySelf(pm, reply, format);
             reply = cmdRouter.resolveBarAttributes(pm, reply);
-            auto expanded = dice::presentation::expandComponents(reply, style, preferred);
+            auto expanded = dice::presentation::expandComponents(reply, style, preferred, pm.platform == "qq_official");
             reply = std::move(expanded.text);
             if (expanded.usedMarkdown) format = dice::ContentFormat::kMarkdown;
             pm.presentationActions = std::move(expanded.actions);
@@ -3949,7 +3949,7 @@ static int realMain(int argc, char* argv[]) {
                     if (!reply.empty()) {
                         reply = cmdRouter.applySelf(msg, reply, replyFormat);
                         reply = cmdRouter.resolveBarAttributes(msg, reply);
-                        auto expanded = dice::presentation::expandComponents(reply, replyStyle, preferredReplyFormat);
+                        auto expanded = dice::presentation::expandComponents(reply, replyStyle, preferredReplyFormat, msg.platform == "qq_official");
                         reply = std::move(expanded.text);
                         if (expanded.usedMarkdown) replyFormat = dice::ContentFormat::kMarkdown;
                     }

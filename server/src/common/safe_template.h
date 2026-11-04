@@ -95,6 +95,14 @@ inline std::vector<std::string_view> split(std::string_view value, char separato
     size_t start = 0, depth = 0;
     for (size_t i = 0; i < value.size(); ++i) {
         if (sample_template::escaped(value, i)) continue;
+        // Component field separators belong to the component, not the enclosing
+        // sample/grade/assignment. Their variables are compiled with the branch.
+        const auto tail = value.substr(i);
+        if (tail.substr(0, 9) == "[[action:" || tail.substr(0, 6) == "[[bar:"
+            || tail.substr(0, 16) == "[[math-template:") {
+            const auto end = value.find("]]", i + 2);
+            if (end != std::string_view::npos) { i = end + 1; continue; }
+        }
         if (value[i] == '{') ++depth;
         else if (value[i] == '}' && depth) --depth;
         else if (value[i] == separator && !depth) {

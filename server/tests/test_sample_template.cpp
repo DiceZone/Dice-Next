@@ -80,6 +80,28 @@ TEST(SampleTemplate, EveryTopLevelOptionIncludingEmptyIsReachable) {
     }
 }
 
+TEST(WeightedTemplate, VisualComponentsInsideSamplesKeepFieldSeparatorsAndFallbacks) {
+    const auto value = weighted_templates::encode(json::array({
+        {{"text", "NEVER"}, {"weight", 0}},
+        {{"text", R"({sample:[[action:再掷|{command}]] [[math:\frac{ {{roll}} }{2}|{roll}/2]]|[[action:再掷|{command}]] [[math:\frac{ {{roll}} }{2}|{roll}/2]]})"}, {"weight", 1}}
+    }));
+    for (const auto* platform : {"qq_group", "qq_private", "qq_channel", "kook", "discord", "plain"}) {
+        const auto result = outbound::templatePreview({{"text", value}, {"format", "markdown"},
+            {"platform", platform}, {"args", {{"roll", "42"}, {"command", ".r 2d6"}}}});
+        const auto& preview = result["preview"];
+        const bool qqMath = std::string(platform) == "qq_group" || std::string(platform) == "qq_private";
+        const auto text = preview["text"].get<std::string>();
+        ASSERT_TRUE(text.find(".r 2d6") != std::string::npos);
+        ASSERT_TRUE(text.find("[[") == std::string::npos);
+        ASSERT_TRUE(text.find(qqMath ? R"(\frac{ 42 }{2})" : "42/2") != std::string::npos);
+        ASSERT_TRUE(preview["plain"].get<std::string>().find("42/2") != std::string::npos);
+        if (qqMath) ASSERT_EQ(preview["actions"].size(), size_t(1));
+    }
+    const auto literal = outbound::templatePreview({{"text", "[[math:{{nick}}|{nick}]]"},
+        {"format", "markdown"}, {"platform", "plain"}, {"args", {{"nick", "**A_B_C**"}}}});
+    ASSERT_EQ(literal["preview"]["text"].get<std::string>(), "**A_B_C**");
+}
+
 TEST(SampleTemplate, NestedChoicesAreLazyAndVariablesStayIntact) {
     size_t calls = 0;
     auto first = [&](size_t) { ++calls; return size_t(0); };

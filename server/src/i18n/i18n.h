@@ -134,10 +134,13 @@ public:
     /// Explicit format of an override; absent overrides return plain text.
     ContentFormat getOverrideFormat(Locale loc, const std::string& key) const;
     /// The bundle DEFAULT for (loc, key), ignoring overrides (for edit/reset UI).
-    std::string getDefault(Locale loc, const std::string& key) const;
+    std::string getDefault(Locale loc, const std::string& key,
+                           PresentationStyle style = PresentationStyle::kStandard) const;
     /// Format of a trusted built-in template. It is derived only from bundled
     /// project resources, never from user input or a rendered reply.
-    ContentFormat getDefaultFormat(Locale loc, const std::string& key) const;
+    ContentFormat getDefaultFormat(Locale loc, const std::string& key,
+                                   PresentationStyle style = PresentationStyle::kStandard) const;
+    json defaultTemplates(Locale loc, const std::string& key) const;
 
     /// Capture the richest template format used while one command builds a
     /// reply, without changing the command router's string-returning API.

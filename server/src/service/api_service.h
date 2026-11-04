@@ -1867,13 +1867,16 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 std::set<std::string> replyKeys;
                 auto appendReply = [&](const std::string& key, const std::string& example = std::string()) {
                     if (!replyKeys.insert(key).second) return;
-                    std::string def = i18n.getDefault(loc, key);
+                    const auto presets = i18n.defaultTemplates(loc, key);
+                    const std::string presetStyle = presentationStyleName(IAdapter::presentationStyle());
+                    std::string def = presets[presetStyle]["value"].get<std::string>();
                     replies.push_back(J{
                         {"key", key},
                         {"default", def},
                         {"override", ov.count(key) ? J(ov[key]) : J(nullptr)},
                         {"format", ov.count(key) ? ovFormat[key] : "plain"},
-                        {"defaultFormat", contentFormatName(i18n.getDefaultFormat(loc, key))},
+                        {"defaultFormat", presets[presetStyle]["format"]},
+                        {"presets", presets}, {"presetStyle", presetStyle},
                         {"v2key", legacyv2::v2KeyFor(key)},
                         {"example", example},
                         {"vars", deriveVars(def)}
@@ -2013,13 +2016,16 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             J arr = J::array();
             for (auto& [key, def] : defaults) {
                 auto oi = ov.find(key);
+                const auto presets = i18n.defaultTemplates(loc, key);
+                const std::string presetStyle = presentationStyleName(IAdapter::presentationStyle());
                 arr.push_back(J{
                     {"key", key},
                     {"group", key.substr(0, key.find('.'))},
-                    {"default", def},
+                    {"default", presets[presetStyle]["value"]},
                     {"override", oi != ov.end() ? J(oi->second) : J(nullptr)},
                     {"format", oi != ov.end() ? ovFormat[key] : "plain"},
-                    {"defaultFormat", contentFormatName(i18n.getDefaultFormat(loc, key))},
+                    {"defaultFormat", presets[presetStyle]["format"]},
+                    {"presets", presets}, {"presetStyle", presetStyle},
                     {"v2key", legacyv2::v2KeyFor(key)}
                 });
                 arr.back().update(outcomeTextMetadata(i18n, loc, key));

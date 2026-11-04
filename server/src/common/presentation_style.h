@@ -1,11 +1,13 @@
 #pragma once
 
 #include "content_format.h"
+#include "markdown.h"
 
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
 #include <optional>
+#include <map>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -70,6 +72,61 @@ inline std::optional<std::string> decodeActionField(std::string_view value) {
         const int hi = digit(value[i]), lo = digit(value[i + 1]);
         if (hi < 0 || lo < 0) return std::nullopt;
         out += static_cast<char>((hi << 4) | lo);
+    }
+    return out;
+}
+
+// TeX braces are not template macros. Formula variables use {{name}}; a
+// readable fallback after '|' is rendered on platforms without mathematics.
+inline std::string protectMathTemplates(std::string value) {
+    for (size_t pos = 0; (pos = value.find("[[math:", pos)) != std::string::npos;) {
+        const auto end = value.find("]]", pos + 7), split = value.find('|', pos + 7);
+        if (end == std::string::npos) break;
+        if (split == std::string::npos || split > end) { pos = end + 2; continue; }
+        const auto replacement = "[[math-template:" + encodeActionField(std::string_view(value).substr(pos + 7, split - pos - 7))
+            + value.substr(split, end + 2 - split);
+        value.replace(pos, end + 2 - pos, replacement);
+        pos += replacement.size();
+    }
+    return value;
+}
+
+inline std::string mathLiteral(std::string_view value) {
+    const bool numeric = !value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return (ch >= '0' && ch <= '9') || ch == '+' || ch == '-' || ch == '.';
+    });
+    if (numeric) return std::string(value);
+    std::string out = "\\text{";
+    for (const auto ch : value) {
+        switch (ch) {
+            case '\\': out += "\\textbackslash{}"; break;
+            case '{': case '}': case '%': case '$': case '#': case '_': case '&': out += '\\'; out += ch; break;
+            case '^': out += "\\textasciicircum{}"; break;
+            case '~': out += "\\textasciitilde{}"; break;
+            case '\n': case '\r': out += ' '; break;
+            default: out += ch;
+        }
+    }
+    return out + '}';
+}
+
+inline std::string expandMathVariables(std::string_view formula, const std::map<std::string, std::string>& args) {
+    std::string out;
+    size_t pos = 0;
+    while (pos < formula.size()) {
+        const auto open = formula.find("{{", pos);
+        if (open == std::string_view::npos) { out += formula.substr(pos); break; }
+        const auto close = formula.find("}}", open + 2);
+        if (close == std::string_view::npos) { out += formula.substr(pos); break; }
+        // A TeX group may directly surround a placeholder: \frac{{{roll}}}{2}.
+        // Find the inner double braces rather than treating the group as a name.
+        if (formula.substr(open + 2, close - open - 2).find_first_of("{}") != std::string_view::npos) {
+            out += formula.substr(pos, open + 1 - pos); pos = open + 1; continue;
+        }
+        out += formula.substr(pos, open - pos);
+        const auto found = args.find(std::string(formula.substr(open + 2, close - open - 2)));
+        out += found == args.end() ? std::string(formula.substr(open, close + 2 - open)) : mathLiteral(found->second);
+        pos = close + 2;
     }
     return out;
 }
@@ -292,7 +349,7 @@ inline std::optional<int> previewBarSample(std::string_view name) {
 // templates alike.  Existing {variables} are expanded first, so a template can
 // write [[bar:HP|{hp}|{hpmax}]] without teaching every adapter a new syntax.
 inline Expanded expandComponents(const std::string& input, PresentationStyle style,
-                                 ContentFormat output) {
+                                 ContentFormat output, bool supportsMath = true) {
     Expanded result;
     result.text.reserve(input.size());
     size_t pos = 0;
@@ -313,6 +370,15 @@ inline Expanded expandComponents(const std::string& input, PresentationStyle sty
                 if (current && maximum)
                     replacement = statusBar(std::string_view(token).substr(4, first - 4),
                                             *current, *maximum, style, output);
+            }
+        } else if (token.rfind("math-data:", 0) == 0) {
+            const auto split = token.find('|', 10);
+            if (split != std::string::npos) {
+                const auto formula = decodeActionField(std::string_view(token).substr(10, split - 10));
+                const auto fallback = decodeActionField(std::string_view(token).substr(split + 1));
+                if (formula && fallback)
+                    replacement = style == PresentationStyle::kTraditional || output == ContentFormat::kPlainText
+                        ? *fallback : supportsMath ? "$" + *formula + "$" : markdown::escapeLiteral(*fallback);
             }
         } else if (token.rfind("action:", 0) == 0 || token.rfind("action-data:", 0) == 0) {
             const bool encoded = token.rfind("action-data:", 0) == 0;

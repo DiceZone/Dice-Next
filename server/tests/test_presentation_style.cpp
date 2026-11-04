@@ -154,3 +154,45 @@ TEST(PresentationStyle, FinalReplyPreservesExactCommandsAndOnlyUpdatesCaptions) 
     ASSERT_TRUE(ai::preservesActionCommands("/rc 力量-5  // 检定", "/rc 力量-5  // Check"));
     ASSERT_FALSE(ai::preservesActionCommands("/rc 力量-5  // 检定", "/rc 力量+5  // Check"));
 }
+
+TEST(PresentationStyle, EditedVisualPresetRetainsButtonsForGlobalAndPersonaOverrides) {
+    I18n i18n((std::filesystem::path(__FILE__).parent_path().parent_path() / "i18n").string());
+    ASSERT_TRUE(i18n.load());
+    const auto presets = i18n.defaultTemplates(Locale::kZhHans, "dice.check.result");
+    auto edited = presets["visual"]["value"].get<std::string>();
+    ASSERT_TRUE(edited.find("[[action:") != std::string::npos);
+    edited = "我的检定：" + edited;
+    const I18n::Args args{{"nick", "测试"}, {"attr", "侦查"}, {"roll", "42"}, {"rate", "60"}, {"level", "成功"}, {"command", ".ra侦查"}};
+    for (const bool persona : {false, true}) {
+        if (persona) i18n.setPersonaBundles(9, Locale::kZhHans, {{"dice.check.result", edited}}, {{"dice.check.result", "markdown"}});
+        else i18n.setOverride(Locale::kZhHans, "dice.check.result", edited, ContentFormat::kMarkdown);
+        const I18n::PersonaScope scope(persona ? 9 : 0);
+        I18n::beginOutboundCapture(ContentFormat::kMarkdown, PresentationStyle::kVisual);
+        const auto rendered = i18n.tr(Locale::kZhHans, "dice.check.result", args);
+        I18n::endOutboundCapture();
+        const auto expanded = presentation::expandComponents(rendered, PresentationStyle::kVisual, ContentFormat::kMarkdown);
+        ASSERT_TRUE(expanded.text.find("我的检定") != std::string::npos);
+        ASSERT_EQ(expanded.actions.size(), size_t(1));
+        ASSERT_EQ(expanded.actions[0].text, ".ra侦查");
+    }
+    i18n.clearOverride(Locale::kZhHans, "dice.check.result");
+    ASSERT_EQ(i18n.getDefault(Locale::kZhHans, "dice.check.result", PresentationStyle::kVisual), presets["visual"]["value"].get<std::string>());
+}
+
+TEST(PresentationStyle, AuthoredFormulasSupportSafeVariablesAndPlainFallback) {
+    ASSERT_EQ(presentation::expandMathVariables(R"(\frac{{{roll}}}{2})", {{"roll", "42"}}), R"(\frac{42}{2})");
+    const std::string source = R"([[math:\textcolor{#E5484D}{\frac{ {{roll}} }{ {{rate}} }}|{roll}/{rate}]])";
+    for (const auto format : {ContentFormat::kPlainText, ContentFormat::kMarkdown}) {
+        const auto rendered = I18n::previewTemplate(source, {{"roll", "42"}, {"rate", "60"}}, format);
+        const auto rich = presentation::expandComponents(rendered, PresentationStyle::kVisual, ContentFormat::kMarkdown);
+        ASSERT_EQ(rich.text, R"($\textcolor{#E5484D}{\frac{ 42 }{ 60 }}$)");
+        ASSERT_EQ(presentation::expandComponents(rendered, PresentationStyle::kVisual, ContentFormat::kPlainText).text, "42/60");
+        ASSERT_EQ(presentation::expandComponents(rendered, PresentationStyle::kTraditional, ContentFormat::kMarkdown).text, "42/60");
+        ASSERT_EQ(presentation::expandComponents(rendered, PresentationStyle::kVisual, ContentFormat::kMarkdown, false).text, "42/60");
+    }
+    const auto hostile = I18n::previewTemplate(R"([[math:{{nick}}|{nick}]])", {{"nick", R"(}\href{javascript:bad}{bad}$]])"}}, ContentFormat::kMarkdown);
+    const auto result = presentation::expandComponents(hostile, PresentationStyle::kVisual, ContentFormat::kMarkdown);
+    ASSERT_TRUE(result.text.find("\\textbackslash{}href") != std::string::npos);
+    ASSERT_TRUE(result.text.find("\\$") != std::string::npos);
+    ASSERT_TRUE(result.actions.empty());
+}

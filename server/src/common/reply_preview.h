@@ -29,9 +29,13 @@ inline Json replyPreview(const std::string& text, ContentFormat format,
             {"payload", nullptr}, {"actions", actions}, {"messages", messages}};
     }
     const bool rich = !forcePlain && style != PresentationStyle::kTraditional && !channel && platform != "plain";
-    auto expanded = presentation::expandComponents(text, style, rich ? ContentFormat::kMarkdown : ContentFormat::kPlainText);
+    auto expanded = presentation::expandComponents(text, style, rich ? ContentFormat::kMarkdown : ContentFormat::kPlainText, qq && !channel);
     if (expanded.usedMarkdown) format = ContentFormat::kMarkdown;
-    const auto plain = format == ContentFormat::kMarkdown ? markdown::toPlainText(expanded.text) : expanded.text;
+    // Convert authored prose before decoding opaque component data: literal
+    // nicknames/commands in fallbacks must not become Markdown instructions.
+    const auto plain = presentation::expandComponents(
+        format == ContentFormat::kMarkdown ? markdown::toPlainText(text) : text,
+        style, ContentFormat::kPlainText).text;
     Json payload;
     if (qq) payload = qqText(expanded.text, format, rich, channel, nullptr, expanded.actions,
         "markdown", "buttons", "preview-user");
