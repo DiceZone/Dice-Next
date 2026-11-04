@@ -118,3 +118,31 @@ TEST(SystemInfo, SymlinkDataUsesTheResolvedTargetWhenSupported) {
     ASSERT_TRUE(disk.has_value());
     ASSERT_EQ(disk->path, utf8(fs::canonical(data.file)));
 }
+
+#include "service/sysinfo_history.h"
+
+TEST(SystemInfoHistory, RingKeepsTheNewestSamplesAndAnswersIncrementalReads) {
+    dice::sysinfo::SampleRing ring(3);
+    for (int64_t t = 1; t <= 5; ++t) ring.push({t, double(t * 10), int(t)});
+    ASSERT_EQ(ring.size(), size_t(3));
+    const auto all = ring.since(0);
+    ASSERT_EQ(all.size(), size_t(3));
+    ASSERT_EQ(all.front().t, int64_t(3));
+    ASSERT_EQ(ring.since(4).size(), size_t(1));
+    ASSERT_TRUE(ring.since(5).empty());
+    ring.push({2, 1, 1});                     // clock stepped back: start a fresh history
+    ASSERT_EQ(ring.since(0).size(), size_t(1));
+}
+
+TEST(SystemInfoHistory, SamplerCollectsInTheBackgroundAndServesCachedSnapshots) {
+    auto& sampler = dice::sysinfo::HistorySampler::instance();
+    sampler.start(std::filesystem::temp_directory_path());
+    const auto info = sampler.latest();
+    ASSERT_TRUE(info.memTotalMB > 0);
+    for (int i = 0; i < 50 && sampler.since(0).empty(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const auto samples = sampler.since(0);
+    ASSERT_FALSE(samples.empty());
+    ASSERT_TRUE(samples.back().mem >= 0 && samples.back().mem <= 100);
+    ASSERT_TRUE(sampler.since(samples.back().t).empty());
+}

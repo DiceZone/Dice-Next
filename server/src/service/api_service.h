@@ -37,6 +37,7 @@
 #include "../core/help_catalog.h"
 #include "../core/identity/identity_binding.h"
 #include "../platform/system_info.h"
+#include "sysinfo_history.h"
 #include "../i18n/i18n.h"
 #include "../common/types.h"
 #include "group_chat_buffer.h"
@@ -473,9 +474,12 @@ static J replyToJson(const ReplyRuleRow& r) {
 }
 
 // Host CPU / memory / disk snapshot for the dashboard server-info panel and the
-// live /api/system/sysinfo poll. Static hardware details are cached in gather().
+// /api/system/sysinfo poll. The background sampler owns gather(); requests read
+// its latest snapshot instead of blocking ~120ms to measure CPU themselves.
 static J sysInfoJson(const std::string& databasePath) {
-    auto si = dice::sysinfo::gather(std::filesystem::u8path(databasePath));
+    auto& sampler = dice::sysinfo::HistorySampler::instance();
+    sampler.start(std::filesystem::u8path(databasePath));
+    const auto si = sampler.latest();
     J disks = J::array();
     for (const auto& d : si.disks) {
         disks.push_back(J{
@@ -514,6 +518,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                               CounterStore& counterStore, PersonaManager& personaMgr,
                               update::UpdateService& updateService, CommandRouter& cmdRouter) {
     auto& app = drogon::app();
+    // Collect host history from startup, so the dashboard has it before anyone opens it.
+    dice::sysinfo::HistorySampler::instance().start(std::filesystem::u8path(db.path()));
     auto* st = db.getStorage();
     auto* lst = db.getLogStorage();   // game_logs / game_log_messages live in logs.db
 
@@ -2443,8 +2449,19 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
     // ── Dashboard ─────────────────────────────────────────────
     // Live host metrics for the dashboard server-info curve (polled frequently).
-    app.registerHandler("/api/system/sysinfo", [&db](Req, CB&& cb) {
-        jsonReply(ok(sysInfoJson(db.path())), std::move(cb));
+    // ?since=<unix 秒> 只返回更新的样本，前端轮询不必每次取回整小时的历史。
+    app.registerHandler("/api/system/sysinfo", [&db](Req req, CB&& cb) {
+        J out = sysInfoJson(db.path());
+        int64_t since = 0;
+        try { const auto raw = req->getParameter("since"); if (!raw.empty()) since = std::stoll(raw); } catch (...) {}
+        J samples = J::array();
+        for (const auto& sample : dice::sysinfo::HistorySampler::instance().since(since))
+            samples.push_back(J::array({sample.t, sample.cpu, sample.mem}));
+        out["history"] = J{{"interval", dice::sysinfo::HistorySampler::kIntervalSeconds},
+                           {"window", dice::sysinfo::HistorySampler::kIntervalSeconds
+                                      * static_cast<int>(dice::sysinfo::HistorySampler::kCapacity)},
+                           {"samples", std::move(samples)}};   // [unix 秒, CPU%, 内存%]
+        jsonReply(ok(out), std::move(cb));
     }, {drogon::Get});
 
     // 平台能力位：{platform: {kick,ban,poke,friends,...}}。前端按能力显示/隐藏
