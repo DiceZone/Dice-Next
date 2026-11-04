@@ -43,6 +43,18 @@ std::string unexpectedInputUnit(const std::string& input, size_t offset) {
     return escaped.str();
 }
 
+// Precedence of a rendered fragment (see RenderResult::precedence).
+constexpr int kAdditive = 1;
+constexpr int kMultiplicative = 2;
+constexpr int kNegation = 3;
+constexpr int kAtom = 4;
+
+std::string bracketed(const std::string& text) { return "(" + text + ")"; }
+
+// A fragment written after an operator must not start with its own minus:
+// "5-(-1)", never "5--1".
+bool leadingMinus(const std::string& text) { return !text.empty() && text.front() == '-'; }
+
 }  // namespace
 
 
@@ -170,8 +182,10 @@ DiceResult DiceExpression::evaluate(const std::string& input) {
             total = checkedValue(int64_t(total) + signedVal);
 
             const std::string sign = (i == 0) ? (neg ? "-" : "") : (neg ? "-" : "+");
-            sep      += sign + r.sep;
-            combined += sign + std::to_string(r.value);
+            const std::string subtotal = std::to_string(r.value);
+            const bool afterSign = i > 0 || neg;
+            sep      += sign + (afterSign && leadingMinus(r.sep) ? bracketed(r.sep) : r.sep);
+            combined += sign + (afterSign && r.value < 0 ? bracketed(subtotal) : subtotal);
         }
 
         const std::string totalStr = std::to_string(total);
@@ -220,9 +234,11 @@ DiceExpression::RenderResult DiceExpression::renderEval(
             return out;
 
         case ASTNode::Kind::kUnaryMinus: {
-            RenderResult r = renderEval(node->left.get(), parenDice, results);
+            // Always bracket a multi-die group so "-3D6" shows "-(1+2+3)", not "-1+2+3".
+            RenderResult r = renderEval(node->left.get(), true, results);
             out.value = checkedValue(-int64_t(r.value));
-            out.sep = "-" + r.sep;
+            out.sep = "-" + (r.precedence < kAtom ? bracketed(r.sep) : r.sep);
+            out.precedence = kNegation;
             return out;
         }
 
@@ -230,14 +246,28 @@ DiceExpression::RenderResult DiceExpression::renderEval(
             // Nested +/- (inside parens) and ×/÷ both force child dice to parenthesize.
             RenderResult l = renderEval(node->left.get(), true, results);
             RenderResult r = renderEval(node->right.get(), true, results);
+            const bool multiplicative = node->op == '*' || node->op == '/';
+            out.precedence = multiplicative ? kMultiplicative : kAdditive;
+            // The AST has no brackets, so restore the ones its shape implies:
+            // (1+2)×3 and 8/(2×2) must not read as 1+2×3 and 8/2×2.  Operators
+            // associate left, so the left side needs them only below this level;
+            // the right side also needs them at the same level unless regrouping
+            // is exact (a+(b-c) = a+b-c, a×(b×c) = a×b×c, but integer a×(b/c)
+            // differs from a×b/c).
+            const bool rightIsDivision = node->right->kind == ASTNode::Kind::kBinaryOp && node->right->op == '/';
+            const bool sameLevelNeedsBrackets = node->op == '-' || node->op == '/' ||
+                (node->op == '*' && rightIsDivision);
+            const std::string left = l.precedence < out.precedence ? bracketed(l.sep) : l.sep;
+            const std::string right = r.precedence < out.precedence || leadingMinus(r.sep) ||
+                (r.precedence == out.precedence && sameLevelNeedsBrackets) ? bracketed(r.sep) : r.sep;
             switch (node->op) {
-                case '+': out.value = checkedValue(int64_t(l.value) + r.value); out.sep = l.sep + "+" + r.sep; break;
-                case '-': out.value = checkedValue(int64_t(l.value) - r.value); out.sep = l.sep + "-" + r.sep; break;
-                case '*': out.value = checkedValue(int64_t(l.value) * r.value); out.sep = l.sep + "×" + r.sep; break;
+                case '+': out.value = checkedValue(int64_t(l.value) + r.value); out.sep = left + "+" + right; break;
+                case '-': out.value = checkedValue(int64_t(l.value) - r.value); out.sep = left + "-" + right; break;
+                case '*': out.value = checkedValue(int64_t(l.value) * r.value); out.sep = left + "×" + right; break;
                 case '/':
                     if (r.value == 0)
                         throw AppException(ApiErrorCode::kDiceInvalidExpression, "division by zero");
-                    out.value = checkedValue(int64_t(l.value) / r.value); out.sep = l.sep + "/" + r.sep; break;
+                    out.value = checkedValue(int64_t(l.value) / r.value); out.sep = left + "/" + right; break;
                 default:
                     throw AppException(ApiErrorCode::kDiceInvalidExpression,
                         std::string("unknown operator: ") + node->op);
@@ -277,6 +307,7 @@ DiceExpression::RenderResult DiceExpression::renderEval(
                 out.sep = "{" + inner + "}(" + std::to_string(sum) + ")";
             } else {
                 out.sep = (count > 1 && parenDice) ? ("(" + inner + ")") : inner;
+                if (count > 1 && !parenDice) out.precedence = kAdditive;
             }
             return out;
         }

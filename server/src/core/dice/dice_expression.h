@@ -130,6 +130,9 @@ private:
         int value = 0;
         std::string sep;
         std::string displayOverride;
+        /// Binding of @c sep's outermost operator, so callers add the brackets
+        /// the AST implies: 1 = +/-, 2 = ×/÷, 3 = negation, 4 = atom.
+        int precedence = 4;
     };
 
     /// Roll + render a subtree. @p parenDice wraps multi-die groups in ().
