@@ -60,6 +60,12 @@ TEST(outbound, official_sn_presets_custom_templates_and_literal_fallback) {
     }
     EXPECT_TRUE(qq_sn::prefix(card, true, "off").empty());
     EXPECT_TRUE(qq_sn::prefix(card, false, "off").empty());
+    EXPECT_EQ(qq_sn::prefix(card, true, "small_red", 0, "> {sn}", "#3b82f6"),
+        "$\\scriptsize\\textcolor{#3B82F6}{\\text{" + qq_sn::texText(card) + "}}$\n\n");
+    for (const auto* bad : {"red", "#12345", "#1234567", "#GGGGGG", "#12}\\x", ""})
+        EXPECT_EQ(qq_sn::prefix(card, true, "small_red", 0, "> {sn}", bad).rfind("$\\scriptsize\\textcolor{#E5484D}", 0), size_t(0));
+    EXPECT_TRUE(qq_sn::validColor("#00ff7F"));
+    EXPECT_FALSE(qq_sn::validColor("00ff7f"));
     EXPECT_FALSE(qq_sn::validStyle("<font>"));
     EXPECT_FALSE(qq_sn::validTemplate("missing placeholder"));
     EXPECT_FALSE(qq_sn::validTemplate(std::string(2045, 'x') + "{sn}"));

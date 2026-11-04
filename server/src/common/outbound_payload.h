@@ -14,7 +14,8 @@ inline Json qqText(const std::string& text, ContentFormat format, bool useMarkdo
                    const std::string& richStyle = "off", const std::string& interactions = "off",
                    const std::string& nativeUser = "", bool verifyImages = false, int fallbackLevel = 0,
                    const std::string& nameCard = "", const std::string& nameCardStyle = "small_red",
-                   const std::string& nameCardTemplate = "> {sn}") {
+                   const std::string& nameCardTemplate = "> {sn}",
+                   const std::string& nameCardColor = qq_sn::kDefaultColor) {
     const bool rich = useMarkdown && format == ContentFormat::kPlainText && richStyle != "off"
         && card && card->original == text;
     const bool interactive = useMarkdown && fallbackLevel == 0 && richStyle != "off" && !actions.empty();
@@ -24,9 +25,9 @@ inline Json qqText(const std::string& text, ContentFormat format, bool useMarkdo
         : (format == ContentFormat::kMarkdown ? markdown::toPlainText(text) : text);
     if (rich) wire = qq_rich::render(*card, fallbackLevel == 0 && richStyle == "math", false);
     if ((rich || interactive) && fallbackLevel == 0 && interactions == "links") wire += qq_rich::commandLinks(commands);
-    if (!nameCard.empty()) wire = qq_sn::prefix(nameCard, useMarkdown, nameCardStyle, fallbackLevel, nameCardTemplate) + wire;
+    if (!nameCard.empty()) wire = qq_sn::prefix(nameCard, useMarkdown, nameCardStyle, fallbackLevel, nameCardTemplate, nameCardColor) + wire;
     if (rich && wire.size() > 3500)
-        return qqText(text, format, false, channel, nullptr, {}, "off", "off", "", verifyImages, 2, nameCard, nameCardStyle, nameCardTemplate);
+        return qqText(text, format, false, channel, nullptr, {}, "off", "off", "", verifyImages, 2, nameCard, nameCardStyle, nameCardTemplate, nameCardColor);
     Json body = useMarkdown
         ? Json{{"msg_type", 2}, {"markdown", {{"content", wire}, {"force_verify_image_resource", verifyImages}}}}
         : Json{{"content", wire.empty() && !text.empty() ? text : wire}};

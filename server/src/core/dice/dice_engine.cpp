@@ -9,6 +9,28 @@
 
 namespace dice {
 
+namespace {
+const char* providerLabel(secure_random::Provider provider) {
+    switch (provider) {
+    case secure_random::Provider::OpenSSL: return "OpenSSL 安全随机";
+    case secure_random::Provider::Hardware: return "CPU 硬件熵源（RDSEED，混合系统随机）";
+    case secure_random::Provider::Pseudo: return "应急伪随机（xoshiro256**）";
+    default: return "操作系统安全随机";
+    }
+}
+// Runs only when the provider changes, so a broken entropy interface logs once
+// instead of on every roll.
+void onRandomProviderChange(secure_random::Source requested, secure_random::Provider,
+                            secure_random::Provider current) {
+    const bool intended = (requested == secure_random::Source::OpenSSL && current == secure_random::Provider::OpenSSL)
+        || (requested == secure_random::Source::Hardware && current == secure_random::Provider::Hardware)
+        || (requested == secure_random::Source::System && current == secure_random::Provider::System);
+    if (intended) DICE_LOG_INFO_M("掷骰", "随机源：正在使用{}。", providerLabel(current));
+    else DICE_LOG_WARN_M("掷骰", "随机源：所选来源暂不可用，已自动改用{}；掷骰继续进行，来源恢复后自动切回。",
+                         providerLabel(current));
+}
+} // namespace
+
 // ═══════════════════════════════════════════════════════════════
 // Constructor
 // ═══════════════════════════════════════════════════════════════
@@ -246,8 +268,8 @@ void DiceEngine::setRules(const DiceRules& rules) {
 void DiceEngine::reloadRules() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     try {
-        secure_random::setSource(configMgr_.get<std::string>("dice/random_source", "system") == "openssl"
-            ? secure_random::Source::OpenSSL : secure_random::Source::System);
+        secure_random::setFallbackObserver(&onRandomProviderChange);
+        secure_random::setSource(secure_random::parseSource(configMgr_.get<std::string>("dice/random_source", "system")));
         json rulesJson = configMgr_.getAll();
         // Navigate to dice → rules
         if (rulesJson.contains("dice") && rulesJson["dice"].contains("rules")) {

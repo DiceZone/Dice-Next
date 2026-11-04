@@ -624,11 +624,14 @@ public:
                 if (j.value("retcode", -1) != 0) throw std::runtime_error(j.value("msg", std::string("创建扫码任务失败")));
                 std::string task = j.at("data").at("task_id").get<std::string>();
                 std::string sid = randomSessionId();
+                if (sid.empty()) throw std::runtime_error("无法生成扫码会话");
                 { std::lock_guard lock(qrMutex_); qrSessions_[sid] = {task, std::move(key), std::time(nullptr)}; }
                 cb({true, {{"sessionId",sid},{"url","https://q.qq.com/qqbot/openclaw/connect.html?task_id=" + task + "&source=DiceNext&_wv=2"}}, {}});
             } catch (const std::exception& e) { cb({false,{},e.what()}); }
         });
     }
+
+    static std::string qrSessionIdForTest() { return randomSessionId(); }
 
     static void pollQrLogin(const std::string& sid, QrCallback cb) {
         QrSession session;
@@ -661,6 +664,7 @@ public:
     using ApiTransport = std::function<void(drogon::HttpMethod, const std::string&, const json&, ActionCallback)>;
     void setApiTransportForTest(ApiTransport transport) { testApi_ = std::move(transport); }
     static json apiResponseForTest(int status, const json& data) { return checkedApiResponse(status, data); }
+    static bool permissionDeniedForTest(int status, int64_t code, const std::string& message) { return isPermissionDenied(status, code, message); }
     int gatewayIntentsForTest() const { return qqprotocol::intents(subscribeGroupMemberEvents_); }
     void setNameTimeForTest(std::time_t now) { nameTimeForTest_ = now; }
     void maintainNamesForTest(bool online = true) { connected_ = online; maintainNameCache(); }
@@ -698,7 +702,16 @@ private:
     static drogon::HttpClientPtr httpsClient(const std::string& host) {
         const auto ip=resolveIpv4(host); return ip.empty()?nullptr:drogon::HttpClient::newHttpClient(ip,443,true);
     }
-    static std::string randomSessionId() { std::string raw(18,'\0'); RAND_bytes(reinterpret_cast<unsigned char*>(raw.data()),(int)raw.size()); return drogon::utils::base64Encode(raw); }
+    // 会话号会放进 URL 路径段。标准 Base64 约一半概率带 '/' 或 '+'，drogon 解码后
+    // 不再匹配 /qr/{1}，表现为二维码偶发 404 加载不出来；改用十六进制，只含 [0-9a-f]。
+    static std::string randomSessionId() {
+        unsigned char raw[18]{};
+        if (RAND_bytes(raw, static_cast<int>(sizeof(raw))) != 1) return {};
+        static constexpr char kHex[] = "0123456789abcdef";
+        std::string out; out.reserve(sizeof(raw) * 2);
+        for (unsigned char b : raw) { out.push_back(kHex[b >> 4]); out.push_back(kHex[b & 0x0f]); }
+        return out;
+    }
     static std::string decryptSecret(const std::string& cipher64,const std::string& key) {
         auto raw=drogon::utils::base64Decode(cipher64); if(raw.size()<29||key.size()!=32) return {};
         const unsigned char* iv=reinterpret_cast<const unsigned char*>(raw.data()); const unsigned char* tag=reinterpret_cast<const unsigned char*>(raw.data()+raw.size()-16);
@@ -711,6 +724,16 @@ private:
     }
     static json apiResult(bool ok, int status, const std::string& message = {}, json data = json::object()) {
         return json{{"ok", ok}, {"httpStatus", status}, {"message", message}, {"data", std::move(data)}};
+    }
+    // 平台返回的「无权限」类错误：未开通 / 内邀 / 白名单接口。只按平台给出的错误码
+    // 与文案识别，不把网络、限流、参数错误当成权限问题。
+    static bool isPermissionDenied(int status, int64_t code, const std::string& message) {
+        // 40012010：应用无接口访问权限；11253/11254：成员等接口未授权（名称查询已按此退避）。
+        if (code == 40012010 || code == 11253 || code == 11254) return true;
+        if (status == 401 || status == 429 || status >= 500) return false;
+        for (const char* marker : {"无接口访问权限", "无权限", "没有权限", "权限不足", "未授权", "未开通", "no permission", "permission denied"})
+            if (message.find(marker) != std::string::npos) return true;
+        return false;
     }
     static json checkedApiResponse(int status, const json& data) {
         int64_t code = 0;
@@ -1249,9 +1272,15 @@ private:
             json data = raw.empty() ? json::object() : json::parse(raw, nullptr, false);
             auto checked = checkedApiResponse(status, data);
             if (!checked.value("ok", false)) {
-                DICE_LOG_WARN("QQOfficial '{}': {} {} 失败：HTTP {}，错误码 {}，{}", self->name_,
-                              method == drogon::Get ? "GET" : method == drogon::Post ? "POST" : method == drogon::Patch ? "PATCH" : method == drogon::Delete ? "DELETE" : "HTTP",
-                              path, status, checked.value("error_code", int64_t(0)), checked.value("message", std::string()));
+                const char* verb = method == drogon::Get ? "GET" : method == drogon::Post ? "POST" : method == drogon::Patch ? "PATCH" : method == drogon::Delete ? "DELETE" : "HTTP";
+                const auto code = checked.value("error_code", int64_t(0));
+                const auto message = checked.value("message", std::string());
+                // 官方 v2 不少接口只对内邀或白名单应用开放，普通应用每次调用都会稳定返回
+                // 「应用无接口访问权限」。这是平台权限而非故障，降为 DEBUG，避免刷屏。
+                if (isPermissionDenied(status, code, message))
+                    DICE_LOG_DEBUG("QQOfficial '{}': {} {} 无接口访问权限：HTTP {}，错误码 {}，{}", self->name_, verb, path, status, code, message);
+                else
+                    DICE_LOG_WARN("QQOfficial '{}': {} {} 失败：HTTP {}，错误码 {}，{}", self->name_, verb, path, status, code, message);
             }
             cb(std::move(checked));
         }, nameRequest ? 10.0 : 0.0);
@@ -2026,7 +2055,7 @@ public:
         auto body = outbound::qqText(text, format, useMarkdown, m.type == MessageType::kChannel,
             m.platform == "qq_official" ? m.qqRichReply.get() : nullptr, m.presentationActions,
             m.platform == "qq_official" ? richStyle_ : "off", interactions_, nativeUser,
-            forceVerifyImageResource_, fallbackLevel, m.snBanner, m.snBannerStyle, m.snBannerTemplate);
+            forceVerifyImageResource_, fallbackLevel, m.snBanner, m.snBannerStyle, m.snBannerTemplate, m.snBannerColor);
         auto reference = qqprotocol::text(m.extra, "__qq_quote_reference");
         if (!reference.empty() && reference == m.id) reference = qqprotocol::text(m.extra, "message_reference_id");
         if (!reference.empty() && m.type != MessageType::kChannel) {

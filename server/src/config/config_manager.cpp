@@ -42,6 +42,7 @@ static json makeDefaultConfig() {
             {"message_format", "traditional"},   // 出站消息表现形式：traditional / standard / visual
             {"qq_sn_banner", "small_red"},       // QQ 官方 .sn 顶部状态样式（含 off）
             {"qq_sn_template", "> {sn}"},       // 自定义 Markdown，{sn_tex} 用于公式内的文字
+            {"qq_sn_color", "#E5484D"},         // 「彩色文字」预设的颜色（#RRGGBB）
             {"save_log_images", false},
             {"image_send", {{"mode", "base64"}, {"host", ""}}},
             {"image_host", {{"mode", "none"}}},

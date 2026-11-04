@@ -3042,6 +3042,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             {"message_format", "traditional"},
             {"qq_sn_banner", "small_red"},
             {"qq_sn_template", "> {sn}"},
+            {"qq_sn_color", "#E5484D"},
             {"bot_msg", kDefaultBotMessage}, {"bot_header", ""},
             {"save_log_images", false},
             {"image_send", J{{"mode", "base64"}, {"host", ""}}},
@@ -3069,6 +3070,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 return value.is_string() && qq_sn::validStyle(value.get<std::string>());
             if (key == "qq_sn_template")
                 return value.is_string() && qq_sn::validTemplate(value.get<std::string>());
+            if (key == "qq_sn_color")
+                return value.is_string() && qq_sn::validColor(value.get<std::string>());
             if (key == "message_format")
                 return value.is_string() && (value == "traditional" || value == "standard"
                     || value == "visual" || value == "card");
@@ -3165,12 +3168,19 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (req->method() == drogon::Put) {
                 const auto body = J::parse(req->body());
                 const auto value = body.at("source").get<std::string>();
-                if (value != "system" && value != "openssl") throw std::invalid_argument("Invalid random source");
+                if (!secure_random::validSourceName(value)) throw std::invalid_argument("Invalid random source");
+                if (value == "hardware" && !secure_random::hardwareAvailable())
+                    throw std::invalid_argument("This CPU does not provide RDSEED; keep the system source");
                 if (!cfg.setAndSave("dice/random_source", value))
                     throw std::runtime_error("Failed to save random source; previous setting retained");
-                secure_random::setSource(value == "openssl" ? secure_random::Source::OpenSSL : secure_random::Source::System);
+                secure_random::setSource(secure_random::parseSource(value));
             }
-            jsonReply(ok(J{{"source", cfg.get<std::string>("dice/random_source", "system")}}), std::move(cb));
+            const auto saved = cfg.get<std::string>("dice/random_source", "system");
+            const auto health = secure_random::status();
+            jsonReply(ok(J{{"source", secure_random::validSourceName(saved) ? saved : std::string("system")},
+                           {"active", secure_random::providerName(health.active)},
+                           {"fallbacks", health.fallbacks},
+                           {"hardware_available", secure_random::hardwareAvailable()}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 

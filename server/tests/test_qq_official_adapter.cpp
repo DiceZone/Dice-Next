@@ -1,3 +1,4 @@
+#include <set>
 #include "test_framework.h"
 #include <limits>
 #include "../src/adapter/qq_official_adapter.h"
@@ -58,6 +59,17 @@ TEST(QQOfficialAdapter, FaceExtUrlsAreValidatedWithoutGuessingFromIds) {
         ASSERT_EQ(qqmsg::normalizeIncoming(literal, json::array()).raw, std::string(literal));
         ASSERT_EQ(qqmsg::normalizeLogFaces(literal), std::string(literal));
     }
+}
+
+TEST(QQOfficialAdapter, QrSessionIdsAreSingleUrlPathSegments) {
+    std::set<std::string> seen;
+    for (int i = 0; i < 256; ++i) {
+        const auto sid = QQOfficialAdapter::qrSessionIdForTest();
+        ASSERT_EQ(sid.size(), size_t(36));
+        for (char c : sid) ASSERT_TRUE((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+        seen.insert(sid);
+    }
+    ASSERT_EQ(seen.size(), size_t(256));
 }
 
 TEST(QQOfficialAdapter, BuildsQueryStringForGetEndpoints) {

@@ -62,6 +62,7 @@ struct Message {
     std::string snBanner;
     std::string snBannerStyle = "small_red"; // Scoped setting captured before asynchronous sends/retries.
     std::string snBannerTemplate = "> {sn}";
+    std::string snBannerColor = "#E5484D";    // 「彩色文字」预设的颜色（#RRGGBB）
     std::vector<presentation::Action> presentationActions;
     bool forcePlainText = false; // Outbound conversation preference, captured before async work.
     bool textPreferenceCaptured = false;

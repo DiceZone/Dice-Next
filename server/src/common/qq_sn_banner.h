@@ -12,6 +12,23 @@ inline std::string style(const std::string& value) {
     return validStyle(value) ? value : "small_red";
 }
 
+// 「彩色文字」预设（存储键沿用 small_red）的文字颜色，只接受 #RRGGBB。
+inline constexpr const char* kDefaultColor = "#E5484D";
+inline bool validColor(const std::string& value) {
+    if (value.size() != 7 || value[0] != '#') return false;
+    for (size_t i = 1; i < value.size(); ++i) {
+        const char c = value[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+    }
+    return true;
+}
+inline std::string color(const std::string& value) {
+    if (!validColor(value)) return kDefaultColor;
+    std::string out = value;
+    for (auto& c : out) if (c >= 'a' && c <= 'f') c = static_cast<char>(c - 'a' + 'A');
+    return out;
+}
+
 // Text inside QQ's math span must not introduce TeX commands, math delimiters,
 // Markdown links, CQ codes or QQ interaction tags. Only our fixed commands are
 // emitted; names, templates and character attributes remain literal text.
@@ -67,13 +84,14 @@ inline std::string renderTemplate(const std::string& format, const std::string& 
 
 inline std::string prefix(const std::string& card, bool markdown,
                           const std::string& mode = "small_red", int fallbackLevel = 0,
-                          const std::string& format = "> {sn}") {
+                          const std::string& format = "> {sn}", const std::string& textColor = kDefaultColor) {
     if (card.empty() || style(mode) == "off") return {};
     if (!markdown) return card + "\n";
     if (style(mode) == "plain" || fallbackLevel > 0) return qq_rich::literal(card) + "\n\n";
     if (style(mode) == "quote") return "> " + qq_rich::literal(card) + "\n\n";
     if (style(mode) == "custom") return renderTemplate(format, card) + "\n\n";
-    return "$\\scriptsize\\textcolor{#E5484D}{\\text{" + texText(card) + "}}$\n\n";
+    // 颜色已校验为 #RRGGBB，不会引入 TeX 命令或花括号。
+    return "$\\scriptsize\\textcolor{" + color(textColor) + "}{\\text{" + texText(card) + "}}$\n\n";
 }
 
 } // namespace dice::qq_sn

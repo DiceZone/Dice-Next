@@ -30,6 +30,40 @@ TEST(SecureRandom, UniformRejectionAndBothProviders) {
     secure_random::setSource(secure_random::Source::System);
 }
 
+TEST(SecureRandom, UnavailableSourcesFallBackInsteadOfStoppingTheRoll) {
+    using secure_random::Provider;
+    secure_random::setSource(secure_random::Source::System);
+    secure_random::setFailureInjectionForTest({true, false, false});
+    EXPECT_TRUE(secure_random::die(20) >= 1);
+    EXPECT_TRUE(secure_random::status().active == Provider::OpenSSL);
+    secure_random::setSource(secure_random::Source::OpenSSL);
+    secure_random::setFailureInjectionForTest({false, true, false});
+    secure_random::word();
+    EXPECT_TRUE(secure_random::status().active == Provider::System);
+    const auto before = secure_random::status().fallbacks;
+    secure_random::setFailureInjectionForTest({true, true, true});
+    long long sum = 0;
+    for (int i = 0; i < 6000; ++i) {
+        const auto value = secure_random::die(6);
+        EXPECT_TRUE(value >= 1 && value <= 6);
+        sum += value;
+    }
+    EXPECT_TRUE(secure_random::status().active == Provider::Pseudo);
+    EXPECT_TRUE(secure_random::status().fallbacks >= before + 6000);
+    EXPECT_TRUE(sum > 6000 * 3 && sum < 6000 * 4);   // uniform mean 3.5
+    secure_random::setSource(secure_random::Source::Hardware);
+    secure_random::setFailureInjectionForTest({false, false, true});
+    secure_random::word();
+    EXPECT_TRUE(secure_random::status().active == Provider::System);
+    secure_random::setFailureInjectionForTest({});
+    secure_random::setSource(secure_random::Source::System);
+    secure_random::word();
+    EXPECT_TRUE(secure_random::status().active == Provider::System);
+    EXPECT_TRUE(secure_random::parseSource("hardware") == secure_random::Source::Hardware);
+    EXPECT_TRUE(secure_random::parseSource("bogus") == secure_random::Source::System);
+    EXPECT_FALSE(secure_random::validSourceName("pseudo"));
+}
+
 namespace {
 
 struct LegacyTestDir {
@@ -1154,8 +1188,7 @@ TEST(SecureRandom, BothProvidersWorkThroughAllExpressionEnginesAndReload) {
         ASSERT_TRUE(persisted.load());
         ASSERT_EQ(persisted.get<std::string>("dice/random_source", ""), std::string(source));
         f.cfg.emitConfigChanged();
-        ASSERT_TRUE(secure_random::source() == (std::string(source) == "openssl"
-            ? secure_random::Source::OpenSSL : secure_random::Source::System));
+        ASSERT_TRUE(secure_random::source() == secure_random::parseSource(source));
         for (const auto* engine : {"dicenext", "onedice", "dicescript"}) {
             f.cfg.set<json>("dice/expression_order", json::array({engine}));
             const auto reply = f.run(".r 4d6");
@@ -1266,6 +1299,12 @@ TEST(LegacyCommands, OfficialSnRespectsScopedSettingsAndRetainsPlayerOptIn) {
     f.msg.platform = "qq_official";
     ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
     ASSERT_EQ(f.router.officialSnBannerStyle(f.msg), "small_red");
+    ASSERT_EQ(f.router.officialSnBannerColor(f.msg), "#E5484D");
+    scoped_settings::setSection(f.cfg, "adapter", "qq_official", "dice", {{"qq_sn_color", "#22c55e"}});
+    ASSERT_EQ(f.router.officialSnBannerColor(f.msg), "#22C55E");
+    scoped_settings::setSection(f.cfg, "adapter", "qq_official", "dice", {{"qq_sn_color", "}\\evil"}});
+    ASSERT_EQ(f.router.officialSnBannerColor(f.msg), "#E5484D");
+    scoped_settings::setSection(f.cfg, "adapter", "qq_official", "dice", json::object(), json::array({"qq_sn_color"}));
     f.run(".sn");
     const auto card = f.router.officialSnBanner(f.msg);
     ASSERT_FALSE(card.empty());
