@@ -3530,6 +3530,19 @@ static int realMain(int argc, char* argv[]) {
         DICE_LOG_WARN_M("管理面板", "前端资源目录「{}」不存在，请检查安装包是否完整。", webRoot);
     }
 
+    // drogon 只按扩展名白名单提供静态文件，默认不含 json：manifest.json 一直被拒绝，
+    // 浏览器因此从不提供「安装为应用」。单独以标准 MIME 提供清单，不放开其他 .json。
+    if (fs::exists(webRoot)) {
+        const std::string manifestFile = webRoot + "/manifest.json";
+        app.registerHandler("/manifest.json", [manifestFile](const drogon::HttpRequestPtr&,
+                std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+            auto response = drogon::HttpResponse::newFileResponse(manifestFile, "", drogon::CT_CUSTOM,
+                                                                  "application/manifest+json");
+            response->addHeader("Cache-Control", "no-cache");
+            cb(response);
+        }, {drogon::Get, drogon::Head});
+    }
+
     // Old /v1/ and /v2/ bookmarks from the dual-bundle era return to the root.
     // Registered handlers take precedence over leftover static directories.
     for (const char* legacy : {"/v1", "/v2", "/v1/", "/v2/", "/v1/index.html", "/v2/index.html"}) {

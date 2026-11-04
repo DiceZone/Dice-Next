@@ -93,6 +93,26 @@ async function entry() {
     assert.ok((await asset.arrayBuffer()).byteLength > 0);
   }
 }
+// drogon's static whitelist has no "json": the manifest used to be refused and no
+// browser offered "Install app". Check every file installation needs.
+async function installable() {
+  const manifestResponse = await request('/manifest.json');
+  assert.equal(manifestResponse.status, 200, '/manifest.json must be served for install-as-app');
+  assert.match(manifestResponse.headers.get('content-type'), /^application\/manifest\+json/);
+  const manifest = await manifestResponse.json();
+  assert.ok(manifest.name && manifest.start_url && manifest.display, 'incomplete manifest');
+  const manifestUrl = new URL('/manifest.json', `${origin}/`);
+  for (const icon of manifest.icons) {
+    const url = new URL(icon.src, manifestUrl);
+    assert.equal(url.origin, origin, 'Manifest icons must stay local');
+    const response = await request(url.pathname);
+    assert.equal(response.status, 200, url.pathname);
+    assert.match(response.headers.get('content-type'), /image\/png/);
+  }
+  const worker = await request('/sw.js');
+  assert.equal(worker.status, 200, '/sw.js must be served for the install prompt');
+  assert.match(worker.headers.get('content-type'), /javascript/);
+}
 async function legacyRedirects() {
   for (const [route, location] of [['/v1/', '../'], ['/v2/', '../'], ['/v1/index.html', '../'], ['/v2', './']]) {
     for (const method of ['GET', 'HEAD']) {
@@ -142,7 +162,7 @@ try {
   };
   for (const [name, value] of Object.entries(sections)) await writeFile(path.join(root, 'config', name + '.json'), JSON.stringify(value));
   phase = 'upgraded configuration serves the single UI';
-  await start(); await entry();
+  await start(); await entry(); await installable();
   phase = 'old /v1/ and /v2/ bookmarks';
   await legacyRedirects();
   phase = 'retired version API';
@@ -152,7 +172,7 @@ try {
   const saved = JSON.parse(await readFile(path.join(root, 'config/webui.json'), 'utf8'));
   assert.equal(saved.password, ''); assert.equal(saved.fixture_existing_preference, 'preserve-me');
   success = true;
-  console.log('PASS packaged WebUI HTTP: root/index GET+HEAD, relative assets, old /v1/ /v2/ redirects, upgraded settings and restart');
+  console.log('PASS packaged WebUI HTTP: root/index GET+HEAD, relative assets, install manifest/icons/service worker, old /v1/ /v2/ redirects, upgraded settings and restart');
 } catch (error) {
   throw new Error(`${phase}: ${error.message}\nIsolated package retained at ${sandbox}\n${output.replaceAll(apiKey || 'never-a-key', '<redacted>')}`, { cause: error });
 } finally {
