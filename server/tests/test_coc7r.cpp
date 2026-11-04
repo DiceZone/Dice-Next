@@ -465,11 +465,14 @@ TEST(CheckArithmetic, ChecksAndAttributeEditsShareOneArithmeticModule) {
     ASSERT_TRUE(f.run(".ra(10)侦查").find("10/40") != std::string::npos);            // plain forms unchanged
     ASSERT_TRUE(f.run(".ra(10)侦查60").find("10/60") != std::string::npos);
     ASSERT_TRUE(f.run(".ra(10)侦查 60 搜索").find("10/60") != std::string::npos);
-    // .st follows ordinary arithmetic too: 60 - 20 + 5, then 50 - 1d1 - 1d1.
+    // .st treats everything after the sign as one amount (pasted weapon damage):
+    // 60 - (20+5); 50 - (1d1+2) — a low roll never turns damage into healing.
     f.run(".st 力量-20+5");
-    ASSERT_EQ(f.get("力量"), 45);
-    f.run(".st 敏捷-1d1-1d1");
-    ASSERT_EQ(f.get("敏捷"), 48);
+    ASSERT_EQ(f.get("力量"), 35);
+    f.run(".st 敏捷-1d1+2");
+    ASSERT_EQ(f.get("敏捷"), 47);
+    f.run(".st 敏捷+1d1*2");
+    ASSERT_EQ(f.get("敏捷"), 49);
     f.run(".st 侦查20*2");
     ASSERT_EQ(f.get("侦查"), 40);
 }

@@ -4185,12 +4185,14 @@ private:
                 formulaChanges[fcanon] = formula;
                 continue;
             }
-            // Ordinary arithmetic, dice included: ".st hp-20+5" changes hp by -15 and
-            // ".st hp-1d6-1d4" subtracts both rolls; ".st 力量30*2" sets 60.
+            // Everything after "+"/"-" is ONE amount, as in original Dice!: players paste
+            // weapon damage, so ".st hp-1d6+2" loses (1d6+2) and can never heal on a low
+            // roll; ".st hp-20+5" loses 25. Full arithmetic works inside the amount, and
+            // ".st 力量30*2" (no sign) sets 60.
             const bool diceValue = valTok.find_first_of("dD") != std::string::npos;
-            auto evaluated = arith::evaluate((sign < 0 ? "-" : "") + valTok, {}, arithRoller());
+            auto evaluated = arith::evaluate(valTok, {}, arithRoller());
             if (!evaluated.value && diceValue) continue;
-            int value = evaluated.value ? *evaluated.value : sign * parseIntOr(valTok, 0);
+            int value = sign * (evaluated.value ? *evaluated.value : parseIntOr(valTok, 0));
             std::string key = CharacterCardStore::canonical(attr);
             // Keep DND ability labels stable in replies even when another active
             // rule pack has registered a different global alias for the same word.
