@@ -442,3 +442,51 @@ TEST(Coc7r, BotOffAndRollOffDoNotMutateCards) {
     ASSERT_TRUE(f.data()==before);
 }
 
+
+TEST(CheckArithmetic, ChecksAndAttributeEditsShareOneArithmeticModule) {
+    CocFixture f;
+    f.run(".set coc7");
+    f.run(".st 力量60 敏捷50 侦查40 hp12");
+    ASSERT_TRUE(f.run(".ra(10)力量+20-30").find("10/50") != std::string::npos);      // reported case
+    ASSERT_TRUE(f.run(".ra(10)力量 +20 -30 攻击").find("10/50") != std::string::npos);
+    ASSERT_TRUE(f.run(".ra(10)力量 +20 -30 攻击").find("攻击") != std::string::npos);
+    ASSERT_TRUE(f.run(".ra(10)力量*2").find("10/120") != std::string::npos);
+    ASSERT_TRUE(f.run(".ra(10)(力量+敏捷)/2").find("10/55") != std::string::npos);
+    // Without a fixed roll the leading parenthesis is arithmetic, not the "(N)" preview.
+    ASSERT_TRUE(f.run(".ra (力量+敏捷)/2").find("/55") != std::string::npos);
+    ASSERT_TRUE(f.run(".ra(1d1)侦查").find("1/40") != std::string::npos);
+    ASSERT_TRUE(f.run(".ra(10)力量^0.5*10").find("10/77") != std::string::npos);
+    ASSERT_TRUE(f.run(".ra(10)力量70+10").find("10/80") != std::string::npos);      // inline value
+    ASSERT_TRUE(f.run(".ra(10)60+10").find("10/70") != std::string::npos);
+    ASSERT_TRUE(f.run(".ra(1)力量-200").find("1/1") != std::string::npos);          // floor at 1
+    ASSERT_TRUE(f.run(".ra(10)困难力量+20-30").find("10/25") != std::string::npos);  // difficulty after arithmetic
+    ASSERT_TRUE(f.run(".ra(10)力量+克苏鲁").find("克苏鲁") != std::string::npos);    // missing attribute named
+    ASSERT_TRUE(f.run(".ra(10)力量/0").find("力量/0") != std::string::npos);         // invalid expression explained
+    ASSERT_TRUE(f.run(".ra(10)侦查").find("10/40") != std::string::npos);            // plain forms unchanged
+    ASSERT_TRUE(f.run(".ra(10)侦查60").find("10/60") != std::string::npos);
+    ASSERT_TRUE(f.run(".ra(10)侦查 60 搜索").find("10/60") != std::string::npos);
+    // .st treats everything after the sign as one amount (pasted weapon damage):
+    // 60 - (20+5); 50 - (1d1+2) — a low roll never turns damage into healing.
+    f.run(".st 力量-20+5");
+    ASSERT_EQ(f.get("力量"), 35);
+    f.run(".st 敏捷-1d1+2");
+    ASSERT_EQ(f.get("敏捷"), 47);
+    f.run(".st 敏捷+1d1*2");
+    ASSERT_EQ(f.get("敏捷"), 49);
+    f.run(".st 侦查20*2");
+    ASSERT_EQ(f.get("侦查"), 40);
+}
+
+TEST(CheckArithmetic, DndChecksApplyTheWholeModifierChain) {
+    CocFixture f;
+    f.run(".setdnd on");
+    f.run(".st 力量18");                                   // ability modifier +4
+    ASSERT_TRUE(f.run(".rc 力量+2-1").find(" +5 = ") != std::string::npos);
+    const auto spaced = f.run(".rc 力量 +2 -1 开门");
+    ASSERT_TRUE(spaced.find(" +5 = ") != std::string::npos);
+    ASSERT_TRUE(spaced.find("开门") != std::string::npos);
+    ASSERT_TRUE(f.run(".rc 力量*2").find(" +8 = ") != std::string::npos);
+    ASSERT_TRUE(f.run(".rc 力量+1d1").find(" +5 = ") != std::string::npos);
+    ASSERT_TRUE(f.run(".rc 力量-5").find(" -1 = ") != std::string::npos);  // unchanged single modifier
+    ASSERT_TRUE(f.run(".rc 力量+").find("力量+") != std::string::npos);     // explained, not guessed
+}

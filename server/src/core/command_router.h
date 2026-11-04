@@ -17,6 +17,7 @@
 #include "../adapter/adapter_interface.h"
 #include "../common/qq_rich_reply.h"
 #include "../common/qq_sn_banner.h"
+#include "../common/arith_expression.h"
 #include "../common/sample_template.h"
 #include "../common/check_reply.h"
 #include "../common/check_rules.h"
@@ -1530,6 +1531,16 @@ private:
                      int& rate, std::string& label, std::string& err) {
         if (tok.empty()) { err = i18n_.tr(loc, "dice.rav.usage"); return false; }
         if (isAllDigits(tok)) { rate = parseIntOr(tok, 0); label = tok; return true; }
+        if (arith::hasArithmetic(tok)) {   // 对抗双方同样支持 "力量+20-30"、"(力量+敏捷)/2"
+            auto outcome = evaluateCheckExpression(msg, tok);
+            if (!outcome || !outcome->value) {
+                err = outcome && !outcome->missing.empty()
+                    ? i18n_.tr(loc, "dice.check.no_card", {{"attr", outcome->missing}})
+                    : i18n_.tr(loc, "dice.check.bad_expression", {{"expr", tok}});
+                return false;
+            }
+            rate = (std::max)(*outcome->value, 1); label = tok + checkDiceNote(*outcome); return true;
+        }
         auto v = coc7rRule(msg, "skills") ? coc7rAttr(msg, tok) : cards_.getAttr(msg.senderId, cardScope(msg), tok);
         if (!v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", tok}}); return false; }
         rate = *v; label = tok; return true;
@@ -1702,6 +1713,49 @@ private:
         return value;
     }
 
+    /// ".ra(1)50" fixes the D100; "(力量+敏捷)/2" or "(str+dex)" is a skill expression.
+    /// A preview holds only numbers and dice and is not followed by an operator.
+    static bool isFixedRollPreview(const CheckRollOverride& parsed) {
+        if (!parsed.rest.empty() && arith::isOperator(parsed.rest[0])) return false;
+        for (unsigned char c : parsed.expression)
+            if (c >= 0x80 || (std::isalpha(c) && c != 'd' && c != 'D')) return false;
+        return true;
+    }
+    /// Dice inside check/attribute arithmetic use the configured secure random source.
+    static arith::Roller arithRoller() {
+        return [](int count, int faces) -> std::optional<long long> {
+            long long total = 0;
+            for (int i = 0; i < count; ++i) total += secure_random::die(faces);
+            return total;
+        };
+    }
+    /// Evaluates a check expression. "力量60+10" uses the inline 60 instead of the card
+    /// value; other names resolve through checkAttribute (card, derived, defaults, coc7r).
+    std::optional<arith::Result> evaluateCheckExpression(const Message& msg, const std::string& expr) const {
+        std::string formula = expr;
+        const size_t digit = expr.find_first_of("0123456789");
+        const size_t op = expr.find_first_of("+-*/%^()");
+        if (digit != std::string::npos && digit > 0 && digit < op
+            && expr.substr(0, digit).find_first_of("+-*/%^()") == std::string::npos)
+            formula = expr.substr(digit);
+        return arith::evaluate(formula, [&](const std::string& name) { return checkAttribute(msg, name); },
+                               arithRoller());
+    }
+    /// "(7)" or "(7,3)" after a label whose expression rolled dice; empty otherwise.
+    static std::string checkDiceNote(const arith::Result& outcome) {
+        if (outcome.diceTrace.empty()) return {};
+        std::string note;
+        size_t at = 0;
+        while ((at = outcome.diceTrace.find('=', at)) != std::string::npos) {
+            const size_t end = outcome.diceTrace.find(',', at);
+            if (!note.empty()) note += ",";
+            note += outcome.diceTrace.substr(at + 1, end == std::string::npos ? std::string::npos : end - at - 1);
+            if (end == std::string::npos) break;
+            at = end;
+        }
+        return "(" + note + ")";
+    }
+
     /// Parse ".ra" arguments: `<属性>[成功率] [原因]`. Whitespace is the separator
     /// (faithful to original), so a trailing reason is NEVER folded into the
     /// attribute/value. Forms handled: "力量"、"力量 哈哈"、"力量 60"、"力量 60 攻击"、
@@ -1717,24 +1771,37 @@ private:
         std::string first = (sp == std::string::npos) ? s : s.substr(0, sp);
         std::string remainder = (sp == std::string::npos) ? "" : trim(s.substr(sp + 1));
 
-        // Quick adjust (青果): "技能+10" / "技能-20" → rate = 卡值(技能) ± N.
-        // Name part must be non-numeric, adjust part must be sign + digits.
+        // Arithmetic on a skill or rate, shared by every check command through
+        // arith::evaluate: "力量+20-30"、"力量*2"、"(力量+敏捷)/2"、"侦查+1d10"、
+        // "60+10"、"力量60+10"（内联数值代替卡值），以及空格分开的 "力量 +20 -30 攻击"。
         {
-            size_t pm = first.find_first_of("+-");
-            if (pm != std::string::npos && pm > 0) {
-                std::string nm = first.substr(0, pm), adj = first.substr(pm);
-                bool adjOk = adj.size() >= 2;
-                for (size_t i = 1; i < adj.size() && adjOk; ++i)
-                    if (!std::isdigit(static_cast<unsigned char>(adj[i]))) adjOk = false;
-                if (adjOk && nm.find_first_of("0123456789") == std::string::npos) {
-                    auto perspective = msg; perspective.senderId = owner;
-                    auto v = checkAttribute(perspective, nm);
-                    if (!v) { err = i18n_.tr(loc, "dice.check.no_card", {{"attr", nm}}); return false; }
-                    rate = static_cast<int>((std::clamp)(int64_t(*v) + parseIntOr(adj, 0),
-                        int64_t(1), int64_t((std::numeric_limits<int>::max)())));
-                    attr = nm + adj;          // display "侦查+10"
-                    reason = remainder;
-                    return true;
+            std::string expr = first, rest = remainder;
+            while (!rest.empty()) {
+                const size_t next = rest.find(' ');
+                const std::string token = next == std::string::npos ? rest : rest.substr(0, next);
+                if (!arith::isModifierTail(token)) break;
+                expr += token;
+                rest = next == std::string::npos ? std::string() : trim(rest.substr(next + 1));
+            }
+            if (arith::hasArithmetic(expr)) {
+                auto perspective = msg; perspective.senderId = owner;
+                if (auto outcome = evaluateCheckExpression(perspective, expr)) {
+                    if (!outcome->value) {
+                        // A name that itself contains '-' (e.g. "Cthulhu-Mythos") stays a plain name.
+                        const bool plainName = expr == first && !outcome->missing.empty()
+                            && checkAttribute(perspective, first).has_value();
+                        if (!plainName) {
+                            err = outcome->missing.empty()
+                                ? i18n_.tr(loc, "dice.check.bad_expression", {{"expr", expr}})
+                                : i18n_.tr(loc, "dice.check.no_card", {{"attr", outcome->missing}});
+                            return false;
+                        }
+                    } else {
+                        rate = (std::max)(*outcome->value, 1);
+                        attr = expr + checkDiceNote(*outcome);   // display "力量+20-30"、"侦查+1d10(7)"
+                        reason = rest;
+                        return true;
+                    }
                 }
             }
         }
@@ -2186,6 +2253,7 @@ private:
         auto consumeFixedRoll = [&]() -> std::optional<std::string> {
             auto parsed = parseCheckRollOverride(s);
             if (!parsed.present) return std::nullopt;
+            if (!isFixedRollPreview(parsed)) return std::nullopt;   // "(力量+敏捷)/2" is skill arithmetic
             if (!parsed.valid) return i18n_.tr(loc, "dice.check.preview_invalid");
             auto result = engine_.roll(parsed.expression);
             if (!result.ok()) return i18n_.tr(loc, "dice.check.preview_invalid");
@@ -3444,10 +3512,18 @@ private:
         if (s.empty()) return i18n_.tr(loc, "dnd.rc.usage");
 
         auto [first, remainder] = splitCommand(s);
-        std::string namePart = first; int inlineAdj = 0;
-        if (size_t pm = first.find_first_of("+-"); pm != std::string::npos && pm > 0) {
+        // "力量+2-1"、"力量 +2 -1 开门"、"运动+1d4"、"力量*2": the whole chain applies to the
+        // modifier through the shared arithmetic module (previously only "+2" was read).
+        std::string namePart = first, adjExpr;
+        if (size_t pm = first.find_first_of("+-*/%^"); pm != std::string::npos && pm > 0) {
             namePart = first.substr(0, pm);
-            inlineAdj = parseIntOr(first.substr(pm), 0);
+            adjExpr = first.substr(pm);
+        }
+        while (!remainder.empty()) {
+            auto [token, after] = splitCommand(remainder);
+            if (!arith::isModifierTail(token)) break;
+            adjExpr += token;
+            remainder = trim(after);
         }
         int mod = 0;
         if (isAllDigits(namePart)) { mod = parseIntOr(namePart, 0); }
@@ -3456,7 +3532,15 @@ private:
             if (!v) return i18n_.tr(loc, "dice.check.no_card", {{"attr", namePart}});
             mod = isDndAbility(namePart) ? dndAbilityModifier(*v) : dndSkillValue(msg, namePart).value_or(*v);
         }
-        mod += inlineAdj;
+        std::string adjNote;
+        if (!adjExpr.empty()) {
+            auto outcome = arith::evaluate("(" + std::to_string(mod) + ")" + adjExpr, {}, arithRoller());
+            if (!outcome.value)
+                return i18n_.tr(loc, "dice.check.bad_expression", {{"expr", namePart + adjExpr}});
+            mod = *outcome.value;
+            adjNote = checkDiceNote(outcome);
+        }
+        first = namePart + adjExpr + adjNote;
 
         int d1 = engine_.roll("1d20").modifiedTotal;
         int rolled = d1; std::string rollStr = "1d20=" + std::to_string(d1);
@@ -3513,7 +3597,8 @@ private:
         auto appendExtra = [&](const std::string& raw) {
             if (raw.empty()) return;
             if (raw.find_first_of("dD") != std::string::npos) diceExtra += raw;
-            else staticExtra += parseIntOr(raw, 0);
+            // "+2-1"、"+2*3": evaluate the whole chain, not just the first number.
+            else staticExtra += arith::evaluate("0" + raw, {}).value.value_or(parseIntOr(raw, 0));
         };
         auto takeLeadingExtra = [&](std::string& token) {
             if (token.empty() || (token[0] != '+' && token[0] != '-')) return false;
@@ -4100,15 +4185,14 @@ private:
                 formulaChanges[fcanon] = formula;
                 continue;
             }
-            int value;
-            if (valTok.find('d') != std::string::npos || valTok.find('D') != std::string::npos) {
-                auto r = engine_.roll(valTok);
-                if (!r.ok()) continue;
-                value = r.modifiedTotal;
-            } else {
-                value = parseIntOr(valTok, 0);
-            }
-            value *= sign;
+            // Everything after "+"/"-" is ONE amount, as in original Dice!: players paste
+            // weapon damage, so ".st hp-1d6+2" loses (1d6+2) and can never heal on a low
+            // roll; ".st hp-20+5" loses 25. Full arithmetic works inside the amount, and
+            // ".st 力量30*2" (no sign) sets 60.
+            const bool diceValue = valTok.find_first_of("dD") != std::string::npos;
+            auto evaluated = arith::evaluate(valTok, {}, arithRoller());
+            if (!evaluated.value && diceValue) continue;
+            int value = sign * (evaluated.value ? *evaluated.value : parseIntOr(valTok, 0));
             std::string key = CharacterCardStore::canonical(attr);
             // Keep DND ability labels stable in replies even when another active
             // rule pack has registered a different global alias for the same word.
