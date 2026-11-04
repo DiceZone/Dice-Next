@@ -1,3 +1,4 @@
+#include "common/arith_expression.h"
 #include "test_framework.h"
 #include "common/model_formula.h"
 #include "common/legacy_model.h"
@@ -192,4 +193,45 @@ TEST(LegacyModLimit, MixedLuaTablesKeepDefaultAndNamedCounterScopes) {
     ASSERT_TRUE(has(limits.locks, S::Global, "first", 1));
     ASSERT_TRUE(has(limits.locks, S::Global, "second", 1));
     ASSERT_TRUE(has(limits.locks, S::User, "personal", 1));
+}
+
+TEST(ArithExpression, ChatArithmeticSupportsChainsScienceAndDiceWithinLimits) {
+    const std::map<std::string, int> values = {{"力量", 65}, {"敏捷", 50}};
+    auto lookup = [&](const std::string& name) -> std::optional<int> {
+        const auto found = values.find(name); return found == values.end() ? std::nullopt : std::optional<int>(found->second);
+    };
+    arith::Roller half = [](int count, int faces) -> std::optional<long long> { return 1LL * count * faces / 2; };
+    auto eval = [&](const std::string& text) { return arith::evaluate(text, lookup, half).value.value_or(-999); };
+    ASSERT_EQ(eval("力量+20-30"), 55);            // the reported multi-step modifier
+    ASSERT_EQ(eval("力量/2"), 32);                // halves still round down
+    ASSERT_EQ(eval("(力量/2)*2"), 65);            // real-valued until the end
+    ASSERT_EQ(eval("(力量+敏捷)/2"), 57);
+    ASSERT_EQ(eval("力量*1.5"), 97);
+    ASSERT_EQ(eval("2^10"), 1024);
+    ASSERT_EQ(eval("2**3**2"), 512);              // right-associative
+    ASSERT_EQ(eval("-2^2"), -4);
+    ASSERT_EQ(eval("sqrt(力量)*10"), 80);
+    ASSERT_EQ(eval("sin(pi/2)*50+ln(e)+log(100)"), 53);
+    ASSERT_EQ(eval("hypot(3,4)+max(1,2)"), 7);
+    ASSERT_EQ(eval("0.1*30"), 3);
+    ASSERT_EQ(eval("侦查+1"), -999);
+    ASSERT_EQ(arith::evaluate("力量+侦查", lookup, half).missing, std::string("侦查"));
+    const auto dice = arith::evaluate("力量+1d10-2d6", lookup, half);
+    ASSERT_EQ(dice.value.value_or(-1), 64);
+    ASSERT_EQ(dice.diceTrace, std::string("1d10=5, 2d6=6"));
+    ASSERT_EQ(eval("dex"), -999);                 // "dex" is a name, not 'd' dice
+    // Hostile input is rejected instead of computed.
+    for (const auto* text : {"10^1000", "1/0", "sqrt(-1)", "log(0)", "asin(2)", "2^", "0^-1", "1001d6", "600d6+401d6"})
+        ASSERT_FALSE(arith::evaluate(text, lookup, half).value.has_value());
+    ASSERT_FALSE(arith::evaluate(std::string(513, '1'), lookup, half).value.has_value());
+    ASSERT_FALSE(arith::evaluate(std::string(60, '(') + "1" + std::string(60, ')'), lookup, half).value.has_value());
+    // The legacy model DSL is unchanged: "^" is JavaScript XOR there and stays unsupported.
+    ASSERT_FALSE(model_formula::supported("2^3"));
+    ASSERT_FALSE(model_formula::supported("ln(2)"));
+    ASSERT_EQ(model_formula::evaluate("7/2*2", lookup).value_or(-1), 6);
+    ASSERT_TRUE(arith::isModifierTail("+20-30"));
+    ASSERT_TRUE(arith::isModifierTail("*1.5"));
+    ASSERT_FALSE(arith::isModifierTail("-偷袭"));
+    ASSERT_FALSE(arith::hasArithmetic("力量60"));
+    ASSERT_TRUE(arith::hasArithmetic("力量+20"));
 }

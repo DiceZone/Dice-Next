@@ -289,6 +289,7 @@
       "result_reason": "For **{reason}**, **{nick}** rolls **{attr}**: `{roll}/{rate}` **{level}**",
       "need_value": "Please provide a target value, e.g. .ra Spot 60",
       "no_card": "Attribute \"{attr}\" not found; set it with .st first, or give a value like .ra {attr} 60",
+      "bad_expression": "Cannot evaluate \"{expr}\": use + - * / %, parentheses, NdM dice and attribute names, e.g. .ra STR+20-30, .ra (STR+DEX)/2, .ra Spot+1d10",
       "preview_invalid": "Invalid fixed outcome; use .ra(outcome)rate, for example .ra(1)50",
       "preview_range": "The fixed D100 outcome must be between 1 and 100",
       "hidden": "{nick} made a hidden check; the result was sent privately."
@@ -451,7 +452,7 @@
       "rdx": "Double-Cross .rdx\n.rdx <count>c<crit>[±final modifier] // legacy Dice compatibility alias, identical to .dx, e.g. .rdx 5c10+3",
       "r": "Roll .r\n.r [expr] [reason] // roll dice, e.g. .r3d6+2 attack\n.rh [expr] [reason] // hidden roll, the result is DM'd to you\nN#<expr> // repeat the roll N times\nA non-ASCII default-die reason may be attached without a space, e.g. .rd测试.",
       "rh": "Hidden .rh\n.rh [expr] [reason] // hidden roll; the result is DM'd to you and the group only sees \"<name> made a hidden roll\"\n.rah <skill> [rate] // hidden check, also DM'd, e.g. .rah Spot 60\n.rch <skill> [rate] // same\nHouse rules (.setcoc) and bonus/penalty dice still apply; nobody else sees the numbers.",
-      "ra": "Check .ra\n.ra <skill|attr> [rate] [reason] // COC check; reads the card if rate omitted\n.ra(<outcome>)<rate> // preview the text for a specific result level, e.g. .ra(1)1, .ra(100)1\ne.g. .ra spot / .ra str60.\n.ra spot-20 / .ra spot+20 // apply a temporary modifier to the current card value; a skill of 50 checks against 30 or 70 without changing the card\nBy default and in CoC7/CoC7R, .rc uses D100 like .ra. In DND, .rc uses D20; ability scores are converted to modifiers before adjustments.\nSelect CoC with .pc type coc7 / .pc type coc7r or .setcoc; use .setdnd on for DND.",
+      "ra": "Check .ra\n.ra <skill|attr> [rate] [reason] // COC check; reads the card if rate omitted\n.ra(<outcome>)<rate> // preview the text for a specific result level, e.g. .ra(1)1, .ra(100)1\ne.g. .ra spot / .ra str60.\n.ra spot-20 / .ra spot+20 // apply a temporary modifier to the current card value; a skill of 50 checks against 30 or 70 without changing the card\n.ra str+20-30 / .ra (str+dex)/2 / .ra spot+1d10 // + - * /, % remainder, ^ power, parentheses, dice, attribute names and functions such as sqrt or max; the result rounds down\nBy default and in CoC7/CoC7R, .rc uses D100 like .ra. In DND, .rc uses D20; ability scores are converted to modifiers before adjustments.\nSelect CoC with .pc type coc7 / .pc type coc7r or .setcoc; use .setdnd on for DND.",
       "rx": "Psychology .rx\n.rx @investigator [rate] // hidden Psychology roll for Keepers; the detailed result with success level is DM'd to you\nReads the target card's Psychology if rate omitted, default 10. The group only sees a non-spoiler receipt.",
       "rb": "Bonus/penalty .rb\n.rb [N] [check] // bonus dice, keep the low tens, e.g. .rb spot\n.rp [N] [check] // penalty dice, keep the high tens, e.g. .rp2 60",
       "sc": "Sanity .sc\n.sc <success>/<fail> [san] // sanity check; auto-deducts SAN and saves to the card, e.g. .sc 1/1d6",
