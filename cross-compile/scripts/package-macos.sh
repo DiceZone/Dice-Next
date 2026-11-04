@@ -42,7 +42,9 @@ COUNTER=$(sed -nE 's/.*:[[:space:]]*([0-9]+).*/\1/p' "$SERVER_DIR/build/generate
 VERSION=$(sed -nE 's/project\(dice-next-server VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' "$SERVER_DIR/CMakeLists.txt" | head -n1)
 VERSION=${VERSION:-3.0.0}
 BUILD_PADDED=$(printf '%03d' "$BUILD")
-TIMESTAMP=$(date +%Y-%m-%d-%H%M%S)
+# 文件名时间统一按北京时间（UTC+8），与 runner 所在时区无关；POSIX 写法
+# <+08>-8 不依赖系统时区数据库，GNU 与 BSD date 都支持。
+TIMESTAMP=$(TZ='<+08>-8' date +%Y-%m-%d-%H%M%S)
 PACKAGE_NAME="DiceNext-beta-${VERSION}-${BUILD_PADDED}-macos-arm64-${TIMESTAMP}"
 STAGE_NAME="DiceNext-beta"
 STAGING_DIR="$RELEASE_DIR/$STAGE_NAME"

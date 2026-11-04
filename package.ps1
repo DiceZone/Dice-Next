@@ -1,7 +1,7 @@
 ﻿# ─────────────────────────────────────────────────────────────
 #  DiceNext 一键打包脚本
 #  把运行所必须的 release 打包成 zip → dice-next\release\
-#  文件名：DiceNext-beta-3.0.0-NNN-windows-amd64-YYYY-MM-DD-HHMMSS.zip
+#  文件名：DiceNext-beta-3.0.0-NNN-windows-amd64-YYYY-MM-DD-HHMMSS.zip（北京时间 UTC+8）
 #  用法：在 dice-next\ 目录右键「用 PowerShell 运行」，或：
 #        powershell -ExecutionPolicy Bypass -File package.ps1
 # ─────────────────────────────────────────────────────────────
@@ -86,7 +86,8 @@ if (Test-Path $counter) {
         $build = '{0:D3}' -f $compiledBuild
     }
 }
-$ts   = Get-Date -Format 'yyyy-MM-dd-HHmmss'
+# 文件名时间统一按北京时间（UTC+8），不随 runner 或本机时区变化（windows-11-arm runner 的本地时间比 UTC 慢 8 小时）。
+$ts   = [DateTime]::UtcNow.AddHours(8).ToString('yyyy-MM-dd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
 $name = "DiceNext-beta-$ver-$build-windows-$Architecture-$ts"
 
 $out   = [Environment]::GetEnvironmentVariable('DICENEXT_RELEASE_ROOT')
