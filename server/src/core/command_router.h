@@ -978,7 +978,8 @@ private:
 
     static uint64_t diceScriptRandom(void* failure, uint64_t upperBound) {
         if (upperBound <= 1) return 0;
-        // Never unwind through the C ABI. Discard the result if entropy fails.
+        // Never unwind through the C ABI. word() itself falls back instead of throwing;
+        // this guard only protects against unexpected exceptions.
         try { return secure_random::below(upperBound); }
         catch (...) { if (failure) *static_cast<bool*>(failure) = true; return 0; }
     }
