@@ -13,7 +13,8 @@ struct HttpLogResult {
 inline bool logManagementRequest(std::string_view path, std::string_view method) {
     return path.rfind("/api/", 0) == 0 && method != "GET" && method != "HEAD" && method != "OPTIONS"
         && path.rfind("/api/auth/", 0) != 0 && path.rfind("/api/test/", 0) != 0
-        && path != "/api/replies/test";
+        // Read-only rendering uses POST to carry the template, not to save it.
+        && path != "/api/replies/test" && path != "/api/templates/preview";
 }
 
 inline HttpLogResult httpLogResult(int status, std::string_view body) {

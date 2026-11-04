@@ -96,6 +96,9 @@ TEST(Logger, HttpDiagnosticsDetectBusinessFailuresWithoutLoggingSuccessfulPayloa
 TEST(Logger, PollingAndCommandPreviewsDoNotGenerateManagementRecords) {
     ASSERT_FALSE(logManagementRequest("/api/dashboard", "GET"));
     ASSERT_FALSE(logManagementRequest("/api/test/message", "POST"));
+    ASSERT_FALSE(logManagementRequest("/api/templates/preview", "POST"));
+    ASSERT_TRUE(logManagementRequest("/api/templates", "PUT"));
+    ASSERT_TRUE(logManagementRequest("/api/templates/import", "POST"));
     ASSERT_FALSE(logManagementRequest("/api/auth/login", "POST"));
     ASSERT_TRUE(logManagementRequest("/api/mod/lua/delete", "POST"));
     ASSERT_TRUE(logManagementRequest("/api/replies", "DELETE"));
