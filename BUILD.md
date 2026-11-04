@@ -36,7 +36,7 @@ npm run build   # → dist（由主程序打包脚本带入安装包）
 powershell -File package.ps1
 ```
 
-输出 `release\DiceNext-beta-3.0.0(NNN)-YYYY-MM-DD-HHMMSS.zip`（exe + 运行库 DLL + i18n/decks/web/dist + 示例 JS 插件 + 使用说明）。打包前请将 `Dice-Next`、`Dice-Next-WebUI` 和 `Dice-Next-Doc` 放在同一目录，或设置 `DICENEXT_WEB_ROOT`、`DICENEXT_DOC_ROOT`。
+输出 `release\DiceNext-beta-3.0.0-NNN-windows-amd64-YYYY-MM-DD-HHMMSS.zip`（时间为北京时间 UTC+8；内含 exe + 运行库 DLL + i18n/decks/web/dist + 示例 JS 插件 + 使用说明）。打包前请将 `Dice-Next`、`Dice-Next-WebUI` 和 `Dice-Next-Doc` 放在同一目录，或设置 `DICENEXT_WEB_ROOT`、`DICENEXT_DOC_ROOT`。
 
 ---
 
