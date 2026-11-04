@@ -1787,7 +1787,7 @@ static int realMain(int argc, char* argv[]) {
                 dice::presentation::refreshActionLabels(reply, replyActions);
             }
             if (reply.empty() && broadcast.empty()) return;
-            // 官方 QQ 不能改群名片。.sn 的内容改放到回复第一行；日志与转发看到的是同一段文字。
+            // 官方 QQ 不能改群名片。.sn 的内容改放到回复第一行；转发与聊天窗看到的是同一段文字。
             const std::string snBanner = reply.empty() ? std::string() : cmdRouter.officialSnBanner(msg);
             const std::string visibleReply = snBanner.empty() ? reply : snBanner + "\n" + reply;
             // .link：骰娘回复按最终文本转发到链接目标。
@@ -1796,8 +1796,9 @@ static int realMain(int argc, char* argv[]) {
                 for (auto& aim : cmdRouter.linkAimsFor(msg.platform, msg.targetId))
                     cmdRouter.linkForward(msg, aim, visibleReply);
             }
-            // .log 游戏日志：骰娘回复按最终发送文本记录（入站已在消息线程记过）。
-            if (!reply.empty()) cmdRouter.recordBotReply(msg, visibleReply);
+            // .log 游戏日志：记录骰娘回复正文（入站已在消息线程记过）。官方 QQ 的 .sn
+            // 状态行只是名片的替代展示，每条回复都会重复一遍，写进跑团日志会让记录一片混乱。
+            if (!reply.empty()) cmdRouter.recordBotReply(msg, reply);
             // 模拟聊天窗 + chat.db 持久化（骰娘侧）。私聊使用稳定的
             // private:<用户号> 作用域，避免不同私聊混在旧的空 groupId 中。
             if ((msg.type == dice::MessageType::kGroup && !msg.targetId.empty())
@@ -1852,6 +1853,7 @@ static int realMain(int argc, char* argv[]) {
                 if (!snBanner.empty()) {
                     replyMsg.snBannerStyle = cmdRouter.officialSnBannerStyle(msg);
                     replyMsg.snBannerTemplate = cmdRouter.officialSnBannerTemplate(msg);
+                    replyMsg.snBannerColor = cmdRouter.officialSnBannerColor(msg);
                 }
                 replyMsg.forcePlainText = forcePlainText;
                 replyMsg.textPreferenceCaptured = true;
@@ -2812,6 +2814,7 @@ static int realMain(int argc, char* argv[]) {
             if (!pm.snBanner.empty()) {
                 pm.snBannerStyle = cmdRouter.officialSnBannerStyle(pm);
                 pm.snBannerTemplate = cmdRouter.officialSnBannerTemplate(pm);
+                pm.snBannerColor = cmdRouter.officialSnBannerColor(pm);
             }
             a->sendReplyFormatted(pm, reply, format);
             DICE_LOG_INFO_M("群管理", "事件： poked by {} in group {}", e.operatorId, e.groupId);

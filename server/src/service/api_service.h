@@ -3042,6 +3042,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             {"message_format", "traditional"},
             {"qq_sn_banner", "small_red"},
             {"qq_sn_template", "> {sn}"},
+            {"qq_sn_color", "#E5484D"},
             {"bot_msg", kDefaultBotMessage}, {"bot_header", ""},
             {"save_log_images", false},
             {"image_send", J{{"mode", "base64"}, {"host", ""}}},
@@ -3069,6 +3070,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 return value.is_string() && qq_sn::validStyle(value.get<std::string>());
             if (key == "qq_sn_template")
                 return value.is_string() && qq_sn::validTemplate(value.get<std::string>());
+            if (key == "qq_sn_color")
+                return value.is_string() && qq_sn::validColor(value.get<std::string>());
             if (key == "message_format")
                 return value.is_string() && (value == "traditional" || value == "standard"
                     || value == "visual" || value == "card");

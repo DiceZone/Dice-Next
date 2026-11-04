@@ -268,6 +268,17 @@ TEST(OfficialNames, BusinessErrorsMalformedBodiesAndHttpFailuresAreRejected) {
     ASSERT_TRUE(QQOfficialAdapter::apiResponseForTest(204, json::object()).value("ok", false));
 }
 
+TEST(OfficialNames, PlatformPermissionDenialsAreSeparatedFromRealFailures) {
+    ASSERT_TRUE(QQOfficialAdapter::permissionDeniedForTest(400, 40012010, "应用无接口访问权限"));
+    ASSERT_TRUE(QQOfficialAdapter::permissionDeniedForTest(400, 40012010, ""));
+    ASSERT_TRUE(QQOfficialAdapter::permissionDeniedForTest(200, 11253, "成员接口未授权"));
+    ASSERT_TRUE(QQOfficialAdapter::permissionDeniedForTest(403, 0, "no permission"));
+    ASSERT_FALSE(QQOfficialAdapter::permissionDeniedForTest(500, 0, "服务内部错误"));
+    ASSERT_FALSE(QQOfficialAdapter::permissionDeniedForTest(429, 0, "请求过于频繁"));
+    ASSERT_FALSE(QQOfficialAdapter::permissionDeniedForTest(401, 0, "token 未授权"));
+    ASSERT_FALSE(QQOfficialAdapter::permissionDeniedForTest(400, 40034006, "参数错误"));
+}
+
 TEST(OfficialNames, QueryDeduplicationAndAppRateBudgetsBoundRequests) {
     NameFixture f;
     for (int index = 0; index < 10; ++index) f.adapter->getUserName("same", "group-A");

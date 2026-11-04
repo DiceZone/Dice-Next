@@ -279,6 +279,11 @@ public:
             return {};
         return compactSnCard(renderCurrentSn(msg));
     }
+    std::string officialSnBannerColor(const Message& msg) const {
+        const auto settings = diceSettingsFor(msg);
+        const auto it = settings.find("qq_sn_color");
+        return qq_sn::color(it != settings.end() && it->is_string() ? it->get<std::string>() : std::string());
+    }
     std::string officialSnBannerTemplate(const Message& msg) const {
         const auto settings = diceSettingsFor(msg);
         const auto it = settings.find("qq_sn_template");

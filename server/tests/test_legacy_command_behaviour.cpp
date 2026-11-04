@@ -1299,6 +1299,12 @@ TEST(LegacyCommands, OfficialSnRespectsScopedSettingsAndRetainsPlayerOptIn) {
     f.msg.platform = "qq_official";
     ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
     ASSERT_EQ(f.router.officialSnBannerStyle(f.msg), "small_red");
+    ASSERT_EQ(f.router.officialSnBannerColor(f.msg), "#E5484D");
+    scoped_settings::setSection(f.cfg, "adapter", "qq_official", "dice", {{"qq_sn_color", "#22c55e"}});
+    ASSERT_EQ(f.router.officialSnBannerColor(f.msg), "#22C55E");
+    scoped_settings::setSection(f.cfg, "adapter", "qq_official", "dice", {{"qq_sn_color", "}\\evil"}});
+    ASSERT_EQ(f.router.officialSnBannerColor(f.msg), "#E5484D");
+    scoped_settings::setSection(f.cfg, "adapter", "qq_official", "dice", json::object(), json::array({"qq_sn_color"}));
     f.run(".sn");
     const auto card = f.router.officialSnBanner(f.msg);
     ASSERT_FALSE(card.empty());
