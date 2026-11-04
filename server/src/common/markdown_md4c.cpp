@@ -572,7 +572,8 @@ bool preservesStructure(const std::string& original, const std::string& candidat
 
 std::string toPlainText(const std::string& markdownText) {
     if (markdownText.empty()) return {};
-    if (markdownText.find_first_of("*_~\x60[#><") == std::string::npos) {
+    // Backslash escapes such as "1\. " or "\-" must still be unescaped.
+    if (markdownText.find_first_of("*_~\x60[#><\\") == std::string::npos) {
         return markdownText;
     }
 

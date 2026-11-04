@@ -1,4 +1,5 @@
 #include "test_framework.h"
+#include "common/template_markdown.h"
 #include "common/sample_template.h"
 #include "common/weighted_templates.h"
 #include "common/template_preview.h"
@@ -154,4 +155,30 @@ TEST(SampleTemplate, MarkdownAndCachedPlainTextKeepVariablesAndChoices) {
         const auto text = i18n.tr(Locale::kZhHans, "sample.test");
         ASSERT_TRUE(text == "效果拔群" || text == "干得漂亮");
     }
+}
+
+TEST(TemplateMarkdown, PlainTextConvertsWithoutChangingWhatPlayersSee) {
+    using template_markdown::escapeLiterals;
+    ASSERT_EQ(escapeLiterals("{nick}掷骰: {res}"), std::string("{nick}掷骰: {res}"));
+    ASSERT_EQ(escapeLiterals("**原样** 2*3 a_b {nick}"), std::string("\\*\\*原样\\*\\* 2*3 a_b {nick}"));
+    // Template syntax and components stay exactly as written.
+    ASSERT_EQ(escapeLiterals("# 标题\n- 列表 {sample:*a*|b} [[action:再掷|.r *]]"),
+              std::string("\\# 标题\n\\- 列表 {sample:*a*|b} [[action:再掷|.r *]]"));
+    ASSERT_EQ(escapeLiterals("\\{字面\\} *x*"), std::string("\\{字面\\} \\*x\\*"));
+    ASSERT_EQ(escapeLiterals("[CQ:image,file=a_b.png] *x*"), std::string("[CQ:image,file=a_b.png] \\*x\\*"));
+    for (const std::string plain : {"**原样** 2*3", "# 不是标题\n> 不是引用\n- 不是列表", "`代码` ~~删除~~ {nick}", "1. 第一条 {res}"}) {
+        const I18n::Args args{{"nick", "A*B"}, {"res", "D100=42"}};
+        const auto before = I18n::previewTemplate(plain, args, ContentFormat::kPlainText);
+        const auto after = I18n::previewTemplate(template_markdown::convert(plain), args, ContentFormat::kMarkdown);
+        ASSERT_EQ(markdown::toPlainText(after), before);
+    }
+}
+
+TEST(TemplateMarkdown, WeightedVariantsConvertEachTextAndKeepWeights) {
+    const auto stored = weighted_templates::encode(json::array({{{"text", "*甲*"}, {"weight", 1}}, {{"text", "乙"}, {"weight", 3}}}));
+    const auto converted = weighted_templates::decode(template_markdown::convert(stored));
+    ASSERT_EQ(converted.size(), size_t(2));
+    ASSERT_EQ(converted[0]["text"].get<std::string>(), std::string("\\*甲\\*"));
+    ASSERT_EQ(converted[1]["text"].get<std::string>(), std::string("乙"));
+    ASSERT_EQ(converted[1]["weight"].get<int>(), 3);
 }

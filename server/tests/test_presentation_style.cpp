@@ -4,6 +4,7 @@
 #include "i18n/i18n.h"
 #include "service/ai_gateway.h"
 #include <filesystem>
+#include <fstream>
 
 using namespace dice;
 
@@ -108,7 +109,7 @@ TEST(PresentationStyle, I18nSelectsPartialProfileOverlays) {
     I18n::endOutboundCapture();
     const auto visual = presentation::expandComponents(
         visualTemplate, PresentationStyle::kVisual, ContentFormat::kMarkdown).text;
-    ASSERT_TRUE(visual.find("🎲 **希亚**") != std::string::npos);
+    ASSERT_TRUE(visual.find("**希亚** 掷骰\n> `D100=42`") != std::string::npos);
     ASSERT_TRUE(visual.find(".r  // 再次掷骰") != std::string::npos);
 }
 
@@ -195,4 +196,37 @@ TEST(PresentationStyle, AuthoredFormulasSupportSafeVariablesAndPlainFallback) {
     ASSERT_TRUE(result.text.find("\\textbackslash{}href") != std::string::npos);
     ASSERT_TRUE(result.text.find("\\$") != std::string::npos);
     ASSERT_TRUE(result.actions.empty());
+}
+
+TEST(PresentationStyle, BundledRepliesUseMarkdownInsteadOfEmoji) {
+    // Built-in replies, including every display preset, stay free of emoji:
+    // structure comes from Markdown (bold titles, quotes) and components.
+    const auto root = std::filesystem::path(__FILE__).parent_path().parent_path() / "i18n";
+    auto isEmoji = [](char32_t c) {
+        return (c >= 0x1F000 && c <= 0x1FAFF) || (c >= 0x2600 && c <= 0x27BF && c != 0x2605 && c != 0x2713)
+            || (c >= 0x2300 && c <= 0x23FF) || (c >= 0x2B00 && c <= 0x2BFF) || c == 0xFE0F || c == 0x200D;
+    };
+    std::function<void(const json&, const std::string&, const std::string&)> scan =
+        [&](const json& node, const std::string& file, const std::string& key) {
+        if (node.is_object()) { for (const auto& [name, child] : node.items()) scan(child, file, key.empty() ? name : key + "." + name); return; }
+        if (!node.is_string()) return;
+        const auto& text = node.get_ref<const std::string&>();
+        for (size_t i = 0; i < text.size();) {
+            const auto lead = static_cast<unsigned char>(text[i]);
+            const size_t length = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+            char32_t c = length == 1 ? lead : lead & (0xFF >> (length + 1));
+            for (size_t j = 1; j < length && i + j < text.size(); ++j) c = (c << 6) | (static_cast<unsigned char>(text[i + j]) & 0x3F);
+            if (isEmoji(c)) std::cerr << "emoji in " << file << " " << key << '\n';
+            EXPECT_FALSE(isEmoji(c));
+            i += length;
+        }
+    };
+    size_t files = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.path().extension() != ".json") continue;
+        std::ifstream input(entry.path(), std::ios::binary);
+        scan(json::parse(input), entry.path().filename().string(), "");
+        ++files;
+    }
+    ASSERT_TRUE(files >= 12);
 }

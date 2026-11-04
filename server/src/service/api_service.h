@@ -1,5 +1,6 @@
 #pragma once
 #include "../common/weighted_templates.h"
+#include "../common/template_markdown.h"
 #include "../common/check_reply.h"
 #include "../common/template_preview.h"
 // ─── Dice!Next v3.0.0 — Real API Service ─────────────────────
@@ -1981,6 +1982,50 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
             }
             jsonReply(ok(J{{"imported", n}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Post});
+
+    // Plain → Markdown with the same visible text: literal Markdown characters
+    // outside template syntax are escaped. Converts only; the editor saves.
+    app.registerHandler("/api/templates/markdown-source", [](Req req, CB&& cb) {
+        try {
+            const auto value = weighted_templates::apiValue(J::parse(req->body()));
+            jsonReply(ok(J{{"value", template_markdown::convert(value)}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Post});
+
+    // Convert every plain override (global, or one persona) to Markdown in one
+    // go, e.g. after migrating old Dice! texts. {personaId?, locale?, dryRun?}.
+    // Returns how many entries are plain and how many need escapes.
+    app.registerHandler("/api/templates/convert-markdown", [st, &i18n, &personaMgr](Req req, CB&& cb) {
+        try {
+            const auto j = J::parse(req->body().empty() ? std::string("{}") : std::string(req->body()));
+            const int personaId = j.value("personaId", 0);
+            const std::string locale = j.value("locale", std::string());
+            const bool dryRun = j.value("dryRun", false);
+            int total = 0, changed = 0;
+            auto visit = [&](const std::string& value, const std::string& format, const std::string& entryLocale) {
+                if (format == "markdown" || (!locale.empty() && entryLocale != locale)) return std::optional<std::string>();
+                auto converted = template_markdown::convert(value);
+                ++total; if (converted != value) ++changed;
+                return std::optional<std::string>(std::move(converted));
+            };
+            if (personaId > 0) {
+                for (const auto& entry : personaMgr.listEntries(personaId)) {
+                    const auto converted = visit(entry.value, entry.format, entry.locale);
+                    if (converted && !dryRun && !personaMgr.setEntry(personaId, entry.locale, entry.key, *converted, "markdown"))
+                        throw std::runtime_error("failed to update persona entry " + entry.key);
+                }
+                if (!dryRun && total) personaMgr.loadIntoI18n(personaId);
+            } else if (st) {
+                for (auto row : st->get_all<I18nOverrideRow>()) {
+                    const auto converted = visit(row.value, row.format, row.locale);
+                    if (!converted || dryRun) continue;
+                    row.value = *converted; row.format = "markdown"; st->update(row);
+                    i18n.setOverride(localeFromString(row.locale), row.key, row.value, ContentFormat::kMarkdown);
+                }
+            }
+            jsonReply(ok(J{{"total", total}, {"escaped", changed}, {"converted", dryRun ? 0 : total}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
 

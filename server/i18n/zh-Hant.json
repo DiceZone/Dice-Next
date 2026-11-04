@@ -619,12 +619,12 @@
   },
   "send": {
     "empty": "要轉交什麼給 Master 呢？用法：.send <留言>",
-    "done": "✅ 已轉交給 Master，謝謝你的回饋！",
+    "done": "已轉交給 Master，謝謝你的回饋！",
     "no_master": "本骰娘還沒有設定 Master，無法轉交。",
-    "from_private": "📨 來自私聊 {user}({uid}) 的留言：",
-    "from_group": "📨 來自群 {group} 的 {user}({uid}) 的留言：",
+    "from_private": "來自私聊 {user}({uid}) 的留言：",
+    "from_group": "來自群 {group} 的 {user}({uid}) 的留言：",
     "master_usage": "骰主發送 .send\n.send group <群號> <訊息> // 發送到指定群\n.send user <QQ號> <訊息> // 發送給指定使用者",
-    "master_done": "✅ 已發送到 {target}"
+    "master_done": "已發送到 {target}"
   },
   "dismiss": {
     "leaving": "骰子正在退出本群……",
@@ -669,7 +669,7 @@
   },
   "log": {
     "usage": "跑團日誌 .log\n.log new [名稱] // 新建日誌\n.log on/off // 繼續或暫停記錄\n.log end // 結束並上傳\n.log halt // 結束但不上傳\n.log list // 列出本視窗日誌\n.log get [名稱] // 取回日誌\n.log del [名稱] // 刪除日誌\n.log stat [名稱] // 查看統計\n.log export [名稱] // 匯出日誌\n.log type txt/html // 設定群文件格式\n.log time/timer // 計時\n.log // 不帶參數時查看目前狀態",
-    "unofficial_site": "⚠️ 當前配置的日誌站並非官方站點，連結安全性請自行確認。",
+    "unofficial_site": "注意：當前配置的日誌站並非官方站點，連結安全性請自行確認。",
     "halted": "已強行結束本次記錄（未上傳）。",
     "not_found": "沒有找到日誌「{name}」。用 .log list 查看本群日誌。",
     "getting": "正在重新上傳日誌，請稍候……",
@@ -710,10 +710,10 @@
       "unit_h": "小時",
       "unit_m": "分",
       "unit_s": "秒",
-      "started": "⏱ 已開始計時。",
-      "resumed": "⏱ 繼續計時，累計時長 {total}。",
-      "stopped": "⏱ 本次時長 {current}，累計 {total}。",
-      "show": "⏱ 記錄「{name}」累計時長 {total}{running}",
+      "started": "已開始計時。",
+      "resumed": "繼續計時，累計時長 {total}。",
+      "stopped": "本次時長 {current}，累計 {total}。",
+      "show": "記錄「{name}」累計時長 {total}{running}",
       "running": "（本次進行中 {current}）",
       "show_none": "本群暫無可計時的跑團記錄。",
       "is_off": "本群跑團計時未開啟（.log timer on 開啟）。",
@@ -819,7 +819,7 @@
   "ob": {
     "group_only": "旁觀功能只能在群裡使用哦。",
     "empty": "目前沒有旁觀者。",
-    "list": "👀 旁觀者（{count}）：\n{list}",
+    "list": "旁觀者（{count}）：\n{list}",
     "cleared": "{nick} 已清空旁觀名單。",
     "exit": "{nick} 已退出旁觀。",
     "joined": "{nick} 開始旁觀本群跑團。",
