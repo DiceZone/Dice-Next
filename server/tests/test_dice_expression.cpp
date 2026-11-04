@@ -65,3 +65,47 @@ TEST(DiceExpression, ParenthesesCanStillRequestRightAssociationExplicitly) {
     ASSERT_EQ(requestedSides[6], 6);
     ASSERT_EQ(requestedSides[7], 6);
 }
+
+namespace {
+std::string rendered(const std::string& input, int face = 4) {
+    DiceExpression expression([face](int) { return face; });
+    const DiceResult result = expression.evaluate(input);
+    return result.ok() ? result.formattedOutput : "error: " + result.error;
+}
+}  // namespace
+
+TEST(DiceExpression, NegativeOperandsKeepTheirBrackets) {
+    // .r 5-(-1) once showed "5-(-1)=5--1=6".
+    ASSERT_EQ(rendered("5-(-1)"), std::string("5-(-1)=6"));
+    ASSERT_EQ(rendered("5+(-1)"), std::string("5+(-1)=4"));
+    ASSERT_EQ(rendered("-(-1)"), std::string("-(-1)=1"));
+    ASSERT_EQ(rendered("3*-1"), std::string("3*-1=3×(-1)=-3"));
+    ASSERT_EQ(rendered("10/-2"), std::string("10/-2=10/(-2)=-5"));
+    ASSERT_EQ(rendered("1d6-(-1d4)"), std::string("1D6-(-1D4)=4-(-4)=8"));
+    ASSERT_EQ(rendered("5-(-1)*2"), std::string("5-(-1)*2=5-(-1×2)=5-(-2)=7"));
+}
+
+TEST(DiceExpression, ExpandedFormulaKeepsGroupingOfTheInput) {
+    // Each expanded stage must read as the value it leads to.
+    ASSERT_EQ(rendered("(1+2)*3"), std::string("(1+2)*3=(1+2)×3=9"));
+    ASSERT_EQ(rendered("(1-5)*2"), std::string("(1-5)*2=(1-5)×2=-8"));
+    ASSERT_EQ(rendered("8/(2*2)"), std::string("8/(2*2)=8/(2×2)=2"));
+    // Integer division: 3×(5/2) = 6 but 3×5/2 = 7.
+    ASSERT_EQ(rendered("3*(5/2)"), std::string("3*(5/2)=3×(5/2)=6"));
+    ASSERT_EQ(rendered("-(1+2)"), std::string("-(1+2)=-3"));
+    ASSERT_EQ(rendered("-(2*3)"), std::string("-(2*3)=-(2×3)=-6"));
+    ASSERT_EQ(rendered("-3d6"), std::string("-3D6=-(4+4+4)=-12"));
+    ASSERT_EQ(rendered("2*(1d6+1)"), std::string("2*(1D6+1)=2×(4+1)=10"));
+    ASSERT_EQ(rendered("(2d10+5)*2"), std::string("(2D10+5)*2=((4+4)+5)×2=26"));
+    ASSERT_EQ(rendered("-(1d6+1)*2"), std::string("-(1D6+1)*2=-(4+1)×2=-10"));
+}
+
+TEST(DiceExpression, ExactRegroupingStaysFlat) {
+    ASSERT_EQ(rendered("3d6+2"), std::string("3D6+2=(4+4+4)+2=12+2=14"));
+    ASSERT_EQ(rendered("10-(2+3)"), std::string("10-(2+3)=10-2-3=5"));
+    ASSERT_EQ(rendered("10-(2-3)"), std::string("10-(2-3)=10-2+3=11"));
+    ASSERT_EQ(rendered("1-(2*3)"), std::string("1-(2*3)=1-2×3=1-6=-5"));
+    ASSERT_EQ(rendered("2*(3*4)"), std::string("2*(3*4)=2×3×4=24"));
+    ASSERT_EQ(rendered("8/2*2"), std::string("8/2*2=8/2×2=8"));
+    ASSERT_EQ(rendered("3d6"), std::string("3D6=4+4+4=12"));
+}
