@@ -365,6 +365,53 @@ TEST(I18nFormat, PersonaValueAndFormatBothWinOverGlobalOverride) {
               static_cast<int>(ContentFormat::kMarkdown));
 }
 
+TEST(I18nFormat, MarkdownGradeFragmentKeepsItsStyleInsideAMarkdownResult) {
+    // A styled grade label such as "**失败**" inside .ra's result was sent as
+    // literal stars: it was escaped like a nickname.
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setOverride(Locale::kZhHans, "test.level", "**失败**", ContentFormat::kMarkdown);
+    i18n.setOverride(Locale::kZhHans, "test.check", "**{nick}** {level}", ContentFormat::kMarkdown);
+    i18n.setOverride(Locale::kZhHans, "test.plain_check", "{nick} {level}", ContentFormat::kPlainText);
+
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown);
+    I18n::Args args{{"nick", "A**B"}};
+    I18n::putFragment(args, "level", i18n.trFragment(Locale::kZhHans, "test.level"));
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "test.check", args), "**A\\*\\*B** **失败**");
+    // A plain reply shows the label's text, not its Markdown markers.
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "test.plain_check", args), "A**B 失败");
+    I18n::endOutboundCapture();
+}
+
+TEST(I18nFormat, PlainFragmentsAndReplacedValuesStayLiteral) {
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setOverride(Locale::kZhHans, "test.level", "**字面**", ContentFormat::kPlainText);
+    i18n.setOverride(Locale::kZhHans, "test.check", "{level}", ContentFormat::kMarkdown);
+
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown);
+    I18n::Args args;
+    I18n::putFragment(args, "level", i18n.trFragment(Locale::kZhHans, "test.level"));
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "test.check", args), "\\*\\*字面\\*\\*");
+    // Overwriting a fragment (for example with player input) drops its mark.
+    I18n::putFragment(args, "level", {"**粗体**", ContentFormat::kMarkdown});
+    args["level"] = "**玩家输入**";
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "test.check", args), "\\*\\*玩家输入\\*\\*");
+    I18n::endOutboundCapture();
+    EXPECT_EQ(I18n::fragmentPlainText(args, "level"), "**玩家输入**");
+    I18n::putFragment(args, "level", {"**粗体**", ContentFormat::kMarkdown});
+    EXPECT_EQ(I18n::fragmentPlainText(args, "level"), "粗体");
+}
+
+TEST(I18nFormat, FragmentsWorkInsideNestedReferencesAndCodeSpans) {
+    I18n i18n("nonexistent_dir", Locale::kZhHans);
+    i18n.setOverride(Locale::kZhHans, "test.inner", "结果：{level}", ContentFormat::kMarkdown);
+    i18n.setOverride(Locale::kZhHans, "test.outer", "{text:test.inner} `{level}`", ContentFormat::kMarkdown);
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown);
+    I18n::Args args;
+    I18n::putFragment(args, "level", {"*成功*", ContentFormat::kMarkdown});
+    EXPECT_EQ(i18n.tr(Locale::kZhHans, "test.outer", args), "结果：*成功* `*成功*`");
+    I18n::endOutboundCapture();
+}
+
 TEST(I18nPersona, ScopedSelectionRestoresAndIsolatesPersonas) {
     I18n i18n("nonexistent_dir", Locale::kZhHans);
     i18n.setPersona(1);

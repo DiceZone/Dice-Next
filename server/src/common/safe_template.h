@@ -10,6 +10,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -86,6 +87,8 @@ struct Budget {
     bool contextLengthsOverrideArgs = false; // Lua args are copies of this typed message.
     Delay* delay = nullptr;
     std::time_t now = std::time(nullptr);
+    // Slots holding text another reply template rendered (see holdAuthored).
+    std::set<std::string> authored;
 };
 using Resolve = std::function<std::optional<std::string>(const std::string&, unsigned, Budget&)>;
 using Literal = std::function<std::string(std::string_view)>;
@@ -164,6 +167,15 @@ inline std::string hold(std::string value, Budget& budget) {
     const auto key = std::string("\x1f") + "dnx-value-" + std::to_string(budget.values.size());
     budget.values[key] = std::move(value);
     return "{" + key + "}";
+}
+
+// Like hold(), for text a reply template already rendered in the output's own
+// format (a grade label inside a check result). The final renderer inserts it
+// as written instead of escaping it like a nickname or other player input.
+inline std::string holdAuthored(std::string value, Budget& budget) {
+    auto slot = hold(std::move(value), budget);
+    if (slot.size() > 2) budget.authored.insert(slot.substr(1, slot.size() - 2));
+    return slot;
 }
 
 inline std::string materialize(std::string_view text, const Args& args, const Budget& budget) {

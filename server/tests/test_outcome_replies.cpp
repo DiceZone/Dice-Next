@@ -167,6 +167,24 @@ TEST(OutcomeReplies, CocAllGradesMultiHouseRulesAndLegacyFallback) {
     ASSERT_EQ(f.run(".ra(50)60"), "old:50/60|old success");
 }
 
+TEST(OutcomeReplies, MarkdownGradeLabelsKeepTheirStyleInCheckResults) {
+    OutcomeFixture f;
+    f.i18n.setOverride(Locale::kZhHans, "dice.check.result", "{roll}/{rate} {level}", ContentFormat::kMarkdown);
+    f.i18n.setOverride(Locale::kZhHans, "dice.level.failure", "**失败**", ContentFormat::kMarkdown);
+    // Sent as "80/60 \*\*失败\*\*" (literal stars) before grade labels became fragments.
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown);
+    ASSERT_EQ(f.run(".ra(80)60"), "80/60 **失败**");
+    I18n::endOutboundCapture();
+    I18n::beginOutboundCapture(ContentFormat::kPlainText);
+    ASSERT_EQ(f.run(".ra(80)60"), "80/60 失败");
+    I18n::endOutboundCapture();
+    // A label saved as plain text keeps its stars as literal characters.
+    f.i18n.setOverride(Locale::kZhHans, "dice.level.failure", "**失败**", ContentFormat::kPlainText);
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown);
+    ASSERT_EQ(f.run(".ra(80)60"), "80/60 \\*\\*失败\\*\\*");
+    I18n::endOutboundCapture();
+}
+
 TEST(OutcomeReplies, BonusPenaltyAttachedSyntaxAndUnjudgedRolls) {
     OutcomeFixture f;
     f.family("standard"); f.family("bonus"); f.family("penalty");

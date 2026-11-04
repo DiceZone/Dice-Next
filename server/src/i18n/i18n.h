@@ -78,6 +78,24 @@ public:
     std::optional<std::string> trConfigured(Locale loc, const std::string& key,
                                            const Args& args = {}) const;
 
+    /// tr() / trConfigured() together with the format the text was rendered in.
+    ReplyContent trFragment(Locale loc, const std::string& key, const Args& args = {}) const;
+    std::optional<ReplyContent> trConfiguredFragment(Locale loc, const std::string& key,
+                                                     const Args& args = {}) const;
+
+    /// Store a reply text that is itself inserted into another reply, such as
+    /// a grade label inside a check result. Unlike player input it is authored
+    /// text: a Markdown fragment keeps its formatting in a Markdown reply and
+    /// becomes plain text in a plain one, and a plain fragment stays literal.
+    /// The mark is tied to this exact value; replacing args[name] afterwards
+    /// (for example with player data) makes it an ordinary escaped argument.
+    static void putFragment(Args& args, const std::string& name, const ReplyContent& fragment);
+    /// Hidden bookkeeping entries written by putFragment, for code that lists
+    /// arguments (previews, diagnostics).
+    static bool isFragmentMarker(const std::string& name);
+    /// args[name] as plain text, for splicing a fragment into an ordinary value.
+    static std::string fragmentPlainText(const Args& args, const std::string& name);
+
     /// Convenience overload accepting a locale code string.
     std::string tr(const std::string& localeCode,
                    const std::string& key,
