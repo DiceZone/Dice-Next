@@ -758,6 +758,32 @@ TEST(IdentityBind, InfoDoesNotRecommendUnsafeDirectOfficialGroupBinding) {
     ASSERT_TRUE(userInfo.find(".bind confirm") != std::string::npos);
 }
 
+TEST(RollReply, LiteralBackslashesAndReasonsKeepCustomText) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    f.i18n.setOverride(Locale::kZhHans, "dice.roll.result", "CUSTOM:{res}|{reason}", ContentFormat::kPlainText);
+    ASSERT_EQ(f.run(".r 5-(-1)"), "CUSTOM:5-(-1)=6|");
+    for (const auto* platform : {"onebot_v11", "qq_official"}) {
+        f.msg.platform = platform;
+        const auto reply = f.run(R"(.r 5-\(-1\))");
+        ASSERT_TRUE(reply.rfind("CUSTOM:D100=", 0) == 0);
+        ASSERT_TRUE(reply.ends_with(R"(|5-\(-1\))"));
+        ASSERT_EQ(f.run(".r 1d1 测试"), "CUSTOM:1D1=1|测试");
+    }
+    f.i18n.setOverride(Locale::kZhHans, "dice.roll.result_reason", "SPECIAL:{reason}");
+    ASSERT_EQ(f.run(".r 1d1 测试"), "SPECIAL:测试");
+}
+
+TEST(RollReply, CustomEngineOrderControlsTheDetailFormat) {
+    LegacyFixture f;
+    f.i18n.setOverride(Locale::kZhHans, "dice.roll.result", "{res}");
+    f.cfg.set<std::string>("dice/expression_mode", "custom");
+    f.cfg.set<json>("dice/expression_order", json::array({"onedice", "dicenext"}));
+    ASSERT_EQ(f.run(".r 1d1"), "1d1[1]=1");
+    f.cfg.set<json>("dice/expression_order", json::array({"dicenext", "onedice"}));
+    ASSERT_EQ(f.run(".r 1d1"), "1D1=1");
+}
+
 TEST(SampleTemplate, RollReplyUsesChosenTextAndActualResult) {
     LegacyFixture f;
     ASSERT_TRUE(f.i18n.load());

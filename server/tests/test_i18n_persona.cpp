@@ -15,6 +15,34 @@
 
 using namespace dice;
 
+TEST(I18nPersona, ReasonRepliesInheritCustomRollsButExplicitVariantsWin) {
+    I18n i18n((std::filesystem::path(__FILE__).parent_path().parent_path() / "i18n").string());
+    ASSERT_TRUE(i18n.load());
+    const I18n::Args args{{"nick", "希亚"}, {"res", "D100=55"}, {"reason", R"(5-\(-1\))"}};
+    for (auto style : {PresentationStyle::kStandard, PresentationStyle::kVisual, PresentationStyle::kTraditional}) {
+        i18n.setOverride(Locale::kZhHans, "dice.roll.result", "我的回复:{reason}|{res}", ContentFormat::kPlainText);
+        I18n::beginOutboundCapture(ContentFormat::kMarkdown, style);
+        const auto reply = i18n.tr(Locale::kZhHans, "dice.roll.result_reason", args);
+        const auto format = I18n::endOutboundCapture();
+        ASSERT_EQ(reply, std::string(R"(我的回复:5-\(-1\)|D100=55)"));
+        ASSERT_TRUE(format == ContentFormat::kPlainText);
+    }
+    i18n.setPersona(42);
+    i18n.setPersonaBundles(42, Locale::kZhHans, {{"dice.roll.result", "人格:{res}"}});
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.roll.result_reason", args), "人格:D100=55");
+    i18n.setOverride(Locale::kZhHans, "dice.roll.result_reason", "理由:{reason}");
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.roll.result_reason", args), std::string(R"(理由:5-\(-1\))"));
+    i18n.setOverride(Locale::kZhHans, "dice.roll.result_reason", "");
+    ASSERT_TRUE(i18n.tr(Locale::kZhHans, "dice.roll.result_reason", args).empty());
+    i18n.setOverride(Locale::kZhHans, "dice.roll.multi", "多轮:{res}");
+    ASSERT_EQ(i18n.tr(Locale::kZhHans, "dice.roll.multi_reason", args), "多轮:D100=55");
+    i18n.clearOverride(Locale::kZhHans, "dice.roll.result_reason");
+    i18n.setPersona(0);
+    i18n.setOverride(Locale::kZhHans, "dice.roll.result", "**自定义** {reason} `{res}`", ContentFormat::kMarkdown);
+    const auto rich = i18n.tr(Locale::kZhHans, "dice.roll.result_reason", args);
+    ASSERT_EQ(markdown::toPlainText(rich), std::string(R"(自定义 5-\(-1\) D100=55)"));
+}
+
 TEST(I18nBundles, LocaleLeafKeysStayInSyncAndLegacyKeysAreTopLevel) {
     namespace fs = std::filesystem;
     const fs::path i18nDir = fs::path(__FILE__).parent_path().parent_path() / "i18n";

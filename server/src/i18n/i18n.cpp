@@ -341,6 +341,14 @@ const I18n::TemplateValue* I18n::findTemplate(Locale loc, const std::string& key
     if (personaIt != preparedPersonaBundles_.end())
         if (auto value = findIn(personaIt->second, loc)) return value;
     if (auto value = findIn(overrides_, loc)) return value;
+    // Reason variants are optional customisations of the same roll. A user who
+    // only customised the ordinary reply must not fall back to a built-in style
+    // just because the parser classified some input as a reason. Explicit
+    // reason overrides (including intentionally empty ones) still win.
+    const char* reasonBase = key == "dice.roll.result_reason" ? "dice.roll.result"
+        : key == "dice.roll.multi_reason" ? "dice.roll.multi" : nullptr;
+    if (reasonBase)
+        if (auto value = configuredTemplate(loc, reasonBase)) return value;
     if (outboundCaptureActive_ && outboundPresentationStyle_ != PresentationStyle::kStandard) {
         auto styleIt = preparedStyleBundles_.find(outboundPresentationStyle_);
         if (styleIt != preparedStyleBundles_.end())
@@ -360,6 +368,8 @@ const I18n::TemplateValue* I18n::findTemplate(Locale loc, const std::string& key
         if (personaIt != preparedPersonaBundles_.end())
             if (auto value = findIn(personaIt->second, defaultLocale_)) return value;
         if (auto value = findIn(overrides_, defaultLocale_)) return value;
+        if (reasonBase)
+            if (auto value = configuredTemplate(defaultLocale_, reasonBase)) return value;
         if (outboundCaptureActive_ && outboundPresentationStyle_ != PresentationStyle::kStandard) {
             auto styleIt = preparedStyleBundles_.find(outboundPresentationStyle_);
             if (styleIt != preparedStyleBundles_.end())

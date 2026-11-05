@@ -8,6 +8,18 @@
 
 using namespace dice;
 
+TEST(RollCommandParser, EscapedParenthesesRemainLiteralReasonNotValidArithmetic) {
+    const std::string input = R"(5-\(-1\))";
+    const auto parsed = roll_command::parse(input, false);
+    ASSERT_TRUE(parsed.expression.empty());
+    ASSERT_EQ(parsed.reason, input);
+    const auto arithmetic = roll_command::parse("5-(-1)", false);
+    ASSERT_EQ(arithmetic.expression, std::string("5-(-1)"));
+    ASSERT_TRUE(arithmetic.reason.empty());
+    DiceExpression native([](int) { return 1; });
+    ASSERT_EQ(native.evaluate(arithmetic.expression).modifiedTotal, 6);
+}
+
 TEST(RollCommandParser, CompactDefaultDieKeepsSimplifiedChineseReason) {
     const auto parsed = roll_command::parse("d测试");
     ASSERT_TRUE(parsed.expression.empty());
