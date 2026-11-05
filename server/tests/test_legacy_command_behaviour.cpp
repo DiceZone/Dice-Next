@@ -774,6 +774,41 @@ TEST(RollReply, LiteralBackslashesAndReasonsKeepCustomText) {
     ASSERT_EQ(f.run(".r 1d1 测试"), "SPECIAL:测试");
 }
 
+TEST(RollReply, PlainTextIsTheReasonForTheDefaultDie) {
+    // DiceScript parses Chinese text as an unknown variable; Dice! treats it as a reason.
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    f.i18n.setOverride(Locale::kZhHans, "dice.roll.result", "R:{res}|{reason}");
+    for (const auto* order : {R"(["dicescript","dicenext","onedice"])", R"(["dicenext","onedice","dicescript"])"}) {
+        f.cfg.set<std::string>("dice/expression_mode", "custom");
+        f.cfg.set<json>("dice/expression_order", json::parse(order));
+        // The default die keeps each engine's own detail format (D100=42 or 42).
+        const auto reply = f.run(".r 他带着西服去干洗店");
+        ASSERT_TRUE(reply.rfind("R:", 0) == 0);
+        ASSERT_TRUE(reply.find("non") == std::string::npos);
+        ASSERT_TRUE(reply.ends_with("|他带着西服去干洗店"));
+        ASSERT_TRUE(f.run(".r 他带着 西服").ends_with("|他带着 西服"));
+        const auto multi = f.run(".r 2#他带着西服");
+        ASSERT_TRUE(multi.find("他带着西服") != std::string::npos);
+        ASSERT_TRUE(multi.find(f.i18n.tr(Locale::kZhHans, "dice.error.non_numeric")) == std::string::npos);
+        ASSERT_TRUE(f.run(".r 1d1 测试").ends_with("1|测试"));
+    }
+}
+
+TEST(RollReply, DisabledReasonsShowOnlyTheResult) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    f.i18n.setOverride(Locale::kZhHans, "dice.roll.result", "R:{res}|{reason}");
+    f.cfg.set<bool>("dice/roll_reason_disabled", true);
+    ASSERT_EQ(f.run(".r 1d1 攻击"), "R:1D1=1|");
+    const auto text = f.run(".r 他带着西服去干洗店");
+    ASSERT_TRUE(text.rfind("R:D100=", 0) == 0);
+    ASSERT_TRUE(text.ends_with("|"));
+    ASSERT_TRUE(f.run(".r 2#1d1 攻击").find("攻击") == std::string::npos);
+    f.cfg.set<bool>("dice/roll_reason_disabled", false);
+    ASSERT_EQ(f.run(".r 1d1 攻击"), "R:1D1=1|攻击");
+}
+
 TEST(RollReply, CustomEngineOrderControlsTheDetailFormat) {
     LegacyFixture f;
     f.i18n.setOverride(Locale::kZhHans, "dice.roll.result", "{res}");

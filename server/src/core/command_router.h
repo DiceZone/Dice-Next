@@ -1143,6 +1143,13 @@ private:
         auto parsedRoll = roll_command::parse(rest, compact);
         std::string expr = std::move(parsedRoll.expression);
         std::string reason = std::move(parsedRoll.reason);
+        // DiceScript accepts Unicode identifiers, so plain text such as
+        // ".r 他带着西服去干洗店" parses as an (unknown) variable. Remember the
+        // user's own expression (set after the N# prefix below): if it evaluates
+        // to no number, Dice! treats the whole text as the reason for a default die.
+        std::string userExpression;
+        // Instance option: drop every reason and show only the result.
+        const bool reasonsOff = cfg_.get<bool>("dice/roll_reason_disabled", false);
 
 
         // Multi-roll: "N#expr"
@@ -1153,6 +1160,7 @@ private:
             expr = expr.substr(hashPos + 1);
         }
         if (turns < 1) turns = 1;
+        userExpression = expr;
         // Multi-roll is capped at 10. Tell the user when they exceed it rather
         // than silently clamping (".r 12N#" → error stating the max).
         if (turns > 10)
@@ -1168,14 +1176,23 @@ private:
             }
             if (!wexpr.empty()) expr = wexpr;     // reason stays as the weapon name label
         }
+        if (reasonsOff) reason.clear();
         if (expr.empty() && reason.empty()) {
             auto preset = cards_.getValueByName(msg.senderId, cards_.boundCard(msg.senderId, cardScope(msg)), "__DefaultDiceExp");
             if (preset && preset->is_string()) expr = preset->get<std::string>();
         }
-        if (expr.empty()) {                       // default die (.set override)
+        auto defaultDie = [&] {
             std::string df = personalDefaultDice(msg);
             if (df.empty()) df = getGroupSetting(msg, "groupDefaultDice");  // 本群规则默认骰
-            expr = "d" + (df.empty() ? std::string("100") : df);
+            return "d" + (df.empty() ? std::string("100") : df);
+        };
+        // Text that is not a numeric expression becomes the reason (legacy Dice!).
+        auto textAsReason = [&] {
+            if (!reasonsOff) reason = trim(userExpression + (reason.empty() ? "" : " " + reason));
+            expr = defaultDie();
+        };
+        if (expr.empty()) {                       // default die (.set override)
+            expr = defaultDie();
         } else {
             // 省略面数直接跟 ±修正（.rd-5 / .r-5 / .rd+5 / .r+5）：
             // 视同「当前默认骰 ± 修正」，与 .rd100-5（=1d100-5）语义一致，
@@ -1212,6 +1229,10 @@ private:
 
         if (turns == 1) {
             auto result = evaluateExpression(msg, expr);
+            if (!result.ok && result.errorKey == "dice.error.non_numeric" && expr == userExpression) {
+                textAsReason();
+                result = evaluateExpression(msg, expr);
+            }
             if (!result.ok) return result.errorKey.empty()
                 ? i18n_.tr(loc, "dice.error.roll", {{"error", result.error}})
                 : i18n_.tr(loc, result.errorKey);
@@ -1225,6 +1246,10 @@ private:
         std::ostringstream res;
         for (int i = 0; i < turns; ++i) {
             auto result = evaluateExpression(msg, expr);
+            if (i == 0 && !result.ok && result.errorKey == "dice.error.non_numeric" && expr == userExpression) {
+                textAsReason();
+                result = evaluateExpression(msg, expr);
+            }
             if (!result.ok) return result.errorKey.empty()
                 ? i18n_.tr(loc, "dice.error.roll", {{"error", result.error}})
                 : i18n_.tr(loc, result.errorKey);
