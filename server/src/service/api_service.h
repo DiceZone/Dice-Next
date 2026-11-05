@@ -5534,7 +5534,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     }, {drogon::Get});
     // ── Players (auto-built profiles) ─────────────────────────
     // GET /api/players — list profiles (信任等级/QQ/昵称/上次指令/总指令数).
-    app.registerHandler("/api/players", [st](Req, CB&& cb) {
+    app.registerHandler("/api/players", [st, &db](Req, CB&& cb) {
         try {
             // Only surface players who have actually issued ≥1 command. Profiles
             // are auto-created for everyone who talks (so we cache nickname/etc.),
@@ -5555,6 +5555,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
             }
             J arr = J::array();
+            QQOfficialNameCache officialProfiles;
+            officialProfiles.attach(db);
             for (auto& [uid, r] : merged) {
                 J bindings = J::array(); bool virtualId = identity::BindingStore::isVirtual(uid);
                 try {
@@ -5564,8 +5566,15 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         orm::c(&IdentityEndpointRow::identityId) == ids.front().id)))
                         bindings.push_back(J{{"adapterType", ep.adapterType}, {"adapterAccount", ep.adapterAccount}, {"endpointId", ep.endpointId}});
                 } catch (...) {}
+                std::string avatarUrl;
+                for (const auto& binding : bindings) {
+                    if (binding.value("adapterType", "") != "qq_official") continue;
+                    avatarUrl = officialProfiles.avatar(binding.value("adapterAccount", ""), binding.value("endpointId", ""));
+                    if (!avatarUrl.empty()) break;
+                }
                 arr.push_back(J{
                     {"platform", r.platform}, {"userId", r.userId},
+                    {"avatarUrl", avatarUrl},
                     {"nickname", r.nickname}, {"trustLevel", r.trustLevel},
                     {"cmdCount", r.cmdCount}, {"groupCmdCount", r.groupCmdCount},
                     {"favor", r.favor}, {"lastCmdAt", r.lastCmdAt},

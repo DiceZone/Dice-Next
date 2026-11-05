@@ -108,7 +108,7 @@ inline json actions() {
         "qq_delete_panel", "qq_panel_target", "qq_me", "qq_my_guilds", "qq_guild", "qq_guild_channels", "qq_create_channel", "qq_channel",
         "qq_update_channel", "qq_delete_channel", "qq_interaction", "qq_generate_share_url", "qq_send_message", "qq_input_notify", "qq_wakeup_message",
         "qq_media_files", "qq_upload_prepare", "qq_upload_part_finish", "qq_gateway",
-        "qq_material_prepare", "qq_material_complete", "qq_material_list", "qq_material_delete"});
+        "qq_material_prepare", "qq_material_complete", "qq_material_list", "qq_material_delete", "qq_material_upload"});
 }
 
 inline std::string validate(const std::string& action, const json& params) {
@@ -118,6 +118,29 @@ inline std::string validate(const std::string& action, const json& params) {
         if (it != params.end() && (!it->is_string() || it->get_ref<const std::string&>().size() > 4096)) return std::string(field) + " 必须为字符串，且长度不超过 4096 字节。";
     }
     if (params.contains("body") && !params["body"].is_object()) return "body 必须为 JSON 对象。";
+    if (action == "qq_material_upload") {
+        const auto file = text(params, "fileName"), data = text(params, "base64");
+        if (file.empty() || file.size() > 255 || file.find_first_of("/\\\r\n") != std::string::npos) return "请提供图片文件名。";
+        if (data.empty() || data.size() > 13981016 || data.size() % 4 != 0
+            || data.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") != std::string::npos)
+            return "图片须为有效 Base64，且不超过 10 MB。";
+    }
+    if (action == "qq_send_message" && integer(object(params, "body"), "msg_type") == 8) {
+        const auto body = object(params, "body"), card = object(body, "card"), content = object(card, "content");
+        if (text(card, "type") != "tuwen") return "图文卡片 type 须为 tuwen。";
+        for (const auto& [key, maximum] : {std::pair{"title", 50}, std::pair{"description", 200}}) {
+            const auto value = text(content, key);
+            const auto count = std::count_if(value.begin(), value.end(), [](unsigned char c) { return (c & 0xc0) != 0x80; });
+            if (count < 1 || count > maximum) return std::string(key) + " 长度超出图文卡片限制。";
+        }
+        for (const char* key : {"url", "pic_url"}) {
+            const auto value = text(content, key);
+            if (value.size() > 1024 || value.rfind("https://", 0) != 0 || qqmsg::imageUrl(value).empty())
+                return std::string(key) + " 须为不超过 1024 字符的 HTTPS 地址。";
+        }
+        if (body.contains("markdown") || body.contains("media") || body.contains("ark") || !text(body, "content").empty())
+            return "图文卡片不能混合其他消息正文。";
+    }
     if (action == "qq_material_prepare" || action == "qq_material_complete") {
         const auto body = object(params, "body");
         const auto hex = [](const std::string& value, size_t length) {

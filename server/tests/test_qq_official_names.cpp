@@ -74,6 +74,26 @@ TEST(OfficialNames, GroupAndPrivateMessagesPublishActualNames) {
     ASSERT_EQ(f.profile(f.messages.back().senderId).nickname, "私聊昵称");
 }
 
+TEST(OfficialNames, AvatarsPersistByAppAndRejectStaleOrInvalidValues) {
+    NameFixture f;
+    const std::string url = "https://q.qlogo.cn/example/avatar.png";
+    f.adapter->dispatchForTest("AT_MESSAGE_CREATE", {{"id", "avatar-message"}, {"channel_id", "channel"},
+        {"content", ".r"}, {"author", {{"id", "member"}, {"username", "玩家"}, {"avatar", url}}}});
+    QQOfficialNameCache cache;
+    cache.attach(f.db);
+    ASSERT_EQ(cache.avatar("app-A", "member"), url);
+    ASSERT_EQ(cache.avatar("app-B", "member"), "");
+    const auto before = cache.revision();
+    cache.rememberAvatar("app-A", "member", url + "?new");
+    cache.rememberAvatar("app-A", "member", url, before);
+    for (const auto& invalid : {"", "javascript:alert(1)", "data:image/png;base64,AAAA", "https://host/\nsecret"})
+        cache.rememberAvatar("app-A", "member", invalid);
+    ASSERT_EQ(cache.avatar("app-A", "member"), url + "?new");
+    QQOfficialNameCache reloaded;
+    reloaded.attach(f.db);
+    ASSERT_EQ(reloaded.avatar("app-A", "member"), url + "?new");
+}
+
 TEST(OfficialNames, TemplateCacheLookupsNeverScheduleRequests) {
     NameFixture f;
     ASSERT_EQ(f.adapter->cachedUserName("unknown","unseen-group"), "");

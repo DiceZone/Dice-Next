@@ -424,6 +424,8 @@ public:
             officialApi(drogon::Put, "/interactions/" + urlEncode(interactionId), body, std::move(cb));
         } else if (action == "qq_generate_share_url") {
             officialApi(drogon::Post, "/v2/generate_url_link", json{{"callback_data", params.value("callbackData", std::string())}}, std::move(cb));
+        } else if (action == "qq_material_upload") {
+            uploadMaterial(params, std::move(cb));
         } else if (action == "qq_material_prepare" || action == "qq_material_complete") {
             officialApi(drogon::Post, action == "qq_material_prepare" ? "/v2/media-images/prepare" : "/v2/media-images/complete",
                 params.value("body", json::object()), std::move(cb));
@@ -663,6 +665,8 @@ public:
     void dispatchForTest(const std::string& eventType, const json& payload) { dispatch(eventType, payload, "test"); }
     using ApiTransport = std::function<void(drogon::HttpMethod, const std::string&, const json&, ActionCallback)>;
     void setApiTransportForTest(ApiTransport transport) { testApi_ = std::move(transport); }
+    using MaterialTransport = std::function<void(const drogon::HttpRequestPtr&, std::function<void(drogon::ReqResult, const drogon::HttpResponsePtr&)>)>;
+    void setMaterialTransportForTest(MaterialTransport transport) { testMaterial_ = std::move(transport); }
     static json apiResponseForTest(int status, const json& data) { return checkedApiResponse(status, data); }
     static bool permissionDeniedForTest(int status, int64_t code, const std::string& message) { return isPermissionDenied(status, code, message); }
     int gatewayIntentsForTest() const { return qqprotocol::intents(subscribeGroupMemberEvents_); }
@@ -1125,6 +1129,7 @@ private:
     std::string rememberAuthor(const json& author, bool group, uint64_t revision = (std::numeric_limits<uint64_t>::max)()) {
         auto user = QQOfficialNameCache::text(author, group ? "member_openid" : "user_openid");
         if (user.empty()) user = QQOfficialNameCache::text(author, "id");
+        names_.rememberAvatar(appId_, user, QQOfficialNameCache::text(author, "avatar"), revision);
         const auto supplied = QQOfficialNameCache::name(QQOfficialNameCache::text(author, "username"), user);
         const auto cached = names_.rememberUser(appId_, user, supplied, QQOfficialNameCache::text(author, "union_openid"), revision);
         return cached.empty() ? supplied : cached;
@@ -1700,6 +1705,57 @@ private:
         return ip.empty() ? nullptr : drogon::HttpClient::newHttpClient(ip, port, tls);
     }
 
+    void uploadMaterial(const json& params, ActionCallback cb) {
+        std::string bytes, mime;
+        const auto file = qqprotocol::text(params, "fileName");
+        try {
+            bytes = drogon::utils::base64Decode(qqprotocol::text(params, "base64"));
+            if (bytes.empty() || bytes.size() > 10 * 1024 * 1024) throw std::runtime_error("图片不能为空，且不能超过 10 MB。");
+            mime = image_resources::mimeFor(bytes, file);
+        } catch (const std::exception& e) { cb(apiResult(false, 0, e.what())); return; }
+        const auto md5 = hexDigest(bytes, EVP_md5());
+        const json prepare{{"file_name", file}, {"file_size", bytes.size()}, {"content_type", mime},
+            {"md5", md5}, {"sha1", hexDigest(bytes, EVP_sha1())}};
+        if (const auto error = qqprotocol::validate("qq_material_prepare", {{"body", prepare}}); !error.empty()) {
+            cb(apiResult(false, 0, error)); return;
+        }
+        const auto generation = nameGeneration_.load();
+        officialApi(drogon::Post, "/v2/media-images/prepare", prepare,
+            [self = shared_from_this(), bytes = std::move(bytes), mime, md5, generation, cb = std::move(cb)](json result) mutable {
+            if (!result.value("ok", false)) { cb(std::move(result)); return; }
+            if (self->stopping_ || self->nameGeneration_ != generation) { cb(apiResult(false, 0, "账号已变更，上传已取消。")); return; }
+            const auto data = self->apiData(result);
+            const auto uploadId = qqprotocol::text(data, "upload_id");
+            ParsedUrl url;
+            if (uploadId.empty() || !parseUrl(qqprotocol::text(data, "presigned_url"), url)
+                || url.scheme != "https" || url.port != 443 || !url.host.ends_with(".myqcloud.com")
+                || url.host.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") != std::string::npos) {
+                cb(apiResult(false, 0, "平台返回了无效的素材上传地址。")); return;
+            }
+            auto client = self->testMaterial_ ? nullptr : drogon::HttpClient::newHttpClient("https://" + url.host);
+            auto request = drogon::HttpRequest::newHttpRequest();
+            request->setMethod(drogon::Put);
+            request->setPath(url.path + (url.query.empty() ? "" : "?" + url.query));
+            request->setContentTypeString(mime);
+            request->setBody(std::move(bytes));
+            // The signed COS request carries no bot Authorization header and follows no redirects.
+            auto finish = [self, client, uploadId, md5, generation, cb = std::move(cb)](
+                drogon::ReqResult status, const drogon::HttpResponsePtr& response) mutable {
+                if (status != drogon::ReqResult::Ok || !response || response->statusCode() < 200 || response->statusCode() >= 300) {
+                    cb(apiResult(false, response ? static_cast<int>(response->statusCode()) : 0, "图片直传失败，请重新上传。")); return;
+                }
+                auto etag = response->getHeader("etag");
+                if (etag.size() == 34 && etag.front() == '"' && etag.back() == '"') etag = etag.substr(1, 32);
+                std::transform(etag.begin(), etag.end(), etag.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (etag != md5) { cb(apiResult(false, 0, "上传返回的图片摘要不匹配。")); return; }
+                if (self->stopping_ || self->nameGeneration_ != generation) { cb(apiResult(false, 0, "账号已变更，上传已取消。")); return; }
+                self->officialApi(drogon::Post, "/v2/media-images/complete", {{"upload_id", uploadId}, {"md5", etag}}, std::move(cb));
+            };
+            if (self->testMaterial_) self->testMaterial_(request, std::move(finish));
+            else client->sendRequest(request, std::move(finish), 60.0);
+        });
+    }
+
     std::string resolveTarget(const Message& m) {
         std::string target;
         if (m.extra.is_object()) target = m.extra.value("__identity_native_target", std::string());
@@ -2174,6 +2230,7 @@ private:
     std::unordered_map<std::string,std::time_t> seenMessages_, interactionResponses_;
     std::time_t seenMessageSweepAt_ = 0;
     ApiTransport testApi_;
+    MaterialTransport testMaterial_;
     drogon::HttpClientPtr nameClient_;
     std::optional<trantor::TimerId> nameMaintenanceTimer_;
     std::optional<std::time_t> nameTimeForTest_;

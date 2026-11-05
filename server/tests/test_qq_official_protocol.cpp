@@ -100,6 +100,8 @@ TEST(OfficialProtocol, AllAdvertisedApiActionsHaveADocumentedWireRoute) {
         ASSERT_EQ(f.requests.size(), size_t(1)); ASSERT_EQ(f.requests[0].path, route.path); ASSERT_EQ(f.requests[0].method, route.method);
         tested.insert(route.action);
     }
+    // The upload orchestration spans prepare/PUT/complete and has its own wire test below.
+    tested.insert("qq_material_upload");
     const auto advertised = qqprotocol::actions(); ASSERT_EQ(tested.size(), advertised.size());
     for (const auto& action : advertised) ASSERT_TRUE(tested.count(action.get<std::string>()));
 }
@@ -154,6 +156,60 @@ TEST(OfficialProtocol, InvalidParametersCannotIssuePlatformRequests) {
         {"qq_interaction", {{"interactionId", "i"}, {"body", {{"code", 6}}}}}, {"qq_send_message", {{"groupId", "g"}, {"body", nullptr}}}
     };
     for (const auto& [action, params] : invalid) { f.call(action, params); ASSERT_FALSE(f.result.value("ok", true)); }
+    ASSERT_TRUE(f.requests.empty());
+}
+
+TEST(OfficialProtocol, MaterialUploadUsesSignedPutWithoutBotCredentialsAndChecksEtag) {
+    OfficialProtocolFixture f;
+    const auto png = drogon::utils::base64Decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aRZkAAAAASUVORK5CYII=");
+    std::string digest;
+    bool badEtag = false;
+    int completed = 0, puts = 0;
+    f.adapter->setApiTransportForTest([&](auto method, const auto& path, const auto& body, auto cb) {
+        ASSERT_EQ(method, drogon::Post);
+        if (path == "/v2/media-images/prepare") {
+            ASSERT_EQ(body["file_size"].template get<size_t>(), png.size());
+            digest = body["md5"].template get<std::string>();
+            cb(QQOfficialAdapter::apiResponseForTest(200, {{"upload_id", "upload"}, {"presigned_url", "https://bucket.cos.ap-guangzhou.myqcloud.com/image?signature=test"}}));
+        } else {
+            ASSERT_EQ(path, "/v2/media-images/complete"); ++completed;
+            ASSERT_EQ(body["md5"].template get<std::string>(), digest);
+            cb(QQOfficialAdapter::apiResponseForTest(200, {{"image_id", "image"}, {"url", "qqbot-media://image/v1/token"}}));
+        }
+    });
+    f.adapter->setMaterialTransportForTest([&](const auto& request, auto cb) {
+        ++puts;
+        ASSERT_EQ(request->method(), drogon::Put);
+        ASSERT_TRUE(request->getHeader("authorization").empty());
+        ASSERT_EQ(request->body(), png);
+        ASSERT_EQ(request->contentType(), drogon::CT_IMAGE_PNG);
+        auto response = drogon::HttpResponse::newHttpResponse();
+        response->addHeader("ETag", "\"" + (badEtag ? std::string(32, '0') : digest) + "\"");
+        cb(drogon::ReqResult::Ok, response);
+    });
+    const json params{{"fileName", "sample.png"}, {"base64", drogon::utils::base64Encode(png)}};
+    f.call("qq_material_upload", params);
+    ASSERT_TRUE(f.result.value("ok", false)); ASSERT_EQ(completed, 1); ASSERT_EQ(puts, 1);
+    badEtag = true;
+    f.call("qq_material_upload", params);
+    ASSERT_FALSE(f.result.value("ok", true)); ASSERT_EQ(completed, 1);
+    auto invalid = params; invalid["fileName"] = "sample.jpg";
+    f.call("qq_material_upload", invalid); ASSERT_FALSE(f.result.value("ok", true)); ASSERT_EQ(puts, 2);
+    f.adapter->setApiTransportForTest([&](auto, const auto&, const auto&, auto cb) {
+        cb(QQOfficialAdapter::apiResponseForTest(200, {{"upload_id", "upload"}, {"presigned_url", "https://127.0.0.1/image"}}));
+    });
+    f.call("qq_material_upload", params); ASSERT_FALSE(f.result.value("ok", true)); ASSERT_EQ(puts, 2);
+}
+
+TEST(OfficialProtocol, PictureCardsRejectBadLimitsAndInsecureUrls) {
+    OfficialProtocolFixture f;
+    json content{{"title", "标题"}, {"description", "说明"}, {"url", "https://example.com"}, {"pic_url", "https://example.com/image.png"}};
+    for (auto entry : std::vector<std::pair<std::string, std::string>>{{"title", ""}, {"title", std::string(51, 'a')},
+             {"description", std::string(201, 'a')}, {"url", "http://example.com"}, {"pic_url", "javascript:alert(1)"}}) {
+        auto changed = content; changed[entry.first] = entry.second;
+        f.call("qq_send_message", {{"groupId", "g"}, {"body", {{"msg_type", 8}, {"card", {{"type", "tuwen"}, {"content", changed}}}}}});
+        ASSERT_FALSE(f.result.value("ok", true));
+    }
     ASSERT_TRUE(f.requests.empty());
 }
 

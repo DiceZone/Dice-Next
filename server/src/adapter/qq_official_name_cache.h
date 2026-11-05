@@ -35,6 +35,29 @@ public:
     }
     uint64_t revision() const { std::lock_guard lock(mu_); return revision_; }
 
+    static std::string avatarUrl(const std::string& value) {
+        if (value.size() > 1024 || value.find_first_of("\r\n\t ") != std::string::npos) return {};
+        if (value.rfind("https://", 0) != 0 && value.rfind("http://", 0) != 0) return {};
+        return name(value);
+    }
+    void rememberAvatar(const std::string& app, const std::string& openid, const std::string& url,
+                        uint64_t observedBefore = (std::numeric_limits<uint64_t>::max)()) {
+        const auto fresh = avatarUrl(url);
+        if (app.empty() || openid.empty() || app.size() > 256 || openid.size() > 256 || fresh.empty()) return;
+        std::lock_guard lock(mu_);
+        const auto key = cacheKey(app, "avatar", openid);
+        auto record = read(key);
+        if (record.revision > observedBefore) return;
+        const bool changed = record.value != fresh;
+        record.value = fresh; record.revision = ++revision_;
+        if (changed) write(key, record); else records_[key] = record;
+    }
+    std::string avatar(const std::string& app, const std::string& openid) const {
+        if (app.empty() || openid.empty() || app.size() > 256 || openid.size() > 256) return {};
+        std::lock_guard lock(mu_);
+        return avatarUrl(read(cacheKey(app, "avatar", openid)).value);
+    }
+
     std::string rememberUser(const std::string& app, const std::string& openid,
                              const std::string& username, const std::string& unionId = {},
                              uint64_t observedBefore = (std::numeric_limits<uint64_t>::max)()) {
