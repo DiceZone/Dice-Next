@@ -1236,6 +1236,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
+    // 禁用掷骰理由：.r 只显示结果，理由一律不显示（dice.roll_reason_disabled，默认 false）。
+    app.registerHandler("/api/system/roll-reason", [&cfg](Req req, CB&& cb) {
+        try {
+            if (req->method() == drogon::Put) {
+                auto j = J::parse(req->body());
+                cfg.set<bool>("dice/roll_reason_disabled", j.value("disabled", false));
+                cfg.save();
+            }
+            jsonReply(ok(J{{"disabled", cfg.get<bool>("dice/roll_reason_disabled", false)}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Put});
+
     // ═══ Persona switching API ═══════════════════════════
 
     // List all personas
