@@ -4,11 +4,11 @@
 // 加延迟，是文档里说明的取舍）；失败/超时/未配置→原样返回，绝不影响正常掷骰。
 //
 // 配置 dice/ai.polish：
-//   { enabled, model_id (空=用首个启用模型), mode ("text"=仅润色措辞 / "rp"=按情境加 rp),
+//   { enabled, mode ("text"=仅润色措辞 / "rp"=按情境加 rp),
 //     persona (人设/额外指令) }
 
 #include "../config/config_manager.h"
-#include "ai_gateway.h"
+#include "ai_usage.h"
 #include "../common/content_format.h"
 #include "../common/markdown.h"
 #include <nlohmann/json.hpp>
@@ -34,18 +34,6 @@ inline bool covers(ConfigManager& cfg, const std::string& cat) {
     return cat == "roll";
 }
 
-// 选润色模型：polish.model_id 指定且启用则用它，否则用首个启用模型。
-inline bool pickModel(ConfigManager& cfg, ai::Model& out) {
-    std::string want = conf(cfg).value("model_id", std::string());
-    ai::Model first; bool haveFirst = false;
-    for (auto& m : ai::models(cfg)) {
-        if (!m.enabled) continue;
-        if (!haveFirst) { first = m; haveFirst = true; }
-        if (!want.empty() && m.id == want) { out = m; return true; }
-    }
-    if (want.empty() && haveFirst) { out = first; return true; }
-    return false;
-}
 
 // 内置提示词（前端可查看/覆盖）。数字/结构保留是硬约束——即使被改，
 // preservesNumbers 校验仍会兜底回退原文。
@@ -69,10 +57,7 @@ inline std::string defaultPromptRp() {
 inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const std::string& replyText,
                           ContentFormat format = ContentFormat::kPlainText) {
     if (replyText.empty()) return replyText;
-    ai::Model m;
-    if (!pickModel(cfg, m)) return replyText;
-
-    DICE_LOG_DEBUG("开始润色：模型「{}」，模式 {}，回复 {} 字节、用户输入 {} 字节。", m.id, conf(cfg).value("mode","text"), replyText.size(), userMsg.size());
+    if (!ai::hasModel(cfg, "polish")) return replyText;
     json c = conf(cfg);
     std::string mode = c.value("mode", std::string("text"));
     std::string persona = c.value("persona", std::string());
@@ -89,8 +74,8 @@ inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const 
     // 润色输出长度按原文放宽一些；低温度求忠实；超时 20s。
     int maxTok = (int)(replyText.size()) + 256;
     if (maxTok > 1024) maxTok = 1024;
-    ai::Result r = ai::chat(cfg, m, sys, user, maxTok, 20, /*tempOverride=*/0.3);
-    if (!r.ok || r.reply.empty()) { if (!r.ok) DICE_LOG_WARN("模型「{}」润色失败：{}，耗时 {} 毫秒；继续使用原回复。", m.id, r.error, r.latencyMs); return replyText; }
+    ai::Result r = ai::chatFor(cfg, "polish", sys, user, maxTok, 20, /*tempOverride=*/0.3);
+    if (!r.ok || r.reply.empty()) { if (!r.ok) DICE_LOG_WARN("模型「{}」润色失败：{}，耗时 {} 毫秒；继续使用原回复。", r.modelId, r.error, r.latencyMs); return replyText; }
     std::string out = r.reply;
     auto b = out.find_first_not_of(" \t\r\n");
     auto e = out.find_last_not_of(" \t\r\n");
@@ -105,7 +90,7 @@ inline std::string polish(ConfigManager& cfg, const std::string& userMsg, const 
     if (format == ContentFormat::kMarkdown && !markdown::preservesStructure(replyText, out)) {
         DICE_LOG_WARN("润色结果破坏了 Markdown 结构，使用原回复。"); return replyText;
     }
-    DICE_LOG_DEBUG("模型「{}」润色完成：使用 {} Token，耗时 {} 毫秒；输入 {} 字节、输出 {} 字节。", m.id, r.totalTokens, r.latencyMs, replyText.size(), out.size());
+    DICE_LOG_DEBUG("模型「{}」润色完成：使用 {} Token，耗时 {} 毫秒；输入 {} 字节、输出 {} 字节。", r.modelId, r.totalTokens, r.latencyMs, replyText.size(), out.size());
     return out;
 }  // polish
 }  // namespace dice::aipolish

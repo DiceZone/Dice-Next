@@ -6,12 +6,12 @@
 // 失败/超时/未配置一律发原文，不影响正常使用。
 //
 // 配置 dice/ai.translate：
-//   { enabled, model_id(空=首个启用模型),
+//   { enabled,
 //     scope_dice, scope_reply, scope_plugin,
 //     langs: [ { name:"德语", keywords:["de","german","德语","deutsch"] } ] }
 
 #include "../config/config_manager.h"
-#include "ai_gateway.h"
+#include "ai_usage.h"
 #include "../common/content_format.h"
 #include "../common/markdown.h"
 #include <nlohmann/json.hpp>
@@ -69,19 +69,6 @@ inline std::string matchLang(ConfigManager& cfg, const std::string& input) {
     return "";
 }
 
-// 选翻译模型（translate.model_id 指定且启用则用它，否则首个启用模型）。
-inline bool pickModel(ConfigManager& cfg, ai::Model& out) {
-    std::string want = conf(cfg).value("model_id", std::string());
-    ai::Model first; bool haveFirst = false;
-    for (auto& m : ai::models(cfg)) {
-        if (!m.enabled) continue;
-        if (!haveFirst) { first = m; haveFirst = true; }
-        if (!want.empty() && m.id == want) { out = m; return true; }
-    }
-    if (want.empty() && haveFirst) { out = first; return true; }
-    return false;
-}
-
 // 翻译缓存（同源文本+同目标语言只计费一次）。内存缓存，超上限整体清空（简单可靠）。
 inline std::mutex& cacheMutex() { static std::mutex m; return m; }
 inline std::map<std::string, std::string>& cache() { static std::map<std::string, std::string> c; return c; }
@@ -108,9 +95,7 @@ inline std::string translate(ConfigManager& cfg, const std::string& targetLang, 
         auto it = cache().find(key);
         if (it != cache().end()) return it->second;
     }
-    ai::Model m;
-    if (!pickModel(cfg, m)) return text;
-    DICE_LOG_DEBUG("开始翻译：模型「{}」，目标语言 {}，待翻译 {} 字节。", m.id, targetLang, text.size());
+    if (!ai::hasModel(cfg, "translate")) return text;
 
     // 系统提示词优先用配置里的 prompt（前端可编辑，{lang} 占位）；留空则用内置默认。
     std::string tpl = conf(cfg).value("prompt", std::string());
@@ -120,8 +105,8 @@ inline std::string translate(ConfigManager& cfg, const std::string& targetLang, 
         sys += "\n回复采用 Markdown。必须保留标题、列表、表格、引用、粗体等排版结构，代码、数学公式、链接目标和媒体代码必须原样保留，只翻译普通文字。";
     int maxTok = (int)(text.size()) + 256;
     if (maxTok > 2048) maxTok = 2048;
-    ai::Result r = ai::chat(cfg, m, sys, text, maxTok, 20, /*tempOverride=*/0.3);
-    if (!r.ok || r.reply.empty()) { if (!r.ok) DICE_LOG_WARN("模型「{}」翻译至 {} 失败：{}；使用原回复。", m.id, targetLang, r.error); return text; }
+    ai::Result r = ai::chatFor(cfg, "translate", sys, text, maxTok, 20, /*tempOverride=*/0.3);
+    if (!r.ok || r.reply.empty()) { if (!r.ok) DICE_LOG_WARN("模型「{}」翻译至 {} 失败：{}；使用原回复。", r.modelId, targetLang, r.error); return text; }
 
     std::string out = r.reply;
     auto b = out.find_first_not_of(" \t\r\n");
@@ -137,7 +122,7 @@ inline std::string translate(ConfigManager& cfg, const std::string& targetLang, 
     {
         std::lock_guard<std::mutex> lk(cacheMutex());
         if (cache().size() > 1000) cache().clear();
-    DICE_LOG_DEBUG("模型「{}」已翻译至 {}：使用 {} Token，耗时 {} 毫秒；输入 {} 字节、输出 {} 字节。", m.id, targetLang, r.totalTokens, r.latencyMs, text.size(), out.size());
+    DICE_LOG_DEBUG("模型「{}」已翻译至 {}：使用 {} Token，耗时 {} 毫秒；输入 {} 字节、输出 {} 字节。", r.modelId, targetLang, r.totalTokens, r.latencyMs, text.size(), out.size());
         cache()[key] = out;
     }
     return out;

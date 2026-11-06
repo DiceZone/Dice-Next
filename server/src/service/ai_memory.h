@@ -8,14 +8,14 @@
 // 消息累积到一批（>=rounds）才真正请求模型，天然限频、控成本。失败保留旧摘要。
 //
 // 配置 dice/ai.memory.short：
-//   { enabled, rounds(逐条保留的近期窗口/折叠批大小), summary_model_id(空=首个启用),
-//     summary_prompt(空=内置默认), max_chars(摘要字数上限) }
+//   { enabled, rounds(逐条保留的近期窗口/折叠批大小), summary_prompt(空=内置默认),
+//     max_chars(摘要字数上限) }；模型由用途分配的「记忆摘要」决定。
 //
 // 阶段 C 将复用 ai_memory 表存持久事实（kind="fact"，带 embedding 向量检索）。
 
 #include "../config/config_manager.h"
 #include "../storage/database.h"
-#include "ai_gateway.h"
+#include "ai_usage.h"
 #include "ai_chat.h"
 #include <sqlite_orm/sqlite_orm.h>
 #include <nlohmann/json.hpp>
@@ -43,9 +43,9 @@ inline int keepRounds(ConfigManager& cfg) { int n = shortConf(cfg).value("rounds
 inline int summaryMaxChars(ConfigManager& cfg) { int n = shortConf(cfg).value("max_chars", 400); return n < 80 ? 80 : (n > 2000 ? 2000 : n); }
 
 // ─── 阶段C：长期记忆（持久事实 + embedding 向量检索）配置 ───────────────
-//   dice/ai.memory.long { enabled, embed_model_id(取其 base_url/api_key), embed_model(嵌入模型名),
-//     top_k(检索条数), min_similarity(相似度阈值 0-1), max_facts(每群事实上限),
-//     extract_model_id(抽取用对话模型，空=首个启用), extract_prompt(空=内置默认) }
+//   dice/ai.memory.long { enabled, top_k(检索条数), min_similarity(相似度阈值 0-1),
+//     max_facts(每群事实上限), extract_prompt(空=内置默认) }
+//   嵌入与抽取的模型由用途分配的「嵌入」「事实抽取」决定。
 inline json longConf(ConfigManager& cfg) {
     json a = ai::conf(cfg);
     if (a.is_object() && a.contains("memory") && a["memory"].is_object()) {
@@ -54,25 +54,13 @@ inline json longConf(ConfigManager& cfg) {
     }
     return json::object();
 }
-inline std::string embedModelName(ConfigManager& cfg) { return longConf(cfg).value("embed_model", std::string()); }
 inline bool longEnabled(ConfigManager& cfg) {
-    return ai::enabled(cfg) && longConf(cfg).value("enabled", false) && !embedModelName(cfg).empty();
+    return ai::enabled(cfg) && longConf(cfg).value("enabled", false) && ai::hasModel(cfg, "embed");
 }
 inline int topK(ConfigManager& cfg) { int n = longConf(cfg).value("top_k", 4); return n < 1 ? 1 : (n > 20 ? 20 : n); }
 inline float minSim(ConfigManager& cfg) { double s = longConf(cfg).value("min_similarity", 0.75); return (float)(s < 0 ? 0 : (s > 1 ? 1 : s)); }
 inline int maxFacts(ConfigManager& cfg) { int n = longConf(cfg).value("max_facts", 300); return n < 20 ? 20 : (n > 5000 ? 5000 : n); }
 
-// 选嵌入用连接（复用某个已配置模型的 base_url/api_key）。
-inline ai::Model embedConn(ConfigManager& cfg) {
-    ai::Model m; bool got = false;
-    std::string want = longConf(cfg).value("embed_model_id", std::string());
-    for (auto& mm : ai::models(cfg)) {
-        if (!mm.enabled) continue;
-        if (!got) { m = mm; got = true; }
-        if (!want.empty() && mm.id == want) { m = mm; break; }
-    }
-    return m;
-}
 inline std::string defaultExtractPrompt() {
     return "你在为一个 TRPG 跑团 QQ 群维护长期记忆。从下面的对话里，抽取值得长期记住的**持久事实**："
         "人物设定与偏好、人物卡/角色信息、正在进行的剧情线索、群内约定与关系、重要事件。"
@@ -89,14 +77,7 @@ inline std::string defaultSummaryPrompt() {
 
 // 用大模型把（已有摘要 + 新增对话）压缩为更新后的摘要。纯函数：任何失败返回空。
 inline std::string summarize(ConfigManager& cfg, const std::string& prevSummary, const std::string& newDialog) {
-    ai::Model m; bool got = false;
-    std::string want = shortConf(cfg).value("summary_model_id", std::string());
-    for (auto& mm : ai::models(cfg)) {
-        if (!mm.enabled) continue;
-        if (!got) { m = mm; got = true; }
-        if (!want.empty() && mm.id == want) { m = mm; got = true; break; }
-    }
-    if (!got) return "";
+    if (!ai::hasModel(cfg, "summary")) return "";
     std::string sys = shortConf(cfg).value("summary_prompt", std::string());
     if (sys.empty()) sys = defaultSummaryPrompt();
     int maxChars = summaryMaxChars(cfg);
@@ -104,7 +85,7 @@ inline std::string summarize(ConfigManager& cfg, const std::string& prevSummary,
     user += "【已有摘要】\n" + (prevSummary.empty() ? std::string("（暂无）") : prevSummary) + "\n\n";
     user += "【新增对话】\n" + newDialog + "\n";
     user += "请输出更新后的摘要（不超过约" + std::to_string(maxChars) + "字）：";
-    ai::Result r = ai::chat(cfg, m, sys, user, maxChars * 2 + 64, 40);
+    ai::Result r = ai::chatFor(cfg, "summary", sys, user, maxChars * 2 + 64, 40);
     if (!r.ok || r.reply.empty()) return "";
     return dice::aichat::truncateChars(r.reply, maxChars);
 }
@@ -112,18 +93,11 @@ inline std::string summarize(ConfigManager& cfg, const std::string& prevSummary,
 // 阶段C：从一批对话里抽取持久事实（LLM 调用，期望 JSON 字符串数组）。任何失败返回空。
 inline std::vector<std::string> extractFacts(ConfigManager& cfg, const std::string& dialog) {
     std::vector<std::string> out;
-    ai::Model m; bool got = false;
-    std::string want = longConf(cfg).value("extract_model_id", std::string());
-    for (auto& mm : ai::models(cfg)) {
-        if (!mm.enabled) continue;
-        if (!got) { m = mm; got = true; }
-        if (!want.empty() && mm.id == want) { m = mm; got = true; break; }
-    }
-    if (!got) return out;
+    if (!ai::hasModel(cfg, "extract")) return out;
     std::string sys = longConf(cfg).value("extract_prompt", std::string());
     if (sys.empty()) sys = defaultExtractPrompt();
     std::string user = "对话：\n" + dialog + "\n请抽取持久事实，输出 JSON 字符串数组：";
-    ai::Result r = ai::chat(cfg, m, sys, user, 512, 40, 0.2);
+    ai::Result r = ai::chatFor(cfg, "extract", sys, user, 512, 40, 0.2);
     if (!r.ok || r.reply.empty()) return out;
     // 解析 JSON 数组（容错：截取第一个 [ 到最后一个 ]）。
     std::string s = r.reply;
@@ -164,7 +138,7 @@ inline void storeFacts(ConfigManager& cfg, Store* cst, const std::string& scope,
                        const std::vector<std::string>& facts) {
     if (!cst || facts.empty() || !longEnabled(cfg)) return;
     namespace orm = sqlite_orm;
-    ai::EmbedResult er = ai::embed(cfg, embedConn(cfg), embedModelName(cfg), facts, 30);
+    ai::EmbedResult er = ai::embedFor(cfg, facts, 30);
     if (!er.ok) return;
     try {
         // 载入本 scope 已有事实的向量（去重用）。
@@ -180,7 +154,8 @@ inline void storeFacts(ConfigManager& cfg, Store* cst, const std::string& scope,
             if (v.empty()) continue;
             bool dup = false;
             for (auto& ev : exVecs) if (ai::cosine(v, ev) > 0.92f) { dup = true; break; }
-            if (dup) continue;
+            if (dup) { DICE_LOG_DEBUG_M("AI 记忆", "[{}] 事实与已有记忆重复，跳过：{}", scopeId, facts[i]); continue; }
+            DICE_LOG_DEBUG_M("AI 记忆", "[{}] 记住新事实：{}", scopeId, facts[i]);
             AiMemoryRow nr; nr.scope = scope; nr.scopeId = scopeId; nr.kind = "fact";
             nr.content = facts[i]; nr.embedding = ai::vecToJson(v);
             nr.createdAt = now; nr.updatedAt = now;
@@ -198,7 +173,8 @@ inline void storeFacts(ConfigManager& cfg, Store* cst, const std::string& scope,
                     and orm::c(&AiMemoryRow::kind) == std::string("fact")),
                 orm::multi_order_by(orm::order_by(&AiMemoryRow::hits).asc(), orm::order_by(&AiMemoryRow::id).asc()));
             int toDel = total - cap;
-            for (auto& e : all) { if (toDel-- <= 0) break; cst->template remove<AiMemoryRow>(e.id); }
+            DICE_LOG_DEBUG_M("AI 记忆", "[{}] 事实共 {} 条，超过上限 {}，删除命中最少的 {} 条。", scopeId, total, cap, toDel);
+            for (auto& e : all) { if (toDel-- <= 0) break; DICE_LOG_DEBUG_M("AI 记忆", "[{}] 删除事实：{}", scopeId, e.content); cst->template remove<AiMemoryRow>(e.id); }
         }
     } catch (...) {}
 }
@@ -211,7 +187,7 @@ inline std::vector<std::string> retrieveFacts(ConfigManager& cfg, Store* cst, co
     std::vector<std::string> out;
     if (!cst || query.empty() || !longEnabled(cfg)) return out;
     namespace orm = sqlite_orm;
-    ai::EmbedResult er = ai::embed(cfg, embedConn(cfg), embedModelName(cfg), {query}, 20);
+    ai::EmbedResult er = ai::embedFor(cfg, {query}, 20);
     if (!er.ok || er.vectors.empty() || er.vectors[0].empty()) return out;
     const auto& qv = er.vectors[0];
     try {
@@ -225,6 +201,13 @@ inline std::vector<std::string> retrieveFacts(ConfigManager& cfg, Store* cst, co
         }
         std::sort(scored.begin(), scored.end(), [](auto& a, auto& b) { return a.first > b.first; });
         int k = topK(cfg);
+        if (ai::debugOn()) {
+            std::string hits;
+            for (size_t i = 0; i < scored.size() && (int)i < k; ++i)
+                hits += "\n" + std::to_string(scored[i].first).substr(0, 5) + " " + rows[scored[i].second].content;
+            DICE_LOG_DEBUG_M("AI 记忆", "[{}] 检索长期记忆：共 {} 条事实，{} 条达到相似度 {}，取前 {} 条。{}", scopeId, rows.size(),
+                             scored.size(), minSim(cfg), k, hits);
+        }
         for (auto& sc : scored) {
             if ((int)out.size() >= k) break;
             out.push_back(rows[sc.second].content);
@@ -275,6 +258,8 @@ inline void maybeFold(ConfigManager& cfg, Store* cst, const std::string& platfor
                 and orm::c(&ChatMsgRow::id) > watermark and orm::c(&ChatMsgRow::id) < firstVerbatimId),
             orm::order_by(&ChatMsgRow::id).asc(), orm::limit(300));
         if ((int)fold.size() < keep) return;  // 攒够一批再折叠，省成本
+        DICE_LOG_DEBUG_M("AI 记忆", "[{}] 开始整理记忆：折叠 {} 条已滑出近期窗口的消息（水位线 {} → 窗口起点 {}），摘要{}、事实抽取{}。",
+                         scopeId, fold.size(), watermark, firstVerbatimId, sEn ? "开" : "关", lEn ? "开" : "关");
 
         std::string dialog; int64_t newWatermark = watermark;
         for (auto& mm : fold) {
@@ -287,11 +272,12 @@ inline void maybeFold(ConfigManager& cfg, Store* cst, const std::string& platfor
         std::string newSummary = have ? row.content : std::string();
         if (sEn) {
             std::string updated = summarize(cfg, have ? row.content : std::string(), dialog);
-            if (updated.empty()) advance = false;   // 摘要失败：保留旧摘要，不推进水位线
-            else newSummary = updated;
+            if (updated.empty()) { advance = false; DICE_LOG_DEBUG_M("AI 记忆", "[{}] 摘要失败，保留旧摘要，下次再试。", scopeId); }   // 不推进水位线
+            else { newSummary = updated; DICE_LOG_DEBUG_M("AI 记忆", "[{}] 摘要已更新：\n{}", scopeId, updated); }
         }
         if (lEn && advance) {                        // 长期事实：只在会提交这一批时抽取
             auto facts = extractFacts(cfg, dialog);
+            DICE_LOG_DEBUG_M("AI 记忆", "[{}] 抽取到 {} 条事实。", scopeId, facts.size());
             if (!facts.empty()) storeFacts(cfg, cst, scope, scopeId, facts);
         }
         if (!advance) return;

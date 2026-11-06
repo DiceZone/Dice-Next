@@ -49,6 +49,7 @@
 #include "log_usage.h"
 #include "game_session_list.h"
 #include "ai_gateway.h"     // AI 网关
+#include "ai_usage.h"       // AI 用途分配
 #include "ai_polish.h"      // 润色（默认提示词）
 #include "ai_translate.h"   // 翻译（默认提示词）
 #include "ai_chat.h"        // 智能化阶段A：对话（默认提示词）
@@ -845,6 +846,22 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 auto j = J::parse(req->body());
                 J out = J::object();
                 out["enabled"] = j.value("enabled", false);
+                // 提供商：Base URL + API Key 只填一次，供多个模型共用。
+                J ps = J::array();
+                std::set<std::string> providerIds;
+                if (j.contains("providers") && j["providers"].is_array()) {
+                    for (auto& p : j["providers"]) {
+                        if (!p.is_object()) continue;
+                        std::string id = p.value("id", std::string());
+                        if (id.empty() || providerIds.count(id)) id = "p" + drogon::utils::genRandomString(8);
+                        providerIds.insert(id);
+                        ps.push_back(J{{"id", id}, {"name", p.value("name", std::string())},
+                                       {"base_url", p.value("base_url", std::string())},
+                                       {"api_key", p.value("api_key", std::string())},
+                                       {"enabled", p.value("enabled", true)}});
+                    }
+                }
+                out["providers"] = ps;
                 J ms = J::array();
                 if (j.contains("models") && j["models"].is_array()) {
                     for (auto& m : j["models"]) {
@@ -854,9 +871,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         if (id.empty()) id = "m" + drogon::utils::genRandomString(8);
                         mm["id"] = id;
                         mm["name"] = m.value("name", std::string());
-                        mm["base_url"] = m.value("base_url", std::string());
-                        mm["api_key"] = m.value("api_key", std::string());
+                        std::string pid = m.value("provider_id", std::string());
+                        mm["provider_id"] = providerIds.count(pid) ? pid : std::string();
                         mm["model"] = m.value("model", std::string());
+                        const bool embedding = m.value("kind", std::string("chat")) == "embedding";
+                        mm["kind"] = embedding ? "embedding" : "chat";
+                        mm["vision"] = !embedding && m.value("vision", false);
                         mm["enabled"] = m.value("enabled", true);
                         mm["price_in"] = m.value("price_in", 0.0);
                         mm["price_out"] = m.value("price_out", 0.0);
@@ -869,6 +889,10 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     }
                 }
                 out["models"] = ms;
+                out["usages"] = dice::ai::normalizeUsages(j.value("usages", J::object()), ms);
+                // 语音识别（模型由用途分配决定）。
+                J spj = (j.contains("speech") && j["speech"].is_object()) ? j["speech"] : J::object();
+                out["speech"] = J{{"enabled", spj.value("enabled", false)}};
                 // 覆盖范围规范化（roll/deck/fun/custom/plugin）。
                 auto normCov = [](const J& src, bool defRoll, bool defOthers) {
                     const J& cv = (src.contains("cov") && src["cov"].is_object()) ? src["cov"] : J::object();
@@ -885,19 +909,18 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"frequency_penalty", prm.value("frequency_penalty", 0.0)},
                     {"presence_penalty", prm.value("presence_penalty", 0.0)}
                 };
-                // 润色配置（enabled / model_id / mode text|rp / persona / cov）。
+                // 润色配置（enabled / mode text|rp / persona / cov）；模型由用途分配决定。
                 J pj = (j.contains("polish") && j["polish"].is_object()) ? j["polish"] : J::object();
                 std::string pmode = pj.value("mode", std::string("text"));
                 if (pmode != "text" && pmode != "rp") pmode = "text";
                 out["polish"] = J{
                     {"enabled", pj.value("enabled", false)},
-                    {"model_id", pj.value("model_id", std::string())},
                     {"mode", pmode},
                     {"persona", pj.value("persona", std::string())},
                     {"prompt", pj.value("prompt", std::string())},   // 可编辑系统提示词（空=内置默认）
                     {"cov", normCov(pj, true, false)}
                 };
-                // 翻译配置（enabled / model_id / cov / 自定义语言列表）。
+                // 翻译配置（enabled / cov / 自定义语言列表）；模型由用途分配决定。
                 J tj = (j.contains("translate") && j["translate"].is_object()) ? j["translate"] : J::object();
                 J langs = J::array();
                 if (tj.contains("langs") && tj["langs"].is_array()) {
@@ -914,7 +937,6 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
                 out["translate"] = J{
                     {"enabled", tj.value("enabled", false)},
-                    {"model_id", tj.value("model_id", std::string())},
                     {"prompt", tj.value("prompt", std::string())},   // 可编辑翻译提示词（{lang} 占位，空=内置默认）
                     {"cov", normCov(tj, true, true)},
                     {"langs", langs}
@@ -932,12 +954,12 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 int sprob = chj.value("standby_prob", 0); if (sprob < 0) sprob = 0; if (sprob > 100) sprob = 100;
                 out["chat"] = J{
                     {"enabled", chj.value("enabled", false)},
-                    {"model_id", chj.value("model_id", std::string())},
                     {"persona", chj.value("persona", std::string())},
                     {"prompt", chj.value("prompt", std::string())},
                     {"at_bot", chj.value("at_bot", true)},
                     {"keywords", ckws},
                     {"standby_prob", sprob},
+                    {"decision", chj.value("decision", false)},   // 待机搭话前先问决策模型
                     {"context_rounds", chj.value("context_rounds", (long long)10)},
                     {"max_chars", chj.value("max_chars", (long long)200)},
                     {"cooldown_sec", chj.value("cooldown_sec", (long long)5)},
@@ -959,17 +981,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         {"enabled", msh.value("enabled", false)},
                         {"rounds", (long long)mrounds},
                         {"max_chars", (long long)mmax},
-                        {"summary_model_id", msh.value("summary_model_id", std::string())},
                         {"summary_prompt", msh.value("summary_prompt", std::string())}
                     }},
                     {"long", J{
                         {"enabled", mlo.value("enabled", false)},
-                        {"embed_model_id", mlo.value("embed_model_id", std::string())},
-                        {"embed_model", mlo.value("embed_model", std::string())},
                         {"top_k", (long long)mtopk},
                         {"min_similarity", msim},
                         {"max_facts", (long long)mcap},
-                        {"extract_model_id", mlo.value("extract_model_id", std::string())},
                         {"extract_prompt", mlo.value("extract_prompt", std::string())}
                     }}
                 };
@@ -1036,31 +1054,33 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (!cur.is_object()) cur = J::object();
             if (!cur.contains("enabled")) cur["enabled"] = false;
             if (!cur.contains("models") || !cur["models"].is_array()) cur["models"] = J::array();
+            if (!cur.contains("providers") || !cur["providers"].is_array()) cur["providers"] = J::array();
+            cur["usages"] = dice::ai::normalizeUsages(cur.value("usages", J::object()), cur["models"]);
+            if (!cur.contains("speech") || !cur["speech"].is_object()) cur["speech"] = J{{"enabled", false}};
             const J covRollOnly = J{{"roll", true}, {"deck", false}, {"fun", false}, {"custom", false}, {"plugin", false}};
             const J covAll = J{{"roll", true}, {"deck", true}, {"fun", true}, {"custom", true}, {"plugin", true}};
             if (!cur.contains("params") || !cur["params"].is_object())
                 cur["params"] = J{{"temperature", 0.7}, {"top_p", 1.0}, {"max_tokens", 1024}, {"frequency_penalty", 0.0}, {"presence_penalty", 0.0}};
             if (!cur.contains("polish") || !cur["polish"].is_object())
-                cur["polish"] = J{{"enabled", false}, {"model_id", std::string()}, {"mode", "text"}, {"persona", std::string()}, {"cov", covRollOnly}};
+                cur["polish"] = J{{"enabled", false}, {"mode", "text"}, {"persona", std::string()}, {"cov", covRollOnly}};
             else if (!cur["polish"].contains("cov")) cur["polish"]["cov"] = covRollOnly;
             if (!cur.contains("translate") || !cur["translate"].is_object())
-                cur["translate"] = J{{"enabled", false}, {"model_id", std::string()}, {"cov", covAll}, {"langs", J::array()}};
+                cur["translate"] = J{{"enabled", false}, {"cov", covAll}, {"langs", J::array()}};
             else if (!cur["translate"].contains("cov")) cur["translate"]["cov"] = covAll;
             if (!cur.contains("chat") || !cur["chat"].is_object())
-                cur["chat"] = J{{"enabled", false}, {"model_id", std::string()}, {"persona", std::string()},
+                cur["chat"] = J{{"enabled", false}, {"persona", std::string()},
                                 {"prompt", std::string()}, {"at_bot", true}, {"keywords", J::array()},
-                                {"standby_prob", 0}, {"context_rounds", 10}, {"max_chars", 200},
+                                {"standby_prob", 0}, {"decision", false}, {"context_rounds", 10}, {"max_chars", 200},
                                 {"cooldown_sec", 5}, {"reply_at", false}, {"no_emoji", true}, {"filters", J::array()}};
             else { if (!cur["chat"].contains("no_emoji")) cur["chat"]["no_emoji"] = true;
                    if (!cur["chat"].contains("filters")) cur["chat"]["filters"] = J::array(); }
             if (!cur.contains("memory") || !cur["memory"].is_object()) cur["memory"] = J::object();
             if (!cur["memory"].contains("short") || !cur["memory"]["short"].is_object())
                 cur["memory"]["short"] = J{{"enabled", false}, {"rounds", 20}, {"max_chars", 400},
-                                           {"summary_model_id", std::string()}, {"summary_prompt", std::string()}};
+                                           {"summary_prompt", std::string()}};
             if (!cur["memory"].contains("long") || !cur["memory"]["long"].is_object())
-                cur["memory"]["long"] = J{{"enabled", false}, {"embed_model_id", std::string()}, {"embed_model", std::string()},
-                                          {"top_k", 4}, {"min_similarity", 0.75}, {"max_facts", 300},
-                                          {"extract_model_id", std::string()}, {"extract_prompt", std::string()}};
+                cur["memory"]["long"] = J{{"enabled", false}, {"top_k", 4}, {"min_similarity", 0.75}, {"max_facts", 300},
+                                          {"extract_prompt", std::string()}};
             if (!cur.contains("tools") || !cur["tools"].is_object())
                 cur["tools"] = J{{"enabled", false}, {"roll_dice", true}, {"draw_deck", true}, {"get_attr", true},
                                  {"set_attr", false}, {"run_command", true}, {"search_help", true}, {"max_rounds", 3}};
@@ -1080,7 +1100,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 {"chat", dice::aichat::defaultPrompt()},
                 {"summary", dice::aimemory::defaultSummaryPrompt()},
                 {"extract", dice::aimemory::defaultExtractPrompt()},
-                {"vision", dice::aivision::defaultPrompt()}
+                {"vision", dice::aivision::defaultPrompt()},
+                {"decision", dice::aichat::defaultDecisionPrompt()}
             };
             jsonReply(ok(cur), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
@@ -1150,11 +1171,26 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             dice::ai::Model m;
             if (j.contains("model") && j["model"].is_object()) {
                 m = dice::ai::modelFromJson(j["model"]);
+                // 未保存的设置也能测：请求里带了提供商就用它，否则按 provider_id 查已存的。
+                std::vector<dice::ai::Provider> provs;
+                if (j.contains("provider") && j["provider"].is_object()) provs.push_back(dice::ai::providerFromJson(j["provider"]));
+                else provs = dice::ai::providersOf(dice::ai::conf(cfg));
+                dice::ai::resolveProvider(m, provs);
+                m.enabled = true;
             } else if (j.contains("id")) {
                 std::string id = j.value("id", std::string());
                 for (auto& mm : dice::ai::models(cfg)) if (mm.id == id) { m = mm; break; }
             }
             std::string prompt = j.value("prompt", std::string("\xe7\x94\xa8\xe4\xb8\x80\xe5\x8f\xa5\xe8\xaf\x9d\xe5\x81\x9a\xe4\xb8\xaa\xe8\x87\xaa\xe6\x88\x91\xe4\xbb\x8b\xe7\xbb\x8d\xe3\x80\x82"));  // 用一句话做个自我介绍。
+            if (m.kind == "embedding") {
+                auto er = dice::ai::embed(cfg, m, std::vector<std::string>{prompt}, 30);
+                std::string dim = er.ok && !er.vectors.empty() ? std::to_string(er.vectors[0].size()) : std::string();
+                jsonReply(ok(J{{"ok", er.ok}, {"reply", er.ok ? "dim=" + dim : std::string()}, {"error", er.error},
+                               {"latencyMs", 0}, {"promptTokens", er.totalTokens}, {"completionTokens", 0},
+                               {"totalTokens", er.totalTokens}, {"cost", 0.0}}), std::move(cb));
+                return;
+            }
+            dice::ai::PurposeScope purpose("test");
             auto r = dice::ai::chat(cfg, m, "You are a helpful assistant.", prompt, 128, 30);
             jsonReply(ok(J{
                 {"ok", r.ok}, {"reply", r.reply}, {"error", r.error},

@@ -5,13 +5,14 @@
 // 强限频（每群冷却）避免刷屏；最大字数截断；失败/未配置/未触发一律不回复。
 //
 // 配置 dice/ai.chat：
-//   { enabled, model_id(空=首个启用), persona, prompt(系统提示词，空=内置默认),
+//   { enabled, persona, prompt(系统提示词，空=内置默认),
 //     at_bot(被@时回复), keywords[](含则回复), standby_prob(0-100 非触发也按概率回),
+//     decision(待机搭话前先问「决策」用途的模型要不要插话),
 //     context_rounds(喂给AI的上下文轮数), max_chars(回复上限), cooldown_sec(每群冷却),
-//     reply_at(是否@发送者) }
+//     reply_at(是否@发送者) }；模型由用途分配的「回复」「决策」决定。
 
 #include "../config/config_manager.h"
-#include "ai_gateway.h"
+#include "ai_usage.h"
 #include "ai_tools.h"
 #include <nlohmann/json.hpp>
 #include <string>
@@ -128,15 +129,22 @@ inline bool noEmoji(ConfigManager& cfg) { return conf(cfg).value("no_emoji", tru
 enum class Trigger { None, Strong, Standby };
 inline Trigger triggerKind(ConfigManager& cfg, const std::string& text, bool atMe) {
     json c = conf(cfg);
-    if (atMe && c.value("at_bot", true)) return Trigger::Strong;   // 被 @ 必回
+    if (atMe && c.value("at_bot", true)) { DICE_LOG_DEBUG_M("AI 对话", "触发判断：被 @，必定回复。"); return Trigger::Strong; }
     if (c.contains("keywords") && c["keywords"].is_array())
         for (auto& kw : c["keywords"])
-            if (kw.is_string() && !kw.get<std::string>().empty() && text.find(kw.get<std::string>()) != std::string::npos)
-                return Trigger::Strong;                            // 命中关键词必回
+            if (kw.is_string() && !kw.get<std::string>().empty() && text.find(kw.get<std::string>()) != std::string::npos) {
+                DICE_LOG_DEBUG_M("AI 对话", "触发判断：命中关键词「{}」，必定回复。", kw.get<std::string>());
+                return Trigger::Strong;
+            }
     int prob = c.value("standby_prob", 0);
     if (prob > 0) {
+        static std::mutex rngMutex;
         static std::mt19937 rng{std::random_device{}()};
-        if ((int)(rng() % 100) < prob) return Trigger::Standby;    // 非关键词时的待机搭话
+        int roll;
+        { std::lock_guard<std::mutex> lk(rngMutex); roll = (int)(rng() % 100); }
+        bool hit = roll < prob;
+        DICE_LOG_DEBUG_M("AI 对话", "触发判断：待机搭话掷出 {}，{}概率 {}，{}。", roll, hit ? "低于" : "不低于", prob, hit ? "进入待机搭话" : "不回复");
+        if (hit) return Trigger::Standby;
     }
     return Trigger::None;
 }
@@ -180,17 +188,11 @@ inline std::string generate(ConfigManager& cfg, const std::string& contextBlock,
                             const aitools::ToolExec& toolExec = nullptr,
                             const std::string& systemOverride = "",
                             const std::string& modelOverride = "") {
-    ai::Model m;
-    {   // 选模型：modelOverride > chat.model_id > 首个启用模型。
-        std::string want = !modelOverride.empty() ? modelOverride : conf(cfg).value("model_id", std::string());
-        bool got = false;
-        for (auto& mm : ai::models(cfg)) {
-            if (!mm.enabled) continue;
-            if (!got) { m = mm; got = true; }
-            if (!want.empty() && mm.id == want) { m = mm; got = true; break; }
-        }
-        if (!got) return "";
-    }
+    bool isNpc = !systemOverride.empty();
+    const std::string usage = isNpc ? "npc" : "reply";
+    ai::PurposeScope purpose(usage);
+    // 先静默检查有没有可用模型；真正选模型（含日志）在下面调用时进行。
+    if (ai::pick(cfg, usage, modelOverride, false).empty()) { DICE_LOG_DEBUG_M("AI 对话", "用途「{}」没有可用模型，不回复。", usage); return ""; }
     json c = conf(cfg);
     std::string sys;
     if (!systemOverride.empty()) {
@@ -205,7 +207,6 @@ inline std::string generate(ConfigManager& cfg, const std::string& contextBlock,
     if (!background.empty())
         sys += "\n\n【群历史记忆（较早对话的摘要，作背景参考，不要直接复述）】\n" + background;
 
-    bool isNpc = !systemOverride.empty();
     std::string user;
     if (!contextBlock.empty()) user = "群里最近的对话：\n" + contextBlock + "\n";
     user += "最新消息 —— " + curSender + "：" + curText + "\n"
@@ -217,15 +218,49 @@ inline std::string generate(ConfigManager& cfg, const std::string& contextBlock,
     std::string reply;
     if (toolExec && aitools::enabled(cfg)) {
         // 阶段D：带工具的对话（模型可掷骰/抽牌/查卡），最后据结果自然回复。
-        reply = aitools::runChat(cfg, m, sys, user, maxTok, 30, toolExec);
+        reply = aitools::runChat(cfg, ai::pick(cfg, usage, modelOverride), sys, user, maxTok, 30, toolExec);   // NPC 专属模型排在最前
     } else {
-        ai::Result r = ai::chat(cfg, m, sys, user, maxTok, 25);   // 温度用全局 params
+        ai::Result r = ai::chatFor(cfg, usage, sys, user, maxTok, 25, -1, modelOverride);   // 温度用全局 params
         if (r.ok) reply = r.reply;
     }
-    if (reply.empty()) return "";
+    if (reply.empty()) { DICE_LOG_DEBUG_M("AI 对话", "模型没有给出回复，本次不回复。"); return ""; }
     if (noEmoji(cfg)) reply = stripEmoji(reply);   // 默认不发 emoji
     if (reply.empty()) return "";
-    return truncateChars(reply, maxChars);
+    std::string out = truncateChars(reply, maxChars);
+    if (out.size() < reply.size()) DICE_LOG_DEBUG_M("AI 对话", "回复超过 {} 字，已截断。", maxChars);
+    return out;
+}
+
+// 决策：待机搭话（非 @、非关键词）前，先用「决策」用途的模型判断此刻要不要插话。
+// 只输出很短的 JSON，比直接生成回复便宜。模型不可用或输出无法解析时视为「不插话」。
+inline bool decisionEnabled(ConfigManager& cfg) { return conf(cfg).value("decision", false); }
+inline std::string defaultDecisionPrompt() {
+    return "你在判断群聊里的骰娘此刻要不要主动插话。只有当最新消息与骰娘有关、在向群里提问、"
+        "需要帮助，或骰娘能自然地接上话题时才插话；闲聊刷屏、与骰娘无关的私人对话不插话。"
+        "只输出 JSON：{\"reply\": true 或 false, \"reason\": \"十字以内的理由\"}。";
+}
+inline bool decide(ConfigManager& cfg, const std::string& contextBlock,
+                   const std::string& curSender, const std::string& curText) {
+    std::string persona = conf(cfg).value("persona", std::string());
+    std::string sys = defaultDecisionPrompt();
+    if (!persona.empty()) sys += "\n骰娘的人设：" + persona;
+    std::string user;
+    if (!contextBlock.empty()) user = "群里最近的对话：\n" + contextBlock + "\n";
+    user += "最新消息 —— " + curSender + "：" + curText + "\n要插话吗？";
+    ai::Result r = ai::chatFor(cfg, "decision", sys, user, 64, 15, 0.1);
+    if (!r.ok) { DICE_LOG_DEBUG_M("AI 对话", "决策：模型调用失败（{}），不插话。", r.error); return false; }
+    std::string t = r.reply;
+    auto lb = t.find('{'), rb = t.rfind('}');
+    bool yes = false; std::string reason;
+    if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
+        json j = json::parse(t.substr(lb, rb - lb + 1), nullptr, false);
+        if (j.is_object()) {
+            if (j.contains("reply") && j["reply"].is_boolean()) yes = j["reply"].get<bool>();
+            reason = j.value("reason", std::string());
+        }
+    }
+    DICE_LOG_DEBUG_M("AI 对话", "决策：{}（{}）", yes ? "插话" : "不插话", reason.empty() ? r.reply : reason);
+    return yes;
 }
 
 }  // namespace dice::aichat

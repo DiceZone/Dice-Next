@@ -10,7 +10,7 @@
 
 #include "../config/config_manager.h"
 #include "../storage/database.h"
-#include "ai_gateway.h"
+#include "ai_usage.h"
 #include <sqlite_orm/sqlite_orm.h>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -121,20 +121,13 @@ inline void updateMood(ConfigManager& cfg, Store* cst, const Npc& n, const std::
                        const std::string& userId, const std::string& senderName,
                        const std::string& userText, const std::string& npcReply) {
     if (!cst || !n.moodEnabled) return;
-    ai::Model m; bool got = false;
-    for (auto& mm : ai::models(cfg)) {
-        if (!mm.enabled) continue;
-        if (!got) { m = mm; got = true; }
-        if (!n.modelId.empty() && mm.id == n.modelId) { m = mm; got = true; break; }
-    }
-    if (!got) return;
     json cur = getMood(cst, groupKey, n.id, userId);
     int favor = cur.value("favor", 0);
     std::string sys = "你在为 TRPG NPC 维护对玩家的好感度。根据这次互动，输出 JSON："
         "{\"delta\": 整数(-5到5，本次好感变化), \"mood\": \"一两个词的当前情绪\"}。只输出 JSON，不要解释。";
     std::string user = "NPC「" + n.name + "」当前对「" + senderName + "」好感 " + std::to_string(favor)
         + "。\n玩家说：" + userText + "\nNPC 回应：" + npcReply + "\n请评估：";
-    ai::Result r = ai::chat(cfg, m, sys, user, 128, 20, 0.2);
+    ai::Result r = ai::chatFor(cfg, "mood", sys, user, 128, 20, 0.2, n.modelId);
     if (!r.ok || r.reply.empty()) return;
     std::string s = r.reply;
     auto lb = s.find('{'), rb = s.rfind('}');

@@ -11,7 +11,7 @@
 // 配置 dice/ai.tools：{ enabled, roll_dice, draw_deck, get_attr, max_rounds }
 
 #include "../config/config_manager.h"
-#include "ai_gateway.h"
+#include "ai_usage.h"
 #include <nlohmann/json.hpp>
 #include <string>
 #include <functional>
@@ -85,7 +85,9 @@ inline json toolDefs(ConfigManager& cfg) {
 
 // 工具调用循环：给定系统/用户提示，若模型请求工具则执行并回喂，最多 maxRounds 轮，最后
 // 返回自然语言回复。任何失败返回空。maxTok 用于每次生成上限。
-inline std::string runChat(ConfigManager& cfg, const ai::Model& m, const std::string& systemPrompt,
+// @p candidates 是按用途策略排好的模型；只有第一轮（尚未执行任何工具）失败时才换下一个，
+// 避免掷骰、改卡等操作被重复执行。
+inline std::string runChat(ConfigManager& cfg, const std::vector<ai::Model>& candidates, const std::string& systemPrompt,
                            const std::string& userPrompt, int maxTok, int timeoutSec, const ToolExec& exec) {
     json tools = toolDefs(cfg);
     json messages = json::array();
@@ -93,11 +95,21 @@ inline std::string runChat(ConfigManager& cfg, const ai::Model& m, const std::st
     messages.push_back({{"role", "user"}, {"content", userPrompt}});
 
     int rounds = maxRounds(cfg);
+    size_t current = 0;
+    int attempts = 0;
     for (int i = 0; i <= rounds; ++i) {
+        if (current >= candidates.size()) return "";
+        const ai::Model& m = candidates[current];
         // 最后一轮强制不带工具，逼模型据已有工具结果给出文本回复。
         bool last = (i == rounds);
         ai::ChatRawResult r = ai::chatRaw(cfg, m, messages, last ? json::array() : tools, maxTok, timeoutSec);
-        if (!r.ok) return "";
+        if (!r.ok) {
+            if (i == 0 && ++attempts < ai::kMaxAttempts && current + 1 < candidates.size()) {
+                DICE_LOG_DEBUG_M("AI 服务", "模型「{}」首轮失败（{}），换下一个候选模型。", m.name.empty() ? m.id : m.name, r.error);
+                ++current; i = -1; continue;
+            }
+            return "";
+        }
         if (r.toolCalls.empty() || last) return r.content;   // 无工具请求 → 最终回复
         messages.push_back(r.assistantMsg);                  // 助手的 tool_calls 轮
         for (auto& tc : r.toolCalls) {
@@ -106,6 +118,8 @@ inline std::string runChat(ConfigManager& cfg, const ai::Model& m, const std::st
             std::string result;
             try { result = exec ? exec(tc.name, args) : std::string("(工具不可用)"); } catch (...) { result = "(工具执行出错)"; }
             if (result.empty()) result = "(无结果)";
+            if (ai::debugOn())
+                ai::debugBlock("第 " + std::to_string(i + 1) + " 轮执行工具 " + tc.name + " " + args.dump(), "【结果】\n" + result);
             messages.push_back({{"role", "tool"}, {"tool_call_id", tc.id}, {"content", result}});
         }
     }

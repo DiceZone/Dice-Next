@@ -7,10 +7,10 @@
 // 图片来源：实时消息里 [CQ:image,url=http...] 的 rkey 还新鲜，直接把 http URL 交给视觉
 // 模型拉取；若是本地图（/api/chat/images/<名> 或本地路径）则读文件转 base64 data URL。
 //
-// 配置 dice/ai.vision：{ enabled, model_id(空=首个启用), prompt(空=内置默认), max_images }
+// 配置 dice/ai.vision：{ enabled, prompt(空=内置默认), max_images, pass_url }；模型由用途分配的「图像识别」决定。
 
 #include "../config/config_manager.h"
-#include "ai_gateway.h"
+#include "ai_usage.h"
 #include "chat_image.h"
 #include <nlohmann/json.hpp>
 #include <string>
@@ -140,16 +140,11 @@ inline std::string describe(ConfigManager& cfg, const std::string& content) {
     {
         std::lock_guard<std::mutex> lk(visionCacheMutex());
         auto it = visionCache().find(ckey);
-        if (it != visionCache().end() && now - it->second.ts < 86400) return it->second.desc;
+        if (it != visionCache().end() && now - it->second.ts < 86400) {
+            DICE_LOG_DEBUG_M("AI 服务", "图像识别命中缓存（{} 张图）：{}", srcs.size(), it->second.desc);
+            return it->second.desc;
+        }
     }
-    ai::Model m; bool got = false;
-    std::string want = conf(cfg).value("model_id", std::string());
-    for (auto& mm : ai::models(cfg)) {
-        if (!mm.enabled) continue;
-        if (!got) { m = mm; got = true; }
-        if (!want.empty() && mm.id == want) { m = mm; got = true; break; }
-    }
-    if (!got) return "";
     std::string prompt = conf(cfg).value("prompt", std::string());
     if (prompt.empty()) prompt = defaultPrompt();
     json contentArr = json::array();
@@ -158,7 +153,7 @@ inline std::string describe(ConfigManager& cfg, const std::string& content) {
         contentArr.push_back({{"type", "image_url"}, {"image_url", {{"url", s}}}});
     json messages = json::array();
     messages.push_back({{"role", "user"}, {"content", contentArr}});
-    ai::ChatRawResult r = ai::chatRaw(cfg, m, messages, json(nullptr), 300, 30);
+    ai::ChatRawResult r = ai::chatRawFor(cfg, "vision", messages, json(nullptr), 300, 30);
     if (!r.ok || r.content.empty()) return "";
     // A2：写缓存（超量按最旧淘汰）。
     {

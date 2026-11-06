@@ -18,7 +18,6 @@ inline nlohmann::json normalizeSettings(const nlohmann::json& input,
     const bool direct = source.contains("pass_url") ? source.at("pass_url").get<bool>()
         : previous.is_object() ? previous.value("pass_url", true) : true;
     return J{{"enabled", source.value("enabled", false)},
-             {"model_id", source.value("model_id", std::string())},
              {"prompt", source.value("prompt", std::string())},
              {"max_images", limit}, {"pass_url", direct}};
 }

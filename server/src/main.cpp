@@ -35,6 +35,8 @@
 #include "service/ai_tools.h"          // 智能化阶段D：AI 工具调用（掷骰/抽牌/查卡）
 #include "service/ai_npc.h"            // 智能化阶段E：NPC 扮演
 #include "service/ai_vision.h"         // 多模态图像识别
+#include "service/ai_speech.h"         // 语音识别
+#include "service/ai_usage.h"          // AI 用途分配与选模型
 #include "service/ai_worker.h"         // AI 后台线程（AI 调用不再阻塞消息管线）
 #include "service/heart_service.h"     // 心跳上报（heart.dice.zone）
 #include "service/cloudban_service.h"  // 云黑名单同步（cloudban.dice.zone）
@@ -423,6 +425,7 @@ static int realMain(int argc, char* argv[]) {
     const bool configLoaded = configMgr.load();
     dice::configureLogger(configMgr.getAll());
     configMgr.onConfigChanged([&configMgr] { dice::configureLogger(configMgr.getAll()); });
+    if (configLoaded) dice::ai::ensureMigrated(configMgr);   // 旧版 AI 模型设置 → 提供商/模型/用途分配
     const bool obsoleteDefaultConfigDiscarded = configMgr.discardedObsoleteDefaultConfig();
     if (configLoaded) {
         // Consume settings written by builds that exposed legacy Dice! fields
@@ -1983,15 +1986,41 @@ static int realMain(int argc, char* argv[]) {
             dice::aichat::Trigger tkind = dice::aichat::enabled(configMgr)
                 ? dice::aichat::triggerKind(configMgr, trigText, atMe) : dice::aichat::Trigger::None;
             bool defaultHit = !npcHit && tkind != dice::aichat::Trigger::None;
+            // 语音消息：文字触发判断在转写之后进行（后台线程），这里只认出「带语音」。
+            bool voiceCand = !npcHit && !defaultHit && dice::aispeech::hasVoice(msg) && dice::aispeech::enabled(configMgr);
             // 被@/命中关键词（Strong）或 NPC 命中 → 必回，无视冷却；待机搭话（Standby）受冷却。
             bool bypassCd = npcHit || tkind == dice::aichat::Trigger::Strong;
-            if ((npcHit || defaultHit) && (bypassCd || dice::aichat::cooldownOk(configMgr, gkey))) {
+            bool cdOk = voiceCand || bypassCd;
+            if (!cdOk && defaultHit) {
+                cdOk = dice::aichat::cooldownOk(configMgr, gkey);   // 消费式：只调用一次
+                if (!cdOk) DICE_LOG_DEBUG_M("AI 对话", "群 {} 待机搭话冷却中，不回复。", msg.targetId);
+            }
+            if ((npcHit || defaultHit || voiceCand) && cdOk) {
                 std::string senderNick = msg.senderName.empty() ? msg.senderId : msg.senderName;
                 dice::aitools::ToolExec toolExec = dice::aitools::enabled(configMgr) ? makeAiTool(msg) : nullptr;
                 bool lnk = linkReplyOk;
                 dice::Message msgC = msg;
-                auto job = [&configMgr, &db, finishReply, msgC, gkey, npc, npcHit,
-                            senderNick, trigText, toolExec, lnk]() {
+                auto job = [&configMgr, &db, &adapterMgr, finishReply, msgC, gkey, npc, npcHit,
+                            senderNick, trigText, toolExec, lnk, tkind, voiceCand]() mutable {
+                    // 语音：先转文字，再用转写结果做触发判断（语音里无法 @，只看 NPC/关键词/待机）。
+                    std::string voiceText;
+                    if (dice::aispeech::hasVoice(msgC) && dice::aispeech::enabled(configMgr)) {
+                        auto adapter = adapterMgr.getAdapter(msgC.adapterId);
+                        voiceText = dice::aispeech::transcribe(configMgr, adapter.get(), msgC);
+                        if (!voiceText.empty()) trigText = trigText.empty() ? voiceText : (trigText + " " + voiceText);
+                    }
+                    if (voiceCand) {
+                        if (voiceText.empty()) return;
+                        std::string clean = dice::aichat::cleanForAi(configMgr, trigText);
+                        npcHit = dice::ainpc::enabled(configMgr) && dice::ainpc::match(configMgr, gkey, clean, npc);
+                        tkind = npcHit || !dice::aichat::enabled(configMgr) ? dice::aichat::Trigger::None
+                              : dice::aichat::triggerKind(configMgr, trigText, false);
+                        if (!npcHit && tkind == dice::aichat::Trigger::None) return;
+                        if (!npcHit && tkind == dice::aichat::Trigger::Standby && !dice::aichat::cooldownOk(configMgr, gkey)) {
+                            DICE_LOG_DEBUG_M("AI 对话", "群 {} 待机搭话冷却中，不回复。", msgC.targetId);
+                            return;
+                        }
+                    }
                     std::string ctx;
                     if (auto* cst = db.getChatStorage()) {
                         try {
@@ -2007,11 +2036,19 @@ static int realMain(int argc, char* argv[]) {
                             }
                         } catch (...) { DICE_LOG_EXCEPTION("AI chat context database read"); }
                     }
+                    // 决策：待机搭话先问「决策」用途的模型要不要插话（被 @、关键词、NPC 命中不经过决策）。
+                    if (!npcHit && tkind == dice::aichat::Trigger::Standby && dice::aichat::decisionEnabled(configMgr)
+                        && !dice::aichat::decide(configMgr, ctx, senderNick, dice::aichat::cleanForAi(configMgr, trigText)))
+                        return;
+                    DICE_LOG_DEBUG_M("AI 对话", "群 {} 开始生成回复：{}{}。", msgC.targetId,
+                                     npcHit ? "NPC「" + npc.name + "」" : std::string("骰娘"),
+                                     tkind == dice::aichat::Trigger::Standby ? "（待机搭话）" : "");
                     // 阶段B：注入本群滚动摘要（快速读）；阶段C：按当前消息向量检索相关持久事实
                     //（embedding 同样是网络调用，必须在后台线程）。
                     std::string memBg;
                     if (dice::aimemory::shortEnabled(configMgr))
                         memBg = dice::aimemory::currentSummary(db.getChatStorage(), "group", gkey);
+                    if (!memBg.empty()) DICE_LOG_DEBUG_M("AI 记忆", "[{}] 注入群摘要：\n{}", gkey, memBg);
                     if (dice::aimemory::longEnabled(configMgr)) {
                         auto facts = dice::aimemory::retrieveFacts(configMgr, db.getChatStorage(), "group", gkey,
                             dice::aichat::cleanForAi(configMgr, trigText));
@@ -3907,8 +3944,14 @@ static int realMain(int argc, char* argv[]) {
                         dice::ainpc::Npc pnpc;
                         bool pNpcHit = dice::ainpc::enabled(configMgr)
                             && dice::ainpc::match(configMgr, gkNpc, dice::aichat::cleanForAi(configMgr, msg.content), pnpc);
-                        bool pDefaultHit = !pNpcHit && dice::aichat::enabled(configMgr)
-                            && dice::aichat::shouldTrigger(configMgr, msg.content, atMe);
+                        dice::aichat::Trigger pKind = !pNpcHit && dice::aichat::enabled(configMgr)
+                            ? dice::aichat::triggerKind(configMgr, msg.content, atMe) : dice::aichat::Trigger::None;
+                        bool pDefaultHit = pKind != dice::aichat::Trigger::None;
+                        // 测试台同样走「决策」：待机搭话先判断要不要插话，便于骰主预览。
+                        if (pDefaultHit && pKind == dice::aichat::Trigger::Standby && dice::aichat::decisionEnabled(configMgr)
+                            && !dice::aichat::decide(configMgr, "", msg.senderName.empty() ? msg.senderId : msg.senderName,
+                                                     dice::aichat::cleanForAi(configMgr, msg.content)))
+                            pDefaultHit = false;
                         if (pNpcHit || pDefaultHit) {
                             std::string sn = msg.senderName.empty() ? msg.senderId : msg.senderName;
                             // 阶段B/C：测试台也注入本群摘要 + 检索到的持久事实，便于预览记忆效果。
