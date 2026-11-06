@@ -722,6 +722,47 @@ TEST(NoticeEvents, SubmittedRequestIsNotConfirmationAndUnknownEventsNeverInventC
     event.subType = "kick_me"; event.operatorId.clear();
     ASSERT_TRUE(dice::notice::groupDeparture(event, "", "").body.find("平台未提供操作者") != std::string::npos);
 }
+TEST(NoticeEvents, UnattributedKickAfterDismissConfirmsLeaveAndSkipsBlacklist) {
+    auto intent = dismissIntent(); intent.reason = "礼貌退群";
+    for (const auto* subtype : {"kick", "kick_me", "removed"}) {
+        auto event = departure(subtype);
+        event.operatorId.clear();
+        auto text = dice::notice::groupDeparture(event, "未归星璇", "", intent);
+        ASSERT_EQ(text.operation, std::string("group_left"));
+        ASSERT_EQ(text.title, std::string("骰娘退群已确认"));
+        ASSERT_TRUE(text.body.find("希亚(1707642)通过指令 .dismiss") != std::string::npos);
+        ASSERT_TRUE(text.body.find("礼貌退群") != std::string::npos);
+        ASSERT_TRUE(text.body.find("云黑名单") != std::string::npos);
+        ASSERT_TRUE(text.body.find("被群管理员") == std::string::npos);
+        event.operatorId = "0";
+        ASSERT_EQ(dice::notice::groupDeparture(event, "未归星璇", "", intent).title, std::string("骰娘退群已确认"));
+        event.operatorId = event.selfId;
+        text = dice::notice::groupDeparture(event, "未归星璇", "骰娘", intent);
+        ASSERT_EQ(text.title, std::string("骰娘退群已确认"));
+        ASSERT_TRUE(text.body.find("没有提供其他操作者") != std::string::npos);
+    }
+    auto named = departure("kick_me");
+    ASSERT_EQ(dice::notice::groupDeparture(named, "未归星璇", "管理员小明", intent).title, std::string("骰娘被踢出群聊"));
+    auto event = departure("kick_me");
+    event.operatorId.clear();
+    event.adapterId = "dismiss-echo";
+    event.platform = "onebot_v11";
+    event.groupId = "537576597";
+    const auto id = dice::notice::LeaveIntents::instance().remember(event.adapterId, event.platform, event.groupId, intent);
+    struct CancelIntent { uint64_t id; ~CancelIntent() { dice::notice::LeaveIntents::instance().cancel(id); } } guard{id};
+    dice::notice::reconcileOwnLeaveEcho(event);
+    ASSERT_EQ(event.subType, std::string("leave"));
+    ASSERT_EQ(event.extra.value("platform_departure", std::string()), std::string("kick_me"));
+    ASSERT_TRUE(dice::notice::LeaveIntents::instance().peek(event.adapterId, event.platform, event.groupId).has_value());
+    const auto echoed = dice::notice::groupDeparture(event, "银蛇十月团", "", intent);
+    ASSERT_EQ(echoed.title, std::string("骰娘退群已确认"));
+    ASSERT_TRUE(echoed.body.find("银蛇十月团(537576597)") != std::string::npos);
+    ASSERT_TRUE(echoed.body.find("标成了「踢出」") != std::string::npos);
+    auto stillKick = departure("kick");
+    stillKick.adapterId = event.adapterId; stillKick.platform = event.platform; stillKick.groupId = event.groupId;
+    dice::notice::reconcileOwnLeaveEcho(stillKick);
+    ASSERT_EQ(stillKick.subType, std::string("kick"));
+}
 TEST(NoticeEvents, LeaveCorrelationIsConsumedScopedExpiredAndBounded) {
     dice::notice::LeaveIntents records;
     const auto time = dice::notice::LeaveIntents::Clock::now();

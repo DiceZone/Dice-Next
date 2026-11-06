@@ -2298,13 +2298,17 @@ static int realMain(int argc, char* argv[]) {
         eventContext.platform = e.platform; eventContext.adapterId = e.adapterId;
         eventContext.targetId = e.groupId;
         eventContext.senderId = dice::eventTriggerUserId(e);
-        if (jsMod.ready() && !cmdRouter.isGroupDisabled(eventContext)) jsMod.handleEvent(e);
+        // Copy first: the callback receives a const event, and an unattributed
+        // kick after our own leave request must be shown to plugins as a leave.
+        dice::BotEvent observed = e;
+        dice::notice::reconcileOwnLeaveEcho(observed);
+        if (jsMod.ready() && !cmdRouter.isGroupDisabled(eventContext)) jsMod.handleEvent(observed);
         auto runLegacyHook = [&](const std::string& hook, nlohmann::json* result = nullptr) {
             if (cmdRouter.isBlocked(eventContext) || cmdRouter.isGroupDisabled(eventContext)
                 || !cmdRouter.groupFeatureEnabled(eventContext, "plugin")) return false;
             nlohmann::json context = {{"platform", e.platform}, {"adapterId", e.adapterId}, {"uid", eventContext.senderId}, {"gid", e.groupId},
                 {"operator", e.operatorId}, {"selfId", e.selfId}, {"fromMsg", e.comment}, {"fromUser", eventContext.senderId},
-                {"fromGroup", e.groupId}, {"flag", e.flag}, {"subType", e.subType}, {"time", std::time(nullptr)}, {"extra", e.extra}};
+                {"fromGroup", e.groupId}, {"flag", e.flag}, {"subType", observed.subType}, {"time", std::time(nullptr)}, {"extra", observed.extra}};
             const bool blocked = luaMod.dispatchHook(hook, context);
             if (result) *result = std::move(context);
             return blocked;
@@ -2820,6 +2824,8 @@ static int realMain(int argc, char* argv[]) {
         } else if (e.type == ET::kGroupDecrease) {
             runLegacyHook("GroupDecrease"); // observational; cannot suppress leave bookkeeping
             // B：骰娘被移出群（或自身退群回执）→ 标记已退群 + 通知骰主。
+            // observed 已把「刚提交的退群请求 + 没有其他操作者的踢出回执」改写成主动退出。
+            // 这里只发通知，不写黑名单，也不上报云黑。
             if (!e.selfId.empty() && e.userId == e.selfId && !e.groupId.empty()) {
                 cmdRouter.setGroupSettingFor(e.platform, e.groupId, "left", "1", e.adapterId);
                 auto intent = dice::notice::LeaveIntents::instance().take(e.adapterId, e.platform, e.groupId);
@@ -2827,7 +2833,7 @@ static int realMain(int argc, char* argv[]) {
                     const auto native = e.extra.find("__identity_native_target");
                     if (native != e.extra.end() && native->is_string()) intent = dice::notice::LeaveIntents::instance().take(e.adapterId, e.platform, native->get<std::string>());
                 }
-                cmdRouter.notifyMasters(dice::notice::groupDeparture(e, groupNameForNotice(e.groupId),
+                cmdRouter.notifyMasters(dice::notice::groupDeparture(observed, groupNameForNotice(e.groupId),
                     resolveUserNick(e.operatorId, e.groupId), intent), e.adapterId);
             }
         } else if (e.type == ET::kGroupBan) {
