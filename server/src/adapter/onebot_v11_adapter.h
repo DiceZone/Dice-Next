@@ -947,6 +947,18 @@ private:
                     // CQ codes (incl. images) for the transcript.
                     std::string s = rawMsg.get<std::string>();
                     cqContent = s;
+                    if (auto rp = s.find("[CQ:record,"); rp != std::string::npos) {
+                        auto re = s.find(']', rp);
+                        std::string inner = s.substr(rp, re == std::string::npos ? std::string::npos : re - rp);
+                        auto field = [&](const std::string& k) {
+                            auto at = inner.find("," + k + "=");
+                            if (at == std::string::npos) return std::string();
+                            at += k.size() + 2;
+                            return inner.substr(at, inner.find(',', at) == std::string::npos ? std::string::npos : inner.find(',', at) - at);
+                        };
+                        if (!msg.extra.is_object()) msg.extra = json::object();
+                        msg.extra["records"] = json::array({{{"file", field("file")}, {"url", field("url")}, {"path", field("path")}}});
+                    }
                     text = stripCQCollectAt(s, msg.atList);
                     disp = cqToDisplay(s);   // codes → [图片]/[表情]/@xx in original order
                     // openopq（v1.3.0-rc.1）把消息里所有 @ 提到最前面写成 [CQ:at]，正文里却还留着
@@ -983,6 +995,12 @@ private:
                             std::string fid = jsonField(data, "file_id");
                             std::string fsize = jsonField(data, "file_size");
                             cqContent += "[CQ:file,name=" + fname + ",id=" + fid + ",size=" + fsize + "]";
+                        } else if (segType == "record") {
+                            // 语音只记在 extra 里供 AI 语音识别取用，不进 rawContent（记录/日志照旧显示「[语音]」）。
+                            if (!msg.extra.is_object()) msg.extra = json::object();
+                            if (!msg.extra.contains("records")) msg.extra["records"] = json::array();
+                            msg.extra["records"].push_back({{"file", jsonField(data, "file")}, {"url", jsonField(data, "url")},
+                                                            {"path", jsonField(data, "path")}});
                         }
                     }
                 }
