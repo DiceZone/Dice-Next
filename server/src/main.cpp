@@ -37,6 +37,7 @@
 #include "service/ai_vision.h"         // 多模态图像识别
 #include "service/ai_speech.h"         // 语音识别
 #include "service/ai_usage.h"          // AI 用途分配与选模型
+#include "service/knowledge_search.h"   // AI 知识库
 #include "service/ai_worker.h"         // AI 后台线程（AI 调用不再阻塞消息管线）
 #include "service/heart_service.h"     // 心跳上报（heart.dice.zone）
 #include "service/cloudban_service.h"  // 云黑名单同步（cloudban.dice.zone）
@@ -670,6 +671,11 @@ static int realMain(int argc, char* argv[]) {
         DICE_LOG_SUCCESS_M("规则包", "加载完成：{} 条规则、{} 个规则包、{} 个属性模板别名。", packN, bundleN, aliasN);
     }
     dice::CommandRouter::loadHelpFiles();   // 加载 data/help/*.md 帮助文档
+    {   // AI 知识库：随包分发的文档切段 + 骰主录入的条目。
+        size_t docN = dice::kb::KnowledgeBase::instance().loadDocs(std::filesystem::u8path(i18nDir) / "knowledge" / "docs.json");
+        size_t entryN = dice::kb::KnowledgeBase::instance().loadEntries(std::filesystem::u8path("data/knowledge/entries.json"));
+        DICE_LOG_INFO_M("AI 知识库", "已读取 {} 段文档、{} 条自定义条目。", docN, entryN);
+    }
     dice::CommandRouter::loadHelpDocs();    // 加载 data/helpdoc/**/*.json 结构化帮助文档（海豹兼容+随包速查）
     dice::CardDeck cardDeck;
     cardDeck.setDiceEval([&engine](const std::string& e) {
@@ -1538,8 +1544,23 @@ static int realMain(int argc, char* argv[]) {
 
     // 智能化阶段D：AI 工具执行器工厂 —— 给定一条消息，返回一个 ToolExec 回调，能真的
     // 掷骰（骰子引擎）/抽牌（牌堆）/查属性（发送者人物卡）。供 AI 对话 function-calling 用。
-    auto makeAiTool = [&cardDeck, &cmdRouter](dice::Message m) -> dice::aitools::ToolExec {
-        return [&cardDeck, &cmdRouter, m](const std::string& tn, const nlohmann::json& ta) -> std::string {
+    // AI 知识库检索（见 service/knowledge_search.h）。
+    auto kbSearch = [&configMgr, &cmdRouter](const dice::Message& m, const std::string& query,
+                                              std::optional<dice::kb::Options> override = std::nullopt) {
+        // 去掉对话的触发关键词（如骰娘的名字），它们只是用来叫骰娘，不是问题内容。
+        std::string q = query;
+        auto chatConf = dice::aichat::conf(configMgr);
+        if (chatConf.contains("keywords") && chatConf["keywords"].is_array())
+            for (auto& kw : chatConf["keywords"]) {
+                if (!kw.is_string() || kw.get<std::string>().empty()) continue;
+                const std::string k = kw.get<std::string>();
+                for (size_t at; (at = q.find(k)) != std::string::npos;) q.replace(at, k.size(), " ");
+            }
+        return dice::kb::searchFor(configMgr, cmdRouter, cmdRouter.localeOf(m), q, override);
+    };
+
+    auto makeAiTool = [&cardDeck, &cmdRouter, &configMgr, kbSearch](dice::Message m) -> dice::aitools::ToolExec {
+        return [&cardDeck, &cmdRouter, &configMgr, kbSearch, m](const std::string& tn, const nlohmann::json& ta) -> std::string {
             if (tn == "roll_dice") {
                 std::string expr = ta.value("expression", std::string("d100"));
                 return cmdRouter.rollExpressionForAi(m, expr);
@@ -1572,6 +1593,17 @@ static int realMain(int argc, char* argv[]) {
                 return an + " \xe5\xb7\xb2\xe8\xae\xbe\xe4\xb8\xba " + std::to_string(newv);  // 已设为 N
             }
             // 执行任意指令 / 帮助搜索 —— 以发送者身份走 command_router，权限=该用户。
+            // 知识库开启时，search_help 改查知识库（帮助、文档、骰主资料），阈值放宽、多给几条。
+            if (tn == "search_help" && dice::kb::enabled(configMgr)) {
+                std::string q = ta.value("query", std::string());
+                if (q.empty()) return std::string("(\xe7\xa9\xba\xe6\x9f\xa5\xe8\xaf\xa2)");  // (空查询)
+                auto opt = dice::kb::optionsFrom(dice::kb::conf(configMgr));
+                opt.minScore = std::max(0.2, opt.minScore - 0.15);
+                opt.topK = std::max(opt.topK, 4);
+                auto res = kbSearch(m, q, opt);
+                if (res.hits.empty()) return std::string("(\xe6\xb2\xa1\xe6\x9c\x89\xe6\x89\xbe\xe5\x88\xb0\xe7\x9b\xb8\xe5\x85\xb3\xe8\xb5\x84\xe6\x96\x99)");  // (没有找到相关资料)
+                return dice::kb::KnowledgeBase::buildContext(res.hits, opt.maxChars * 2);
+            }
             if (tn == "run_command" || tn == "search_help") {
                 std::string cmd = (tn == "search_help")
                     ? (".helpdoc " + ta.value("query", std::string()))
@@ -1595,7 +1627,7 @@ static int realMain(int argc, char* argv[]) {
 
     // Wire: incoming messages → command router; if no command matched, fall back
     // to the custom-reply word library; then send via the originating adapter.
-    adapterMgr.onMessage([&adapterMgr, &cmdRouter, &jsMod, &luaMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, &i18n, &deferredReplies, replyFallback](const dice::Message& msg) {
+    adapterMgr.onMessage([&adapterMgr, &cmdRouter, &jsMod, &luaMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, &i18n, &deferredReplies, replyFallback, kbSearch](const dice::Message& msg) {
         dice::safe_template::Delay requestedDelay;
         dice::safe_template::DelayScope delayScope(&requestedDelay);
         dice::I18n::TemplateContextScope templateScope(
@@ -2001,7 +2033,7 @@ static int realMain(int argc, char* argv[]) {
                 bool lnk = linkReplyOk;
                 dice::Message msgC = msg;
                 auto job = [&configMgr, &db, &adapterMgr, finishReply, msgC, gkey, npc, npcHit,
-                            senderNick, trigText, toolExec, lnk, tkind, voiceCand]() mutable {
+                            senderNick, trigText, toolExec, lnk, tkind, voiceCand, kbSearch]() mutable {
                     // 语音：先转文字，再用转写结果做触发判断（语音里无法 @，只看 NPC/关键词/待机）。
                     std::string voiceText;
                     if (dice::aispeech::hasVoice(msgC) && dice::aispeech::enabled(configMgr)) {
@@ -2072,8 +2104,21 @@ static int realMain(int argc, char* argv[]) {
                         if (!vdesc.empty())
                             curText += "\n\xef\xbc\x88\xe6\x88\x91\xe5\x8f\x91\xe7\x9a\x84\xe5\x9b\xbe\xe7\x89\x87\xe5\x86\x85\xe5\xae\xb9\xef\xbc\x9a" + vdesc + "\xef\xbc\x89";  // （我发的图片内容：...）
                     }
+                    // 知识库：FAQ 命中直接回复（不调用模型）；否则把高分段落作为参考资料注入。
+                    std::string kbText;
+                    if (dice::kb::enabled(configMgr)) {
+                        auto kr = kbSearch(msgC, curText, std::nullopt);
+                        if (kr.faq && !npcHit) {
+                            DICE_LOG_DEBUG_M("AI 知识库", "FAQ 直答「{}」（相似度 {:.2f}），不调用模型。", kr.faq->title, kr.faq->coverage);
+                            std::string rep = dice::aichat::replyAt(configMgr)
+                                ? ("[CQ:at,qq=" + msgC.senderId + "] " + kr.faq->text) : kr.faq->text;
+                            finishReply(msgC, rep, "", "", "", {}, lnk, dice::ContentFormat::kPlainText);
+                            return;
+                        }
+                        kbText = dice::kb::KnowledgeBase::buildContext(kr.hits, dice::kb::optionsFrom(dice::kb::conf(configMgr)).maxChars);
+                    }
                     std::string aiReply = dice::aichat::generate(configMgr, ctx, senderNick,
-                        curText, memBg, toolExec, sysOv, modelOv);
+                        curText, memBg, toolExec, sysOv, modelOv, kbText);
                     if (aiReply.empty()) return;
                     std::string rep = dice::aichat::replyAt(configMgr)
                         ? ("[CQ:at,qq=" + msgC.senderId + "] " + aiReply) : aiReply;
@@ -3845,7 +3890,7 @@ static int realMain(int argc, char* argv[]) {
         }, {drogon::Post});
 
     app.registerHandler("/api/test/message",
-        [&cmdRouter, &jsMod, &luaMod, &configMgr, &db, &adapterMgr, &makeAiTool, replyFallback](const drogon::HttpRequestPtr& req,
+        [&cmdRouter, &jsMod, &luaMod, &configMgr, &db, &adapterMgr, &makeAiTool, replyFallback, kbSearch](const drogon::HttpRequestPtr& req,
                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
             nlohmann::json out;
             try {
@@ -3982,7 +4027,16 @@ static int realMain(int argc, char* argv[]) {
                                 if (!vd.empty())
                                     pcur += "\n\xef\xbc\x88\xe6\x88\x91\xe5\x8f\x91\xe7\x9a\x84\xe5\x9b\xbe\xe7\x89\x87\xe5\x86\x85\xe5\xae\xb9\xef\xbc\x9a" + vd + "\xef\xbc\x89";
                             }
-                            std::string ar = dice::aichat::generate(configMgr, "", sn, pcur, memBg, texec, sysOv, modelOv);
+                            // 测试台同样走知识库（FAQ 直答 / 注入参考资料），便于预览。
+                            std::string kbText;
+                            std::string faqReply;
+                            if (dice::kb::enabled(configMgr)) {
+                                auto kr = kbSearch(msg, pcur, std::nullopt);
+                                if (kr.faq && !pNpcHit) faqReply = kr.faq->text;
+                                else kbText = dice::kb::KnowledgeBase::buildContext(kr.hits, dice::kb::optionsFrom(dice::kb::conf(configMgr)).maxChars);
+                            }
+                            std::string ar = !faqReply.empty() ? faqReply
+                                : dice::aichat::generate(configMgr, "", sn, pcur, memBg, texec, sysOv, modelOv, kbText);
                             if (!ar.empty()) { reply = ar; replyFormat = dice::ContentFormat::kPlainText; }
                         }
                     }

@@ -75,7 +75,7 @@ inline json toolDefs(ConfigManager& cfg) {
     // 在帮助文档里搜索相关词条 —— 用户问「怎么用/有没有X功能」时。
     if (c.value("search_help", true)) arr.push_back({{"type", "function"}, {"function", {
         {"name", "search_help"},
-        {"description", "在帮助文档里搜索与关键词相关的指令/词条并返回。用户问某功能怎么用、有没有某个功能、某指令是什么时用它，再据结果解释。"},
+        {"description", "在帮助文档里搜索相关的指令/词条并返回；开启知识库时同时搜索 DiceNext 文档与骰主录入的资料（团规、设定等）。用户问某功能怎么用、有没有某个功能、群里的规定时用它，再据结果解释。"},
         {"parameters", {{"type", "object"}, {"properties", {
             {"query", {{"type", "string"}, {"description", "要搜索的关键词，如 先攻、人物卡、暗骰"}}}
         }}, {"required", json::array({"query"})}}}

@@ -4661,6 +4661,8 @@ private:
 
     // ─── .help / .helpdoc 文档系统 ───────────────────────────
 public:   // helpTopics/setHelpProvider/allHelp 供 main.cpp 注入与 api_service 聚合
+    // 这条消息所在群/私聊生效的语言（AI 知识库按它检索帮助词条）。
+    Locale localeOf(const Message& msg) const { return resolver_.resolve(msg); }
     // 插件好感度桥接：JS/Lua 与内置 .favor 共用 player_profiles.favor，
     // 不允许插件侧再生成一份独立存储。platform 必填，以免多适配器同 ID 串数据。
     int pluginFavorGet(const std::string& platform, const std::string& uid) const {

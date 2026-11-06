@@ -187,7 +187,8 @@ inline std::string generate(ConfigManager& cfg, const std::string& contextBlock,
                             const std::string& background = "",
                             const aitools::ToolExec& toolExec = nullptr,
                             const std::string& systemOverride = "",
-                            const std::string& modelOverride = "") {
+                            const std::string& modelOverride = "",
+                            const std::string& knowledge = "") {
     bool isNpc = !systemOverride.empty();
     const std::string usage = isNpc ? "npc" : "reply";
     ai::PurposeScope purpose(usage);
@@ -206,6 +207,10 @@ inline std::string generate(ConfigManager& cfg, const std::string& contextBlock,
     // 阶段 B/C：注入群历史摘要 + 相关记忆作为背景（供参考，不要直接复述）。
     if (!background.empty())
         sys += "\n\n【群历史记忆（较早对话的摘要，作背景参考，不要直接复述）】\n" + background;
+    // 知识库：检索到的参考资料放在最后，前面固定的人设部分可被服务商的前缀缓存复用。
+    if (!knowledge.empty())
+        sys += "\n\n【参考资料（DiceNext 帮助与骰主录入的资料）】\n与问题相关时据此回答，用自己的话简短说明，"
+               "不要编造资料里没有的指令或用法；与问题无关就忽略。\n" + knowledge;
 
     std::string user;
     if (!contextBlock.empty()) user = "群里最近的对话：\n" + contextBlock + "\n";

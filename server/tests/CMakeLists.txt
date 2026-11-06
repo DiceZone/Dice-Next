@@ -37,6 +37,7 @@ set(TEST_SOURCES
     test_bot_info.cpp
     test_message_break.cpp
     test_ai_settings.cpp
+    test_knowledge_base.cpp
     test_persona_manager.cpp
     test_i18n_persona.cpp
     test_outcome_replies.cpp

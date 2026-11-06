@@ -50,6 +50,7 @@
 #include "game_session_list.h"
 #include "ai_gateway.h"     // AI 网关
 #include "ai_usage.h"       // AI 用途分配
+#include "knowledge_search.h" // AI 知识库
 #include "ai_polish.h"      // 润色（默认提示词）
 #include "ai_translate.h"   // 翻译（默认提示词）
 #include "ai_chat.h"        // 智能化阶段A：对话（默认提示词）
@@ -890,6 +891,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 }
                 out["models"] = ms;
                 out["usages"] = dice::ai::normalizeUsages(j.value("usages", J::object()), ms);
+                out["knowledge"] = dice::kb::normalizeSettings(j.contains("knowledge") ? j["knowledge"]
+                    : cfg.get<J>("dice/ai/knowledge", J::object()));
                 // 语音识别（模型由用途分配决定）。
                 J spj = (j.contains("speech") && j["speech"].is_object()) ? j["speech"] : J::object();
                 out["speech"] = J{{"enabled", spj.value("enabled", false)}};
@@ -1057,6 +1060,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (!cur.contains("providers") || !cur["providers"].is_array()) cur["providers"] = J::array();
             cur["usages"] = dice::ai::normalizeUsages(cur.value("usages", J::object()), cur["models"]);
             if (!cur.contains("speech") || !cur["speech"].is_object()) cur["speech"] = J{{"enabled", false}};
+            cur["knowledge"] = dice::kb::normalizeSettings(cur.value("knowledge", J::object()));
             const J covRollOnly = J{{"roll", true}, {"deck", false}, {"fun", false}, {"custom", false}, {"plugin", false}};
             const J covAll = J{{"roll", true}, {"deck", true}, {"fun", true}, {"custom", true}, {"plugin", true}};
             if (!cur.contains("params") || !cur["params"].is_object())
@@ -1200,6 +1204,89 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             }), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Post});
+
+    // ─── AI 知识库 ───────────────────────────────────────
+    // 设置：GET/PUT 只读写 dice/ai.knowledge（不动其它 AI 设置）。
+    app.registerHandler("/api/knowledge/settings", [&cfg](Req req, CB&& cb) {
+        try {
+            if (req->method() == drogon::Put) {
+                cfg.set<J>("dice/ai/knowledge", dice::kb::normalizeSettings(J::parse(req->body())));
+                cfg.save();
+            }
+            jsonReply(ok(dice::kb::conf(cfg)), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Put});
+
+    // 自定义条目：GET 列表；POST 新增/更新一条；DELETE ?id= 删除。
+    app.registerHandler("/api/knowledge/entries", [](Req req, CB&& cb) {
+        try {
+            auto& kbase = dice::kb::KnowledgeBase::instance();
+            if (req->method() == drogon::Post) {
+                auto j = J::parse(req->body());
+                auto e = dice::kb::entryFromJson(j.contains("entry") ? j["entry"] : j);
+                if (e.title.empty() && e.content.empty()) { jsonReply(fail("empty entry"), std::move(cb)); return; }
+                jsonReply(ok(dice::kb::entryToJson(kbase.upsert(e))), std::move(cb));
+                return;
+            }
+            if (req->method() == drogon::Delete) {
+                std::string id = req->getParameter("id");
+                if (!kbase.remove(id)) { jsonReply(fail("not found"), std::move(cb)); return; }
+                jsonReply(ok(nullptr), std::move(cb));
+                return;
+            }
+            J arr = J::array();
+            for (auto& e : kbase.entries()) arr.push_back(dice::kb::entryToJson(e));
+            jsonReply(ok(J{{"entries", arr}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get, drogon::Post, drogon::Delete});
+
+    // 批量导入：{ entries: [ {title, content, tags, questions, direct} ] }，追加到现有条目。
+    app.registerHandler("/api/knowledge/import", [](Req req, CB&& cb) {
+        try {
+            auto j = J::parse(req->body());
+            std::vector<dice::kb::Entry> add;
+            if (j.contains("entries") && j["entries"].is_array())
+                for (auto& e : j["entries"]) if (e.is_object()) add.push_back(dice::kb::entryFromJson(e));
+            jsonReply(ok(J{{"imported", dice::kb::KnowledgeBase::instance().importEntries(add)}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Post});
+
+    // 检索测试：用当前设置（可临时覆盖）检索，返回命中、分数、FAQ 直答与将要注入的文字。
+    app.registerHandler("/api/knowledge/search", [&cfg, &cmdRouter, &i18n](Req req, CB&& cb) {
+        try {
+            auto j = J::parse(req->body());
+            std::string query = j.value("query", std::string());
+            J settings = dice::kb::conf(cfg);
+            if (j.contains("settings") && j["settings"].is_object()) settings = dice::kb::normalizeSettings(j["settings"]);
+            auto opt = dice::kb::optionsFrom(settings);
+            auto res = dice::kb::searchFor(cfg, cmdRouter, i18n.defaultLocale(), query, opt);
+            auto hitJson = [](const dice::kb::Hit& h) {
+                return J{{"source", h.source}, {"id", h.id}, {"title", h.title}, {"url", h.url},
+                         {"text", dice::kb::truncateChars(h.text, 400)}, {"coverage", h.coverage},
+                         {"score", h.score}, {"semantic", h.semantic}};
+            };
+            J hits = J::array(), below = J::array();
+            for (auto& h : res.hits) hits.push_back(hitJson(h));
+            for (auto& h : res.belowThreshold) below.push_back(hitJson(h));
+            std::string injected = dice::kb::KnowledgeBase::buildContext(res.hits, opt.maxChars);
+            J out{{"hits", hits}, {"below", below}, {"scanned", res.scanned}, {"elapsedMs", res.elapsedMs},
+                  {"injected", injected}, {"injectedChars", dice::kb::charCount(injected)},
+                  {"faqSimilarity", res.faqSimilarity}, {"faq", nullptr}};
+            if (res.faq) out["faq"] = J{{"id", res.faq->id}, {"title", res.faq->title}, {"text", res.faq->text}};
+            jsonReply(ok(out), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Post});
+
+    // 状态：各来源条目数、是否可做语义检索。
+    app.registerHandler("/api/knowledge/status", [&cfg, &cmdRouter, &i18n](Req, CB&& cb) {
+        try {
+            size_t helpN = 0;
+            cmdRouter.visitHelp(i18n.defaultLocale(), "", [&](const CommandRouter::HelpEntryView&) { ++helpN; return true; });
+            auto& kbase = dice::kb::KnowledgeBase::instance();
+            jsonReply(ok(J{{"help", helpN}, {"docs", kbase.docCount()}, {"custom", kbase.entries().size()},
+                           {"aiEnabled", dice::ai::enabled(cfg)}, {"embedModel", dice::ai::hasModel(cfg, "embed")}}), std::move(cb));
+        } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
+    }, {drogon::Get});
 
     // 是否把日志内图片落地到本地（data/logs/images），供网页导出内嵌。
     app.registerHandler("/api/system/save-log-images", [&cfg](Req req, CB&& cb) {
