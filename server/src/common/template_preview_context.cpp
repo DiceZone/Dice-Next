@@ -289,6 +289,8 @@ struct Example {
              {"last", "2026-10-21 20:00:00"},
              {"mapped", "dice.roll.result"},
              {"day", "30"},
+             {"size", "80"},
+             {"limit", "50"},
              {"text", word("欢迎来到本群！", "Welcome to the group!")},
              {"sec", "30"},
              {"a", word("主动方", "Active side")},

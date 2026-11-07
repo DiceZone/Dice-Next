@@ -56,6 +56,10 @@ static json makeDefaultConfig() {
             {"max_group_size", 0},
             {"blacklist_quit_level", "member"},  // 黑名单退群默认等级: member=任一成员触发 / admin=仅群主级触发
             {"leave_black_qq", false},
+            {"listen_group_kick", false},
+            {"listen_group_ban", false},
+            {"kicked_ban_inviter", false},
+            {"banned_ban_inviter", false},
             {"listen_at_when_off", true},
             {"respond_self", false},             // 自响应：用骰娘账号自身消息自控（默认关）
             {"censor", {{"enabled", false}, {"words", json::object()}}}, // 原版敏感词：仅检查指令；无内置词库

@@ -43,6 +43,7 @@
 #include "legacy_clock_command.h"
 #include "legacy_command_arguments.h"
 #include "../service/notice_manager.h"   // B：通知系统（权限变更等推送给骰主）
+#include "../service/legacy_punish.h"    // 原版被踢/禁言拉黑与清群退场文案
 #include "../service/sensitive_word_filter.h"
 #include "../service/cloud_card_service.h"
 
@@ -6909,15 +6910,106 @@ public:
 
     bool groupCommandInactiveFor(const std::string& platform, const std::string& groupId,
                                  const std::string& adapterId, int days) const {
-        auto* st = db_.getStorage(); if (!st || adapterId.empty() || days <= 0) return false;
+        return days > 0 && groupCommandIdleDays(platform, groupId, adapterId) >= days;
+    }
+
+    int groupCommandIdleDays(const std::string& platform, const std::string& groupId,
+                             const std::string& adapterId) const {
+        auto* st = db_.getStorage(); if (!st || adapterId.empty()) return 0;
         namespace orm = sqlite_orm;
-        // Never inherit a different bot's shared lastCommandAt for a platform action.
         const auto rows = st->get_all<GroupAccountSettingRow>(orm::where(
             orm::c(&GroupAccountSettingRow::adapterId) == adapterId and
             orm::c(&GroupAccountSettingRow::platform) == platform and
             orm::c(&GroupAccountSettingRow::groupId) == groupId and
             orm::c(&GroupAccountSettingRow::key) == std::string("lastCommandAt")));
-        return !rows.empty() && auto_cleanup::inactive(rows.front().value, days);
+        return rows.empty() ? 0 : auto_cleanup::idleDays(rows.front().value);
+    }
+
+    bool groupPunishExempt(const std::string& platform, const std::string& groupId,
+                           const std::string& adapterId = {}) const {
+        for (const auto* key : {"locked", "banExempt", "protocolInvalid", "免黑", "协议无效"})
+            if (getGroupSettingFor(platform, groupId, key, adapterId) == "1") return true;
+        return false;
+    }
+
+    bool userPunishExempt(const std::string& platform, const std::string& userId,
+                          const std::string& selfId) const {
+        if (userId.empty() || userId == "0") return true;
+        if (isUserWhitelisted(userId)) return true;
+        return trustOf(platform, userId, selfId) > 1;
+    }
+
+    bool applyUserBlacklist(const std::string& id, const std::string& reason) {
+        if (id.empty() || id == "0" || banlistHas(0, 0, id)) return false;
+        banlistAdd(0, 0, id, reason);
+        notifyListChange(0, 0, id, true, reason);
+        if (onMasterBan) onMasterBan("user", id, reason);
+        return true;
+    }
+
+    void enforceLegacyKickPunish(const BotEvent& observed, bool listen, bool banInviter) {
+        using namespace dice::legacy_punish;
+        const auto subject = kickSubject(observed, isDiceBot(observed.userId));
+        Parties parties;
+        parties.groupExempt = groupPunishExempt(observed.platform, observed.groupId, observed.adapterId);
+        parties.operatorExempt = userPunishExempt(observed.platform, observed.operatorId, observed.selfId);
+        parties.operatorIsDiceBot = isDiceBot(observed.operatorId);
+        const std::string inviter = groupSettingValue(observed.platform, observed.groupId, "inviter", observed.adapterId);
+        parties.inviterExempt = inviter.empty() || userPunishExempt(observed.platform, inviter, observed.selfId);
+        Flags flags;
+        flags.listen = listen;
+        flags.banInviter = banInviter && subject == KickSubject::Self;
+        const auto decision = decideKick(observed, subject, flags, parties);
+        if (decision.clearCleanupExempt)
+            setGroupSettingFor(observed.platform, observed.groupId, "cleanupExempt", "0", observed.adapterId);
+        const std::string reason = subject == KickSubject::OtherDice
+            ? "目击其他骰娘被移出群 " + observed.groupId
+            : "将骰娘移出群 " + observed.groupId;
+        if (decision.banOperator && applyUserBlacklist(observed.operatorId, reason))
+            DICE_LOG_INFO("被踢自动拉黑：操作者 {}（群 {}）", observed.operatorId, observed.groupId);
+        if (decision.banInviter && applyUserBlacklist(inviter, reason + ";入群邀请者"))
+            DICE_LOG_INFO("被踢连带拉黑邀请人：{}（群 {}）", inviter, observed.groupId);
+    }
+
+    void enforceLegacyMutePunish(const BotEvent& event, bool listen, bool banInviter) {
+        using namespace dice::legacy_punish;
+        const bool targetIsSelf = !event.selfId.empty() && event.userId == event.selfId;
+        Parties parties;
+        parties.groupExempt = groupPunishExempt(event.platform, event.groupId, event.adapterId);
+        parties.operatorExempt = userPunishExempt(event.platform, event.operatorId, event.selfId);
+        parties.operatorIsDiceBot = isDiceBot(event.operatorId);
+        const std::string inviter = groupSettingValue(event.platform, event.groupId, "inviter", event.adapterId);
+        parties.inviterExempt = inviter.empty() || userPunishExempt(event.platform, inviter, event.selfId);
+        const auto decision = decideMute(event, targetIsSelf, {listen, banInviter}, parties);
+        if (decision.clearCleanupExempt)
+            setGroupSettingFor(event.platform, event.groupId, "cleanupExempt", "0", event.adapterId);
+        const std::string reason = "在群 " + event.groupId + " 中禁言骰娘";
+        if (decision.banOperator && applyUserBlacklist(event.operatorId, reason))
+            DICE_LOG_INFO("被禁言自动拉黑：操作者 {}（群 {}）", event.operatorId, event.groupId);
+        if (decision.banInviter && applyUserBlacklist(inviter, reason + ";入群邀请者"))
+            DICE_LOG_INFO("被禁言连带拉黑邀请人：{}（群 {}）", inviter, event.groupId);
+        if (!decision.leaveGroup) return;
+        AdapterPtr adapter;
+        if (!event.adapterId.empty()) adapter = adapters_.getAdapter(event.adapterId);
+        if (adapter && requestGroupLeave(adapter, event.groupId, "被禁言自动退群", "mute_leave", reason))
+            setGroupSettingFor(event.platform, event.groupId, kLeaveRequestedAt, leaveRequestStamp(), event.adapterId);
+    }
+
+    void sendGroupFarewellThenLeave(const AdapterPtr& adapter, const std::string& groupId,
+                                    const std::string& text, const std::string& cause,
+                                    const std::string& operation, const std::string& reason) {
+        if (!adapter || groupId.empty()) return;
+        if (!text.empty()) adapter->sendGroupMessage(groupId, text);
+        auto weak = std::weak_ptr<IAdapter>(adapter);
+        drogon::app().getLoop()->runAfter(0.5, [this, weak, groupId, cause, operation, reason]() {
+            auto a = weak.lock();
+            if (!a || !a->isConnected()) {
+                DICE_LOG_INFO("已发送退场消息，但适配器离线，未提交退群（group {}）", groupId);
+                return;
+            }
+            if (!requestGroupLeave(a, groupId, cause, operation, reason)) return;
+            setGroupSettingFor(a->platform(), groupId, kLeaveRequestedAt, leaveRequestStamp(), a->id());
+        });
     }
 
     // The record-retention pass never calls a platform API. Keep cards, transcripts,

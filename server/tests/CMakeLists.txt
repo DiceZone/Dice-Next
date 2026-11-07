@@ -33,6 +33,7 @@ set(TEST_SOURCES
     test_legacy_templates.cpp
     test_lua_event_bridge.cpp
     test_auto_cleanup.cpp
+    test_legacy_punish.cpp
     test_config_manager.cpp
     test_bot_info.cpp
     test_message_break.cpp

@@ -908,18 +908,19 @@ TEST(ImportBinaryGroups, KeepsCoreAndLuaCompatibleSettings) {
         std::ofstream out(root / "user" / "ChatConf.dat", std::ios::binary);
         writeRaw<int32_t>(out, 1); writeRaw<int64_t>(out, 20001); writeRaw<int64_t>(out, 20001);
         writeRaw<int16_t>(out, 4); writeLegacyStr(out, "旧群名");
-        writeRaw<int16_t>(out, 11); writeRaw<int16_t>(out, 5);
+        writeRaw<int16_t>(out, 11); writeRaw<int16_t>(out, 6);
         writeLegacyStr(out, "停用指令"); writeLegacyInt(out, 1);
         writeLegacyStr(out, "rc房规"); writeLegacyInt(out, 6);
         writeLegacyStr(out, "入群欢迎"); writeLegacyUtf8(out, "欢迎 {at}");
         writeLegacyStr(out, "免清"); writeLegacyInt(out, 1);
+        writeLegacyStr(out, "免黑"); writeLegacyInt(out, 1);
         writeLegacyStr(out, "pluginOption"); writeLegacyInt(out, 9);
         writeRaw<int16_t>(out, -1);
     }
     Database db; ASSERT_TRUE(db.open((root / "app.db").string()));
     LuaPluginManager lua;
     int groups = 0;
-    ASSERT_EQ(importChatConf(db, root / "user", groups, &lua), 5);
+    ASSERT_EQ(importChatConf(db, root / "user", groups, &lua), 6);
     ASSERT_EQ(groups, 1);
     ASSERT_EQ(lua.confGet("g:20001", "pluginOption"), "9");
     auto rows = db.getStorage()->get_all<GroupSettingRow>();
@@ -928,6 +929,7 @@ TEST(ImportBinaryGroups, KeepsCoreAndLuaCompatibleSettings) {
     ASSERT_EQ(values["legacyGroupName"], "旧群名");
     ASSERT_EQ(values["enabled"], "0");
     ASSERT_EQ(values["cleanupExempt"], "1");
+    ASSERT_EQ(values["banExempt"], "1");
     ASSERT_EQ(values["cocRule"], "6");
     ASSERT_EQ(values["welcome"], "欢迎 {at}");
     db.close(); cleanupTempDir(root);
@@ -1314,6 +1316,10 @@ TEST(LegacyConsole, MigratesSettingsIntoActiveCapabilities) {
                "  GroupInvalidSize: 600\n"
                "  DisabledListenAt: 1\n"
                "  LeaveBlackQQ: 1\n"
+               "  ListenGroupKick: 1\n"
+               "  ListenGroupBan: 0\n"
+               "  KickedBanInviter: 1\n"
+               "  BannedBanInviter: 0\n"
                "  AllowStranger: 2\n";
     }
     ConfigManager cfg((root / "config").string());
@@ -1327,6 +1333,10 @@ TEST(LegacyConsole, MigratesSettingsIntoActiveCapabilities) {
     ASSERT_EQ(cfg.get<int>("dice/max_group_size"), 600);
     ASSERT_FALSE(cfg.get<bool>("dice/listen_at_when_off"));
     ASSERT_TRUE(cfg.get<bool>("dice/leave_black_qq"));
+    ASSERT_TRUE(cfg.get<bool>("dice/listen_group_kick"));
+    ASSERT_FALSE(cfg.get<bool>("dice/listen_group_ban"));
+    ASSERT_TRUE(cfg.get<bool>("dice/kicked_ban_inviter"));
+    ASSERT_FALSE(cfg.get<bool>("dice/banned_ban_inviter"));
     ASSERT_EQ(cfg.get<std::string>("events/friend_policy"), "nonblacklist");
     auto masters = cfg.get<json>("dice/masters", json::array());
     ASSERT_EQ(masters.size(), static_cast<size_t>(1));

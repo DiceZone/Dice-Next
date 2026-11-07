@@ -57,6 +57,7 @@
 #include "adapter/milky_adapter.h"
 #include "adapter/qq_official_adapter.h"
 #include "core/command_router.h"
+#include "service/legacy_punish.h"
 #include "core/plugin_command_priority.h"
 #include "core/playground_reply.h"
 #include "core/friend_approval_policy.h"
@@ -2664,13 +2665,21 @@ static int realMain(int argc, char* argv[]) {
                     const std::string joinedGroup = e.groupId;
                     const std::string joinedAdapter = e.adapterId;
                     drogon::app().getLoop()->runAfter(6.0, [weakAdapter, joinedGroup, joinedAdapter,
-                                                            maxGroupSize, &cmdRouter]() {
+                                                            maxGroupSize, &cmdRouter, &i18n, &localeResolver]() {
                         auto adapter = weakAdapter.lock(); if (!adapter || !adapter->isConnected()) return;
                         const int members = adapter->getGroupMemberCount(joinedGroup);
                         if (members <= maxGroupSize) return;
-                        if (!cmdRouter.requestGroupLeave(adapter, joinedGroup, "群规模上限规则", "group_size_leave",
-                            "当前群规模 " + std::to_string(members) + " 人，超过上限 " + std::to_string(maxGroupSize) + " 人")) return;
-                        DICE_LOG_INFO("自动清理群聊：群 {} 共 {} 人，超过最大群规模 {}，已提交退群请求，等待平台确认",
+                        dice::Message lm;
+                        lm.platform = adapter->platform(); lm.targetId = joinedGroup;
+                        lm.type = dice::MessageType::kGroup; lm.adapterId = adapter->id();
+                        const auto loc = localeResolver.resolve(lm);
+                        const std::string reason = "当前群规模 " + std::to_string(members) + " 人，超过上限 "
+                            + std::to_string(maxGroupSize) + " 人";
+                        const std::string text = cmdRouter.applySelf(lm, i18n.tr(loc, "event.leave_oversize", {
+                            {"size", std::to_string(members)}, {"limit", std::to_string(maxGroupSize)}}));
+                        cmdRouter.sendGroupFarewellThenLeave(adapter, joinedGroup, text,
+                            "群规模上限规则", "group_size_leave", reason);
+                        DICE_LOG_INFO("自动清理群聊：群 {} 共 {} 人，超过最大群规模 {}，已发送退场消息并提交退群",
                                       joinedGroup, members, maxGroupSize);
                     });
                 }
@@ -2823,25 +2832,34 @@ static int realMain(int argc, char* argv[]) {
 }
         } else if (e.type == ET::kGroupDecrease) {
             runLegacyHook("GroupDecrease"); // observational; cannot suppress leave bookkeeping
-            // B：骰娘被移出群（或自身退群回执）→ 标记已退群 + 通知骰主。
             // observed 已把「刚提交的退群请求 + 没有其他操作者的踢出回执」改写成主动退出。
-            // 这里只发通知，不写黑名单，也不上报云黑。
-            if (!e.selfId.empty() && e.userId == e.selfId && !e.groupId.empty()) {
-                cmdRouter.setGroupSettingFor(e.platform, e.groupId, "left", "1", e.adapterId);
-                auto intent = dice::notice::LeaveIntents::instance().take(e.adapterId, e.platform, e.groupId);
-                if (!intent && e.extra.is_object()) {
-                    const auto native = e.extra.find("__identity_native_target");
-                    if (native != e.extra.end() && native->is_string()) intent = dice::notice::LeaveIntents::instance().take(e.adapterId, e.platform, native->get<std::string>());
+            // 自动拉黑只在开关打开、且仍判定为被踢时执行；主动退群回执不会写入黑名单。
+            if (!observed.selfId.empty() && observed.userId == observed.selfId && !observed.groupId.empty()) {
+                cmdRouter.setGroupSettingFor(observed.platform, observed.groupId, "left", "1", observed.adapterId);
+                auto intent = dice::notice::LeaveIntents::instance().take(observed.adapterId, observed.platform, observed.groupId);
+                if (!intent && observed.extra.is_object()) {
+                    const auto native = observed.extra.find("__identity_native_target");
+                    if (native != observed.extra.end() && native->is_string()) intent = dice::notice::LeaveIntents::instance().take(observed.adapterId, observed.platform, native->get<std::string>());
                 }
-                cmdRouter.notifyMasters(dice::notice::groupDeparture(observed, groupNameForNotice(e.groupId),
-                    resolveUserNick(e.operatorId, e.groupId), intent), e.adapterId);
+                cmdRouter.notifyMasters(dice::notice::groupDeparture(observed, groupNameForNotice(observed.groupId),
+                    resolveUserNick(observed.operatorId, observed.groupId), intent), observed.adapterId);
+            }
+            const auto kickWho = dice::legacy_punish::kickSubject(observed, cmdRouter.isDiceBot(observed.userId));
+            if (diceFlag("listen_group_kick", false) && kickWho != dice::legacy_punish::KickSubject::None
+                && !runLegacyHook("GroupKicked")) {
+                cmdRouter.enforceLegacyKickPunish(observed, true,
+                    kickWho == dice::legacy_punish::KickSubject::Self && diceFlag("kicked_ban_inviter", false));
             }
         } else if (e.type == ET::kGroupBan) {
-            // Owner notifications only: do not activate legacy punishment hooks
-            // or change blacklist/leave policy merely by adding event reporting.
             const bool whole = e.userId == "0" || e.subType == "whole_ban" || e.subType == "whole_lift_ban";
             if (!e.groupId.empty() && (whole || (!e.selfId.empty() && e.userId == e.selfId))) {
                 cmdRouter.notifyMasters(dice::notice::groupModeration(e, groupNameForNotice(e.groupId), resolveUserNick(e.operatorId, e.groupId)), e.adapterId);
+            }
+            const bool mutedSelf = !e.selfId.empty() && e.userId == e.selfId;
+            if (diceFlag("listen_group_ban", false)
+                && dice::legacy_punish::shouldConsiderMute(e, mutedSelf)
+                && !runLegacyHook("GroupBanned")) {
+                cmdRouter.enforceLegacyMutePunish(e, true, diceFlag("banned_ban_inviter", false));
             }
         } else if (e.type == ET::kGroupAdmin) {
             if (!e.selfId.empty() && e.userId == e.selfId && !e.groupId.empty()) {
@@ -5006,7 +5024,7 @@ static int realMain(int argc, char* argv[]) {
         app.getLoop()->runAfter(300.0, friendCleanup);     // 启动 5 分钟后（等好友列表同步）
         app.getLoop()->runEvery(43200.0, friendCleanup);   // 之后每 12 小时
 
-        auto groupCleanup = [&configMgr, &adapterMgr, &cmdRouter]() {
+        auto groupCleanup = [&configMgr, &adapterMgr, &cmdRouter, &i18n, &localeResolver]() {
             const nlohmann::json all = configMgr.getAll();
             int leftCount = 0;
             for (const auto& adapter : adapterMgr.allAdapters()) {
@@ -5023,9 +5041,13 @@ static int realMain(int argc, char* argv[]) {
                     if (limit > 0 && leftCount >= limit) return;
                     if (cmdRouter.groupCleanupExempt(adapter->platform(), groupId, adapter->id())) continue;
                     std::string reason;
+                    auto leaveKind = dice::legacy_punish::CleanupLeave::Idle;
+                    dice::I18n::Args leaveArgs;
                     const int members = adapter->getGroupMemberCount(groupId);
                     if (maxSize > 0 && members > maxSize) {
                         reason = "群规模 " + std::to_string(members) + " 超过上限 " + std::to_string(maxSize);
+                        leaveKind = dice::legacy_punish::CleanupLeave::Oversize;
+                        leaveArgs = {{"size", std::to_string(members)}, {"limit", std::to_string(maxSize)}};
                     } else if (leaveBlack) {
                         const std::string level = cmdRouter.blacklistQuitLevel(
                             adapter->platform(), groupId, adapter->id());
@@ -5039,19 +5061,37 @@ static int realMain(int argc, char* argv[]) {
                                 if (uid.empty() || !cmdRouter.isUserBlacklisted(uid)) continue;
                                 const std::string role = member.value("role", std::string("member"));
                                 if (level == "member" || role == "owner" || role == "admin") {
-                                    reason = "存在黑名单用户 " + uid; break;
+                                    reason = "存在黑名单用户 " + uid;
+                                    leaveKind = (role == "owner" || role == "admin")
+                                        ? dice::legacy_punish::CleanupLeave::BlackAdmin
+                                        : dice::legacy_punish::CleanupLeave::BlackMember;
+                                    leaveArgs = {{"user", uid}};
+                                    break;
                                 }
                             }
                         } catch (...) {}
                     }
-                    if (reason.empty() && cmdRouter.groupCommandInactiveFor(
-                        adapter->platform(), groupId, adapter->id(), inactiveDays))
-                        reason = std::to_string(inactiveDays) + " 天未使用指令";
+                    if (reason.empty() && inactiveDays > 0) {
+                        const int idle = cmdRouter.groupCommandIdleDays(
+                            adapter->platform(), groupId, adapter->id());
+                        if (idle >= inactiveDays) {
+                            reason = std::to_string(idle) + " 天未使用指令";
+                            leaveKind = dice::legacy_punish::CleanupLeave::Idle;
+                            leaveArgs = {{"day", std::to_string(idle)}};
+                        }
+                    }
                     if (reason.empty()) continue;
-                    if (!cmdRouter.requestGroupLeave(adapter, groupId, "定期群聊清理", "group_auto_clean", reason)) continue;
+                    dice::Message lm;
+                    lm.platform = adapter->platform(); lm.targetId = groupId;
+                    lm.type = dice::MessageType::kGroup; lm.adapterId = adapter->id();
+                    const auto loc = localeResolver.resolve(lm);
+                    const std::string text = cmdRouter.applySelf(lm,
+                        i18n.tr(loc, dice::legacy_punish::cleanupLeaveKey(leaveKind), leaveArgs));
+                    cmdRouter.sendGroupFarewellThenLeave(adapter, groupId, text,
+                        "定期群聊清理", "group_auto_clean", reason);
                     ++leftCount;
                     const std::string label = groupName.empty() ? groupId : groupName + "(" + groupId + ")";
-                    DICE_LOG_INFO("自动清理群聊：{}，{}，已提交退群请求，等待平台确认", label, reason);
+                    DICE_LOG_INFO("自动清理群聊：{}，{}，已发送退场消息并提交退群", label, reason);
                 }
             }
         };
