@@ -296,6 +296,15 @@ inline ParsedInput parse(const std::string& input, bool compact = true) {
         return result;
     }
 
+    // `.rd 理由`：d 后直接是空格时只取 d（默认骰），后面整段都是理由。原版 Dice! 读表达式
+    // 遇到空格即停；DiceScript 却会把 `d 1次掷骰` 接成 `d1`，掷出一面骰并截掉理由开头。
+    if (input.size() > 1 && (input[0] == 'd' || input[0] == 'D') &&
+        std::isspace(static_cast<unsigned char>(input[1]))) {
+        ParsedInput result;
+        result.reason = trimAsciiWhitespace(input.substr(1));
+        return result;
+    }
+
     const std::string diceToken = readDiceToken(input, compact);
     ParsedInput result;
     if (hasNonDigit(diceToken)) {

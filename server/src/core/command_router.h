@@ -1800,6 +1800,27 @@ private:
     /// attribute/value. Forms handled: "力量"、"力量 哈哈"、"力量 60"、"力量 60 攻击"、
     /// "力量60"、"力量60 攻击"、"60"（仅数值）.
     /// Returns false (and fills @p err) if no rate can be determined.
+    /// .rad 后面的内容是不是在指定技能（而不是一句理由）。
+    ///   「侦查50」「侦查50 理由」「力量+20」：是；卡上或规则里有的技能名（「侦查」「侦查 理由」）：是；
+    ///   「打了3次怪」（数字后紧跟文字）、「打了 3 次」（不认识的名字后跟数字）：不是。
+    bool looksLikeSkillSpec(const Message& msg, const std::string& text, const std::string& cardUser) const {
+        std::string s = trim(text);
+        size_t sp = s.find(' ');
+        std::string first = sp == std::string::npos ? s : s.substr(0, sp);
+        std::string remainder = sp == std::string::npos ? std::string() : trim(s.substr(sp + 1));
+        auto perspective = msg;
+        if (!cardUser.empty()) perspective.senderId = cardUser;
+        if (arith::hasArithmetic(first)) return true;
+        size_t d = first.find_first_of("0123456789");
+        if (d != std::string::npos) {
+            size_t e = d;
+            while (e < first.size() && std::isdigit(static_cast<unsigned char>(first[e]))) ++e;
+            return e == first.size();   // 数字必须在技能名末尾
+        }
+        if (checkAttribute(perspective, first)) return true;
+        return false;
+    }
+
     bool resolveRate(Locale loc, const Message& msg, const std::string& rest,
                      std::string& attr, int& rate, std::string& reason, std::string& err,
                      const std::string& cardUser = "") {
@@ -2335,8 +2356,9 @@ private:
             if (!rr.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", rr.error}});
             std::string after = trim(splitCommand(s).second);
             // .rad <技能> = .r + .ra 的合并——第一行按 .r 展示掷骰过程，第二行
-            // 用**同一个骰值**对技能成功率判定。"d" 后解析不出技能时保留原行为（当 reason）。
-            if (!after.empty()) {
+            // 用**同一个骰值**对技能成功率判定。"d" 后不是技能时保留原行为（整段当 reason）。
+            // 「打了3次怪」这类数字后紧跟文字的句子是理由，不是「技能 打了、成功率 3」。
+            if (!after.empty() && looksLikeSkillSpec(msg, after, target)) {
                 std::string attr2, reason2, err2; int rate2 = 0;
                 if (resolveRate(loc, msg, after, attr2, rate2, reason2, err2, target)) {
                     int eff2 = (div > 1) ? rate2 / div : rate2;

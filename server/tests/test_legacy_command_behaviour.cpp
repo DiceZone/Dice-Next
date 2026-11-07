@@ -1650,3 +1650,39 @@ TEST(AutoCleanup, MissingHistoryAndProtectedGroupsNeverQualifyForInactivity) {
     ASSERT_FALSE(f.router.groupCommandInactiveFor(f.msg.platform, f.msg.targetId, f.msg.adapterId, 30));
     ASSERT_EQ(f.router.cleanupLocalRecords(0, 30).second, 0);
 }
+
+TEST(RollReply, NumbersInsideTheReasonStayInTheReason) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    f.i18n.setOverride(Locale::kZhHans, "dice.roll.result", "R:{res}|{reason}");
+    // 数字后紧跟文字：整段是理由，掷默认骰。
+    for (const auto* in : {".r 1次掷骰", ".r1次掷骰", ".r 3次攻击"}) {
+        const auto reply = f.run(in);
+        ASSERT_TRUE(reply.rfind("R:D100=", 0) == 0);
+        ASSERT_TRUE(reply.ends_with(std::string(in).find("3") != std::string::npos ? "|3次攻击" : "|1次掷骰"));
+    }
+    // .rd 后接空格：d 是默认骰，后面整段是理由（不能被接成 d1）。
+    const auto rd = f.run(".rd 1次掷骰");
+    ASSERT_TRUE(rd.rfind("R:D100=", 0) == 0);
+    ASSERT_TRUE(rd.ends_with("|1次掷骰"));
+    ASSERT_TRUE(f.run(".rd 攻击").ends_with("|攻击"));
+    // 明确的表达式照旧。
+    ASSERT_TRUE(f.run(".r 1d1 打了3次").ends_with("1|打了3次"));
+    ASSERT_TRUE(f.run(".rd测试").ends_with("|测试"));
+}
+
+TEST(RollReply, RadKeepsSentencesWithNumbersAsTheReason) {
+    LegacyFixture f;
+    ASSERT_TRUE(f.i18n.load());
+    auto lines = [](const std::string& s) { return 1 + std::count(s.begin(), s.end(), '\n'); };
+    // 理由句子里的数字不能被当成「技能 + 成功率」，否则会多出一行 .r。
+    for (const auto* in : {".rad 打了3次怪", ".rad 他走了2步", ".rad 打了 3 次"}) {
+        const auto reply = f.run(in);
+        ASSERT_EQ(lines(reply), 1);
+        ASSERT_TRUE(reply.find(std::string(in).substr(5)) != std::string::npos);
+    }
+    // 指定技能时仍是 .r + .ra 合并（两行，同一个骰值）。
+    ASSERT_EQ(lines(f.run(".rad 侦查50")), 2);
+    ASSERT_EQ(lines(f.run(".rad 侦查50 搜查书房")), 2);
+    ASSERT_EQ(lines(f.run(".rad 侦查")), 2);
+}
