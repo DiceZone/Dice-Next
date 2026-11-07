@@ -37,7 +37,10 @@ struct LeaveIntent {
     ProcessingOrigin actor;
 };
 // A bounded, short-lived correlation record, not evidence that a platform
-// accepted the request. Explicit kick/disband events always override it.
+// accepted the request. A kick that names someone other than the bot still
+// overrides it, as does disband. A kick/removed echo with no other operator
+// confirms the request: OneBot implementations often report set_group_leave
+// that way, and that echo must not be recorded as a kick.
 class LeaveIntents {
 public:
     using Clock = std::chrono::steady_clock;
@@ -64,6 +67,13 @@ public:
         if (it == items_.end()) return std::nullopt;
         auto result = std::move(it->second.intent); items_.erase(it); return result;
     }
+    std::optional<LeaveIntent> peek(const std::string& adapter, const std::string& platform,
+                                   const std::string& group, Clock::time_point at = Clock::now()) {
+        std::lock_guard lock(mutex_); prune(at);
+        auto it = items_.find({adapter, platform, group});
+        if (it == items_.end()) return std::nullopt;
+        return it->second.intent;
+    }
 private:
     struct Entry { uint64_t id; Clock::time_point at; LeaveIntent intent; };
     void prune(Clock::time_point at) {
@@ -84,20 +94,57 @@ inline EventText leaveRequested(const std::string& groupId, const LeaveIntent& i
     if (!intent.reason.empty()) body += "\n原因：" + readable(intent.reason, 800);
     return {intent.operation, "退群请求已提交", std::move(body), 2};
 }
+inline bool namesAnotherOperator(const BotEvent& event) {
+    if (event.operatorId.empty() || event.operatorId == "0") return false;
+    return event.selfId.empty() || event.operatorId != event.selfId;
+}
+inline bool reportedAsKick(const std::string& subType) {
+    return subType == "kick" || subType == "kick_me" || subType == "removed";
+}
+inline std::optional<LeaveIntent> pendingLeave(const BotEvent& event) {
+    auto intent = LeaveIntents::instance().peek(event.adapterId, event.platform, event.groupId);
+    if (intent || !event.extra.is_object()) return intent;
+    const auto native = event.extra.find("__identity_native_target");
+    if (native == event.extra.end() || !native->is_string()) return std::nullopt;
+    return LeaveIntents::instance().peek(event.adapterId, event.platform, native->get<std::string>());
+}
+// QQ often echoes the bot's own set_group_leave as kick/kick_me/removed with
+// operator 0 or the bot itself. Once a leave request is on record, that echo
+// is the confirmation, and plugins should see a leave rather than a kick.
+inline void reconcileOwnLeaveEcho(BotEvent& event) {
+    if (event.type != EventType::kGroupDecrease) return;
+    if (event.selfId.empty() || event.userId != event.selfId || event.groupId.empty()) return;
+    if (!reportedAsKick(event.subType) || namesAnotherOperator(event) || !pendingLeave(event)) return;
+    if (!event.extra.is_object()) event.extra = nlohmann::json::object();
+    event.extra["platform_departure"] = event.subType;
+    event.subType = "leave";
+}
 inline EventText groupDeparture(const BotEvent& event, const std::string& groupName,
                                const std::string& operatorName, const std::optional<LeaveIntent>& intent = {}) {
     const auto group = groupIdentity(groupName.empty() && intent ? intent->groupName : groupName, event.groupId);
     const bool actorKnown = !event.operatorId.empty() && event.operatorId != "0";
     const auto actor = actorKnown ? identity(operatorName, event.operatorId) : std::string();
-    if (event.subType == "kick_me" || event.subType == "kick" || event.subType == "removed")
+    auto confirmRequested = [&](const std::string& platformLabel) {
+        auto body = "平台已确认骰娘退出" + group + "；此前由" + requestedBy(*intent) + "发起退群。";
+        if (!intent->reason.empty()) body += "\n原因：" + readable(intent->reason, 800);
+        if (!platformLabel.empty())
+            body += "\n平台把这次离群标成了「" + platformLabel + "」，但没有提供其他操作者。按此前提交的退群请求确认为主动退出。本程序不会因此写入黑名单或云黑名单。";
+        return EventText{"group_left", "骰娘退群已确认", std::move(body), 2};
+    };
+    if (reportedAsKick(event.subType)) {
+        if (intent && !namesAnotherOperator(event)) return confirmRequested("踢出");
         return {"group_left", "骰娘被踢出群聊", "骰娘被" + (actorKnown ? actor : "群管理员（平台未提供操作者）") + "踢出" + group + "。", 2};
+    }
     if (event.subType == "disband")
         return {"group_left", "群聊已解散", group + (actorKnown ? "已被" + actor + "解散，骰娘已离开该群。" : "已解散，骰娘已离开该群（平台未提供操作者）。"), 2};
     if (event.subType == "leave") {
         if (intent) {
-            auto body = "平台已确认骰娘退出" + group + "；此前由" + requestedBy(*intent) + "发起退群。";
-            if (!intent->reason.empty()) body += "\n原因：" + readable(intent->reason, 800);
-            return {"group_left", "骰娘退群已确认", std::move(body), 2};
+            std::string label;
+            if (event.extra.is_object()) {
+                const auto marked = event.extra.value("platform_departure", std::string());
+                if (reportedAsKick(marked)) label = "踢出";
+            }
+            return confirmRequested(label);
         }
         return {"group_left", "骰娘主动退出群聊", "骰娘主动退出" + group + "；未关联到本程序近期提交的退群请求，可能来自其他客户端或已失效的历史请求。", 2};
     }
