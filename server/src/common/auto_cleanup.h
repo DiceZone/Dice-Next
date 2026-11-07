@@ -2,6 +2,7 @@
 
 #include <ctime>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <stdexcept>
 #include <nlohmann/json.hpp>
@@ -9,19 +10,19 @@
 namespace dice::auto_cleanup {
 // Cleanup must not treat unknown, malformed or future timestamps as inactivity.
 // Stored activity uses UTC ISO-8601; reject normalized dates such as February 31.
-inline bool inactive(const std::string& iso, int days, std::time_t now = std::time(nullptr)) {
-    if (days <= 0 || iso.size() < 19 || iso[4] != '-' || iso[7] != '-'
-        || iso[10] != 'T' || iso[13] != ':' || iso[16] != ':') return false;
+inline std::optional<std::time_t> utcTime(const std::string& iso, std::time_t now = std::time(nullptr)) {
+    if (iso.size() < 19 || iso[4] != '-' || iso[7] != '-'
+        || iso[10] != 'T' || iso[13] != ':' || iso[16] != ':') return std::nullopt;
     for (int i = 0; i < 19; ++i)
-        if (i != 4 && i != 7 && i != 10 && i != 13 && i != 16 && (iso[i] < '0' || iso[i] > '9')) return false;
+        if (i != 4 && i != 7 && i != 10 && i != 13 && i != 16 && (iso[i] < '0' || iso[i] > '9')) return std::nullopt;
     size_t suffix = 19;
     if (suffix < iso.size() && iso[suffix] == '.') {
         const auto start = ++suffix;
         while (suffix < iso.size() && iso[suffix] >= '0' && iso[suffix] <= '9') ++suffix;
-        if (suffix == start) return false;
+        if (suffix == start) return std::nullopt;
     }
     if (suffix < iso.size() && iso[suffix] == 'Z') ++suffix;
-    if (suffix != iso.size()) return false;
+    if (suffix != iso.size()) return std::nullopt;
     std::tm tm{};
     tm.tm_year = std::stoi(iso.substr(0, 4)) - 1900;
     tm.tm_mon = std::stoi(iso.substr(5, 2)) - 1;
@@ -37,8 +38,21 @@ inline bool inactive(const std::string& iso, int days, std::time_t now = std::ti
 #endif
     if (at <= 0 || at > now || tm.tm_year != requested.tm_year || tm.tm_mon != requested.tm_mon
         || tm.tm_mday != requested.tm_mday || tm.tm_hour != requested.tm_hour
-        || tm.tm_min != requested.tm_min || tm.tm_sec != requested.tm_sec) return false;
-    return static_cast<int64_t>(now) - static_cast<int64_t>(at) >= static_cast<int64_t>(days) * 86400;
+        || tm.tm_min != requested.tm_min || tm.tm_sec != requested.tm_sec) return std::nullopt;
+    return at;
+}
+
+inline bool inactive(const std::string& iso, int days, std::time_t now = std::time(nullptr)) {
+    if (days <= 0) return false;
+    const auto at = utcTime(iso, now);
+    if (!at) return false;
+    return static_cast<int64_t>(now) - static_cast<int64_t>(*at) >= static_cast<int64_t>(days) * 86400;
+}
+
+inline int idleDays(const std::string& iso, std::time_t now = std::time(nullptr)) {
+    const auto at = utcTime(iso, now);
+    if (!at) return 0;
+    return static_cast<int>((static_cast<int64_t>(now) - static_cast<int64_t>(*at)) / 86400);
 }
 
 // Validate the entire request before changing any live configuration.

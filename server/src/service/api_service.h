@@ -3240,6 +3240,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             {"listen_group_request", true}, {"listen_group_add", true},
             {"listen_friend_request", true}, {"listen_friend_add", true},
             {"listen_at_when_off", true}, {"leave_black_qq", false},
+            {"listen_group_kick", false}, {"listen_group_ban", false},
+            {"kicked_ban_inviter", false}, {"banned_ban_inviter", false},
             {"allow_official_direct_bind", false},
             {"api_enabled", false}, {"api_timeout", 5},
             {"message_format", "traditional"},
