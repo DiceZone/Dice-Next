@@ -206,7 +206,7 @@ inline std::string generate(ConfigManager& cfg, const std::string& contextBlock,
     }
     // 阶段 B/C：注入群历史摘要 + 相关记忆作为背景（供参考，不要直接复述）。
     if (!background.empty())
-        sys += "\n\n【群历史记忆（较早对话的摘要，作背景参考，不要直接复述）】\n" + background;
+        sys += "\n\n【群历史记忆（仅作背景；优先回答最新消息，与当前话题无关的记忆不要引用）】\n" + background;
     // 知识库：检索到的参考资料放在最后，前面固定的人设部分可被服务商的前缀缓存复用。
     if (!knowledge.empty())
         sys += "\n\n【参考资料（DiceNext 帮助与骰主录入的资料）】\n与问题相关时据此回答，用自己的话简短说明，"
@@ -228,11 +228,12 @@ inline std::string generate(ConfigManager& cfg, const std::string& contextBlock,
         ai::Result r = ai::chatFor(cfg, usage, sys, user, maxTok, 25, -1, modelOverride);   // 温度用全局 params
         if (r.ok) reply = r.reply;
     }
-    if (reply.empty()) { DICE_LOG_DEBUG_M("AI 对话", "模型没有给出回复，本次不回复。"); return ""; }
+    if (reply.empty()) { DICE_LOG_INFO_M("AI 对话", "{} 模型未给出可发送回复，本次不回复。", ai::traceContext()); return ""; }
     if (noEmoji(cfg)) reply = stripEmoji(reply);   // 默认不发 emoji
     if (reply.empty()) return "";
     std::string out = truncateChars(reply, maxChars);
     if (out.size() < reply.size()) DICE_LOG_DEBUG_M("AI 对话", "回复超过 {} 字，已截断。", maxChars);
+    DICE_LOG_INFO_M("AI 对话", "{} 生成回复：{}", ai::traceContext(), out);
     return out;
 }
 
@@ -253,7 +254,7 @@ inline bool decide(ConfigManager& cfg, const std::string& contextBlock,
     if (!contextBlock.empty()) user = "群里最近的对话：\n" + contextBlock + "\n";
     user += "最新消息 —— " + curSender + "：" + curText + "\n要插话吗？";
     ai::Result r = ai::chatFor(cfg, "decision", sys, user, 64, 15, 0.1);
-    if (!r.ok) { DICE_LOG_DEBUG_M("AI 对话", "决策：模型调用失败（{}），不插话。", r.error); return false; }
+    if (!r.ok) { DICE_LOG_INFO_M("AI 决策", "{} 决策调用失败：{}；本次不回复。", ai::traceContext(), r.error); return false; }
     std::string t = r.reply;
     auto lb = t.find('{'), rb = t.rfind('}');
     bool yes = false; std::string reason;
@@ -264,7 +265,7 @@ inline bool decide(ConfigManager& cfg, const std::string& contextBlock,
             reason = j.value("reason", std::string());
         }
     }
-    DICE_LOG_DEBUG_M("AI 对话", "决策：{}（{}）", yes ? "插话" : "不插话", reason.empty() ? r.reply : reason);
+    DICE_LOG_INFO_M("AI 决策", "{} 决策结果：{}；理由：{}；模型输出：{}", ai::traceContext(), yes ? "回复" : "不回复", reason, r.reply);
     return yes;
 }
 

@@ -1780,6 +1780,8 @@ static int realMain(int argc, char* argv[]) {
             dice::ProcessingScope processingScope(processing);
             const auto target = (msg.type == dice::MessageType::kPrivate ? "私聊 " : "群 ") + msg.targetId;
             const auto replyPlan = reply.empty() ? nullptr : std::make_shared<dice::PreparedOutput>(target, reply, processing);
+            if (replyPlan && !dice::ai::traceContext().empty())
+                DICE_LOG_INFO_M("AI 对话", "{} 回复进入发送流程，发送关联 msgID:{}", dice::ai::traceContext(), replyPlan->id);
             const bool officialCardMatched = officialCard && reply == officialCard->original;
             std::vector<dice::presentation::Action> replyActions;
             // Resolve self tokens ({self}/{strSelfName}/{strSelfCall}) in the final
@@ -2033,13 +2035,18 @@ static int realMain(int argc, char* argv[]) {
                 dice::aitools::ToolExec toolExec = dice::aitools::enabled(configMgr) ? makeAiTool(msg) : nullptr;
                 bool lnk = linkReplyOk;
                 dice::Message msgC = msg;
+                const int64_t contextCutoff = (int64_t)std::time(nullptr);
                 auto job = [&configMgr, &db, &adapterMgr, finishReply, msgC, gkey, npc, npcHit,
-                            senderNick, trigText, toolExec, lnk, tkind, voiceCand, kbSearch]() mutable {
+                            senderNick, trigText, toolExec, lnk, tkind, voiceCand, kbSearch, contextCutoff]() mutable {
+                    dice::ai::TraceScope trace("[" + msgC.platform + " 群 " + msgC.targetId + " 消息 " + msgC.id + "]");
+                    DICE_LOG_INFO_M("AI 对话", "{} 收到 {}：{}；触发原因：{}", dice::ai::traceContext(), senderNick, trigText,
+                        npcHit ? "NPC「" + npc.name + "」" : voiceCand ? std::string("语音待转写") : tkind == dice::aichat::Trigger::Strong ? std::string("被 @ 或命中关键词，不经过决策模型") : std::string("待机搭话"));
                     // 语音：先转文字，再用转写结果做触发判断（语音里无法 @，只看 NPC/关键词/待机）。
                     std::string voiceText;
                     if (dice::aispeech::hasVoice(msgC) && dice::aispeech::enabled(configMgr)) {
                         auto adapter = adapterMgr.getAdapter(msgC.adapterId);
                         voiceText = dice::aispeech::transcribe(configMgr, adapter.get(), msgC);
+                        if (!voiceText.empty()) DICE_LOG_INFO_M("AI 语音", "{} 转写结果：{}", dice::ai::traceContext(), voiceText);
                         if (!voiceText.empty()) trigText = trigText.empty() ? voiceText : (trigText + " " + voiceText);
                     }
                     if (voiceCand) {
@@ -2062,16 +2069,28 @@ static int realMain(int argc, char* argv[]) {
                             if (rounds > 0) {
                                 auto rows = cst->get_all<dice::ChatMsgRow>(
                                     orm::where(orm::c(&dice::ChatMsgRow::platform) == msgC.platform
-                                        and orm::c(&dice::ChatMsgRow::groupId) == msgC.targetId),
+                                        and orm::c(&dice::ChatMsgRow::groupId) == msgC.targetId
+                                        and orm::c(&dice::ChatMsgRow::time) <= contextCutoff
+                                        and orm::c(&dice::ChatMsgRow::recalled) == 0
+                                        and (orm::c(&dice::ChatMsgRow::adapterId) == msgC.adapterId or orm::c(&dice::ChatMsgRow::adapterId) == std::string())),
                                     orm::order_by(&dice::ChatMsgRow::id).desc(), orm::limit(rounds));
                                 for (auto it = rows.rbegin(); it != rows.rend(); ++it)
                                     ctx += it->sender + "\xef\xbc\x9a" + dice::aichat::cleanForAi(configMgr, it->content) + "\n";
                             }
                         } catch (...) { DICE_LOG_EXCEPTION("AI chat context database read"); }
                     }
+                    // 多模态 —— 消息带图且开启图像识别时，识别图片内容并注入当前消息。
+                    std::string curText = dice::aichat::cleanForAi(configMgr, trigText);
+                    if (dice::aivision::enabled(configMgr) && !msgC.rawContent.empty()) {
+                        std::string vdesc = dice::aivision::describe(configMgr, msgC.rawContent);
+                        if (!vdesc.empty())
+                            curText += "\n\xef\xbc\x88\xe6\x88\x91\xe5\x8f\x91\xe7\x9a\x84\xe5\x9b\xbe\xe7\x89\x87\xe5\x86\x85\xe5\xae\xb9\xef\xbc\x9a" + vdesc + "\xef\xbc\x89";  // （我发的图片内容：...）
+                    }
+                    if (!npcHit && tkind == dice::aichat::Trigger::Standby && !dice::aichat::decisionEnabled(configMgr))
+                        DICE_LOG_INFO_M("AI 决策", "{} 待机搭话命中，决策开关未开启，直接生成回复。", dice::ai::traceContext());
                     // 决策：待机搭话先问「决策」用途的模型要不要插话（被 @、关键词、NPC 命中不经过决策）。
                     if (!npcHit && tkind == dice::aichat::Trigger::Standby && dice::aichat::decisionEnabled(configMgr)
-                        && !dice::aichat::decide(configMgr, ctx, senderNick, dice::aichat::cleanForAi(configMgr, trigText)))
+                        && !dice::aichat::decide(configMgr, ctx, senderNick, curText))
                         return;
                     DICE_LOG_DEBUG_M("AI 对话", "群 {} 开始生成回复：{}{}。", msgC.targetId,
                                      npcHit ? "NPC「" + npc.name + "」" : std::string("骰娘"),
@@ -2098,19 +2117,12 @@ static int realMain(int argc, char* argv[]) {
                         npcMood = dice::ainpc::getMood(db.getChatStorage(), gkey, npc.id, msgC.senderId);
                     std::string sysOv = npcHit ? dice::ainpc::systemPrompt(npc, npcMood, senderNick) : std::string();
                     std::string modelOv = npcHit ? npc.modelId : std::string();
-                    // 多模态 —— 消息带图且开启图像识别时，识别图片内容并注入当前消息。
-                    std::string curText = dice::aichat::cleanForAi(configMgr, trigText);
-                    if (dice::aivision::enabled(configMgr) && !msgC.rawContent.empty()) {
-                        std::string vdesc = dice::aivision::describe(configMgr, msgC.rawContent);
-                        if (!vdesc.empty())
-                            curText += "\n\xef\xbc\x88\xe6\x88\x91\xe5\x8f\x91\xe7\x9a\x84\xe5\x9b\xbe\xe7\x89\x87\xe5\x86\x85\xe5\xae\xb9\xef\xbc\x9a" + vdesc + "\xef\xbc\x89";  // （我发的图片内容：...）
-                    }
                     // 知识库：FAQ 命中直接回复（不调用模型）；否则把高分段落作为参考资料注入。
                     std::string kbText;
                     if (dice::kb::enabled(configMgr)) {
                         auto kr = kbSearch(msgC, curText, std::nullopt);
                         if (kr.faq && !npcHit) {
-                            DICE_LOG_DEBUG_M("AI 知识库", "FAQ 直答「{}」（相似度 {:.2f}），不调用模型。", kr.faq->title, kr.faq->coverage);
+                            DICE_LOG_INFO_M("AI 知识库", "{} FAQ 直答「{}」（相似度 {:.2f}），不调用模型：{}", dice::ai::traceContext(), kr.faq->title, kr.faq->coverage, kr.faq->text);
                             std::string rep = dice::aichat::replyAt(configMgr)
                                 ? ("[CQ:at,qq=" + msgC.senderId + "] " + kr.faq->text) : kr.faq->text;
                             finishReply(msgC, rep, "", "", "", {}, lnk, dice::ContentFormat::kPlainText);

@@ -126,7 +126,7 @@ inline const std::unordered_set<uint64_t>& stopTerms() {
 
 // ─── 配置 ────────────────────────────────────────────────
 struct Options {
-    bool enabled = false, useHelp = true, useDocs = true, useCustom = true;
+    bool enabled = true, useHelp = true, useDocs = true, useCustom = true;
     int topK = 3;
     double minScore = 0.45;
     int maxChars = 1200;
@@ -135,7 +135,7 @@ struct Options {
     bool semantic = false;
 };
 inline json defaultSettings() {
-    return json{{"enabled", false}, {"sources", {{"help", true}, {"docs", true}, {"custom", true}}}, {"top_k", 3},
+    return json{{"enabled", true}, {"sources", {{"help", true}, {"docs", true}, {"custom", true}}}, {"top_k", 3},
                 {"min_score", 0.45}, {"max_chars", 1200}, {"faq_direct", true}, {"faq_threshold", 0.6}, {"semantic", false}};
 }
 inline json normalizeSettings(const json& in) {
@@ -143,7 +143,7 @@ inline json normalizeSettings(const json& in) {
     if (!in.is_object()) return d;
     auto clampD = [](double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); };
     auto clampI = [](int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); };
-    d["enabled"] = in.value("enabled", false);
+    d["enabled"] = in.value("enabled", true);
     json src = in.contains("sources") && in["sources"].is_object() ? in["sources"] : json::object();
     d["sources"] = {{"help", src.value("help", true)}, {"docs", src.value("docs", true)}, {"custom", src.value("custom", true)}};
     d["top_k"] = clampI(in.value("top_k", 3), 1, 8);

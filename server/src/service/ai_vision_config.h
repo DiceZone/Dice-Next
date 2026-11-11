@@ -15,11 +15,11 @@ inline nlohmann::json normalizeSettings(const nlohmann::json& input,
     int limit = source.value("max_images", 2);
     if (limit < 1) limit = 1;
     if (limit > 4) limit = 4;
-    const bool direct = source.contains("pass_url") ? source.at("pass_url").get<bool>()
-        : previous.is_object() ? previous.value("pass_url", true) : true;
+    int size = source.value("max_image_kb", previous.is_object() ? previous.value("max_image_kb", 1024) : 1024);
+    size = size < 1 ? 1 : (size > 8192 ? 8192 : size);
     return J{{"enabled", source.value("enabled", false)},
              {"prompt", source.value("prompt", std::string())},
-             {"max_images", limit}, {"pass_url", direct}};
+             {"max_images", limit}, {"max_image_kb", size}, {"pass_url", false}};
 }
 
 } // namespace dice::aivision

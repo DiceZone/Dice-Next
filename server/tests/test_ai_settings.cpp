@@ -1,3 +1,5 @@
+#include "../src/service/ai_settings_patch.h"
+#include "../src/service/ai_vision.h"
 #include "test_framework.h"
 #include "../src/service/ai_vision_config.h"
 #include "../src/service/ai_usage.h"
@@ -124,7 +126,7 @@ TEST(AiUsage, ReasoningIsSeparatedFromTheReply) {
 
 TEST(AiVisionSettings, MissingValuesUseCompatibleDefaults) {
     const auto value = aivision::normalizeSettings(json::object());
-    ASSERT_TRUE(value.at("pass_url").get<bool>());
+    ASSERT_FALSE(value.at("pass_url").get<bool>());
     ASSERT_FALSE(value.at("enabled").get<bool>());
     ASSERT_EQ(value.at("max_images").get<int>(), 2);
     ASSERT_FALSE(value.contains("model_id"));   // 模型改由用途分配决定
@@ -134,7 +136,7 @@ TEST(AiVisionSettings, BothSwitchStatesSurviveRepeatedApiRoundTrips) {
     for (const bool direct : {false, true}) {
         json value = {{"enabled", true},
                       {"prompt", "describe"}, {"max_images", 3}, {"pass_url", direct}};
-        const auto expected = value;
+        const auto expected = aivision::normalizeSettings(value);
         for (int i = 0; i < 5; ++i) value = aivision::normalizeSettings(value);
         ASSERT_TRUE(value == expected);
     }
@@ -144,7 +146,7 @@ TEST(AiVisionSettings, OlderClientCannotReenableExplicitlyDisabledDirectUrls) {
     const json previous = {{"pass_url", false}};
     const auto value = aivision::normalizeSettings({{"enabled", true}}, previous);
     ASSERT_FALSE(value.at("pass_url").get<bool>());
-    ASSERT_TRUE(aivision::normalizeSettings({{"pass_url", true}}, previous).at("pass_url").get<bool>());
+    ASSERT_FALSE(aivision::normalizeSettings({{"pass_url", true}}, previous).at("pass_url").get<bool>());
 }
 
 TEST(AiVisionSettings, ImageLimitsRemainBoundedAndWrongBooleanTypesAreRejected) {
@@ -152,7 +154,7 @@ TEST(AiVisionSettings, ImageLimitsRemainBoundedAndWrongBooleanTypesAreRejected) 
     ASSERT_EQ(aivision::normalizeSettings({{"max_images", 50}}).at("max_images").get<int>(), 4);
     for (const json wrong : {json("false"), json(0), json(nullptr)}) {
         bool rejected = false;
-        try { (void)aivision::normalizeSettings({{"pass_url", wrong}}); }
+        try { (void)aivision::normalizeSettings({{"enabled", wrong}}); }
         catch (const json::type_error&) { rejected = true; }
         ASSERT_TRUE(rejected);
     }
@@ -175,4 +177,41 @@ TEST(AiVisionSettings, DisabledDirectUrlsSurviveSaveAndRestart) {
     ASSERT_TRUE(restarted.save());
     ASSERT_TRUE(cfg.reload());
     ASSERT_FALSE(cfg.get<bool>("dice/ai/vision/pass_url", true));
+}
+
+TEST(AiSettings, PartialSwitchPreservesOtherFieldsAndExplicitFalse) {
+    json old = {{"enabled", true}, {"providers", json::array({{{"id", "p1"}, {"api_key", "private"}}})},
+        {"chat", {{"enabled", true}, {"prompt", "keep me"}}}, {"memory", {{"short", {{"enabled", true}, {"rounds", 30}}}}}};
+    auto next = ai::mergeSettings(old, {{"chat", {{"enabled", false}}}});
+    ASSERT_FALSE(next["chat"]["enabled"].get<bool>());
+    ASSERT_EQ(next["chat"]["prompt"].get<std::string>(), "keep me");
+    ASSERT_TRUE(next["providers"] == old["providers"]);
+    next = ai::mergeSettings(next, {{"memory", {{"short", {{"enabled", false}}}}}});
+    ASSERT_FALSE(next["memory"]["short"]["enabled"].get<bool>());
+    ASSERT_EQ(next["memory"]["short"]["rounds"].get<int>(), 30);
+}
+TEST(AiVisionSettings, LimitsAndImageIdentity) {
+    ASSERT_EQ(aivision::normalizeSettings({})["max_image_kb"].get<int>(), 1024);
+    ASSERT_EQ(aivision::normalizeSettings({{"max_image_kb", -1}})["max_image_kb"].get<int>(), 1);
+    ASSERT_EQ(aivision::normalizeSettings({{"max_image_kb", 99999}})["max_image_kb"].get<int>(), 8192);
+    ASSERT_NE(aivision::visionCacheKey({"https://image.example/download?file=1"}), aivision::visionCacheKey({"https://image.example/download?file=2"}));
+    ASSERT_NE(aivision::visionCacheKey({"a|b", "c"}), aivision::visionCacheKey({"a", "b|c"}));
+    ASSERT_EQ(aivision::visionCacheKey({"same"}), aivision::visionCacheKey({"same"}));
+}
+TEST(AiVisionSettings, DetectsMimeFromBytesAndSkipsOversizedFiles) {
+    TempConfig temp;
+    const auto path = temp.root / "picture.tmp";
+    { std::ofstream out(path, std::ios::binary); out << "GIF89a" << std::string(1024, 'x'); }
+    std::string error;
+    ASSERT_TRUE(aivision::fileToDataUrl(path.string(), 2048, &error).rfind("data:image/gif;base64,", 0) == 0);
+    ASSERT_TRUE(aivision::fileToDataUrl(path.string(), 1024, &error).empty());
+    ASSERT_FALSE(error.empty());
+    { std::ofstream out(path, std::ios::binary); out << "<html>expired image</html>"; }
+    ASSERT_TRUE(aivision::fileToDataUrl(path.string(), 2048, &error).empty());
+}
+TEST(AiSettings, ClaudeDoesNotReceiveConflictingSamplingOptions) {
+    json body = {{"temperature", 0.7}, {"top_p", 1}, {"model", "claude"}};
+    ai::applyProviderRequestCompatibility("https://api.anthropic.com/v1", body);
+    ASSERT_FALSE(body.contains("temperature")); ASSERT_FALSE(body.contains("top_p"));
+    ASSERT_EQ(body["model"].get<std::string>(), "claude");
 }

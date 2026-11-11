@@ -284,8 +284,11 @@ inline void maybeFold(ConfigManager& cfg, Store* cst, const std::string& platfor
 
         int64_t now = (int64_t)std::time(nullptr);
         if (have) {
-            row.content = newSummary; row.refId = newWatermark; row.updatedAt = now;
-            cst->update(row);
+            // Do not overwrite a user edit/delete that occurred during the model request.
+            cst->update_all(orm::set(orm::c(&AiMemoryRow::content) = newSummary,
+                orm::c(&AiMemoryRow::refId) = newWatermark, orm::c(&AiMemoryRow::updatedAt) = now),
+                orm::where(orm::c(&AiMemoryRow::id) == row.id and orm::c(&AiMemoryRow::content) == row.content
+                    and orm::c(&AiMemoryRow::refId) == row.refId and orm::c(&AiMemoryRow::updatedAt) == row.updatedAt));
         } else {
             AiMemoryRow nr; nr.scope = scope; nr.scopeId = scopeId; nr.kind = "summary";
             nr.content = newSummary; nr.refId = newWatermark; nr.createdAt = now; nr.updatedAt = now;

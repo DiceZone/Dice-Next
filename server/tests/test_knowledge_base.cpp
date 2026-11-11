@@ -137,3 +137,8 @@ TEST(KnowledgeBase, BundledDocsLoadAndAnswerUsageQuestions) {
     ASSERT_EQ(r.hits[0].url, std::string("/manage/ai"));
     base.loadDocs(docs.parent_path() / "missing.json");
 }
+
+TEST(KnowledgeBase, DefaultsEnabledButRetainsExplicitOptOut) {
+    ASSERT_TRUE(kb::normalizeSettings(json::object())["enabled"].get<bool>());
+    ASSERT_FALSE(kb::normalizeSettings({{"enabled", false}})["enabled"].get<bool>());
+}

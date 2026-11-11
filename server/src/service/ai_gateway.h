@@ -234,6 +234,14 @@ inline std::string httpPostJson(const std::string& url, const std::string& apiKe
 }
 
 // base_url → 完整的 chat/completions 端点（用户填到 /v1 即可，自动补路径）。
+inline void applyProviderRequestCompatibility(const std::string& baseUrl, json& body) {
+    // Official Claude endpoint: omit sampling overrides across model generations.
+    if (baseUrl == "https://api.anthropic.com" || baseUrl.rfind("https://api.anthropic.com/", 0) == 0) {
+        body.erase("temperature"); body.erase("top_p");
+        body.erase("frequency_penalty"); body.erase("presence_penalty");
+    }
+}
+
 inline std::string endpoint(const std::string& baseUrl) {
     std::string u = baseUrl;
     while (!u.empty() && u.back() == '/') u.pop_back();
@@ -274,6 +282,12 @@ inline bool debugOn() { return dice::shouldRecordLog(dice::LogLevel::Debug); }
 
 // 当前调用所属用途（由 usage 层设置），用于日志标注。
 inline std::string& currentPurpose() { thread_local std::string p; return p; }
+inline std::string& traceContext() { static thread_local std::string value; return value; }
+struct TraceScope {
+    std::string previous;
+    explicit TraceScope(std::string value) : previous(traceContext()) { traceContext() = std::move(value); }
+    ~TraceScope() { traceContext() = previous; }
+};
 struct PurposeScope {
     std::string prev;
     explicit PurposeScope(const std::string& p) : prev(currentPurpose()) { currentPurpose() = p; }
@@ -436,6 +450,7 @@ inline Result chat(ConfigManager& cfg, const Model& m,
     if (p.contains("presence_penalty"))  body["presence_penalty"]  = p.value("presence_penalty", 0.0);
 
     const long long no = nextRequestNo();
+    applyProviderRequestCompatibility(m.baseUrl, body);
     const std::string url = endpoint(m.baseUrl);
     logRequest(no, m, url, body);
     InflightGuard busy(m.id);
@@ -512,6 +527,7 @@ inline ChatRawResult chatRaw(ConfigManager& cfg, const Model& m, const json& mes
     body["top_p"] = p.value("top_p", 1.0);
     if (tools.is_array() && !tools.empty()) { body["tools"] = tools; body["tool_choice"] = "auto"; }
     const long long no = nextRequestNo();
+    applyProviderRequestCompatibility(m.baseUrl, body);
     const std::string url = endpoint(m.baseUrl);
     logRequest(no, m, url, body);
     InflightGuard busy(m.id);

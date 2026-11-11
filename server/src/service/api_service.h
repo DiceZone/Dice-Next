@@ -1,4 +1,5 @@
 #pragma once
+#include "ai_settings_patch.h"
 #include "../common/weighted_templates.h"
 #include "../common/template_markdown.h"
 #include "../common/check_reply.h"
@@ -844,7 +845,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     app.registerHandler("/api/system/ai", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
-                auto j = J::parse(req->body());
+                std::lock_guard lock(dice::ai::settingsMutex());
+                auto j = dice::ai::mergeSettings(cfg.get<J>("dice/ai", J::object()), J::parse(req->body()));
                 J out = J::object();
                 out["enabled"] = j.value("enabled", false);
                 // 提供商：Base URL + API Key 只填一次，供多个模型共用。
@@ -1118,6 +1120,40 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         try {
             auto* cst = db.getChatStorage();
             if (!cst) { jsonReply(fail("no chat store"), std::move(cb)); return; }
+            if (req->method() == drogon::Put) {
+                const auto j = J::parse(req->body());
+                const auto id = j.at("id").get<int64_t>();
+                auto row = cst->get<AiMemoryRow>(id);
+                if (row.kind != "summary" && row.kind != "fact") throw std::invalid_argument("unsupported memory kind");
+                const std::string text = j.at("content").get<std::string>();
+                if (text.empty() || text.size() > 24000) throw std::invalid_argument("memory content must be 1-24000 bytes");
+                if (j.value("previous_content", row.content) != row.content) throw std::invalid_argument("memory changed; reload before editing");
+                std::string embedding = row.embedding;
+                if (row.kind == "fact" && text != row.content) {
+                    auto result = dice::ai::embedFor(cfg, {text}, 30);
+                    if (!result.ok || result.vectors.empty() || result.vectors[0].empty())
+                        throw std::runtime_error("embedding failed; memory was not changed: " + result.error);
+                    embedding = dice::ai::vecToJson(result.vectors[0]);
+                }
+                cst->update_all(orm::set(orm::c(&AiMemoryRow::content) = text,
+                    orm::c(&AiMemoryRow::embedding) = embedding,
+                    orm::c(&AiMemoryRow::updatedAt) = (int64_t)std::time(nullptr)),
+                    orm::where(orm::c(&AiMemoryRow::id) == id and orm::c(&AiMemoryRow::content) == row.content));
+                if (!cst->changes()) throw std::runtime_error("memory changed or was deleted; reload before editing");
+                jsonReply(ok(nullptr), std::move(cb)); return;
+            }
+            if (req->method() == drogon::Delete && !req->getParameter("id").empty()) {
+                const auto id = std::stoll(req->getParameter("id"));
+                auto row = cst->get<AiMemoryRow>(id);
+                if (row.kind == "summary") {
+                    // Keep the folding watermark so deleted content is not recreated from old messages.
+                    cst->update_all(orm::set(orm::c(&AiMemoryRow::content) = std::string(),
+                        orm::c(&AiMemoryRow::updatedAt) = (int64_t)std::time(nullptr)),
+                        orm::where(orm::c(&AiMemoryRow::id) == id));
+                } else if (row.kind == "fact") cst->remove<AiMemoryRow>(id);
+                else throw std::invalid_argument("unsupported memory kind");
+                jsonReply(ok(nullptr), std::move(cb)); return;
+            }
             if (req->method() == drogon::Post) {
                 // 立即为某群折叠一批历史（摘要 + 抽取事实，同步，可能阻塞 ~数十秒）。scope_id = "平台:群号"。
                 auto j = J::parse(req->body());
@@ -1159,13 +1195,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 for (auto& r : rows) {
                     if (!fsid.empty() && r.scopeId != fsid) continue;
                     if (kind == "summary" && r.content.empty()) continue;   // 仅做水位线的空摘要行不展示
-                    arr.push_back(J{{"scope", r.scope}, {"scope_id", r.scopeId}, {"content", r.content},
+                    arr.push_back(J{{"id", r.id}, {"kind", r.kind}, {"scope", r.scope}, {"scope_id", r.scopeId}, {"content", r.content},
                                     {"ref_id", r.refId}, {"updated_at", r.updatedAt}, {"hits", r.hits}});
                 }
             } catch (...) {}
             jsonReply(ok(J{{"items", arr}}), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
-    }, {drogon::Get, drogon::Post, drogon::Delete});
+    }, {drogon::Get, drogon::Put, drogon::Post, drogon::Delete});
 
     // 连通性测试——用请求里给的模型配置（未保存也能测）或按 id 取已存模型，
     // 调一次 chat 返回样例回复 + 延迟 + token + 估算费用。不受总开关限制（便于配置时验证）。
@@ -1210,7 +1246,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     app.registerHandler("/api/knowledge/settings", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
-                cfg.set<J>("dice/ai/knowledge", dice::kb::normalizeSettings(J::parse(req->body())));
+                std::lock_guard lock(dice::ai::settingsMutex());
+                cfg.set<J>("dice/ai/knowledge", dice::kb::normalizeSettings(dice::ai::mergeSettings(dice::kb::conf(cfg), J::parse(req->body()))));
                 cfg.save();
             }
             jsonReply(ok(dice::kb::conf(cfg)), std::move(cb));
