@@ -62,7 +62,10 @@ struct LuaEventFixture {
         cfg.resetDefault(); if (!i18n.load()) throw std::runtime_error("cannot load translations");
         adapters.registerAdapter(a); setting("__presence", "1");
     }
-    ~LuaEventFixture() { db.close(); }
+    ~LuaEventFixture() {
+        db.close();
+        std::error_code ec; std::filesystem::remove_all(root, ec); // the fixture created this unique temp directory
+    }
     void setting(const std::string& key, const std::string& value) {
         setAccountGroupSetting(*db.getStorage(), a->id(), a->platform(), origin.groupId, origin.groupId, key, value);
     }

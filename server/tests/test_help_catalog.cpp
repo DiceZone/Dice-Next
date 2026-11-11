@@ -28,7 +28,10 @@ struct HelpLibraryFixture {
         message.senderId = "help-reader"; message.senderName = "读者";
         message.selfId = "fake-bot"; message.targetId = "help-group"; message.type = MessageType::kGroup;
     }
-    ~HelpLibraryFixture() { db.close(); } // Only synthetic data; never starts an adapter/listener.
+    ~HelpLibraryFixture() { // Only synthetic data; never starts an adapter/listener.
+        db.close();
+        std::error_code ec; std::filesystem::remove_all(root, ec); // the fixture created this unique temp directory
+    }
     std::string run(const std::string& command, Locale loc = Locale::kZhHans) {
         message.content = command; return router.handleMessage(message, loc);
     }

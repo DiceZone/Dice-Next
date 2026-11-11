@@ -22,7 +22,10 @@ struct ReleaseImportFixture {
         if (!db.open("app.db")) throw std::runtime_error("cannot open isolated database");
         cfg.resetDefault();
     }
-    ~ReleaseImportFixture() { db.close(); fs::current_path(previous); } // Leave only synthetic evidence; never delete source data.
+    ~ReleaseImportFixture() { // Synthetic data only; remove the unique temp directory this fixture created.
+        db.close(); fs::current_path(previous);
+        std::error_code ec; fs::remove_all(root, ec);
+    }
     void file(const fs::path& path, const std::string& text) { fs::create_directories(path.parent_path()); std::ofstream out(path, std::ios::binary); out << text; }
 };
 template<class T> void raw(std::ofstream& out, T value) { out.write(reinterpret_cast<const char*>(&value), sizeof(value)); }
