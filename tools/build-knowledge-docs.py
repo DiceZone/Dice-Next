@@ -111,7 +111,8 @@ def main():
     src = os.path.join(sys.argv[1], 'src')
     chunks = []
     for root, dirs, files in os.walk(src):
-        dirs[:] = sorted(d for d in dirs if d not in ('public', 'config', 'node_modules') and not d.startswith('.'))
+        # zh-hant / en / ja 是文档站的其他语言版本，知识库只收录简体中文原文。
+        dirs[:] = sorted(d for d in dirs if d not in ('public', 'config', 'node_modules', 'zh-hant', 'en', 'ja') and not d.startswith('.'))
         for name in sorted(files):
             if not name.endswith('.md') or name in SKIP_PAGES:
                 continue

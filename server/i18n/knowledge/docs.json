@@ -54,7 +54,7 @@
 {
 "title": "适配器开发 > 接口定义 > 文件与同步调用",
 "url": "/develop/adapter-dev",
-"text": "// 上传群文件（.log end 传日志 txt）。content = 原始字节，兼容远程/容器化协议端。\nvoid uploadGroupFile(groupId, name, content, localPath = \"\");\n\n// 同步调用平台 API 并等待响应（群文件列表/下载链等请求-响应式接口）。\n// ⚠️ 不得在适配器接收线程上调用（会死锁）；供 WebUI 的 drogon 处理线程使用。\njson invokeAction(action, params, timeoutMs = 8000);",
+"text": "// 上传群文件（.log end 传日志 txt）。content = 原始字节，兼容远程/容器化协议端。\nvoid uploadGroupFile(groupId, name, content, localPath = \"\");\n\n// 同步调用平台 API 并等待响应（群文件列表/下载链等请求-响应式接口）。\n// 注意：不得在适配器接收线程上调用（会死锁）；供 WebUI 的 drogon 处理线程使用。\njson invokeAction(action, params, timeoutMs = 8000);",
 "section": "开发",
 "id": "doc8"
 },
@@ -584,49 +584,49 @@
 "id": "doc83"
 },
 {
-"title": "贡献指南 > ⚠️ 注意事项（重要） > 1. 忠实复刻优先，先查原版",
+"title": "贡献指南 > 注意事项（重要） > 1. 忠实复刻优先，先查原版",
 "url": "/develop/contribution",
 "text": "Dice!Next 的核心目标是让老 Dice! 用户无痛迁移。新增 / 改动任何指令、规则、文案、键值之前，先查原版 Dice! 的实际行为（DiceEvent.cpp / GlobalVar.cpp 等），不要自己发明语法或措辞。参考项目（海豹 / 青果）也可对照。",
 "section": "开发",
 "id": "doc84"
 },
 {
-"title": "贡献指南 > ⚠️ 注意事项（重要） > 2. 文案一律走 i18n，不要硬编码",
+"title": "贡献指南 > 注意事项（重要） > 2. 文案一律走 i18n，不要硬编码",
 "url": "/develop/contribution",
 "text": "所有面向用户的文本都通过 i18n 系统输出，不要在代码里写死中文。新增文案键时，四种语言（zh-Hans / zh-Hant / en / ja）都要补，否则切换语言会缺字。另外注意：.help 帮助文本的首行统一为「描述词 + 指令」的句式，且默认回复文案不得以指令前缀开头（tools/audit_i18n_texts.py 会做回归检查）。",
 "section": "开发",
 "id": "doc85"
 },
 {
-"title": "贡献指南 > ⚠️ 注意事项（重要） > 3. 改数据库表结构要改两处",
+"title": "贡献指南 > 注意事项（重要） > 3. 改数据库表结构要改两处",
 "url": "/develop/contribution",
 "text": "数据库 schema 在两个地方各声明一次，必须同步修改：\n- server/src/storage/database.h 的 Storage decltype(make_storage(...))\n- server/src/storage/database.cpp 的 make_storage(...)\n\n只改一处会导致一大段模板报错。新增列由 sync_schema 自动 ALTER，不会丢数据。",
 "section": "开发",
 "id": "doc86"
 },
 {
-"title": "贡献指南 > ⚠️ 注意事项（重要） > 4. 绝不提交密钥 / Token",
+"title": "贡献指南 > 注意事项（重要） > 4. 绝不提交密钥 / Token",
 "url": "/develop/contribution",
 "text": "OneBot Access Token、API Key 等不得写进提交。config/ 是运行时自动生成的本地目录，注意不要把含真实 Token 的本地配置提交上去。",
 "section": "开发",
 "id": "doc87"
 },
 {
-"title": "贡献指南 > ⚠️ 注意事项（重要） > 5. Windows 平台坑",
+"title": "贡献指南 > 注意事项（重要） > 5. Windows 平台坑",
 "url": "/develop/contribution",
 "text": "- windows.h 的 max/min 宏会和 std::max/std::min 冲突（C2589）；用 (a < b ? b : a) 或定义 NOMINMAX。\n- 跨进程外部调用走 curl（drogon 的异步 DNS 在 Windows 上有问题），参考既有日志上传 / {api:} 实现。",
 "section": "开发",
 "id": "doc88"
 },
 {
-"title": "贡献指南 > ⚠️ 注意事项（重要） > 6. 文档改动要过构建",
+"title": "贡献指南 > 注意事项（重要） > 6. 文档改动要过构建",
 "url": "/develop/contribution",
 "text": "文档站启用了死链检查，新增 / 改链接后请本地跑一遍 npm run docs:build（在 docs/），通过再提交。",
 "section": "开发",
 "id": "doc89"
 },
 {
-"title": "贡献指南 > ⚠️ 注意事项（重要） > 7. 前端一律用网页样式组件，禁用浏览器原生控件",
+"title": "贡献指南 > 注意事项（重要） > 7. 前端一律用网页样式组件，禁用浏览器原生控件",
 "url": "/develop/contribution",
 "text": "下拉框、弹窗、确认框等不要用浏览器自带的原生控件，统一用项目内的样式组件，保证三端外观一致、可主题化：\n\n- 下拉框：用 @/components/ui/select 的 Select（SelectTrigger / SelectContent / SelectItem / SelectValue），不要写原生 `。\n- 确认 / 输入弹窗：用 @/hooks/use-dialogs 的 useDialogs() —— await dlg.confirm({ title, description, destructive })、await dlg.prompt({ title, defaultValue })，并把 dlg.node 渲染进组件树。不要用 window.confirm / alert / prompt。\n- 对话框 / 抽屉：用 @/components/ui/dialog，不要自己堆原生  或裸 position:fixed 遮罩。\n\n参考既有用法：下拉看 components/adapter/adapter-form.tsx，弹窗看 pages/groups-page.tsx`。",
 "section": "开发",
@@ -1685,7 +1685,7 @@
 {
 "title": "快速开始概览 > 核心特性",
 "url": "/guide/",
-"text": "| 特性 | 说明 |\n\n| 🎲 全能掷骰 | COC7 / DND / BRP 检定与房规、命运骰、暗骰、奖惩骰，兼容原版指令 |\n| 🌏 多语言 | 简体 / 繁體 / English / 日本語四语回复，支持自定义语言包 |\n| 🖥️ Web 面板 | 群管、玩家、牌堆、规则、日志、定时任务、通知……全部网页化 |\n| 🧩 扩展生态 | 兼容原版 Dice! Lua mod 与海豹 SealDice JS 插件，规则包一键导入 |\n| 🤖 AI 增强 | 可选接入大模型：回复润色、翻译、对话、NPC 扮演、工具调用 |\n| 📦 解压即用 | Windows 包自带运行库，双击启动，托盘常驻，开机自启 |\n| ⚡ 热加载 | 配置变更自动生效；面板改设置即时保存 |",
+"text": "| 特性 | 说明 |\n\n| 全能掷骰 | COC7 / DND / BRP 检定与房规、命运骰、暗骰、奖惩骰，兼容原版指令 |\n| 多语言 | 简体 / 繁體 / English / 日本語四语回复，支持自定义语言包 |\n| Web 面板 | 群管、玩家、牌堆、规则、日志、定时任务、通知……全部网页化 |\n| 扩展生态 | 兼容原版 Dice! Lua mod 与海豹 SealDice JS 插件，规则包一键导入 |\n| AI 增强 | 可选接入大模型：回复润色、翻译、对话、NPC 扮演、工具调用 |\n| 解压即用 | Windows 包自带运行库，双击启动，托盘常驻，开机自启 |\n| 热加载 | 配置变更自动生效；面板改设置即时保存 |",
 "section": "入门",
 "id": "doc241"
 },
@@ -3519,7 +3519,7 @@
 {
 "title": "关于项目 > 测试人员感谢名单",
 "url": "/other/about",
-"text": "感谢公测期间不辞辛劳、提供大量反馈的测试人员（排名不分先后）：\n\n| 头像 | 测试人员 | 头像 | 测试人员 |\n\n|  | 剪影 |  | 平衡 |\n|  | 云嗣 |  | 贰狐 |\n|  | 条辣困 |  | 叶川 |\n|  | 韶华 |  | 细雪 |\n|  | 察生 |  | 霜桦 |\n\n正是你们的细致测试与建议，让 Dice!Next 不断变得更好。🎲\nDice!Next 基于 AGPLv3 协议开源发布，详见开源协议。",
+"text": "感谢公测期间不辞辛劳、提供大量反馈的测试人员（排名不分先后）：\n\n| 头像 | 测试人员 | 头像 | 测试人员 |\n\n|  | 剪影 |  | 平衡 |\n|  | 云嗣 |  | 贰狐 |\n|  | 条辣困 |  | 叶川 |\n|  | 韶华 |  | 细雪 |\n|  | 察生 |  | 霜桦 |\n\n正是你们的细致测试与建议，让 Dice!Next 不断变得更好。\nDice!Next 基于 AGPLv3 协议开源发布，详见开源协议。",
 "section": "其他",
 "id": "doc503"
 },
@@ -3610,7 +3610,7 @@
 {
 "title": "开源协议 > 简要说明",
 "url": "/other/license",
-"text": "| 权限 / 义务 | 说明 |\n\n| 商业使用 | ✅ 允许 |\n| 修改 | ✅ 允许 |\n| 分发 | ✅ 允许 |\n| 私有使用 | ✅ 允许 |\n| 开源义务 | ⚠️ 修改后分发、或通过网络提供服务，都必须以 AGPLv3 公开对应源代码 |\n| 协议保留 | ⚠️ 必须保留版权声明与许可证 |\n| 担保 | ❌ 无任何担保 |\n\n网络服务条款\nAGPLv3 的核心区别在于：即使你只是把修改版作为网络服务对外提供（而非分发软件本体），也需要向使用者提供对应的源代码。\nGNU AGPLv3 全文。",
+"text": "| 权限 / 义务 | 说明 |\n\n| 商业使用 | 允许 |\n| 修改 | 允许 |\n| 分发 | 允许 |\n| 私有使用 | 允许 |\n| 开源义务 | 修改后分发、或通过网络提供服务，都必须以 AGPLv3 公开对应源代码 |\n| 协议保留 | 必须保留版权声明与许可证 |\n| 担保 | 无任何担保 |\n\n网络服务条款\nAGPLv3 的核心区别在于：即使你只是把修改版作为网络服务对外提供（而非分发软件本体），也需要向使用者提供对应的源代码。\nGNU AGPLv3 全文。",
 "section": "其他",
 "id": "doc516"
 },
