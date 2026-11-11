@@ -5,9 +5,8 @@
 
 namespace dice::aivision {
 
-// Keep the API's read/write schema in one place. In particular, an explicit
-// false is a setting, not a missing value. Older clients which omit pass_url
-// must not silently re-enable URL forwarding on an existing installation.
+// URL forwarding is retired, including for old saved configurations. The bot
+// downloads images, validates their size and format, then uploads image bytes.
 inline nlohmann::json normalizeSettings(const nlohmann::json& input,
                                        const nlohmann::json& previous = nlohmann::json::object()) {
     using J = nlohmann::json;

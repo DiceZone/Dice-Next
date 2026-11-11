@@ -4,10 +4,10 @@
 // 为 text+image_url 数组）识别图片内容，得到一段文字描述，注入对话，让骰娘能"看懂图"
 // 并据此回应。视觉模型可与对话模型分开指定（很多场景对话用便宜模型、识图用多模态模型）。
 //
-// 图片来源：实时消息里 [CQ:image,url=http...] 的 rkey 还新鲜，直接把 http URL 交给视觉
-// 模型拉取；若是本地图（/api/chat/images/<名> 或本地路径）则读文件转 base64 data URL。
+// 图片来源：及时下载 [CQ:image,url=http...]，与本地缓存图一起校验格式和大小，
+// 统一转为 Base64 data URL。图片链接不直接交给视觉服务。
 //
-// 配置 dice/ai.vision：{ enabled, prompt(空=内置默认), max_images, pass_url }；模型由用途分配的「图像识别」决定。
+// 配置 dice/ai.vision：{ enabled, prompt, max_images, max_image_kb }。
 
 #include "../config/config_manager.h"
 #include "ai_usage.h"

@@ -297,6 +297,7 @@ inline long long nextRequestNo() { static std::atomic<long long> n{0}; return ++
 inline std::string requestTag(long long no) {
     std::string t = "AI#" + std::to_string(no);
     if (!currentPurpose().empty()) t += " " + currentPurpose();
+    if (!traceContext().empty()) t += " " + traceContext();
     return t;
 }
 
@@ -337,7 +338,9 @@ inline std::string formatMessages(const json& msgs) {
                 else if (ty == "image_url") {
                     std::string u = part.contains("image_url") && part["image_url"].is_object()
                         ? part["image_url"].value("url", std::string()) : std::string();
-                    out += "[图片] " + u + "\n";
+                    if (u.rfind("data:", 0) == 0)
+                        out += "[图片内容已上传；Base64 字符数 " + std::to_string(u.size()) + "]\n";
+                    else out += "[图片链接]\n";
                 } else out += "[" + ty + "]\n";
             }
         }
@@ -365,6 +368,8 @@ inline std::string formatParams(const json& body) {
 }
 
 inline void logRequest(long long no, const Model& m, const std::string& url, const json& body) {
+    if (!traceContext().empty())
+        DICE_LOG_INFO_M("AI 服务", "[{}] 调用模型「{}」({})。", requestTag(no), m.name.empty() ? m.model : m.name, m.model);
     if (!debugOn()) return;
     std::string head = "[" + requestTag(no) + "] 请求 → 模型「" + (m.name.empty() ? m.model : m.name) + "」(" + m.model + ") " + url;
     std::string text = "参数：" + formatParams(body);

@@ -215,3 +215,13 @@ TEST(AiSettings, ClaudeDoesNotReceiveConflictingSamplingOptions) {
     ASSERT_FALSE(body.contains("temperature")); ASSERT_FALSE(body.contains("top_p"));
     ASSERT_EQ(body["model"].get<std::string>(), "claude");
 }
+
+TEST(AiSettings, ImagePayloadNeverAppearsInDebugMessages) {
+    json messages = json::array({{{"role", "user"}, {"content", json::array({
+        {{"type", "image_url"}, {"image_url", {{"url", "data:image/png;base64,PRIVATE_IMAGE_BYTES"}}}},
+        {{"type", "text"}, {"text", "What is in this image?"}}
+    })}}});
+    auto printed = ai::formatMessages(messages);
+    ASSERT_TRUE(printed.find("PRIVATE_IMAGE_BYTES") == std::string::npos);
+    ASSERT_TRUE(printed.find("What is in this image?") != std::string::npos);
+}
