@@ -372,14 +372,13 @@ std::string signUrlFor(const Manifest& manifest, const std::string& apiKey) {
     return url;
 }
 
-json buildConfig(const Manifest& manifest, const std::string& apiKey, const std::string& account,
-                 int reverseWsPort, const std::string& reverseToken) {
+json buildConfig(const Manifest& manifest, const std::string& apiKey, int reverseWsPort,
+                 const std::string& reverseToken) {
     json config{
         {"CDNLists", manifest.cdnLists},
         {"FakeSignApi", signUrlFor(manifest, apiKey)},
         {"FileLists", json::array()},
         {"Version", manifest.qqVersion},
-        {"Accounts", json::array({account})},
         {"Protocol", "onebot11"},
         {"OneBot", {
             {"message_format", "array"},
@@ -744,7 +743,7 @@ private:
             {
                 std::ofstream config(dir / "Config.json", std::ios::binary | std::ios::trunc);
                 const bool reverse = params.transport == kTransportReverse;
-                config << buildConfig(manifest, params.apiKey, params.account,
+                config << buildConfig(manifest, params.apiKey,
                                       reverse ? params.wsPort : 0, reverse ? params.token : std::string()).dump(2);
                 if (!config) {
                     setStage("failed", "无法写入 openopq 配置");

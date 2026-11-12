@@ -52,9 +52,10 @@ std::string signUrlFor(const Manifest& manifest, const std::string& apiKey);
 /// 给 openopq 的 Config.json：只开 OneBot v11。
 /// 默认 DN 经它端口上的正向 WS 连过去；``reverseWsPort`` 大于 0 时另写一条反向 WS，
 /// 让 openopq 连回 DN（要客户端支持，v1.3.0-rc.1 不支持）。
+/// 账号不写进配置：它由启动参数 ``--account`` 给出，两处都写的话 v1.3.0-rc.2 会给同一个号
+/// 开两个会话，OneBot 分不清连的是哪一个，DN 每次连上都被拒（unknown/ambiguous selector）。
 nlohmann::json buildConfig(const Manifest& manifest, const std::string& apiKey,
-                           const std::string& account, int reverseWsPort = 0,
-                           const std::string& reverseToken = {});
+                           int reverseWsPort = 0, const std::string& reverseToken = {});
 
 /// 内置登录账号与 openopq 之间的连接方式
 inline constexpr const char* kTransportForward = "forward_ws";

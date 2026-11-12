@@ -129,21 +129,22 @@ TEST(OpenOpqRuntime, ConfigSignsWithKeyAndEnablesOneBot) {
     Manifest manifest;
     std::string error;
     ASSERT_TRUE(parseSignedManifest(envelope(kPayload, kSignature), kTestPublicKey, manifest, error));
-    const auto config = buildConfig(manifest, "bdc_diceflats_0123456789abcdef", "123456789");
+    const auto config = buildConfig(manifest, "bdc_diceflats_0123456789abcdef");
     ASSERT_EQ(config["FakeSignApi"].get<std::string>(),
               std::string("https://sign-v1.dice.zone/k/bdc_diceflats_0123456789abcdef/sign"));
     ASSERT_EQ(config["Version"].get<std::string>(), std::string("QQNT-v7.0.2-53644"));
     ASSERT_EQ(config["Protocol"].get<std::string>(), std::string("onebot11"));
     // 默认正向：v1.3.0-rc.1 没有反向 WS，配置里不该有连回 DN 的项
     ASSERT_FALSE(config["OneBot"].contains("reverse_ws"));
-    ASSERT_EQ(config["Accounts"][0].get<std::string>(), std::string("123456789"));
+    // 账号只经 --account 给出；配置里再写一遍，v1.3.0-rc.2 会给同一个号开两个会话
+    ASSERT_FALSE(config.contains("Accounts"));
 }
 
 TEST(OpenOpqRuntime, ReverseTransportWritesBackConnection) {
     Manifest manifest;
     std::string error;
     ASSERT_TRUE(parseSignedManifest(envelope(kPayload, kSignature), kTestPublicKey, manifest, error));
-    const auto config = buildConfig(manifest, "bdc_diceflats_0123456789abcdef", "123456789", 40123, "tok");
+    const auto config = buildConfig(manifest, "bdc_diceflats_0123456789abcdef", 40123, "tok");
     const auto& reverse = config["OneBot"]["reverse_ws"][0];
     ASSERT_EQ(reverse["url"].get<std::string>(), std::string("ws://127.0.0.1:40123/"));
     ASSERT_EQ(reverse["token"].get<std::string>(), std::string("tok"));
