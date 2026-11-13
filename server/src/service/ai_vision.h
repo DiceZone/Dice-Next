@@ -87,9 +87,10 @@ inline std::string fileToDataUrl(const std::string& path, size_t maxBytes = 1024
 inline std::string downloadToDataUrl(const std::string& url, size_t maxBytes = 1024 * 1024, std::string* error = nullptr) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    const auto temporary = image_resources::cacheDirectory("chat") / "tmp";
-    fs::create_directories(temporary, ec);
-    std::string tmpName = image_resources::utf8(temporary / (std::to_string((long long)std::time(nullptr)) + "_" + chatimg::randToken() + ".tmp"));
+    std::unique_ptr<ai::RequestFiles> temporary;
+    try { temporary=std::make_unique<ai::RequestFiles>(); }
+    catch (...) { if (error) *error="无法创建识图临时文件"; return ""; }
+    std::string tmpName = image_resources::utf8(temporary->file("image.tmp"));
     int code = 0;
     if (!chatimg::download(url, tmpName, maxBytes, &code)) {
         if (error) *error = code == 63 ? "图片超过大小上限 " + std::to_string(maxBytes / 1024) + " KB，已跳过" : "图片下载失败，curl 错误码 " + std::to_string(code);
@@ -166,10 +167,18 @@ inline std::string describe(ConfigManager& cfg, const std::string& content) {
         DICE_LOG_WARN_M("AI 识图", "未配置可用的图像识别模型，请在模型用途中选择支持图片的模型。");
         return "[图片未能识别：尚未配置视觉模型。不要猜测图片内容。]";
     }
+    for (size_t i=0; i<srcs.size(); ++i) {
+        const auto comma=srcs[i].find(',');
+        const auto encoded=comma==std::string::npos ? 0 : srcs[i].size()-comma-1;
+        const auto padding=srcs[i].ends_with("==") ? 2 : srcs[i].ends_with("=") ? 1 : 0;
+        DICE_LOG_INFO_M("AI 识图", "{} 识图输入：图片 {}，{} 字节，指纹 {}。", ai::traceContext(),i+1,
+            encoded/4*3-padding,visionCacheKey({srcs[i]}));
+    }
+    const auto settings=normalizeSettings(conf(cfg));
     // A2：查缓存（24h TTL）。
     std::vector<std::string> cacheParts = srcs;
-    cacheParts.push_back(conf(cfg).value("prompt", std::string()));
-    for (const auto& model : ai::pick(cfg, "vision", "", false)) cacheParts.push_back(model.id + ":" + model.model + ":" + model.baseUrl);
+    cacheParts.push_back(settings.dump());
+    for (const auto& model : ai::pick(cfg, "vision", "", false)) cacheParts.push_back(model.id + ":" + model.model + ":" + model.baseUrl + ":" + model.options.dump());
     const std::string ckey = visionCacheKey(cacheParts);
     const long long now = (long long)std::time(nullptr);
     {
@@ -188,7 +197,7 @@ inline std::string describe(ConfigManager& cfg, const std::string& content) {
         contentArr.push_back({{"type", "image_url"}, {"image_url", {{"url", s}}}});
     json messages = json::array();
     messages.push_back({{"role", "user"}, {"content", contentArr}});
-    ai::ChatRawResult r = ai::chatRawFor(cfg, "vision", messages, json(nullptr), 300, 30);
+    ai::ChatRawResult r = ai::chatRawFor(cfg, "vision", messages, json(nullptr), settings["max_tokens"].get<int>(), settings["timeout_sec"].get<int>());
     if (!r.ok || r.content.empty()) {
         DICE_LOG_WARN_M("AI 识图", "{} 图像识别失败：{}", ai::traceContext(), r.error.empty() ? "视觉模型未返回图片描述" : r.error);
         return "[图片识别失败，无法确认图片内容。请告知用户本次未能读图，不要编造图中信息。]";

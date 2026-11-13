@@ -881,8 +881,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         mm["kind"] = embedding ? "embedding" : "chat";
                         mm["vision"] = !embedding && m.value("vision", false);
                         mm["enabled"] = m.value("enabled", true);
-                        mm["price_in"] = m.value("price_in", 0.0);
-                        mm["price_out"] = m.value("price_out", 0.0);
+                        mm.update(dice::ai::normalizeModelOptions(m));
                         mm["token_limit"] = m.value("token_limit", (long long)0);
                         mm["cost_limit"] = m.value("cost_limit", 0.0);
                         // Preserve existing usage stats (don't reset on WebUI save)
@@ -1227,7 +1226,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 std::string dim = er.ok && !er.vectors.empty() ? std::to_string(er.vectors[0].size()) : std::string();
                 jsonReply(ok(J{{"ok", er.ok}, {"reply", er.ok ? "dim=" + dim : std::string()}, {"error", er.error},
                                {"latencyMs", 0}, {"promptTokens", er.totalTokens}, {"completionTokens", 0},
-                               {"totalTokens", er.totalTokens}, {"cost", 0.0}}), std::move(cb));
+                               {"totalTokens", er.totalTokens}, {"cost", er.cost}}), std::move(cb));
                 return;
             }
             dice::ai::PurposeScope purpose("test");

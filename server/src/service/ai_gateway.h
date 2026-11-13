@@ -12,6 +12,8 @@
 //                   used_tokens,used_cost (累计用量，网关自动累加) } ] }
 
 #include "../common/logger.h"
+#include "ai_model_options.h"
+#include "ai_request_files.h"
 #include "../common/subprocess.h"
 #include "../config/config_manager.h"
 #include <nlohmann/json.hpp>
@@ -27,6 +29,7 @@
 #include <mutex>
 #include <cmath>
 #include <map>
+#include <memory>
 
 namespace dice::ai {
 
@@ -44,6 +47,7 @@ struct Model {
     std::string kind = "chat";           // chat（通用）| embedding（嵌入）
     bool vision = false;                 // 通用模型是否支持图片输入
     bool enabled = true;
+    json options = normalizeModelOptions(json::object());
     double priceIn = 0, priceOut = 0;    // 每百万 token 的美元单价
     long long tokenLimit = 0;            // 0 = 不限
     double costLimit = 0;                // 0 = 不限
@@ -78,8 +82,9 @@ inline Model modelFromJson(const json& j) {
     m.kind = j.value("kind", std::string("chat")) == "embedding" ? "embedding" : "chat";
     m.vision = j.value("vision", false);
     m.enabled = j.value("enabled", true);
-    m.priceIn = j.value("price_in", 0.0);
-    m.priceOut = j.value("price_out", 0.0);
+    m.options = normalizeModelOptions(j);
+    m.priceIn = m.options["price_in"].get<double>();
+    m.priceOut = m.options["price_out"].get<double>();
     m.tokenLimit = j.value("token_limit", (long long)0);
     m.costLimit = j.value("cost_limit", 0.0);
     m.usedTokens = j.value("used_tokens", (long long)0);
@@ -204,14 +209,12 @@ inline std::string httpPostJson(const std::string& url, const std::string& apiKe
     status = 0;
     auto esc = [](const std::string& s) { std::string o; o.reserve(s.size() + 8);
         for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; } return o; };
-    static std::atomic<long long> seq{0};
-    long long id = ++seq;
-    fs::path tmp = fs::temp_directory_path();
-    fs::path cfgF = tmp / ("dnai_" + std::to_string(id) + ".cfg");
-    fs::path bodyF = tmp / ("dnai_" + std::to_string(id) + ".body");
+    std::unique_ptr<RequestFiles> files;
+    try { files = std::make_unique<RequestFiles>(); } catch (...) { return "无法创建 AI 请求临时文件"; }
+    const auto cfgF = files->file("request.cfg"), bodyF = files->file("request.body");
     std::error_code ec;
     try {
-        { std::ofstream bf(bodyF, std::ios::binary); bf << body; }
+        { std::ofstream bf(bodyF, std::ios::binary); bf << body; bf.flush(); if (!bf) return "无法写入 AI 请求正文"; }
         std::ofstream cf(cfgF, std::ios::binary);
         cf << "url = \"" << esc(url) << "\"\n";
         cf << "request = \"POST\"\n";
@@ -223,6 +226,7 @@ inline std::string httpPostJson(const std::string& url, const std::string& apiKe
         if (!apiKey.empty()) cf << "header = \"Authorization: Bearer " << esc(apiKey) << "\"\n";
         cf << "data-binary = \"@" << esc(bodyF.string()) << "\"\n";
         cf << "write-out = \"\\n%{http_code}\"\n";
+        cf.flush(); if (!cf) return "无法写入 AI 请求配置";
     } catch (...) { fs::remove(cfgF, ec); fs::remove(bodyF, ec); return ""; }
 
     // curl runs directly, never through a shell: see common/subprocess.h.
@@ -432,91 +436,77 @@ struct InflightGuard {
     ~InflightGuard() { std::lock_guard<std::mutex> lk(inflightMutex()); if (--inflightMap()[id] <= 0) inflightMap().erase(id); }
 };
 
-// 主调用：给定模型 + 系统/用户提示 → 结果（含用量/费用/延迟），并累计用量写回 config。
-inline Result chat(ConfigManager& cfg, const Model& m,
-                   const std::string& systemPrompt, const std::string& userPrompt,
-                   int maxTokens = 512, int timeoutSec = 30, double tempOverride = -1) {
-    Result r;
-    r.modelId = m.id;
-    if (m.baseUrl.empty() || m.model.empty()) { r.error = "model not configured (base_url/model)"; DICE_LOG_WARN("[AI] model not configured: id={}", m.id); return r; }
-    if (m.tokenLimit > 0 && m.usedTokens >= m.tokenLimit) { r.error = "token limit reached"; DICE_LOG_WARN("[AI] token limit reached: model={} used={}/{}", m.id, m.usedTokens, m.tokenLimit); return r; }
-    if (m.costLimit > 0 && m.usedCost >= m.costLimit) { r.error = "cost limit reached"; DICE_LOG_WARN("[AI] cost limit reached: model={} used={:.6f}/{:.6f}", m.id, m.usedCost, m.costLimit); return r; }
-
-    json msgs = json::array();
-    if (!systemPrompt.empty()) msgs.push_back({{"role", "system"}, {"content", systemPrompt}});
-    msgs.push_back({{"role", "user"}, {"content", userPrompt}});
-    // 请求参数从 dice/ai.params 读取；调用方可覆盖 max_tokens / temperature。
-    json p = params(cfg);
-    double temp = (tempOverride >= 0) ? tempOverride : p.value("temperature", 1.0);
-    int mt = (maxTokens > 0) ? maxTokens : p.value("max_tokens", 1024);
-    json body = {{"model", m.model}, {"messages", msgs}, {"max_tokens", mt}, {"temperature", temp}};
-    body["top_p"] = p.value("top_p", 1.0);
-    if (p.contains("frequency_penalty")) body["frequency_penalty"] = p.value("frequency_penalty", 0.0);
-    if (p.contains("presence_penalty"))  body["presence_penalty"]  = p.value("presence_penalty", 0.0);
-
-    const long long no = nextRequestNo();
-    applyProviderRequestCompatibility(m.baseUrl, body);
-    const std::string url = endpoint(m.baseUrl);
-    logRequest(no, m, url, body);
-    InflightGuard busy(m.id);
-    auto t0 = std::chrono::steady_clock::now();
-    int status = 0;
-    std::string resp = httpPostJson(url, m.apiKey, body.dump(), timeoutSec, status);
-    r.latencyMs = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-
-    if (status < 200 || status >= 300) {
-        r.error = "HTTP " + std::to_string(status);
-        if (!resp.empty()) r.error += ": " + resp.substr(0, 300);
-        DICE_LOG_WARN("[AI] HTTP error {}: model={} latency={}ms", status, m.model, r.latencyMs);
-        logRawFailure(no, status, resp);
-        return r;
-    }
-    try {
-        json j = json::parse(resp);
-        if (j.contains("error")) {
-            r.error = (j["error"].is_object() ? j["error"].value("message", std::string("API error")) : std::string("API error"));
-            DICE_LOG_WARN("[AI] API error: model={} error={}", m.model, r.error);
-            logRawFailure(no, status, resp);
-            return r;
-        }
-        std::string think;
-        if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
-            auto& c0 = j["choices"][0];
-            if (c0.contains("message") && c0["message"].is_object()) {
-                auto& msg = c0["message"];
-                std::string content = msg.contains("content") && msg["content"].is_string() ? msg["content"].get<std::string>() : std::string();
-                think = takeReasoning(msg, content);
-                r.reply = sanitize(content);   // 清洗 \f 等控制符
-            }
-        }
-        if (j.contains("usage") && j["usage"].is_object()) {
-            r.promptTokens = j["usage"].value("prompt_tokens", (long long)0);
-            r.completionTokens = j["usage"].value("completion_tokens", (long long)0);
-            r.totalTokens = j["usage"].value("total_tokens", r.promptTokens + r.completionTokens);
-        }
-        logResponse(no, status, r.latencyMs, think, r.reply, json(), r.promptTokens, r.completionTokens);
-    } catch (...) { r.error = "AI 服务响应格式无效"; DICE_LOG_WARN("模型「{}」返回的响应格式无效，本次未取得可用回复。", m.model); logRawFailure(no, status, resp); return r; }
-
-    if (r.reply.empty()) { r.error = "empty reply"; DICE_LOG_WARN("[AI] empty reply: model={}", m.model); return r; }
-    r.cost = (r.promptTokens / 1.0e6) * m.priceIn + (r.completionTokens / 1.0e6) * m.priceOut;
-    r.ok = true;
-    if (r.totalTokens > 0 || r.cost > 0) addUsage(cfg, m.id, r.totalTokens, r.cost);
-    DICE_LOG_INFO("[AI] ok model={} tokens={}/{}/{} cost={:.6f} latency={}ms reply_len={}", m.model, r.promptTokens, r.completionTokens, r.totalTokens, r.cost, r.latencyMs, r.reply.size());
-    return r;
-}
-
 // ─── 智能化阶段D：工具调用（function-calling）──────────────────
 struct ToolCall { std::string id, name, argsJson; };
 struct ChatRawResult {
     bool ok = false;
-    std::string error;
-    std::string content;                 // 助手文本（有 tool_calls 时可能为空）
+    std::string error, content, finishReason;
     std::vector<ToolCall> toolCalls;
-    json assistantMsg = json::object();  // 原始 assistant message（供追加进消息历史）
-    long long promptTokens = 0, completionTokens = 0, totalTokens = 0;
+    json assistantMsg = json::object();
+    long long promptTokens = 0, completionTokens = 0, totalTokens = 0, cachedTokens = 0;
     double cost = 0;
+    long long latencyMs = 0;
 };
+inline ChatRawResult parseChatResponse(const json& j, std::string* reasoning = nullptr) {
+    ChatRawResult r;
+    if (j.contains("error")) {
+        r.error = j["error"].is_object() ? j["error"].value("message",std::string("API error")) : "API error";
+        return r;
+    }
+    if (j.contains("usage") && j["usage"].is_object()) {
+        const auto& u=j["usage"];
+        r.promptTokens=(std::max)(0LL,u.value("prompt_tokens",0LL));
+        r.completionTokens=(std::max)(0LL,u.value("completion_tokens",0LL));
+        r.totalTokens=(std::max)(0LL,u.value("total_tokens",r.promptTokens+r.completionTokens));
+        r.cachedTokens=cachedInputTokens(u,r.promptTokens);
+    }
+    if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty()
+        || !j["choices"][0].contains("message") || !j["choices"][0]["message"].is_object()) {
+        r.error="模型响应缺少 choices/message，无法取得回复"; return r;
+    }
+    const auto& choice=j["choices"][0];
+    if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) r.finishReason=choice["finish_reason"].get<std::string>();
+    const auto& msg=choice["message"];
+    r.assistantMsg=msg;
+    if (msg.contains("content")) {
+        const auto& c=msg["content"];
+        if (c.is_string()) r.content=c.get<std::string>();
+        else if (c.is_array()) for (const auto& part:c)
+            if (part.is_object() && (part.value("type",std::string())=="text" || part.value("type",std::string())=="output_text")
+                && part.contains("text") && part["text"].is_string()) r.content+=part["text"].get<std::string>();
+    }
+    const auto think=takeReasoning(msg,r.content);
+    if (reasoning) *reasoning=think;
+    r.content=sanitize(r.content);
+    if (r.content.find_first_not_of(" \t\r\n")==std::string::npos) r.content.clear();
+    r.assistantMsg.erase("reasoning_content"); r.assistantMsg.erase("reasoning");
+    r.assistantMsg["content"]=r.content;
+    if (msg.contains("tool_calls") && msg["tool_calls"].is_array()) for (const auto& tc:msg["tool_calls"]) {
+        if (!tc.is_object() || !tc.contains("function") || !tc["function"].is_object()) continue;
+        ToolCall t; t.id=tc.value("id",std::string());
+        const auto& f=tc["function"]; t.name=f.value("name",std::string());
+        if (f.contains("arguments")) t.argsJson=f["arguments"].is_string() ? f["arguments"].get<std::string>() : f["arguments"].dump();
+        if (!t.name.empty()) r.toolCalls.push_back(std::move(t));
+    }
+    if (r.finishReason=="length") r.error="模型输出达到上限，未完成回复；请提高输出上限或关闭思考模式";
+    else if (r.finishReason=="content_filter" || (msg.contains("refusal") && msg["refusal"].is_string() && !msg["refusal"].get_ref<const std::string&>().empty())) r.error="模型拒绝生成本次内容";
+    else if (r.content.empty() && r.toolCalls.empty()) r.error=think.empty() ? "模型返回空正文" : "模型仅返回思考内容，没有正式回复；请检查思考模式和输出上限";
+    r.ok=r.error.empty();
+    return r;
+}
+inline void preserveToolReasoning(ChatRawResult& result, const json& response, const Model& model, const json& body) {
+    if (!body.contains("tools") || !body["tools"].is_array() || body["tools"].empty()) return;
+    if (!(officialDeepSeek(model.baseUrl) || model.model.rfind("deepseek",0)==0
+        || model.options.value("thinking_protocol",std::string())=="deepseek")) return;
+    if (!response.contains("choices") || !response["choices"].is_array() || response["choices"].empty()) return;
+    const auto& choice=response["choices"][0];
+    if (!choice.contains("message") || !choice["message"].is_object()) return;
+    const auto& msg=choice["message"];
+    // Current DeepSeek tool loops require the returned reasoning alongside
+    // assistant tool calls. It stays in model context, never in reply text.
+    if (msg.contains("reasoning_content") && msg["reasoning_content"].is_string())
+        result.assistantMsg["reasoning_content"]=msg["reasoning_content"];
+}
 
 // 底层调用：直接传 messages 数组 + 可选 tools；返回文本或 tool_calls。用于工具调用循环。
 inline ChatRawResult chatRaw(ConfigManager& cfg, const Model& m, const json& messages,
@@ -530,12 +520,18 @@ inline ChatRawResult chatRaw(ConfigManager& cfg, const Model& m, const json& mes
     int mt = (maxTokens > 0) ? maxTokens : p.value("max_tokens", 1024);
     json body = {{"model", m.model}, {"messages", messages}, {"max_tokens", mt}, {"temperature", temp}};
     body["top_p"] = p.value("top_p", 1.0);
+    if (p.contains("frequency_penalty")) body["frequency_penalty"] = p.value("frequency_penalty",0.0);
+    if (p.contains("presence_penalty")) body["presence_penalty"] = p.value("presence_penalty",0.0);
     if (tools.is_array() && !tools.empty()) { body["tools"] = tools; body["tool_choice"] = "auto"; }
     const long long no = nextRequestNo();
+    const auto vision = conf(cfg).value("vision", json::object());
+    applyModelOptions(m.options,m.baseUrl,m.model,body,currentPurpose(),
+        currentPurpose()=="vision" ? choiceOption(vision,"thinking",{"auto","enabled","disabled"},"auto") : "auto");
     applyProviderRequestCompatibility(m.baseUrl, body);
     const std::string url = endpoint(m.baseUrl);
     logRequest(no, m, url, body);
     InflightGuard busy(m.id);
+    const auto started = std::time(nullptr);
     auto t0 = std::chrono::steady_clock::now();
     int status = 0;
     std::string resp = httpPostJson(url, m.apiKey, body.dump(), timeoutSec, status);
@@ -548,52 +544,32 @@ inline ChatRawResult chatRaw(ConfigManager& cfg, const Model& m, const json& mes
         return r;
     }
     try {
-        json j = json::parse(resp);
-        if (j.contains("error")) { r.error = j["error"].is_object() ? j["error"].value("message", std::string("API error")) : std::string("API error"); logRawFailure(no, status, resp); return r; }
+        const json j=json::parse(resp);
         std::string think;
-        json rawCalls;
-        if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
-            auto& c0 = j["choices"][0];
-            if (c0.contains("message") && c0["message"].is_object()) {
-                r.assistantMsg = c0["message"];
-                auto& msg = c0["message"];
-                std::string content = msg.contains("content") && msg["content"].is_string() ? msg["content"].get<std::string>() : std::string();
-                think = takeReasoning(msg, content);
-                r.content = sanitize(content);
-                // 思考过程不回传：部分服务商（如 DeepSeek）在下一轮收到 reasoning_content 会报错。
-                r.assistantMsg.erase("reasoning_content");
-                r.assistantMsg.erase("reasoning");
-                if (r.assistantMsg.contains("content") && r.assistantMsg["content"].is_string()) r.assistantMsg["content"] = content;
-                if (msg.contains("tool_calls")) rawCalls = msg["tool_calls"];
-                if (msg.contains("tool_calls") && msg["tool_calls"].is_array()) {
-                    for (auto& tc : msg["tool_calls"]) {
-                        if (!tc.is_object()) continue;
-                        ToolCall t;
-                        t.id = tc.value("id", std::string());
-                        if (tc.contains("function") && tc["function"].is_object()) {
-                            t.name = tc["function"].value("name", std::string());
-                            // arguments 是 JSON 字符串
-                            if (tc["function"].contains("arguments")) {
-                                auto& a = tc["function"]["arguments"];
-                                t.argsJson = a.is_string() ? a.get<std::string>() : a.dump();
-                            }
-                        }
-                        if (!t.name.empty()) r.toolCalls.push_back(std::move(t));
-                    }
-                }
-            }
-        }
-        if (j.contains("usage") && j["usage"].is_object()) {
-            r.promptTokens = j["usage"].value("prompt_tokens", (long long)0);
-            r.completionTokens = j["usage"].value("completion_tokens", (long long)0);
-            r.totalTokens = j["usage"].value("total_tokens", r.promptTokens + r.completionTokens);
-        }
-        logResponse(no, status, latency, think, r.content, rawCalls, r.promptTokens, r.completionTokens);
-    } catch (...) { r.error = "invalid response: " + resp.substr(0, 200); logRawFailure(no, status, resp); return r; }
-    r.cost = (r.promptTokens / 1.0e6) * m.priceIn + (r.completionTokens / 1.0e6) * m.priceOut;
-    r.ok = true;
-    if (r.totalTokens > 0 || r.cost > 0) addUsage(cfg, m.id, r.totalTokens, r.cost);
-    DICE_LOG_INFO("[AI] ok model={} tokens={}/{}/{} cost={:.6f} latency={}ms tool_calls={}", m.model, r.promptTokens, r.completionTokens, r.totalTokens, r.cost, latency, r.toolCalls.size());
+        r=parseChatResponse(j,&think);
+        preserveToolReasoning(r,j,m,body);
+        r.latencyMs=latency;
+        if ((!tools.is_array() || tools.empty()) && !r.toolCalls.empty()) { r.ok=false; r.error="模型意外返回工具调用，没有所需的文本结果"; }
+        r.cost=estimateCost(m.options,r.promptTokens,r.completionTokens,r.cachedTokens,started);
+        if (r.totalTokens>0 || r.cost>0) addUsage(cfg,m.id,r.totalTokens,r.cost);
+        logResponse(no,status,latency,think,r.content,r.assistantMsg.value("tool_calls",json()),r.promptTokens,r.completionTokens);
+        DICE_LOG_INFO_M("AI 服务", "[{}] 模型「{}」{}；结束原因 {}，输出额度 {}，用量 {}/{}，估算费用 {:.6f} USD（{}）。{}",
+            requestTag(no),m.model,r.ok ? "已返回结果" : "未返回完整结果",r.finishReason.empty() ? "未提供" : r.finishReason,
+            body.value("max_tokens",0),r.promptTokens,r.completionTokens,r.cost,isOffPeak(m.options,started) ? "谷时" : "常规",r.error);
+    } catch (...) { r.ok=false; r.error="AI 服务响应格式无效"; logRawFailure(no,status,resp); }
+    return r;
+}
+
+inline Result chat(ConfigManager& cfg, const Model& m,
+        const std::string& systemPrompt, const std::string& userPrompt,
+        int maxTokens=512, int timeoutSec=30, double tempOverride=-1) {
+    json messages=json::array();
+    if (!systemPrompt.empty()) messages.push_back({{"role","system"},{"content",systemPrompt}});
+    messages.push_back({{"role","user"},{"content",userPrompt}});
+    const auto raw=chatRaw(cfg,m,messages,json(),maxTokens,timeoutSec,tempOverride);
+    Result r; r.ok=raw.ok; r.reply=raw.content; r.error=raw.error; r.modelId=m.id;
+    r.promptTokens=raw.promptTokens; r.completionTokens=raw.completionTokens; r.totalTokens=raw.totalTokens;
+    r.cost=raw.cost; r.latencyMs=raw.latencyMs;
     return r;
 }
 
@@ -611,6 +587,7 @@ struct EmbedResult {
     std::string error;
     std::vector<std::vector<float>> vectors;   // 每条输入一个向量
     long long totalTokens = 0;
+    double cost = 0;
 };
 
 // 把一批文本向量化。model 只需 baseUrl/apiKey + embedModelName（嵌入模型名，不同于对话模型）。
@@ -631,6 +608,7 @@ inline EmbedResult embed(ConfigManager& cfg, const Model& m, const std::string& 
     }
     InflightGuard busy(m.id);
     int status = 0;
+    const auto started = std::time(nullptr);
     std::string resp = httpPostJson(url, m.apiKey, body.dump(), timeoutSec, status);
     if (status < 200 || status >= 300) {
         r.error = "HTTP " + std::to_string(status) + (resp.empty() ? "" : (": " + resp.substr(0, 200)));
@@ -652,12 +630,14 @@ inline EmbedResult embed(ConfigManager& cfg, const Model& m, const std::string& 
                 r.vectors.push_back(std::move(v));
             }
         }
-        if (j.contains("usage") && j["usage"].is_object())
+        if (j.contains("usage") && j["usage"].is_object()) {
             r.totalTokens = j["usage"].value("total_tokens", (long long)j["usage"].value("prompt_tokens", (long long)0));
+            r.cost = estimateCost(m.options,r.totalTokens,0,cachedInputTokens(j["usage"],r.totalTokens),started);
+            if (r.totalTokens>0 || r.cost>0) addUsage(cfg,m.id,r.totalTokens,r.cost);
+        }
     } catch (...) { r.error = "invalid embed response: " + resp.substr(0, 160); return r; }
     if (r.vectors.size() != texts.size()) { r.error = "embed count mismatch"; return r; }
     r.ok = true;
-    if (r.totalTokens > 0) addUsage(cfg, m.id, r.totalTokens, (r.totalTokens / 1.0e6) * m.priceIn);
     DICE_LOG_INFO("[AI] embed ok model={} n={} dim={} tokens={}", embedModelName, r.vectors.size(),
                   r.vectors.empty() ? 0 : r.vectors[0].size(), r.totalTokens);
     if (debugOn())
@@ -686,8 +666,9 @@ inline std::string transcribe(ConfigManager& cfg, const Model& m, const std::fil
     if (m.tokenLimit > 0 && m.usedTokens >= m.tokenLimit) { error = "token limit reached"; return ""; }
     if (m.costLimit > 0 && m.usedCost >= m.costLimit) { error = "cost limit reached"; return ""; }
     auto esc = [](const std::string& s) { std::string o; for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; } return o; };
-    static std::atomic<long long> seq{0};
-    fs::path cfgF = fs::temp_directory_path() / ("dnstt_" + std::to_string(++seq) + ".cfg");
+    std::unique_ptr<RequestFiles> files;
+    try { files=std::make_unique<RequestFiles>(); } catch (...) { error="无法创建语音识别请求临时文件"; return ""; }
+    const auto cfgF=files->file("speech.cfg");
     const long long no = nextRequestNo();
     const std::string url = endpointTranscribe(m.baseUrl);
     std::error_code ec;
@@ -708,6 +689,7 @@ inline std::string transcribe(ConfigManager& cfg, const Model& m, const std::fil
         DICE_LOG_DEBUG_M("AI 服务", "[{}] 语音识别请求 → 模型「{}」({}) {}，音频 {} 字节", requestTag(no),
                          m.name.empty() ? m.model : m.name, m.model, url, fs::file_size(audio, ec));
     InflightGuard busy(m.id);
+    const auto started = std::time(nullptr);
     auto t0 = std::chrono::steady_clock::now();
     std::string out = dice::proc::curlConfig(cfgF).output;
     fs::remove(cfgF, ec);

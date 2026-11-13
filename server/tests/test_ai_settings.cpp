@@ -11,6 +11,110 @@
 
 using namespace dice;
 
+TEST(AiVision, ReasoningOnlyAndTruncatedResponsesAreNotSuccessful) {
+    auto response=json{{"choices",json::array({{{"finish_reason","length"},{"message",{{"content",""},{"reasoning_content","分析图片"}}}}})},
+        {"usage",{{"prompt_tokens",100},{"completion_tokens",300},{"prompt_cache_hit_tokens",40}}}};
+    auto result=ai::parseChatResponse(response);
+    ASSERT_FALSE(result.ok);
+    ASSERT_TRUE(result.error.find("上限")!=std::string::npos);
+    ASSERT_EQ(result.completionTokens,300LL);
+    ASSERT_EQ(result.cachedTokens,40LL);
+    response["choices"][0]["finish_reason"]="stop";
+    result=ai::parseChatResponse(response);
+    ASSERT_FALSE(result.ok);
+    ASSERT_TRUE(result.error.find("思考")!=std::string::npos);
+    ASSERT_FALSE(result.assistantMsg.contains("reasoning_content"));
+    response["choices"][0]["message"]["content"]="   \n";
+    ASSERT_FALSE(ai::parseChatResponse(response).ok);
+    response["choices"][0]["message"]["content"]="图片上有一个图表。";
+    ASSERT_TRUE(ai::parseChatResponse(response).ok);
+    response["choices"][0]["finish_reason"]="length";
+    ASSERT_FALSE(ai::parseChatResponse(response).ok); // partial text isn't a completed description
+}
+
+TEST(AiGateway, ResponseValidationSupportsTextBlocksAndToolOnlyResponses) {
+    ASSERT_FALSE(ai::parseChatResponse({{"choices",json::array()}}).ok);
+    json message={{"content",json::array({{{"type","text"},{"text","第一行"}},{{"type","text"},{"text","第二行"}}})}};
+    auto reply=[&](const std::string& finish) { return ai::parseChatResponse({{"choices",json::array({{{"message",message},{"finish_reason",finish}}})}}); };
+    ASSERT_EQ(reply("stop").content,std::string("第一行第二行"));
+    ASSERT_FALSE(reply("content_filter").ok);
+    message={{"content",nullptr},{"tool_calls",json::array({{{"id","t1"},{"function",{{"name","roll_dice"},{"arguments","{}"}}}}})}};
+    ASSERT_TRUE(reply("tool_calls").ok);
+    ASSERT_EQ(reply("tool_calls").toolCalls.size(),size_t(1));
+    ASSERT_FALSE(reply("length").ok);
+}
+
+TEST(AiModelOptions, DeepSeekVisionDefaultsAndExplicitOverrides) {
+    auto options=ai::normalizeModelOptions(json::object());
+    json body={{"max_tokens",2048}};
+    ai::applyModelOptions(options,"https://api.deepseek.com/v1","deepseek-flash",body,"vision");
+    ASSERT_EQ(body["thinking"]["type"].get<std::string>(),std::string("disabled"));
+    body={{"max_tokens",2048}};
+    ai::applyModelOptions(options,"https://example.com/v1","custom",body,"vision");
+    ASSERT_FALSE(body.contains("thinking")); ASSERT_FALSE(body.contains("reasoning_effort"));
+    options=ai::normalizeModelOptions({{"thinking","enabled"},{"reasoning_effort","low"},{"max_tokens",4096}});
+    body={{"max_tokens",8192}};
+    ai::applyModelOptions(options,"https://api.deepseek.com/v1","deepseek-flash",body,"vision");
+    ASSERT_EQ(body["max_tokens"].get<int>(),4096);
+    ASSERT_EQ(body["thinking"]["type"].get<std::string>(),std::string("enabled"));
+    ASSERT_EQ(body["reasoning_effort"].get<std::string>(),std::string("low"));
+    ai::applyModelOptions(options,"https://api.deepseek.com/v1","deepseek-flash",body,"vision","disabled");
+    ASSERT_EQ(body["thinking"]["type"].get<std::string>(),std::string("disabled"));
+    options["thinking_protocol"]="reasoning_effort";
+    body={{"max_tokens",2048}};
+    ai::applyModelOptions(options,"https://relay.example/v1","custom",body,"reply","disabled");
+    ASSERT_EQ(body["reasoning_effort"].get<std::string>(),std::string("none"));
+    body={{"max_tokens",128}};
+    ai::applyModelOptions(options,"https://relay.example/v1","custom",body,"reply");
+    ASSERT_EQ(body["max_tokens"].get<int>(),4096); // configurable text budget can increase old caller defaults
+}
+
+TEST(AiGateway, DeepSeekToolLoopsKeepRequiredReasoningOnlyInContext) {
+    const json response={{"choices",json::array({{{"message",{{"content","正文"},{"reasoning_content","内部过程"}}},{"finish_reason","stop"}}})}};
+    auto model=ai::modelFromJson({{"model","deepseek-flash"},{"base_url","https://api.deepseek.com/v1"}});
+    auto result=ai::parseChatResponse(response);
+    ai::preserveToolReasoning(result,response,model,{{"tools",json::array({{{"type","function"}}})}});
+    ASSERT_EQ(result.assistantMsg["reasoning_content"].get<std::string>(),std::string("内部过程"));
+    ASSERT_EQ(result.content,std::string("正文"));
+    result=ai::parseChatResponse(response);
+    ai::preserveToolReasoning(result,response,model,json::object());
+    ASSERT_FALSE(result.assistantMsg.contains("reasoning_content"));
+}
+
+TEST(AiModelOptions, PeakPricingUsesRequestTimeTimezoneAndCacheHits) {
+    auto options=ai::normalizeModelOptions({{"price_in",2.0},{"price_out",8.0},{"price_cached_in",0.2},
+        {"off_peak",{{"enabled",true},{"start","23:00"},{"end","07:00"},{"utc_offset_minutes",480},
+            {"price_in",1.0},{"price_out",4.0},{"price_cached_in",0.1}}}});
+    ASSERT_TRUE(ai::isOffPeak(options,15*3600)); // 23:00 UTC+8, inclusive
+    ASSERT_FALSE(ai::isOffPeak(options,23*3600)); // 07:00 UTC+8, exclusive
+    ASSERT_TRUE(ai::isOffPeak(options,20*3600)); // crosses midnight
+    ASSERT_EQ(ai::estimateCost(options,1000000,1000000,500000,15*3600),4.55);
+    ASSERT_EQ(ai::estimateCost(options,1000000,1000000,500000,23*3600),9.1);
+    ASSERT_EQ(ai::cachedInputTokens({{"prompt_tokens_details",{{"cached_tokens",500}}}},100),100LL);
+    options["off_peak"]["start"]="07:00";
+    ASSERT_FALSE(ai::isOffPeak(options,20*3600)); // equal endpoints means no interval
+    auto legacy=ai::normalizeModelOptions({{"price_in",2.0},{"price_out",8.0}});
+    ASSERT_EQ(ai::estimateCost(legacy,1000000,1000000,500000,15*3600),10.0);
+    ASSERT_EQ(ai::normalizeModelOptions({{"max_tokens",-100}})["max_tokens"].get<int>(),0);
+    const auto vision=aivision::normalizeSettings({{"max_tokens",8192},{"timeout_sec",120},{"thinking","enabled"}});
+    ASSERT_EQ(aivision::normalizeSettings(vision),vision);
+    ASSERT_EQ(aivision::normalizeSettings(json::object())["max_tokens"].get<int>(),2048);
+}
+
+TEST(AiGateway, RequestTemporaryFilesAreIsolatedAndCleanedUp) {
+    std::filesystem::path one,two;
+    {
+        ai::RequestFiles first, second;
+        one=first.file("request.body"); two=second.file("request.body");
+        ASSERT_NE(one,two);
+        std::ofstream(one)<<"first"; std::ofstream(two)<<"second";
+        ASSERT_TRUE(std::filesystem::exists(one)); ASSERT_TRUE(std::filesystem::exists(two));
+        std::string value; std::ifstream(two)>>value; ASSERT_EQ(value,std::string("second"));
+    }
+    ASSERT_FALSE(std::filesystem::exists(one.parent_path()));
+    ASSERT_FALSE(std::filesystem::exists(two.parent_path()));
+}
+
 namespace {
 json legacyAiConfig() {
     return json{
@@ -33,6 +137,34 @@ struct TempConfig {
     ~TempConfig() { std::error_code ec; std::filesystem::remove_all(root, ec); }
 };
 }  // namespace
+
+// Run through tools/test-ai-http.py: two processes share the OS temporary
+// directory and send real curl requests to a local, deterministic fake API.
+TEST(AiHttpIntegration, VisionFallbackCacheAndConcurrentRequestIsolation) {
+    const char* endpoint=std::getenv("DICENEXT_AI_TEST_ENDPOINT");
+    if (!endpoint) { std::cout << "(HTTP integration requires tools/test-ai-http.py) "; return; }
+    const std::string tag=std::getenv("DICENEXT_AI_TEST_TAG");
+    TempConfig t;
+    auto makeModel=[&](const char* id) { return json{{"id",id},{"model",id},{"base_url",endpoint},{"vision",true},
+        {"thinking","disabled"},{"thinking_protocol","deepseek"},{"max_tokens",4096},{"price_in",2.0},{"price_out",8.0}}; };
+    t.cfg.set<json>("dice/ai",{{"enabled",true},{"providers",json::array()},
+        {"models",json::array({makeModel("empty"),makeModel("complete")})},
+        {"usages",{{"vision",{{"strategy","priority"},{"models",json::array({{{"id","empty"}},{{"id","complete"}}})}}}}},
+        {"vision",{{"enabled",true},{"prompt",tag},{"max_tokens",8192},{"timeout_sec",10}}}});
+    const auto image=t.root/"fixture.png";
+    { std::ofstream out(image,std::ios::binary); out << "\x89PNG\r\n\x1a\n" << tag; }
+    const auto cq="[CQ:image,file="+image.generic_string()+"]";
+    ASSERT_EQ(aivision::describe(t.cfg,cq),"image-"+tag);
+    const auto after=ai::models(t.cfg);
+    ASSERT_EQ(after[0].usedTokens,400LL); // failed output still billed
+    ASSERT_EQ(after[1].usedTokens,140LL);
+    ASSERT_TRUE(after[0].usedCost>0);
+    ASSERT_EQ(aivision::describe(t.cfg,cq),"image-"+tag); // cache: no second request
+    ASSERT_EQ(ai::models(t.cfg)[0].usedTokens,400LL);
+    t.cfg.set<int>("dice/ai/vision/max_tokens",16384); // invalidate cached interpretation
+    ASSERT_EQ(aivision::describe(t.cfg,cq),"image-"+tag);
+    ASSERT_EQ(ai::models(t.cfg)[0].usedTokens,800LL);
+}
 
 TEST(AiUsage, LegacyModelsMergeIntoProvidersAndUsages) {
     json c = legacyAiConfig();
