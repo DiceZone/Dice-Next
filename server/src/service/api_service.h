@@ -6293,7 +6293,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     std::string detail = "group file download failed: curl=" + std::to_string(result.exitCode)
                         + ", upstream HTTP=" + std::to_string(upstreamStatus);
                     if (result.exitCode == 60) detail += " (TLS certificate validation failed; verify the download hostname)";
-                    auto response = drogon::HttpResponse::newHttpJsonResponse(fail(detail));
+                    auto response = drogon::HttpResponse::newHttpResponse();
+                    response->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+                    response->setBody(fail(detail).dump());
                     response->setStatusCode(drogon::k502BadGateway);
                     cb(response); return;
                 }
