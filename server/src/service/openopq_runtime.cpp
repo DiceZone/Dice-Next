@@ -766,7 +766,7 @@ private:
                             params.adapterId, manifest.version, params.consolePort);
             const auto startedAt = std::chrono::steady_clock::now();
             const auto result = dice::proc::runPathsCancellable(
-                pathText(binary),
+                fs::absolute(binary),
                 {"--config", fs::absolute(dir / "Config.json"), "--port", std::to_string(params.consolePort),
                  "--data-dir", fs::absolute(dir / "data"), "--account", params.account,
                  "--headless", "--quiet", "--log-file", fs::absolute(dir / "openopq.log")},

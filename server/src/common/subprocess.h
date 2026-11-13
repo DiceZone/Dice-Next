@@ -62,13 +62,13 @@ Result legacyShellCancellable(const std::string& command, CancellationCheck canc
 /// Same as run(), with every argument given as a path.  On Windows they reach
 /// the child as wide strings, so an install directory the system code page
 /// cannot represent still works.  Plain flags may be passed too.
-Result runPaths(const std::string& program,
+Result runPaths(const std::filesystem::path& program,
                 const std::vector<std::filesystem::path>& args,
                 std::size_t outputLimit = 0,
                 bool captureStderr = false,
                 const std::filesystem::path& workingDirectory = {});
 
-Result runPathsCancellable(const std::string& program,
+Result runPathsCancellable(const std::filesystem::path& program,
                            const std::vector<std::filesystem::path>& args,
                            CancellationCheck cancelled,
                            std::size_t outputLimit = 0,

@@ -504,9 +504,19 @@ public:
     void leaveGroup(const std::string& groupId) override {
         auto self = shared_from_this();
         int64_t gid = parseId(groupId);
-        drogon::app().getLoop()->runAfter(1.5, [self, gid]() {
-            self->sendOneBotAction("set_group_leave", {{"group_id", gid}});
-            DICE_LOG_INFO("OneBotV11 '{}': left group {}", self->name_, gid);
+        if (gid <= 0) return;
+        double delay;
+        {
+            std::lock_guard<std::mutex> lock(dataMutex_);
+            const auto now = std::chrono::steady_clock::now();
+            const auto due = std::max(now + std::chrono::milliseconds(1500), nextGroupLeaveAt_);
+            nextGroupLeaveAt_ = due + std::chrono::milliseconds(1500);
+            delay = std::chrono::duration<double>(due - now).count();
+        }
+        drogon::app().getLoop()->runAfter(delay, [self, gid]() {
+            if (self->stopping_) return;
+            self->sendOneBotAction("set_group_leave", {{"group_id", gid}}, "leave:" + std::to_string(gid));
+            DICE_LOG_INFO("OneBotV11 '{}': requested leave for group {} (awaiting server result)", self->name_, gid);
         });
     }
 
@@ -1775,6 +1785,7 @@ private:
     std::vector<MessageCallback> messageCallbacks_;
     std::vector<EventCallback> eventCallbacks_;
     std::map<std::string, std::string> groupNames_;
+    std::chrono::steady_clock::time_point nextGroupLeaveAt_{}; // guarded by dataMutex_
     std::atomic<uint64_t> echoSeq_{0};
     std::atomic<bool> refreshTimerStarted_{false};  // 1-min group-name refresh guard
 

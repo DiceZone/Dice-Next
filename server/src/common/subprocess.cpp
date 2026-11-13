@@ -157,10 +157,12 @@ Result runWide(const std::wstring& commandLine, std::size_t outputLimit,
                        CREATE_NO_WINDOW | (job ? CREATE_SUSPENDED : 0),
                        nullptr, directory.empty() ? nullptr : directory.c_str(), &startup,
                        &process);
+    const DWORD creationError = started ? ERROR_SUCCESS : GetLastError();
     CloseHandle(writeEnd);
     if (nullInput != INVALID_HANDLE_VALUE) CloseHandle(nullInput);
     if (ownedError && ownedError != INVALID_HANDLE_VALUE) CloseHandle(ownedError);
     if (!started) {
+        result.output = "CreateProcessW failed, Win32 error=" + std::to_string(creationError);
         if (job) CloseHandle(job);
         CloseHandle(readEnd);
         return result;
@@ -349,17 +351,17 @@ Result legacyShellCancellable(const std::string& command, CancellationCheck canc
 #endif
 }
 
-Result runPaths(const std::string& program, const std::vector<fs::path>& args,
+Result runPaths(const std::filesystem::path& program, const std::vector<fs::path>& args,
                 std::size_t outputLimit, bool captureStderr, const fs::path& workingDirectory) {
     return runPathsCancellable(program, args, {}, outputLimit, captureStderr,
                                workingDirectory);
 }
 
-Result runPathsCancellable(const std::string& program, const std::vector<fs::path>& args,
+Result runPathsCancellable(const std::filesystem::path& program, const std::vector<fs::path>& args,
                            CancellationCheck cancelled, std::size_t outputLimit,
                            bool captureStderr, const fs::path& workingDirectory) {
 #if defined(_WIN32)
-    std::wstring commandLine = quoteArgument(widen(program));
+    std::wstring commandLine = quoteArgument(program.wstring());
     for (const auto& argument : args) {
         commandLine.push_back(L' ');
         commandLine += quoteArgument(argument.wstring());
@@ -369,7 +371,7 @@ Result runPathsCancellable(const std::string& program, const std::vector<fs::pat
     std::vector<std::string> narrowed;
     narrowed.reserve(args.size());
     for (const auto& argument : args) narrowed.push_back(argument.string());
-    return runCancellable(program, narrowed, std::move(cancelled), outputLimit,
+    return runCancellable(program.string(), narrowed, std::move(cancelled), outputLimit,
                           captureStderr, workingDirectory);
 #endif
 }
