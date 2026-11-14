@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdlib>
 #include "ai_settings_patch.h"
 #include "../common/weighted_templates.h"
 #include "../common/template_markdown.h"
@@ -6282,14 +6283,26 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     return o;
                 };
                 cf << "url = \"" << esc(url) << "\"\noutput = \"" << esc(tmp) << "\"\n"
-                   << "location\nsilent\nmax-time = 300\n";
+                   << "location\nsilent\nfail\nmax-time = 300\nwrite-out = \"%{http_code}\"\n";
                 cf.close();
-                dice::proc::curlConfig(cfgPath);
+                const auto result = dice::proc::curlConfig(cfgPath);
                 std::error_code ec; fs::remove(cfgPath, ec);
+                const int upstreamStatus = std::atoi(result.output.c_str());
+                if (result.exitCode != 0 || upstreamStatus < 200 || upstreamStatus >= 300) {
+                    fs::remove(tmp, ec);
+                    std::string detail = "group file download failed: curl=" + std::to_string(result.exitCode)
+                        + ", upstream HTTP=" + std::to_string(upstreamStatus);
+                    if (result.exitCode == 60) detail += " (TLS certificate validation failed; verify the download hostname)";
+                    auto response = drogon::HttpResponse::newHttpResponse();
+                    response->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+                    response->setBody(fail(detail).dump());
+                    response->setStatusCode(drogon::k502BadGateway);
+                    cb(response); return;
+                }
             }
             std::error_code ec;
-            if (!fs::exists(tmp, ec) || fs::file_size(tmp, ec) == 0) {
-                jsonReply(fail("download failed"), std::move(cb)); return;
+            if (!fs::is_regular_file(tmp, ec)) {
+                jsonReply(fail("download did not create a file"), std::move(cb)); return;
             }
             std::string name = req->getParameter("name");
             if (name.empty()) name = "groupfile.bin";

@@ -104,7 +104,12 @@ public:
     }
 
     void stop() override {
-        stopping_ = true;
+        {
+            std::lock_guard lock(groupLeaveMutex_);
+            stopping_ = true;
+            ++groupLeaveGeneration_;
+            nextGroupLeaveAt_ = {};
+        }
         if (tcpServer_) { tcpServer_->stop(); tcpServer_.reset(); }
         if (revLoop_) { revLoop_->getLoop()->quit(); revLoop_.reset(); }
         if (wsClient_) { wsClient_->stop(); wsClient_.reset(); }
@@ -502,11 +507,34 @@ public:
     /// Leave the group, deferred ~1.5s so the .dismiss reply is delivered first.
     bool supportsGroupLeave() const override { return true; }
     void leaveGroup(const std::string& groupId) override {
-        auto self = shared_from_this();
+        auto weak = weak_from_this();
         int64_t gid = parseId(groupId);
-        drogon::app().getLoop()->runAfter(1.5, [self, gid]() {
-            self->sendOneBotAction("set_group_leave", {{"group_id", gid}});
-            DICE_LOG_INFO("OneBotV11 '{}': left group {}", self->name_, gid);
+        if (gid <= 0) return;
+        double delay;
+        uint64_t generation;
+        {
+            std::lock_guard lock(groupLeaveMutex_);
+            if (stopping_) return;
+            generation = groupLeaveGeneration_;
+            const auto now = std::chrono::steady_clock::now();
+            const auto due = std::max(now + std::chrono::milliseconds(1500), nextGroupLeaveAt_);
+            nextGroupLeaveAt_ = due + std::chrono::milliseconds(1500);
+            delay = std::chrono::duration<double>(due - now).count();
+        }
+        drogon::app().getLoop()->runAfter(delay, [weak, gid, generation]() {
+            auto self = weak.lock();
+            if (!self) return;
+            std::lock_guard lock(self->groupLeaveMutex_);
+            if (self->stopping_ || generation != self->groupLeaveGeneration_) return;
+            try {
+                if (self->sendOneBotAction("set_group_leave", {{"group_id", gid}}, "leave:" + std::to_string(gid))) {
+                    DICE_LOG_INFO("OneBotV11「{}」已提交群 {} 的退群请求，等待平台确认。", self->name_, gid);
+                } else {
+                    DICE_LOG_WARN("OneBotV11「{}」未能向平台提交群 {} 的退群请求，请检查连接。", self->name_, gid);
+                }
+            } catch (const std::exception& e) {
+                DICE_LOG_WARN("OneBotV11「{}」提交群 {} 的退群请求时发生错误：{}", self->name_, gid, e.what());
+            }
         });
     }
 
@@ -839,18 +867,18 @@ private:
 
     // ─── OneBot v11 Protocol ─────────────────────────────────
 
-    void sendOneBotAction(const std::string& action, const json& params,
+    bool sendOneBotAction(const std::string& action, const json& params,
                           const std::string& echo = "") {
         if ((action == "send_private_msg" && (!params.contains("user_id") || !OneBotAccountIdentity::validId(params["user_id"])))
             || (action == "send_group_msg" && (!params.contains("group_id") || !OneBotAccountIdentity::validId(params["group_id"])))) {
             DICE_LOG_WARN("OneBotV11「{}」发送目标无效，未提交平台请求 {}。", name_, action);
-            return;
+            return false;
         }
         auto outgoing = prepareActionLog("OneBotV11「" + name_ + "」", action, params);
         if (!connected_) {
             if (outgoing) outgoing->failed("适配器尚未连接，没有提交平台");
             else DICE_LOG_DEBUG("OneBotV11「{}」未连接，跳过接口请求 {}。", name_, action);
-            return;
+            return false;
         }
         json req{{"action", action}, {"params", params}};
         req["echo"] = echo.empty() ? std::to_string(++echoSeq_) : echo;
@@ -866,16 +894,17 @@ private:
                 if (!sendRevWsFrame(dumpJsonUtf8Safe(req))) {
                     if (outgoing) outgoing->failed("反向 WS 客户端已断开，没有提交发送");
                     std::lock_guard lock(outboundLogMutex_); pendingOutboundLogs_.erase(requestId);
-                    return;
+                    return false;
                 }
-            } else if (wsClient_ && wsClient_->getConnection()) {
-                wsClient_->getConnection()->send(dumpJsonUtf8Safe(req));
+            } else if (auto conn = wsClient_ ? wsClient_->getConnection() : nullptr; conn && conn->connected()) {
+                conn->send(dumpJsonUtf8Safe(req));
             } else {
                 if (outgoing) outgoing->failed("平台连接不可用，没有提交发送");
                 std::lock_guard lock(outboundLogMutex_); pendingOutboundLogs_.erase(requestId);
-                return;
+                return false;
             }
             if (outgoing) outgoing->submitted();
+            return true;
         } catch (...) {
             if (outgoing) outgoing->failed(describeException(std::current_exception()));
             std::lock_guard lock(outboundLogMutex_); pendingOutboundLogs_.erase(requestId);
@@ -1775,6 +1804,9 @@ private:
     std::vector<MessageCallback> messageCallbacks_;
     std::vector<EventCallback> eventCallbacks_;
     std::map<std::string, std::string> groupNames_;
+    std::mutex groupLeaveMutex_;
+    uint64_t groupLeaveGeneration_ = 0;
+    std::chrono::steady_clock::time_point nextGroupLeaveAt_{};
     std::atomic<uint64_t> echoSeq_{0};
     std::atomic<bool> refreshTimerStarted_{false};  // 1-min group-name refresh guard
 
