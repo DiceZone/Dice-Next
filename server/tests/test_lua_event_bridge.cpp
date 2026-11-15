@@ -86,6 +86,26 @@ TEST(LuaEventBridge, LegacyBanPreservesMinutesAndDoesNotSendPrivateSelfReceipts)
     f.run(".group 1108650419 ban 10001 0"); ASSERT_EQ(f.a->bans.back().seconds, 0);
     ASSERT_TRUE(f.a->messages.empty()); ASSERT_EQ(f.fallbacks, 0);
 }
+TEST(LuaEventBridge, ClassicPrivateBanDoesNotNeedGetDiceQQToMatchLoginId) {
+    LuaEventFixture f;
+    for (const auto* uid : {"0", "", "99999"}) {
+        f.a->bans.clear(); f.a->messages.clear();
+        f.run(".group 1108650419 ban 10001 1", "0", uid);
+        ASSERT_EQ(f.a->bans.size(), size_t(1));
+        ASSERT_EQ(f.a->bans[0].group, std::string("1108650419"));
+        ASSERT_EQ(f.a->bans[0].user, std::string("10001"));
+        ASSERT_EQ(f.a->bans[0].seconds, 60);
+        ASSERT_TRUE(f.a->messages.empty());
+        ASSERT_EQ(f.fallbacks, 0);
+    }
+}
+TEST(LuaEventBridge, FailedClassicBanDoesNotSendGroupPermissionReplyToPrivateZero) {
+    LuaEventFixture f;
+    f.run(".group 1108650419 ban 10002 1", "0", "0");
+    ASSERT_TRUE(f.a->bans.empty());
+    ASSERT_TRUE(f.a->messages.empty());
+    ASSERT_EQ(f.fallbacks, 0);
+}
 TEST(LuaEventBridge, InvalidIdentitiesCannotBecomePrivateZeroOrAcquirePrivilege) {
     LuaEventFixture f;
     for (const auto& target : {"", "0", "-1", "not-a-qq", "9223372036854775808"}) f.run(".r d1", "", target);
