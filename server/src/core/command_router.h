@@ -167,8 +167,10 @@ public:
         return false;
     }
     // Installed legacy plugins may request self-moderation for the actual
-    // triggering player. This never turns arbitrary eventMsg into an admin.
-    // Returned diagnostics stay local; they are not private-message replies.
+    // triggering player via private `.group <gid> ban <uid> <minutes>`.
+    // Matching getDiceQQ() to the login QQ is not required; origin already
+    // binds the group and user. This never turns arbitrary eventMsg into an
+    // admin. Returned diagnostics stay local; they are not private-message replies.
     std::string legacyLuaSelfBan(const LegacyLuaGroupBan& ban, const LuaEventOrigin& origin, const AdapterPtr& adapter) {
         if (origin.virtualEvent || origin.pluginId.rfind("lua:", 0) != 0 || origin.groupId.empty()
             || origin.adapterId.empty() || ban.groupId != origin.groupId || ban.userId != origin.userId)

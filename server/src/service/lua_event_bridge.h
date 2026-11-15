@@ -23,7 +23,13 @@ void dispatchLegacyLuaEvent(AdapterManager& adapters, CommandRouter& router, con
     const bool pv = gid.empty() || gid == "0";
     const auto self = selected->getLoginId();
     const bool selfCall = pv && !self.empty() && self != "0" && uid == self;
-    if (selfCall) if (const auto ban = parseLegacyLuaGroupBan(text)) {
+    // Classic Dice! plugins (roulette, etc.) call:
+    //   eventMsg(".group "..gid.." ban "..uid.." "..minutes, 0, getDiceQQ())
+    // getDiceQQ() is often 0/empty when login info is late. The private
+    // `.group ban` shape is enough to intercept; privilege still comes only
+    // from origin (current group + triggering player). Never fall through to
+    // `.group` (no ban subcommand) or send the permission text to 私聊 0.
+    if (pv) if (const auto ban = parseLegacyLuaGroupBan(text)) {
         const auto error = router.legacyLuaSelfBan(*ban, origin, selected);
         if (!error.empty()) DICE_LOG_WARN("Lua 插件「{}」的旧版禁言未执行：{}", origin.pluginId, error);
         else DICE_LOG_INFO("Lua 插件「{}」已提交自禁言请求：群 {}，用户 {}，{} 分钟。", origin.pluginId, ban->groupId, ban->userId, ban->minutes);
@@ -49,7 +55,12 @@ void dispatchLegacyLuaEvent(AdapterManager& adapters, CommandRouter& router, con
     if (selfCall) { DICE_LOG_DEBUG("Lua 虚拟私聊自调用已处理，回执不向平台发送：{}", reply); return; }
     reply = router.applySelf(message, reply);
     ProcessingScope processing(ProcessingContext{sources, activeProcessingContext.label() + "调用 eventMsg：" + text, "虚拟指令处理完成"});
-    if (pv) selected->sendPrivateMessage(uid, reply);
-    else selected->sendGroupMessageCQ(gid, reply);
+    if (pv) {
+        if (uid.empty() || uid == "0" || ((platform == "onebot_v11" || platform == "milky") && !positiveQQId(uid))) {
+            DICE_LOG_WARN("Lua 插件「{}」的 eventMsg 目标无效，未向平台发送消息。", origin.pluginId);
+            return;
+        }
+        selected->sendPrivateMessage(uid, reply);
+    } else selected->sendGroupMessageCQ(gid, reply);
 }
 }
