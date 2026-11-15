@@ -12,6 +12,9 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 namespace dice::proc {
@@ -382,24 +385,42 @@ Result curlConfig(const fs::path& configFile, std::size_t outputLimit) {
 
 Result curlConfigCancellable(const fs::path& configFile, CancellationCheck cancelled,
                              std::size_t outputLimit) {
+    return curlCancellable({"-K", fs::absolute(configFile)}, std::move(cancelled), outputLimit);
+}
+
+// Resolve beside the running core, including when its working directory changes.
+static fs::path bundledCurl() {
 #if defined(_WIN32)
-    // Built straight from the wide path: the config file can sit under a
-    // directory the system code page cannot represent.
-    const std::wstring commandLine = quoteArgument(widen(systemTool("curl.exe"))) + L" -K " +
-                                     quoteArgument(fs::absolute(configFile).wstring());
-    return runWide(commandLine, outputLimit, false, {}, cancelled);
+    std::wstring buffer(32768, L'\0');
+    const auto size = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (!size || size >= buffer.size()) return {};
+    buffer.resize(size);
+    return fs::path(buffer).parent_path() / L"lib/curl/curl.exe";
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> buffer(size);
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) return {};
+    std::error_code ec;
+    const auto exe = fs::canonical(buffer.data(), ec);
+    return ec ? fs::path{} : exe.parent_path() / "lib/curl/curl";
 #else
-    return runCancellable("curl", {"-K", configFile.string()}, std::move(cancelled),
-                          outputLimit);
+    std::error_code ec;
+    const auto exe = fs::read_symlink("/proc/self/exe", ec);
+    return ec ? fs::path{} : exe.parent_path() / "lib/curl/curl";
 #endif
 }
 
-Result curl(const std::vector<std::string>& args, std::size_t outputLimit) {
-#if defined(_WIN32)
-    return run(systemTool("curl.exe"), args, outputLimit);
-#else
-    return run("curl", args, outputLimit);
-#endif
+Result curlCancellable(std::vector<fs::path> args, CancellationCheck cancelled, std::size_t limit) {
+    const auto program = bundledCurl();
+    if (!program.is_absolute()) return {};
+    args.insert(args.begin(), "-q"); // Never inherit a user's curlrc.
+    return runPathsCancellable(program, args, std::move(cancelled), limit);
+}
+
+Result curl(const std::vector<std::string>& args, std::size_t limit) {
+    std::vector<fs::path> paths(args.begin(), args.end());
+    return curlCancellable(std::move(paths), {}, limit);
 }
 
 }  // namespace dice::proc

@@ -95,13 +95,7 @@ bool smtpSend(const Json& s, const std::string& to, const std::string& body) {
         }
         for (const auto& p : {eml, config}) fs::permissions(p, fs::perms::owner_read | fs::perms::owner_write,
                                                           fs::perm_options::replace);
-#ifdef _WIN32
-        const auto program = proc::systemTool("curl.exe");
-#else
-        const std::string program = "curl";
-#endif
-        // Disable ~/.curlrc: its trace or insecure flags must not affect credential delivery.
-        return proc::runPaths(program, {fs::path("-q"), fs::path("-K"), config}, 1024).ok();
+        return proc::curlConfig(config, 1024).ok();
     } catch (...) { return false; }
 }
 } // namespace

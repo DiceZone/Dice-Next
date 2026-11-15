@@ -28,6 +28,7 @@ else
 fi
 
 $VCPKG_ROOT/vcpkg install \
+    'curl[tool,non-http,ssl]' \
     drogon[sqlite3] \
     nlohmann-json \
     sqlite-orm \

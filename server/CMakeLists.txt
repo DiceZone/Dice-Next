@@ -212,10 +212,31 @@ add_custom_target(prepare_version ALL
 
 # ─── Executable Target ───────────────────────────────────────
 
+# Stage the target triplet's curl CLI with its matching runtime dependencies.
+set(DICE_CURL_ROOT "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+set(DICE_CURL_TOOLS "${DICE_CURL_ROOT}/tools/curl")
+set(DICE_CURL_FILES "${DICE_CURL_TOOLS}/curl${CMAKE_EXECUTABLE_SUFFIX}")
+if(NOT EXISTS "${DICE_CURL_FILES}")
+    message(FATAL_ERROR "Install the target vcpkg curl[tool,non-http,ssl] dependency before configuring.")
+endif()
+if(WIN32)
+    file(GLOB curl_dlls "${DICE_CURL_TOOLS}/*.dll")
+    list(APPEND DICE_CURL_FILES ${curl_dlls})
+endif()
+list(APPEND DICE_CURL_FILES "${DICE_CURL_ROOT}/share/curl/copyright")
+function(dicenext_stage_curl target)
+    set(dir "$<TARGET_FILE_DIR:${target}>/lib/curl")
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${dir}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DICE_CURL_FILES} "${dir}"
+        VERBATIM)
+endfunction()
+
 add_executable(dice-next-server ${SOURCES} ${VERSION_BUILD_SOURCE})
 if(NOT WIN32)
     target_link_libraries(dice-next-server PRIVATE Iconv::Iconv)
 endif()
+dicenext_stage_curl(dice-next-server)
 dicenext_compile_parallelism(dice-next-server)
 add_dependencies(dice-next-server prepare_version)
 # Keep the build value in a generated .cpp rather than a generated header.
@@ -329,6 +350,7 @@ endif()
 
 # ─── Install ─────────────────────────────────────────────────
 install(TARGETS dice-next-server DESTINATION bin)
+install(PROGRAMS ${DICE_CURL_FILES} DESTINATION bin/lib/curl)
 
 # ─── Tests ───────────────────────────────────────────────────
 include(CTest)

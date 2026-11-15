@@ -68,6 +68,10 @@ rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR" "$RELEASE_DIR"
 echo "Packaging $PACKAGE_NAME ..."
 
+curl_dir="$(dirname "$SERVER_BIN")/lib/curl"
+[[ -x "$curl_dir/curl" ]] || { echo "Missing bundled curl" >&2; exit 1; }
+mkdir -p "$STAGING_DIR/lib"
+cp -a "$curl_dir" "$STAGING_DIR/lib/curl"
 install -m 0755 "$SERVER_BIN" "$STAGING_DIR/dice-next-server"
 install -m 0755 "$MANAGER_BIN" "$STAGING_DIR/dice-next"
 cp -a "$SERVER_DIR/i18n" "$STAGING_DIR/i18n"
@@ -95,11 +99,12 @@ cp -a "$WEB_DIST" "$STAGING_DIR/web/dist"
 # start the server with a package-local library path so clean machines work.
 LIB_STAGE="$STAGING_DIR/lib"
 mkdir -p "$LIB_STAGE"
-if [[ -n "${VCPKG_ROOT:-}" && -d "$VCPKG_ROOT/installed/$TRIPLET/lib" ]]; then
-    shopt -s nullglob
-    for library in "$VCPKG_ROOT/installed/$TRIPLET/lib/"*.so*; do cp -a "$library" "$LIB_STAGE/"; done
-    shopt -u nullglob
-fi
+cache="$SERVER_DIR/$BUILD_DIR/CMakeCache.txt"
+installed="$(sed -n 's/^VCPKG_INSTALLED_DIR:[^=]*=//p' "$cache")"
+[[ -d "$installed/$TRIPLET/lib" ]] || { echo "Missing target libraries under $installed/$TRIPLET" >&2; exit 1; }
+shopt -s nullglob
+for library in "$installed/$TRIPLET/lib/"*.so*; do cp -a "$library" "$LIB_STAGE/"; done
+shopt -u nullglob
 
 cat > "$STAGING_DIR/start.sh" << 'EOF'
 #!/usr/bin/env bash

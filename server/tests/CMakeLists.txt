@@ -127,6 +127,7 @@ set(TEST_SOURCES
 )
 
 add_executable(dice-next-tests ${TEST_SOURCES})
+dicenext_stage_curl(dice-next-tests)
 if(NOT WIN32)
     target_link_libraries(dice-next-tests PRIVATE Iconv::Iconv)
 endif()

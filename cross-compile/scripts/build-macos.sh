@@ -33,6 +33,7 @@ fi
 # 安装 vcpkg 依赖
 echo "安装 vcpkg 依赖..."
 $VCPKG_ROOT/vcpkg install \
+    'curl[tool,non-http,ssl]' \
     drogon[sqlite3] \
     nlohmann-json \
     sqlite-orm \

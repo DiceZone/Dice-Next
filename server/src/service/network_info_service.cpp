@@ -147,17 +147,11 @@ std::vector<std::string> NetworkInfoService::publicAddress(const Cancelled& canc
     // Documented fixed HTTPS endpoints: www.ipify.org and AWS's checkip service.
     // No user data, credentials, proxy, curlrc or redirects. Cancel also reaps
     // the child if DNS/curl hangs. No HTTP/WebSocket listener is used.
-#ifdef _WIN32
-    const auto curl = proc::systemTool("curl.exe");
-    if (!std::filesystem::path(curl).is_absolute()) return {}; // never run a cwd/PATH impostor
-#else
-    const auto curl = proc::systemTool("curl");
-#endif
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(7);
     const auto stop = [&] { return cancelled() || std::chrono::steady_clock::now() >= deadline; };
     for (const auto* url : {"https://api.ipify.org", "https://checkip.amazonaws.com"}) {
         if (stop()) break;
-        const auto result = proc::runCancellable(curl,
+        const auto result = proc::curlCancellable(
             {"--disable", "--ipv4", "--silent", "--fail", "--proto", "=https", "--noproxy", "*",
              "--connect-timeout", "2", "--max-time", "3", url}, stop, 128);
         if (!result.ok() || result.truncated || result.cancelled) continue;

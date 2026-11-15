@@ -77,7 +77,7 @@ Result runPathsCancellable(const std::filesystem::path& program,
 
 /// Absolute path of a tool that ships with the operating system.  On Windows it
 /// resolves inside the system directory, so a file dropped next to the
-/// application cannot answer for curl.exe or tar.exe -- the manager puts the
+/// application cannot answer for tar.exe -- the manager puts the
 /// package lib directory on PATH before starting the core.  Elsewhere the plain
 /// name is returned and the normal PATH lookup applies.
 std::string systemTool(const std::string& name);
@@ -94,6 +94,7 @@ Result curlConfigCancellable(const std::filesystem::path& configFile,
 
 /// curl with an explicit argument vector, for the calls that do not use a
 /// config file.  Arguments are passed verbatim -- no quoting required.
+Result curlCancellable(std::vector<std::filesystem::path> args, CancellationCheck cancelled, std::size_t limit = 0);
 Result curl(const std::vector<std::string>& args, std::size_t outputLimit = 0);
 
 } // namespace dice::proc

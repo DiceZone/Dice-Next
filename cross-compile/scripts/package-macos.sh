@@ -52,6 +52,10 @@ ARCHIVE="$RELEASE_DIR/$PACKAGE_NAME.tar.gz"
 
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR" "$RELEASE_DIR"
+curl_dir="$(dirname "$SERVER_BIN")/lib/curl"
+[[ -x "$curl_dir/curl" ]] || { echo "Missing bundled curl" >&2; exit 1; }
+mkdir -p "$STAGING_DIR/lib"
+cp -a "$curl_dir" "$STAGING_DIR/lib/curl"
 install -m 0755 "$SERVER_BIN" "$STAGING_DIR/dice-next-server"
 install -m 0755 "$MANAGER_BIN" "$STAGING_DIR/dice-next"
 cp -a "$SERVER_DIR/i18n" "$STAGING_DIR/i18n"
@@ -81,7 +85,7 @@ cp -a "$WEB_DIST" "$STAGING_DIR/web/dist"
 # and are trusted by macOS.  Refuse to create a misleading "single file" package
 # if a vcpkg dylib was linked by accident.
 if command -v otool >/dev/null 2>&1; then
-    external_libs="$(otool -L "$SERVER_BIN" "$MANAGER_BIN" | awk '/^[[:space:]]/{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' || true)"
+    external_libs="$(otool -L "$SERVER_BIN" "$MANAGER_BIN" "$curl_dir/curl" | awk '/^[[:space:]]/{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' || true)"
     if [[ -n "$external_libs" ]]; then
         echo "Unexpected non-system dynamic dependencies in static macOS build:" >&2
         echo "$external_libs" >&2

@@ -106,6 +106,9 @@ Copy-Item $launcher (Join-Path $stage 'dice-next.exe')
 $appStage = Join-Path $stage 'app'
 New-Item -ItemType Directory -Force -Path $appStage | Out-Null
 Copy-Item $exe (Join-Path $appStage 'dice-next-core.exe')
+if (!(Test-Path (Join-Path $relDir 'lib/curl/curl.exe'))) { throw 'Missing bundled curl' }
+New-Item -ItemType Directory -Force (Join-Path $appStage 'lib') | Out-Null
+Copy-Item (Join-Path $relDir 'lib/curl') (Join-Path $appStage 'lib/curl') -Recurse
 # 依赖 DLL 与 core 同目录。exe 所在目录是 Windows 解析静态导入的第一顺位，放这里
 # 就不需要任何 PATH 设置——启动器因此不必常驻，拉起 core 后即可退出。
 Get-ChildItem (Join-Path $relDir '*.dll') | Copy-Item -Destination $appStage
@@ -153,6 +156,11 @@ New-Item -ItemType Directory -Force -Path $legacyLibStage | Out-Null
     (Join-Path $legacyLibStage 'README.txt'),
     "Compatibility directory for Dice!Next build 883 updater. Runtime DLLs are in app\.",
     $utf8)
+# The curl child has its own DLL search directory on a clean Windows host.
+foreach ($runtimeDll in 'msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll') {
+    Copy-Item (Join-Path $appStage $runtimeDll) (Join-Path $appStage 'lib/curl') -Force
+}
+
 $dllCount = (Get-ChildItem (Join-Path $appStage '*.dll') | Measure-Object).Count
 
 # ── 2. i18n / 内建内容资源 / 前端 ────────────────────────────

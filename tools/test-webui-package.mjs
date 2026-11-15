@@ -145,6 +145,11 @@ try {
   const directories = (await readdir(sandbox, { withFileTypes: true })).filter(entry => entry.isDirectory());
   assert.equal(directories.length, 1, 'Expected one package root');
   root = path.join(sandbox, directories[0].name);
+  const curl = path.join(root, process.platform === 'win32' ? 'app/lib/curl/curl.exe' : 'lib/curl/curl');
+  const curlEnv = { ...process.env, PATH: '', LD_LIBRARY_PATH: path.join(root, 'lib') };
+  const version = execFileSync(curl, ['-q', '--version'], { env: curlEnv, encoding: 'utf8', windowsHide: true });
+  const protocols = version.split(/\r?\n/).find(line => line.startsWith('Protocols:'))?.split(/\s+/) ?? [];
+  for (const protocol of ['http', 'https', 'smtp', 'smtps']) assert.ok(protocols.includes(protocol), 'Bundled curl lacks ' + protocol);
   assert.ok((await stat(path.join(root, 'web/dist/index.html'))).isFile(), 'Missing web/dist/index.html');
   for (const stale of ['web/dist/v1', 'web/dist/v2', 'web/dist/webui-versions.json']) {
     await assert.rejects(stat(path.join(root, stale)), `${stale} belongs to the retired dual bundle`);
