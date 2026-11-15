@@ -62,6 +62,13 @@ public:
                            const std::string& flag = "", int privilege = 0);
 
     void handleEvent(const BotEvent& event, int privilege = 0);
+    // True when a JS plugin called dicenext.setGroupAddRequest during the latest handleEvent.
+    bool requestDecisionTaken() const { return requestDecisionTaken_.load(); }
+    bool lastGroupRequestApproved() const { return lastGroupRequestApproved_.load(); }
+    std::string lastGroupRequestReason() const { return lastGroupRequestReason_; }
+    // True when a JS plugin vetoed a friend request (approve is ignored; Lua-style reject only).
+    bool friendRequestRejected() const { return friendRequestRejected_.load(); }
+    std::string lastFriendRequestReason() const { return lastFriendRequestReason_; }
 
     Result handle(const std::string& platform, const std::string& userId,
                   const std::string& nickname, const std::string& groupId, const std::string& groupCard,
@@ -165,6 +172,23 @@ public:
         ProcessingScope logScope(loggingContextForCall());
         if (groupAdmin_) groupAdmin_(platform, op, groupId, userId, num, text);
     }
+    using GroupRequestFn = std::function<void(const std::string& adapterId, const std::string& platform,
+        const std::string& flag, const std::string& subType, bool approve, const std::string& reason)>;
+    void setGroupRequest(GroupRequestFn f) { groupRequest_ = std::move(f); }
+    void submitGroupRequest(const std::string& adapterId, const std::string& platform,
+                            const std::string& flag, const std::string& subType,
+                            bool approve, const std::string& reason) {
+        ProcessingScope logScope(loggingContextForCall());
+        requestDecisionTaken_.store(true);
+        lastGroupRequestApproved_.store(approve);
+        lastGroupRequestReason_ = reason;
+        if (groupRequest_) groupRequest_(adapterId, platform, flag, subType, approve, reason);
+    }
+    using FriendRequestFn = std::function<void(const std::string& adapterId, const std::string& platform,
+        const std::string& flag, const std::string& reason)>;
+    void setFriendRequest(FriendRequestFn f) { friendRequest_ = std::move(f); }
+    void submitFriendRequest(const std::string& adapterId, const std::string& platform,
+                             const std::string& flag, bool approve, const std::string& reason);
     using BanFn = std::function<void(const std::string& op, const std::string& id, const std::string& reason)>;
     void setBanOp(BanFn f) { banOp_ = std::move(f); }
     void banOp(const std::string& op, const std::string& id, const std::string& reason) const {
@@ -389,8 +413,15 @@ private:
     DiceSidesFn diceSidesResolver_;
     std::vector<std::string> extraDirs_;   // 规则包附加 js 目录
     GroupAdminFn groupAdmin_;
+    GroupRequestFn groupRequest_;
+    FriendRequestFn friendRequest_;
     BanFn banOp_;
     BanQueryFn banQuery_;
+    std::atomic<bool> requestDecisionTaken_{false};
+    std::atomic<bool> lastGroupRequestApproved_{false};
+    std::string lastGroupRequestReason_;
+    std::atomic<bool> friendRequestRejected_{false};
+    std::string lastFriendRequestReason_;
     void wsFire(int64_t id, const char* evt, const std::string& data);   // drogon loop 线程调用
     std::map<int64_t, JSValue> wsObjs_;   // 连接 id → JS 对象引用（持 mutex_）
     std::map<int64_t, ProcessingContext> wsContexts_;

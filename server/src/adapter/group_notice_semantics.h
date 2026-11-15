@@ -49,4 +49,47 @@ inline std::string milkyDepartureType(const std::string& type, const json& data)
     const auto actor = noticeId(data, "operator_id");
     return actor.empty() || actor == "0" ? "leave" : "kick";
 }
+inline bool oneBotFriendRecallEvent(BotEvent& event, const std::string& type, const json& data) {
+    if (!data.is_object() || type != "friend_recall") return false;
+    event.type = EventType::kFriendRecall;
+    event.userId = noticeId(data, "user_id");
+    event.extra = data;
+    event.extra["message_id"] = noticeId(data, "message_id");
+    return true;
+}
+inline bool oneBotEssenceEvent(BotEvent& event, const std::string& type, const json& data) {
+    if (!data.is_object() || type != "essence") return false;
+    event.type = EventType::kEssence;
+    event.groupId = noticeId(data, "group_id");
+    event.userId = noticeId(data, "sender_id");
+    if (event.userId.empty()) event.userId = noticeId(data, "user_id");
+    event.operatorId = noticeId(data, "operator_id");
+    const auto sub = data.find("sub_type");
+    event.subType = sub != data.end() && sub->is_string() ? sub->get<std::string>() : "unknown";
+    event.extra = data;
+    event.extra["message_id"] = noticeId(data, "message_id");
+    return true;
+}
+inline bool oneBotNotifyHonorOrTitle(BotEvent& event, const std::string& type, const json& data) {
+    if (!data.is_object() || type != "notify") return false;
+    const auto sub = data.find("sub_type");
+    const std::string st = sub != data.end() && sub->is_string() ? sub->get<std::string>() : "";
+    if (st == "title") {
+        event.type = EventType::kGroupTitle;
+        event.groupId = noticeId(data, "group_id");
+        event.userId = noticeId(data, "user_id");
+        event.subType = st;
+        event.extra = data;
+        return true;
+    }
+    if (st == "honor") {
+        event.type = EventType::kGroupHonor;
+        event.groupId = noticeId(data, "group_id");
+        event.userId = noticeId(data, "user_id");
+        event.subType = st;
+        event.extra = data;
+        return true;
+    }
+    return false;
+}
 } // namespace dice

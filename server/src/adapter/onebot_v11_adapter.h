@@ -1384,6 +1384,11 @@ private:
                 ev.extra["file"] = json{{"id", jsonField(f, "id")}, {"name", f.value("name", std::string())},
                                         {"size", jsonField(f, "size")}, {"busid", jsonField(f, "busid")}};
                 label = "\xe7\xbe\xa4\xe6\x96\x87\xe4\xbb\xb6";   // 群文件
+            }
+            else if (oneBotFriendRecallEvent(ev, nt, j)) { label = "好友撤回"; }
+            else if (oneBotEssenceEvent(ev, nt, j)) { label = "群精华"; }
+            else if (oneBotNotifyHonorOrTitle(ev, nt, j)) {
+                label = ev.type == EventType::kGroupTitle ? "群头衔变更" : "群荣誉";
             } else { ev.type = EventType::kOther; }
         } else { // request
             const std::string rt = j.value("request_type", "");
@@ -1702,6 +1707,9 @@ private:
             else if (nt == "group_recall" || nt == "friend_recall") desc = "\xe6\x92\xa4\xe5\x9b\x9e";  // 撤回
             else if (nt == "group_ban")      desc = (sub == "lift_ban") ? "\xe8\xa7\xa3\xe7\xa6\x81" : "\xe7\xa6\x81\xe8\xa8\x80";  // 解禁/禁言
             else if (nt == "notify" && sub == "poke") desc = "\xe6\x88\xb3\xe4\xb8\x80\xe6\x88\xb3";    // 戳一戳
+            else if (nt == "notify" && sub == "title") desc = "\xe7\xbe\xa4\xe5\xa4\xb4\xe8\xa1\x94";  // 群头衔
+            else if (nt == "notify" && sub == "honor") desc = "\xe7\xbe\xa4\xe8\x8d\xa3\xe8\xaa\x89";  // 群荣誉
+            else if (nt == "essence") desc = "\xe7\xbe\xa4\xe7\xb2\xbe\xe5\x8d\x8e";                  // 群精华
             std::string op = jsonField(j, "operator_id");
             return "\xe9\x80\x9a\xe7\x9f\xa5 [" + where + "] " + desc + " user=" + jsonField(j, "user_id")  // 通知
                  + (op.empty() ? "" : " op=" + op);

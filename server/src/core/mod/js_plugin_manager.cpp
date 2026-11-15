@@ -237,6 +237,57 @@ static JSValue jsMemberKick(JSContext* ctx, JSValueConst, int argc, JSValueConst
                       toStr(ctx, argv[1]), toStr(ctx, argv[2]), 0, "");
     return JS_UNDEFINED;
 }
+// dicenext.setGroupAddRequest(ctx, flag, subType, approve, reason?)
+// dicenext.setGroupAddRequest(ctx, event, approve, reason?)
+// 海豹 JS 没有入群审批接口，因此挂在 dicenext 而不是 seal 上。
+// event 是 onGroupRequest 回调里的 {flag, subType, ...}。
+static JSValue jsSetGroupAddRequest(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    auto* m = mgrOf(ctx);
+    if (!m || argc < 3) return JS_UNDEFINED;
+    const std::string platform = argc >= 1 ? ctxStr(ctx, argv[0], "endPoint", "platform") : std::string();
+    const std::string adapterId = argc >= 1 ? ctxStr(ctx, argv[0], "endPoint", "id") : std::string();
+    std::string flag, subType, reason;
+    bool approve = false;
+    if (JS_IsObject(argv[1]) && !JS_IsString(argv[1]) && !JS_IsArray(argv[1])) {
+        flag = getStrProp(ctx, argv[1], "flag");
+        subType = getStrProp(ctx, argv[1], "subType");
+        if (subType.empty()) subType = getStrProp(ctx, argv[1], "sub_type");
+        approve = JS_ToBool(ctx, argv[2]);
+        if (argc >= 4) reason = toStr(ctx, argv[3]);
+    } else {
+        flag = toStr(ctx, argv[1]);
+        subType = toStr(ctx, argv[2]);
+        if (argc >= 4) approve = JS_ToBool(ctx, argv[3]);
+        if (argc >= 5) reason = toStr(ctx, argv[4]);
+    }
+    if (subType.empty()) subType = "add";
+    if (flag.empty()) return JS_UNDEFINED;
+    m->submitGroupRequest(adapterId, platform, flag, subType, approve, reason);
+    return JS_UNDEFINED;
+}
+// dicenext.setFriendAddRequest(ctx, event, approve, reason?)
+// dicenext.setFriendAddRequest(ctx, flag, approve, reason?)
+// 跟随 Lua：只能否决。approve=true 会被忽略，好友申请仍走宿主 friend_policy。
+static JSValue jsSetFriendAddRequest(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    auto* m = mgrOf(ctx);
+    if (!m || argc < 3) return JS_UNDEFINED;
+    const std::string platform = ctxStr(ctx, argv[0], "endPoint", "platform");
+    const std::string adapterId = ctxStr(ctx, argv[0], "endPoint", "id");
+    std::string flag, reason;
+    bool approve = false;
+    if (JS_IsObject(argv[1]) && !JS_IsString(argv[1]) && !JS_IsArray(argv[1])) {
+        flag = getStrProp(ctx, argv[1], "flag");
+        approve = JS_ToBool(ctx, argv[2]);
+        if (argc >= 4) reason = toStr(ctx, argv[3]);
+    } else {
+        flag = toStr(ctx, argv[1]);
+        approve = JS_ToBool(ctx, argv[2]);
+        if (argc >= 4) reason = toStr(ctx, argv[3]);
+    }
+    if (flag.empty()) return JS_UNDEFINED;
+    m->submitFriendRequest(adapterId, platform, flag, approve, reason);
+    return JS_UNDEFINED;
+}
 // seal.setPlayerGroupCard(ctx, template) — set the SENDER's group card.
 static JSValue jsSetPlayerGroupCard(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     auto* m = mgrOf(ctx);
@@ -1449,6 +1500,13 @@ void JsPluginManager::installGlobals() {
 
     JS_SetPropertyStr(ctx_, g, "seal", seal);
 
+    JSValue dicenext = JS_NewObject(ctx_);
+    JS_SetPropertyStr(ctx_, dicenext, "setGroupAddRequest",
+        JS_NewCFunction(ctx_, jsSetGroupAddRequest, "setGroupAddRequest", 5));
+    JS_SetPropertyStr(ctx_, dicenext, "setFriendAddRequest",
+        JS_NewCFunction(ctx_, jsSetFriendAddRequest, "setFriendAddRequest", 4));
+    JS_SetPropertyStr(ctx_, g, "dicenext", dicenext);
+
     JS_FreeValue(ctx_, g);
 }
 
@@ -2581,7 +2639,24 @@ JsPluginManager::Result JsPluginManager::handleCommandReceived(
     JS_FreeValue(ctx_, jargs);
     return res;
 }
+void JsPluginManager::submitFriendRequest(const std::string& adapterId, const std::string& platform,
+                                          const std::string& flag, bool approve, const std::string& reason) {
+    ProcessingScope logScope(loggingContextForCall());
+    if (approve) {
+        DICE_LOG_WARN_M("JS 插件", "dicenext.setFriendAddRequest 只能否决好友申请，已忽略同意。");
+        return;
+    }
+    friendRequestRejected_.store(true);
+    lastFriendRequestReason_ = reason;
+    if (friendRequest_) friendRequest_(adapterId, platform, flag, reason);
+}
+
 void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
+    requestDecisionTaken_.store(false);
+    lastGroupRequestApproved_.store(false);
+    lastGroupRequestReason_.clear();
+    friendRequestRejected_.store(false);
+    lastFriendRequestReason_.clear();
 
     const auto extraId = [&](const char* key) -> std::string {
         if (!event.extra.is_object() || !event.extra.contains(key)) return {};
@@ -2590,6 +2665,19 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
         if (v.is_number_integer()) return std::to_string(v.get<int64_t>());
         if (v.is_number_unsigned()) return std::to_string(v.get<uint64_t>());
         return {};
+    };
+    const auto extraInt = [&](const char* key) -> int64_t {
+        if (!event.extra.is_object() || !event.extra.contains(key)) return 0;
+        const auto& v = event.extra[key];
+        if (v.is_number_integer()) return v.get<int64_t>();
+        if (v.is_number_unsigned()) return static_cast<int64_t>(v.get<uint64_t>());
+        if (v.is_string()) {
+            try { return std::stoll(v.get<std::string>()); } catch (...) {}
+        }
+        return 0;
+    };
+    const auto isKick = [&]() {
+        return event.subType == "kick" || event.subType == "kick_me" || event.subType == "removed";
     };
 
     Message message;
@@ -2601,44 +2689,85 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
     message.targetId = event.groupId.empty() ? event.userId : event.groupId;
     message.type = event.groupId.empty() ? MessageType::kPrivate : MessageType::kGroup;
 
-    const char* hook = nullptr;
-    bool usePokeEvent = false;
-    bool useLeaveEvent = false;
-    bool useOfficialEvent = false;
+    enum class EventArgKind { Message, Poke, Leave, Request, Notice, Official };
+    struct EventHook { const char* name; EventArgKind kind; };
+    std::vector<EventHook> hooks;
+
     switch (event.type) {
     case EventType::kGroupIncrease:
         if (event.userId == event.selfId) {
             message.senderId = event.operatorId.empty() ? event.userId : event.operatorId;
-            hook = extraId("guild_id").empty() ? "onGroupJoined" : "onGuildJoined";
+            hooks.push_back({extraId("guild_id").empty() ? "onGroupJoined" : "onGuildJoined", EventArgKind::Message});
         } else {
             message.senderId = event.userId;
-            hook = "onGroupMemberJoined";
+            hooks.push_back({"onGroupMemberJoined", EventArgKind::Message});
         }
         break;
     case EventType::kFriendAdd:
         message.senderId = event.userId;
-        hook = "onBecomeFriend";
+        hooks.push_back({"onBecomeFriend", EventArgKind::Message});
         break;
     case EventType::kGroupRecall:
         message.senderId = event.userId.empty() ? event.operatorId : event.userId;
         message.id = extraId("message_id");
-        hook = "onMessageDeleted";
+        hooks.push_back({"onMessageDeleted", EventArgKind::Message});
+        break;
+    case EventType::kFriendRecall:
+        message.senderId = event.userId.empty() ? event.operatorId : event.userId;
+        message.id = extraId("message_id");
+        hooks.push_back({"onFriendRecall", EventArgKind::Notice});
+        hooks.push_back({"onMessageDeleted", EventArgKind::Message});
         break;
     case EventType::kPoke:
         message.senderId = event.operatorId.empty() ? event.userId : event.operatorId;
-        usePokeEvent = true;
-        hook = "onPoke";
+        hooks.push_back({"onPoke", EventArgKind::Poke});
         break;
     case EventType::kGroupDecrease:
         message.senderId = event.operatorId.empty() ? event.userId : event.operatorId;
-        useLeaveEvent = true;
-        hook = "onGroupLeave";
+        hooks.push_back({"onGroupLeave", EventArgKind::Leave});
+        if (isKick()) hooks.push_back({"onGroupKicked", EventArgKind::Notice});
         break;
+    case EventType::kGroupRequest:
+        message.senderId = event.userId;
+        hooks.push_back({"onGroupRequest", EventArgKind::Request});
+        break;
+    case EventType::kFriendRequest:
+        message.senderId = event.userId;
+        hooks.push_back({"onFriendRequest", EventArgKind::Request});
+        break;
+    case EventType::kGroupUpload:
+        message.senderId = event.userId;
+        hooks.push_back({"onGroupUpload", EventArgKind::Notice});
+        break;
+    case EventType::kGroupBan:
+        message.senderId = event.userId.empty() ? event.operatorId : event.userId;
+        hooks.push_back({"onGroupBan", EventArgKind::Notice});
+        break;
+    case EventType::kGroupAdmin:
+        message.senderId = event.userId.empty() ? event.operatorId : event.userId;
+        hooks.push_back({"onGroupAdmin", EventArgKind::Notice});
+        break;
+    case EventType::kGroupTitle:
+        message.senderId = event.userId;
+        hooks.push_back({"onGroupTitle", EventArgKind::Notice});
+        break;
+    case EventType::kGroupHonor:
+        message.senderId = event.userId;
+        hooks.push_back({"onGroupHonor", EventArgKind::Notice});
+        break;
+    case EventType::kEssence:
+        message.senderId = event.userId.empty() ? event.operatorId : event.userId;
+        message.id = extraId("message_id");
+        hooks.push_back({"onGroupEssence", EventArgKind::Notice});
+        break;
+    case EventType::kGroupHistory:
+        return;
     default:
         if (event.platform != "qq_official") return;
         message.senderId = event.userId.empty() ? event.operatorId : event.userId;
-        hook = event.subType == "interaction" ? "onQQInteraction" : event.subType == "subscription_status" ? "onQQSubscriptionStatus" : "onQQOfficialEvent";
-        useOfficialEvent = true;
+        hooks.push_back({event.subType == "interaction" ? "onQQInteraction"
+            : event.subType == "subscription_status" ? "onQQSubscriptionStatus"
+            : "onQQOfficialEvent", EventArgKind::Official});
         if (!extraId("channel_id").empty()) { message.type = MessageType::kChannel; message.targetId = extraId("channel_id"); }
         break;
     }
@@ -2653,57 +2782,124 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
     JS_UpdateStackTop(rt_);
     JSValue jctx, jmsg;
     buildCtxMsg(message, privilege, jctx, jmsg);
-    JSValue hookArg = JS_DupValue(ctx_, jmsg);
-    if (useOfficialEvent) {
-        JS_FreeValue(ctx_, hookArg);
-        auto payload = event.extra.is_object() ? event.extra : json::object();
-        payload["groupId"] = event.groupId; payload["userId"] = event.userId; payload["operatorId"] = event.operatorId;
-        payload["platform"] = event.platform; payload["adapterId"] = event.adapterId; payload["timestamp"] = event.timestamp;
-        const auto source = payload.dump();
-        hookArg = JS_ParseJSON(ctx_, source.c_str(), source.size(), "qq-official-event");
-    } else if (usePokeEvent) {
-        JS_FreeValue(ctx_, hookArg);
-        hookArg = JS_NewObject(ctx_);
-        JS_SetPropertyStr(ctx_, hookArg, "groupId", JS_NewString(ctx_, event.groupId.c_str()));
-        const std::string senderId = event.operatorId.empty() ? event.userId : event.operatorId;
-        JS_SetPropertyStr(ctx_, hookArg, "senderId", JS_NewString(ctx_, senderId.c_str()));
-        JS_SetPropertyStr(ctx_, hookArg, "targetId", JS_NewString(ctx_, event.userId.c_str()));
-        JS_SetPropertyStr(ctx_, hookArg, "isPrivate", JS_NewBool(ctx_, event.groupId.empty()));
-    } else if (useLeaveEvent) {
-        JS_FreeValue(ctx_, hookArg);
-        hookArg = JS_NewObject(ctx_);
-        JS_SetPropertyStr(ctx_, hookArg, "groupId", JS_NewString(ctx_, event.groupId.c_str()));
-        JS_SetPropertyStr(ctx_, hookArg, "userId", JS_NewString(ctx_, event.userId.c_str()));
-        JS_SetPropertyStr(ctx_, hookArg, "operatorId", JS_NewString(ctx_, event.operatorId.c_str()));
-    }
+
+    auto setStr = [&](JSValue obj, const char* key, const std::string& value) {
+        JS_SetPropertyStr(ctx_, obj, key, JS_NewString(ctx_, value.c_str()));
+    };
+    auto makeNotice = [&]() {
+        JSValue o = JS_NewObject(ctx_);
+        setStr(o, "groupId", event.groupId);
+        setStr(o, "userId", event.userId);
+        setStr(o, "operatorId", event.operatorId);
+        setStr(o, "selfId", event.selfId);
+        setStr(o, "subType", event.subType);
+        setStr(o, "platform", event.platform);
+        setStr(o, "adapterId", event.adapterId);
+        setStr(o, "flag", event.flag);
+        setStr(o, "comment", event.comment);
+        JS_SetPropertyStr(ctx_, o, "isSelf", JS_NewBool(ctx_, !event.selfId.empty() && event.userId == event.selfId));
+        const std::string messageId = extraId("message_id");
+        if (!messageId.empty()) setStr(o, "messageId", messageId);
+        if (event.type == EventType::kGroupBan) {
+            JS_SetPropertyStr(ctx_, o, "duration", JS_NewInt64(ctx_, extraInt("duration")));
+            const bool whole = event.userId == "0" || event.subType == "whole_ban" || event.subType == "whole_lift_ban";
+            JS_SetPropertyStr(ctx_, o, "isWhole", JS_NewBool(ctx_, whole));
+        }
+        if (event.type == EventType::kGroupTitle) setStr(o, "title", extraId("title"));
+        if (event.type == EventType::kGroupHonor) setStr(o, "honorType", extraId("honor_type"));
+        if (event.type == EventType::kGroupUpload) {
+            json f = event.extra.contains("file") && event.extra["file"].is_object()
+                ? event.extra["file"] : json::object();
+            JSValue file = JS_NewObject(ctx_);
+            const auto field = [&](const char* key) -> std::string {
+                if (!f.contains(key)) return {};
+                const auto& v = f[key];
+                if (v.is_string()) return v.get<std::string>();
+                if (v.is_number_integer()) return std::to_string(v.get<int64_t>());
+                if (v.is_number_unsigned()) return std::to_string(v.get<uint64_t>());
+                return {};
+            };
+            setStr(file, "id", field("id"));
+            setStr(file, "name", field("name"));
+            setStr(file, "size", field("size"));
+            setStr(file, "busid", field("busid"));
+            JS_SetPropertyStr(ctx_, o, "file", file);
+        }
+        return o;
+    };
+    auto makeHookArg = [&](EventArgKind kind) -> JSValue {
+        if (kind == EventArgKind::Official) {
+            auto payload = event.extra.is_object() ? event.extra : json::object();
+            payload["groupId"] = event.groupId; payload["userId"] = event.userId; payload["operatorId"] = event.operatorId;
+            payload["platform"] = event.platform; payload["adapterId"] = event.adapterId; payload["timestamp"] = event.timestamp;
+            const auto source = payload.dump();
+            return JS_ParseJSON(ctx_, source.c_str(), source.size(), "qq-official-event");
+        }
+        if (kind == EventArgKind::Poke) {
+            JSValue o = JS_NewObject(ctx_);
+            setStr(o, "groupId", event.groupId);
+            const std::string senderId = event.operatorId.empty() ? event.userId : event.operatorId;
+            setStr(o, "senderId", senderId);
+            setStr(o, "targetId", event.userId);
+            JS_SetPropertyStr(ctx_, o, "isPrivate", JS_NewBool(ctx_, event.groupId.empty()));
+            return o;
+        }
+        if (kind == EventArgKind::Leave) {
+            JSValue o = JS_NewObject(ctx_);
+            setStr(o, "groupId", event.groupId);
+            setStr(o, "userId", event.userId);
+            setStr(o, "operatorId", event.operatorId);
+            setStr(o, "subType", event.subType);
+            return o;
+        }
+        if (kind == EventArgKind::Request) {
+            JSValue o = JS_NewObject(ctx_);
+            setStr(o, "groupId", event.groupId);
+            setStr(o, "userId", event.userId);
+            setStr(o, "operatorId", event.operatorId);
+            setStr(o, "flag", event.flag);
+            setStr(o, "subType", event.subType);
+            setStr(o, "comment", event.comment);
+            setStr(o, "platform", event.platform);
+            setStr(o, "adapterId", event.adapterId);
+            return o;
+        }
+        if (kind == EventArgKind::Notice) return makeNotice();
+        return JS_DupValue(ctx_, jmsg);
+    };
 
     // Event hooks are outside a command turn. replyToSender therefore routes
     // immediately through the injected adapter sender, matching SealDice.
     const bool previousCapture = capturing_;
     capturing_ = false;
-    JSValueConst args[3] = { jctx, hookArg, jmsg };
-    for (auto& e : exts_) {
-        if (suspendedFiles_.count(e.second)) continue;
-        ScriptFaultScope fault(suspendedFiles_, e.second);
-        if (groupGate_ && !event.groupId.empty() && !e.second.empty()
-            && !groupGate_(event.platform, event.groupId, "js:" + e.second, event.adapterId)) continue;
-        JSValue fn = JS_GetPropertyStr(ctx_, e.first, hook);
-        if (JS_IsFunction(ctx_, fn)) {
-            ProcessingScope logScope(loggingSource(e.second, hook), "平台事件：" + std::string(hook));
-            JSValue rv = JS_Call(ctx_, fn, e.first, useOfficialEvent ? 3 : 2, args);
-            if (JS_IsException(rv)) {
-                JSValue exc = JS_GetException(ctx_);
-                logPluginFailure("执行 " + std::string(hook) + " 回调", jsErrorDetails(ctx_, exc));
-                JS_FreeValue(ctx_, exc);
+    for (const auto& planned : hooks) {
+        JSValue hookArg = makeHookArg(planned.kind);
+        JSValueConst args[3] = { jctx, hookArg, jmsg };
+        const int argc = planned.kind == EventArgKind::Official ? 3 : 2;
+        for (auto& e : exts_) {
+            if (suspendedFiles_.count(e.second)) continue;
+            ScriptFaultScope fault(suspendedFiles_, e.second);
+            if (groupGate_ && !event.groupId.empty() && !e.second.empty()
+                && !groupGate_(event.platform, event.groupId, "js:" + e.second, event.adapterId)) continue;
+            JSValue fn = JS_GetPropertyStr(ctx_, e.first, planned.name);
+            if (JS_IsFunction(ctx_, fn)) {
+                ProcessingScope logScope(loggingSource(e.second, planned.name),
+                                         "平台事件：" + std::string(planned.name));
+                JSValue rv = JS_Call(ctx_, fn, e.first, argc, args);
+                if (JS_IsException(rv)) {
+                    JSValue exc = JS_GetException(ctx_);
+                    logPluginFailure("执行 " + std::string(planned.name) + " 回调", jsErrorDetails(ctx_, exc));
+                    JS_FreeValue(ctx_, exc);
+                }
+                JS_FreeValue(ctx_, rv);
+                drainJobs();
             }
-            JS_FreeValue(ctx_, rv);
-            drainJobs();
+            JS_FreeValue(ctx_, fn);
         }
-        JS_FreeValue(ctx_, fn);
+        JS_FreeValue(ctx_, hookArg);
     }
     drainJobs();
     capturing_ = previousCapture;
-    JS_FreeValue(ctx_, hookArg);
     JS_FreeValue(ctx_, jctx);
     JS_FreeValue(ctx_, jmsg);
 }

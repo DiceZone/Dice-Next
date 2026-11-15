@@ -897,6 +897,32 @@ static int realMain(int argc, char* argv[]) {
             return;
         }
     });
+    jsMod.setGroupRequest([&adapterMgr](const std::string& adapterId, const std::string& platform,
+                                        const std::string& flag, const std::string& subType,
+                                        bool approve, const std::string& reason) {
+        auto a = adapterMgr.getAdapter(adapterId);
+        if (!a) {
+            for (auto& cand : adapterMgr.allAdapters()) {
+                if (cand->isConnected() && cand->platform() == platform) { a = cand; break; }
+            }
+        }
+        if (!a) return;
+        a->setGroupRequest(flag, subType.empty() ? "add" : subType, approve, reason);
+        DICE_LOG_INFO_M("群管理", "事件： JS 插件{}入群申请 flag={} reason={}",
+            approve ? "通过" : "拒绝", flag, reason);
+    });
+    jsMod.setFriendRequest([&adapterMgr](const std::string& adapterId, const std::string& platform,
+                                         const std::string& flag, const std::string& reason) {
+        auto a = adapterMgr.getAdapter(adapterId);
+        if (!a) {
+            for (auto& cand : adapterMgr.allAdapters()) {
+                if (cand->isConnected() && cand->platform() == platform) { a = cand; break; }
+            }
+        }
+        if (!a) return;
+        a->setFriendRequest(flag, false);
+        DICE_LOG_INFO_M("群管理", "事件： JS 插件拒绝好友申请 flag={} reason={}", flag, reason);
+    });
     // 黑名单：seal.ban.addBan/addTrust/remove → 命令路由的黑白名单系统。
     jsMod.setBanOp([&cmdRouter](const std::string& op, const std::string& id, const std::string& reason) {
         cmdRouter.jsBanOp(op, id, reason);
@@ -2980,6 +3006,13 @@ static int realMain(int argc, char* argv[]) {
                 }
             }
         } else if (e.type == ET::kFriendRequest) {
+            if (jsMod.friendRequestRejected()) {
+                const auto pluginReason = jsMod.lastFriendRequestReason();
+                reportRequest("已提交自动拒绝",
+                    pluginReason.empty() ? "JS 插件拒绝好友申请" : ("JS 插件拒绝：" + pluginReason));
+                DICE_LOG_INFO_M("群管理", "事件： JS 插件拒绝好友申请 from {}", e.userId);
+                return;
+            }
             if (!diceFlag("listen_friend_request", true)) return;    // 好友请求事件开关
             // 策略：all=任意通过 / keyword=含关键词才通过(其余留人工) /
             //       whitelist=白名单 / group_used=曾在任意群触发指令 /
@@ -3019,6 +3052,17 @@ static int realMain(int argc, char* argv[]) {
                 : reject ? "当前好友策略禁止添加" : "当前为人工审批模式，未提交同意或拒绝";
             reportRequest(approve ? "已提交自动同意" : reject ? "已提交自动拒绝" : "等待人工处理", reason);
         } else if (e.type == ET::kGroupRequest) {
+            if (jsMod.requestDecisionTaken()) {
+                const bool approve = jsMod.lastGroupRequestApproved();
+                const auto pluginReason = jsMod.lastGroupRequestReason();
+                reportRequest(approve ? "已提交自动同意" : "已提交自动拒绝",
+                    pluginReason.empty()
+                        ? (approve ? "JS 插件同意入群申请" : "JS 插件拒绝入群申请")
+                        : (approve ? "JS 插件同意入群申请" : ("JS 插件拒绝：" + pluginReason)));
+                DICE_LOG_INFO_M("群管理", "事件： JS 插件{}群 {} 加群申请 from {}",
+                    approve ? "通过" : "拒绝", e.groupId, e.userId);
+                return;
+            }
             if (!diceFlag("listen_group_request", true)) return;     // 群请求事件开关
             if (e.subType == "invite") {
                 // 记录群邀请人。
