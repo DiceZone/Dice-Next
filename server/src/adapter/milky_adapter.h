@@ -350,9 +350,12 @@ public:
         std::string uri;
         if (!content.empty()) uri = "base64://" + drogon::utils::base64Encode(reinterpret_cast<const unsigned char*>(content.data()), content.size());
         else if (!localPath.empty()) {
-            uri = (localPath.rfind("file:", 0) == 0 || localPath.rfind("base64://", 0) == 0 ||
-                   localPath.rfind("http://", 0) == 0 || localPath.rfind("https://", 0) == 0)
-                ? localPath : "file://" + localPath;
+            if (localPath.rfind("base64://", 0) == 0 ||
+                localPath.rfind("http://", 0) == 0 || localPath.rfind("https://", 0) == 0)
+                uri = localPath;
+            else
+                uri = image_resources::toFileUri(image_resources::fromUtf8(
+                    image_resources::stripFileUri(localPath)));
         }
         if (uri.empty()) return;
         sendAction("upload_group_file", {{"group_id", parseId(groupId)}, {"file_uri", uri}, {"file_name", name}}, {});
@@ -550,7 +553,7 @@ private:
             else if (type == "at" || type == "mention") { auto uid = valueAny(p, {"qq", "user_id", "user"}); if (uid == "all") out.segments.push_back({{"type", "mention_all"}, {"data", json::object()}}); else if (parseId(uid) > 0) out.segments.push_back({{"type", "mention"}, {"data", {{"user_id", parseId(uid)}}}}); else out.segments.push_back({{"type", "text"}, {"data", {{"text", text.substr(pos, end - pos + 1)}}}}); }
             else if (type == "mention_all") out.segments.push_back({{"type", "mention_all"}, {"data", json::object()}});
             else if (type == "face") { auto id = valueAny(p, {"id", "face_id"}); if (!id.empty()) out.segments.push_back({{"type", "face"}, {"data", {{"face_id", id}}}}); else out.segments.push_back({{"type", "text"}, {"data", {{"text", text.substr(pos, end - pos + 1)}}}}); }
-            else if (type == "image" || type == "record" || type == "video") { auto ref = valueAny(p, {"url", "file", "path", "uri"}); auto uri = imageUri(ref); if (!uri.empty()) { json d{{"uri", uri}}; if (type == "video") { auto thumb = imageUri(valueAny(p, {"thumb_uri", "thumb"})); if (!thumb.empty()) d["thumb_uri"] = thumb; } out.segments.push_back({{"type", type}, {"data", d}}); } else out.segments.push_back({{"type", "text"}, {"data", {{"text", text.substr(pos, end - pos + 1)}}}}); }
+            else if (type == "image" || type == "record" || type == "video") { auto ref = valueAny(p, {"url", "file", "path", "uri"}); auto uri = imageUri(ref); if (!uri.empty()) { json d{{"uri", uri}}; if (type == "video") { auto thumb = imageUri(valueAny(p, {"thumb_uri", "thumb"})); if (!thumb.empty()) d["thumb_uri"] = thumb; } out.segments.push_back({{"type", type}, {"data", d}}); } else if (ref.empty()) out.segments.push_back({{"type", "text"}, {"data", {{"text", text.substr(pos, end - pos + 1)}}}}); }
             else if (type == "reply") { auto seq = parseId(valueAny(p, {"id", "message_id", "message_seq"})); if (seq > 0) out.segments.push_back({{"type", "reply"}, {"data", {{"message_seq", seq}}}}); }
             else if (type == "file") { auto ref = valueAny(p, {"url", "file", "path", "uri"}); if (!ref.empty()) out.files.push_back({valueAny(p, {"name", "filename"}), {}, ref, text.substr(pos, end - pos + 1)}); else out.segments.push_back({{"type", "text"}, {"data", {{"text", text.substr(pos, end - pos + 1)}}}}); }
             else { out.segments.push_back({{"type", "text"}, {"data", {{"text", text.substr(pos, end - pos + 1)}}}}); }

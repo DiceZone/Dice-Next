@@ -1604,7 +1604,9 @@ private:
         if (!(n = tailOf("/api/assets/")).empty()) { localPath = "data/assets/" + n; return 1; }
         if (!(n = tailOf("/api/chat/images/")).empty()) { localPath = image_resources::utf8(image_resources::cacheDirectory("chat") / image_resources::fromUtf8(n)); return 1; }
         if (v.rfind("http://", 0) == 0 || v.rfind("https://", 0) == 0) return 0;   // 真外链
-        if (v.rfind("file://", 0) == 0) { localPath = v.substr(7); return 1; }
+        if (v.rfind("file:", 0) == 0 || v.rfind("/file:", 0) == 0) {
+            localPath = image_resources::stripFileUri(v); return 1;
+        }
         if (v.rfind("base64://", 0) == 0) return 2;   // 官方接口不接受 base64
         localPath = v;
         return 1;

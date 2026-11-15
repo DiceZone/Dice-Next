@@ -4,8 +4,10 @@
 // NapCat 跑在别的设备时 localhost 链接取不到图。现在回复/模板里统一存平台中立
 // 图片码 [img,file=<本地路径>]，发送时由适配器按 config dice.image_send 转成
 // 平台可用形式：
-//   base64  — 读本地文件转 base64://…（默认，跨设备通用）
+//   base64  — 读本地文件转 base64://…（默认，给 NapCat 等外置协议端，跨设备通用）
 //   httpurl — http://<host>/api/assets/<名>（host 默认 localhost:<端口>，可配公网）
+// 内置登录与骰同机：未选 httpurl 时发绝对 file:///（OpenOPQ 可直接 open），
+// 文件读不到再回退 base64。不要把相对 data/images/… 交给它当缓存名。
 // 旧数据里已存的 http://..../api/assets/.. 链接同样被识别并按此重新转换。
 
 #include "../config/config_manager.h"
@@ -17,6 +19,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 
 namespace dice::imgsend {
@@ -46,53 +49,77 @@ inline std::string assetName(const std::string& s) {
     return name;
 }
 
-/// 读本地文件 → base64://…（失败返回空）。中文路径走 u8string。
-inline std::string fileToBase64(const std::string& path) {
-    std::filesystem::path p(std::u8string(path.begin(), path.end()));
-    std::ifstream f(p, std::ios::binary);
+/// 读本地文件 → base64://…（失败返回空）。直接用 filesystem 路径，避免再转成
+/// 相对 data/images/… 交给 OneBot/OpenOPQ（它们会当成自己的缓存目录）。
+inline std::string fileToBase64(const std::filesystem::path& path) {
+    std::ifstream f(path, std::ios::binary);
     if (!f) return "";
     std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     if (bytes.empty()) return "";
     return "base64://" + drogon::utils::base64Encode(
         reinterpret_cast<const unsigned char*>(bytes.data()), (unsigned int)bytes.size());
 }
+inline std::string fileToBase64(const std::string& path) {
+    return fileToBase64(image_resources::fromUtf8(path));
+}
+
+inline bool readableFile(const std::filesystem::path& path) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec) && !ec
+        && std::filesystem::file_size(path, ec) > 0 && !ec;
+}
+
+/// 同机协议端：绝对 file:///；文件不在盘上再读成 base64（失败为空）。
+inline std::string fileToUriOrBase64(const std::filesystem::path& path) {
+    if (readableFile(path)) return image_resources::toFileUri(path);
+    return fileToBase64(path);
+}
+
+inline std::string encodeLocal(const std::filesystem::path& path,
+                               const std::string& platform = {},
+                               const std::string& adapterId = {},
+                               bool preferFileUri = false) {
+    auto c = conf(platform, adapterId);
+    if (c.value("mode", std::string("base64")) == "httpurl") {
+        if (auto resources = image_resources::current()) {
+            auto host = c.value("host", std::string());
+            if (host.empty()) host = "localhost:" + std::to_string(g_cfg ? g_cfg->get<int>("server/port", 18088) : 18088);
+            if (!host.starts_with("http://") && !host.starts_with("https://")) host = "http://" + host;
+            while (!host.empty() && host.back() == '/') host.pop_back();
+            try { return host + resources->share(image_resources::utf8(path.lexically_relative(resources->root()))); }
+            catch (...) { /* Private caches must stay inline, never become public links. */ }
+        }
+    }
+    if (preferFileUri) return fileToUriOrBase64(path);
+    return fileToBase64(path);
+}
 
 /// 发送期解析：把图片段里的本地路径/本站资产链接转成平台可用值。
-/// 远程外链、base64://、file:// 原样放行。
+/// 远程外链、base64:// 原样放行。preferFileUri（内置登录）发绝对 file:///；
+/// 否则读文件内嵌。读不到返回空——不要把相对路径交给协议端去 open。
 inline std::string resolve(const std::string& file,
                            const std::string& platform = {},
-                           const std::string& adapterId = {}) {
+                           const std::string& adapterId = {},
+                           bool preferFileUri = false) {
     if (file.empty()) return file;
-    if (file.rfind("base64://", 0) == 0 || file.rfind("file:", 0) == 0) return file;
+    if (file.rfind("base64://", 0) == 0) return file;
+    const std::string local = image_resources::stripFileUri(file);
     if (auto resources = image_resources::current()) {
-        if (auto path = resources->resolve(file)) {
-            auto c = conf(platform, adapterId);
-            if (c.value("mode", std::string("base64")) == "httpurl") {
-                auto host = c.value("host", std::string());
-                if (host.empty()) host = "localhost:" + std::to_string(g_cfg ? g_cfg->get<int>("server/port", 18088) : 18088);
-                if (!host.starts_with("http://") && !host.starts_with("https://")) host = "http://" + host;
-                while (!host.empty() && host.back() == '/') host.pop_back();
-                try { return host + resources->share(image_resources::utf8(path->lexically_relative(resources->root()))); }
-                catch (...) { /* Private caches must stay inline, never become public links. */ }
-            }
-            auto result = fileToBase64(image_resources::utf8(*path));
-            return result.empty() ? file : result;
-        }
-        if (resources->known(file)) return {}; // Recycled aliases must not fall back to old physical copies.
+        if (auto path = resources->resolve(local))
+            return encodeLocal(*path, platform, adapterId, preferFileUri);
+        if (resources->known(local)) return {}; // Recycled aliases must not fall back to old physical copies.
     }
     std::string name;        // data/assets 内的文件名（可走 httpurl）
-    std::string localPath;   // 本地实际路径（走 base64）
-    if (file.rfind("http://", 0) == 0 || file.rfind("https://", 0) == 0) {
-        name = assetName(file);
-        if (name.empty()) return file;   // 真外链（QQ 图床等）原样
+    std::string localPath;   // 本地实际路径
+    if (local.rfind("http://", 0) == 0 || local.rfind("https://", 0) == 0) {
+        name = assetName(local);
+        if (name.empty()) return local;   // 真外链（QQ 图床等）原样
         localPath = "data/assets/" + name;
     } else {
-        localPath = file;
-        std::string norm = file;
-        for (auto& ch : norm) if (ch == '\\') ch = '/';
+        localPath = local;
         static const std::string kDir = "data/assets/";
-        if (norm.rfind(kDir, 0) == 0) {
-            std::string rest = norm.substr(kDir.size());
+        if (local.rfind(kDir, 0) == 0) {
+            std::string rest = local.substr(kDir.size());
             if (!rest.empty() && rest.find('/') == std::string::npos) name = rest;
         }
     }
@@ -109,9 +136,9 @@ inline std::string resolve(const std::string& file,
         while (!host.empty() && host.back() == '/') host.pop_back();
         return host + "/api/assets/" + name;
     }
-    // base64 模式，或 httpurl 下无法定位到可服务的资产（任意本地路径）→ 内嵌。
-    std::string b64 = fileToBase64(localPath);
-    return b64.empty() ? file : b64;
+    const auto path = image_resources::fromUtf8(localPath);
+    if (preferFileUri) return fileToUriOrBase64(path);
+    return fileToBase64(path);
 }
 
 }  // namespace dice::imgsend

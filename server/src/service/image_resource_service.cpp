@@ -65,8 +65,7 @@ bool childOf(const std::string& path,const std::string& directory) {
 std::string parentOf(const std::string& path) { const auto at=path.rfind('/'); return at==std::string::npos ? "" : path.substr(0,at); }
 std::string basename(const std::string& path) { return path.substr(path.rfind('/')==std::string::npos ? 0 : path.rfind('/')+1); }
 std::string referenceKey(std::string value) {
-    for(auto& c:value) if(c=='\\') c='/';
-    if(value.starts_with("file://")) value.erase(0,7);
+    value = stripFileUri(std::move(value));
     while(value.starts_with("./")) value.erase(0,2);
     // Only known old asset endpoints are aliases; this never fetches an URL.
     auto at=value.find("/api/assets/");

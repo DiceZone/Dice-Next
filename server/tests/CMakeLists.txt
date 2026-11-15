@@ -26,6 +26,7 @@ set(TEST_SOURCES
     test_game_session_list.cpp
     test_image_resources.cpp
     test_image_resource_documents.cpp
+    test_image_send.cpp
     test_chat_persistence.cpp
     test_causal_rule_manager.cpp
     test_help_entry_filter.cpp

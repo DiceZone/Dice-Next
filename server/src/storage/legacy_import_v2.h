@@ -1396,7 +1396,7 @@ inline std::string legacyMediaReference(const fs::path& root, const fs::path& de
     if (reference.rfind("http://", 0) == 0 || reference.rfind("https://", 0) == 0
         || reference.rfind("base64://", 0) == 0 || reference.find('{') != std::string::npos) return reference;
     std::string local = reference;
-    if (local.rfind("file://", 0) == 0) local.erase(0, 7);
+    local = image_resources::stripFileUri(std::move(local));
     for (char& c : local) if (c == '\\') c = '/';
     const auto path = fromUtf8(local);
     fs::path found;

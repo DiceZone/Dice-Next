@@ -38,6 +38,39 @@ std::string utf8(const std::filesystem::path& path) {
     const auto text = path.generic_u8string(); return std::string(text.begin(), text.end());
 }
 std::filesystem::path fromUtf8(const std::string& value) { return std::filesystem::path(std::u8string(value.begin(), value.end())); }
+std::string stripFileUri(std::string value) {
+    for (char& c : value) if (c == '\\') c = '/';
+    while (value.starts_with("/file:")) value.erase(0, 1);
+    if (!value.starts_with("file:")) return value;
+    value.erase(0, 5);
+    if (value.starts_with("//")) {
+        const auto rest = value.substr(2);
+        if (rest.starts_with('/')) value = rest;
+        else {
+            const auto slash = rest.find('/');
+            const auto host = slash == std::string::npos ? rest : rest.substr(0, slash);
+            const auto path = slash == std::string::npos ? std::string() : rest.substr(slash);
+            if (host.empty() || host == "localhost" || host == "127.0.0.1") value = path.empty() ? "/" : path;
+            else if (host.size() == 2 && std::isalpha(static_cast<unsigned char>(host[0])) && host[1] == ':')
+                value = host + (path.empty() ? "/" : path);
+            else value = host + path;
+        }
+    }
+    if (value.size() >= 3 && value[0] == '/' && std::isalpha(static_cast<unsigned char>(value[1])) && value[2] == ':')
+        value.erase(0, 1);
+    return value;
+}
+std::string toFileUri(const std::filesystem::path& path) {
+    std::error_code ec;
+    auto abs = std::filesystem::absolute(path, ec);
+    if (ec) abs = path;
+    auto s = utf8(abs.lexically_normal());
+    for (char& c : s) if (c == '\\') c = '/';
+    if (s.size() >= 2 && std::isalpha(static_cast<unsigned char>(s[0])) && s[1] == ':')
+        return "file:///" + s;
+    if (!s.starts_with('/')) s.insert(s.begin(), '/');
+    return "file://" + s;
+}
 std::string escapeCode(const std::string& value) {
     std::string out;
     for (char c : value) {

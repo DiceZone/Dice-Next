@@ -60,7 +60,7 @@ DeckDownload exportDeck(Service& service,const fs::path& source,const std::strin
         auto resolved=service.resolve(reference);
         if(!resolved && (remote(reference) || reference.find('{')!=std::string::npos))return std::nullopt;
         if(!resolved) {
-            auto relative=fromUtf8(reference.starts_with("file://")?reference.substr(7):reference);
+            auto relative=fromUtf8(stripFileUri(reference));
             for(const auto& candidate:{document.path.parent_path()/relative,work/relative}) {
                 if(!imageExtension(candidate) || !fs::is_regular_file(candidate))continue;
                 for(const auto& root:{document.path.parent_path(),service.dataRoot()/"assets",service.dataRoot()/"legacy_assets",work/"image"})if(migration_resources::safePath(root,candidate)){resolved=candidate;break;}

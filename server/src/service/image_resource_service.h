@@ -34,6 +34,10 @@ std::string rewriteDocument(const Document& document, const Mapper& mapper);
 std::vector<std::string> documentReferences(const Document& document);
 std::string utf8(const std::filesystem::path& path);
 std::filesystem::path fromUtf8(const std::string& value);
+// file://data/images/x and file:///C:/x both become ordinary local paths.
+// A leading slash in front of file: (OpenOPQ's /file:///C:/...) is also stripped.
+std::string stripFileUri(std::string value);
+std::string toFileUri(const std::filesystem::path& path);
 std::string escapeCode(const std::string& value);
 std::string unescapeCode(std::string value);
 std::string imageCode(const std::string& relativePath);

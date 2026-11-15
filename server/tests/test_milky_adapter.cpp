@@ -33,6 +33,19 @@ TEST(MilkyAdapter, ConvertsMediaMentionsRepliesAndFiles) {
     ASSERT_EQ(files[0]["path"].get<std::string>(), std::string("https://example.test/report.pdf"));
 }
 
+TEST(MilkyAdapter, SkipsUnreadableLocalImagesInsteadOfFileUris) {
+    const json deck = MilkyAdapter::buildSegmentsForTest(
+        "[img,file=data/images/TAROT/a17.jpg]大吉");
+    ASSERT_EQ(deck.size(), static_cast<size_t>(1));
+    ASSERT_EQ(deck[0]["type"].get<std::string>(), std::string("text"));
+    ASSERT_EQ(deck[0]["data"]["text"].get<std::string>(), std::string("大吉"));
+
+    const json broken = MilkyAdapter::buildSegmentsForTest(
+        "[CQ:image,file=/file:///C:/TAROT/a17.png]大吉");
+    ASSERT_EQ(broken.size(), static_cast<size_t>(1));
+    ASSERT_EQ(broken[0]["data"]["text"].get<std::string>(), std::string("大吉"));
+}
+
 TEST(MilkyAdapter, PreservesUnsupportedOrMalformedCqSegmentsAsText) {
     const json segments = MilkyAdapter::buildSegmentsForTest(
         "a[CQ:music,type=qq,id=1]b[CQ:at,qq=not-a-number]c[CQ:image]d");

@@ -1511,11 +1511,14 @@ private:
                 if (end != std::string::npos) {
                     json seg = parseCode(text.substr(i + 1, end - i - 1));
                     if (!seg.is_null()) {
-                        // 图片按「图片发送方式」配置转换（本地路径/本站资产
-                        // 链接 → base64:// 或 http://<host>/api/assets/..）。
-                        if (seg.value("type", "") == "image")
-                            seg["data"]["file"] = imgsend::resolve(
-                                seg["data"].value("file", ""), platform(), id());
+                        // 图片按「图片发送方式」配置转换。内置登录同机，优先绝对
+                        // file:///；外置 OneBot 默认 base64:// 或 http://…/api/assets/。
+                        if (seg.value("type", "") == "image") {
+                            auto resolved = imgsend::resolve(
+                                seg["data"].value("file", ""), platform(), id(), managedPeer_);
+                            if (resolved.empty()) { i = end + 1; continue; }
+                            seg["data"]["file"] = std::move(resolved);
+                        }
                         flush(); arr.push_back(seg); i = end + 1; continue;
                     }
                 }
@@ -1547,8 +1550,10 @@ private:
                 if (end != std::string::npos) {
                     json seg = parseCode(text.substr(i + 1, end - i - 1));
                     if (seg.is_object() && seg.value("type", "") == "image") {
-                        out += "[CQ:image,file=" + cqEscape(imgsend::resolve(
-                            seg["data"].value("file", ""), platform(), id())) + "]";
+                        auto resolved = imgsend::resolve(
+                            seg["data"].value("file", ""), platform(), id(), managedPeer_);
+                        if (!resolved.empty())
+                            out += "[CQ:image,file=" + cqEscape(resolved) + "]";
                         i = end + 1;
                         continue;
                     }
