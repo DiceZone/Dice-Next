@@ -135,17 +135,19 @@ struct LiveLogService::Impl {
     std::string path,origin;
     ConfigManager& cfg;
     std::mutex opening;
-    std::jthread worker;
+    std::atomic<bool> stopping{false};
+    std::once_flag stopOnce;
+    std::thread worker;
     Impl(std::string file,ConfigManager& c,std::string host):path(std::move(file)),origin(std::move(host)),cfg(c) {
         Connection db(path); prepareSchema(db);
-        worker=std::jthread([this](std::stop_token stop){
-            while (!stop.stop_requested()) {
-                try { tick(stop); } catch(const std::exception& e) { DICE_LOG_WARN("云日志同步失败：{}",e.what()); }
-                for(int i=0;i<15 && !stop.stop_requested();++i) std::this_thread::sleep_for(100ms);
+        worker=std::thread([this]{
+            while (!stopping.load()) {
+                try { tick(); } catch(const std::exception& e) { DICE_LOG_WARN("云日志同步失败：{}",e.what()); }
+                for(int i=0;i<15 && !stopping.load();++i) std::this_thread::sleep_for(100ms);
             }
         });
     }
-    void tick(std::stop_token stop) {
+    void tick() {
         Connection db(path);
         std::vector<int64_t> ids;
         {
@@ -153,7 +155,7 @@ struct LiveLogService::Impl {
             while(ready.step()) ids.push_back(ready.number(0));
         }
         for(auto id:ids) {
-            if(stop.stop_requested()) break;
+            if(stopping.load()) break;
             std::string key,token,adapter,url;
             bool closed=false;
             {
@@ -213,8 +215,13 @@ struct LiveLogService::Impl {
 };
 
 LiveLogService::LiveLogService(const std::string& path,ConfigManager& cfg,std::string origin):impl_(std::make_unique<Impl>(path,cfg,std::move(origin))) {}
-LiveLogService::~LiveLogService()=default;
-void LiveLogService::stop(){impl_->worker.request_stop();if(impl_->worker.joinable())impl_->worker.join();}
+LiveLogService::~LiveLogService() { stop(); }
+void LiveLogService::stop() {
+    std::call_once(impl_->stopOnce, [this] {
+        impl_->stopping.store(true);
+        impl_->worker.join();
+    });
+}
 bool LiveLogService::belongsTo(int id,const std::string& adapter){
     Connection db(impl_->path); Statement s(db,"SELECT adapter FROM live_sessions WHERE log_id=?");
     s.bind(1,id);return !s.step() || s.text(0)==adapter;
