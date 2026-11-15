@@ -17,6 +17,7 @@
 #include <drogon/WebSocketClient.h>
 #include <drogon/HttpRequest.h>
 #include "common/subprocess.h"
+#include "service/image_resource_service.h"
 
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -591,7 +592,7 @@ static JSValue jsBase64ToImage(JSContext* ctx, JSValueConst, int argc, JSValueCo
     if (ec) return JS_NewString(ctx, "");
     const fs::path path = dir / name;
     { std::ofstream f(path, std::ios::binary); f.write(raw.data(), static_cast<std::streamsize>(raw.size())); }
-    return JS_NewString(ctx, ("file://" + dnx_u8str(path)).c_str());
+    return JS_NewString(ctx, image_resources::toFileUri(path).c_str());
 }
 
 // ─── G5: seal.applyPlayerGroupCardByTemplate(ctx, tmpl)（对齐海豹 dice_jsvm.go）───
