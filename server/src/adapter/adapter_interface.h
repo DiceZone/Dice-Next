@@ -91,6 +91,10 @@ enum class EventType {
     kGroupUpload,     // 群文件上传（extra.file = {id,name,size,busid}）
     kGroupBan,        // 群禁言／解除禁言（含全体禁言；extra.duration 为秒）
     kGroupAdmin,      // 群管理员设置／取消
+    kFriendRecall,    // 好友／私聊撤回（extra.message_id）
+    kGroupTitle,      // 群专属头衔变更（extra.title）
+    kGroupHonor,      // 群荣誉（龙王等；extra.honor_type）
+    kEssence,         // 群精华消息设置／取消（extra.message_id）
     kOther,
 };
 

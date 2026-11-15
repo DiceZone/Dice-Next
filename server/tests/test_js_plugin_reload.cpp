@@ -545,3 +545,223 @@ seal.ext.register(ext);
 
     fs::remove_all(root, ec);
 }
+
+TEST(JsPluginManager, GroupRequestHookCanApproveOrReject) {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path root = fs::temp_directory_path() /
+        ("dice_next_js_group_request_" + std::to_string(nonce));
+    std::error_code ec;
+    fs::create_directories(root, ec);
+    ASSERT_FALSE(static_cast<bool>(ec));
+
+    {
+        std::ofstream plugin(root / "join-audit.js", std::ios::binary);
+        plugin << R"JS(
+const ext = seal.ext.new('join-audit', 'Dice!Next', '1.0.0');
+globalThis.__lastRequest = '';
+ext.onGroupRequest = (ctx, event) => {
+  globalThis.__lastRequest =
+    `${event.groupId}:${event.userId}:${event.flag}:${event.subType}:${event.comment}:${ctx.endPoint.id}`;
+  if (event.userId === 'ok') dicenext.setGroupAddRequest(ctx, event, true, '');
+  else if (event.userId === 'no') dicenext.setGroupAddRequest(ctx, event.flag, event.subType, false, '仅限公寓骰主');
+};
+seal.ext.register(ext);
+)JS";
+        plugin.close();
+
+        struct Call {
+            std::string adapterId, platform, flag, subType, reason;
+            bool approve = false;
+        };
+        std::vector<Call> calls;
+        JsPluginManager manager;
+        ASSERT_TRUE(manager.init());
+        ASSERT_EQ(manager.loadDir(root.string()), 1);
+        const auto sealApi = manager.evalString("typeof seal.setGroupAddRequest");
+        const auto nextApi = manager.evalString("typeof dicenext.setGroupAddRequest");
+        ASSERT_TRUE(sealApi && *sealApi == "undefined");
+        ASSERT_TRUE(nextApi && *nextApi == "function");
+        manager.setGroupRequest([&](const std::string& adapterId, const std::string& platform,
+                                    const std::string& flag, const std::string& subType,
+                                    bool approve, const std::string& reason) {
+            calls.push_back(Call{adapterId, platform, flag, subType, reason, approve});
+        });
+
+        BotEvent ignore;
+        ignore.type = EventType::kGroupRequest;
+        ignore.platform = "onebot_v11"; ignore.adapterId = "adapter-1";
+        ignore.groupId = "1071356242"; ignore.userId = "wait";
+        ignore.flag = "f-wait"; ignore.subType = "add"; ignore.comment = "申请";
+        manager.handleEvent(ignore);
+        ASSERT_FALSE(manager.requestDecisionTaken());
+        ASSERT_TRUE(calls.empty());
+        const auto ignored = manager.evalString("globalThis.__lastRequest");
+        ASSERT_TRUE(ignored && *ignored == "1071356242:wait:f-wait:add:申请:adapter-1");
+
+        BotEvent approve;
+        approve.type = EventType::kGroupRequest;
+        approve.platform = "onebot_v11"; approve.adapterId = "adapter-1";
+        approve.groupId = "1071356242"; approve.userId = "ok";
+        approve.flag = "f-ok"; approve.subType = "add";
+        manager.handleEvent(approve);
+        ASSERT_TRUE(manager.requestDecisionTaken());
+        ASSERT_TRUE(manager.lastGroupRequestApproved());
+        ASSERT_EQ(manager.lastGroupRequestReason(), std::string());
+        ASSERT_EQ(calls.size(), 1u);
+        ASSERT_EQ(calls[0].flag, std::string("f-ok"));
+        ASSERT_EQ(calls[0].subType, std::string("add"));
+        ASSERT_TRUE(calls[0].approve);
+        ASSERT_EQ(calls[0].adapterId, std::string("adapter-1"));
+
+        BotEvent reject;
+        reject.type = EventType::kGroupRequest;
+        reject.platform = "onebot_v11"; reject.adapterId = "adapter-1";
+        reject.groupId = "1071356242"; reject.userId = "no";
+        reject.flag = "f-no"; reject.subType = "add";
+        manager.handleEvent(reject);
+        ASSERT_TRUE(manager.requestDecisionTaken());
+        ASSERT_FALSE(manager.lastGroupRequestApproved());
+        ASSERT_EQ(manager.lastGroupRequestReason(), std::string("仅限公寓骰主"));
+        ASSERT_EQ(calls.size(), 2u);
+        ASSERT_EQ(calls[1].flag, std::string("f-no"));
+        ASSERT_FALSE(calls[1].approve);
+        ASSERT_EQ(calls[1].reason, std::string("仅限公寓骰主"));
+    }
+
+    fs::remove_all(root, ec);
+}
+
+TEST(JsPluginManager, DiceNextNoticeHooksAndFriendRequestVetoOnly) {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path root = fs::temp_directory_path() /
+        ("dice_next_js_notices_" + std::to_string(nonce));
+    std::error_code ec;
+    fs::create_directories(root, ec);
+    ASSERT_FALSE(static_cast<bool>(ec));
+
+    {
+        std::ofstream plugin(root / "notice-hooks.js", std::ios::binary);
+        plugin << R"JS(
+const ext = seal.ext.new('notice-hooks', 'Dice!Next', '1.0.0');
+globalThis.__log = [];
+const push = (name, event) => {
+  globalThis.__log.push(`${name}:${event.groupId||''}:${event.userId||''}:${event.subType||''}:${event.messageId||''}:${event.title||''}:${event.honorType||''}:${event.file&&event.file.name||''}:${event.duration||0}`);
+};
+ext.onGroupLeave = (ctx, event) => globalThis.__log.push(`leave:${event.groupId}:${event.userId}:${event.subType||''}`);
+ext.onGroupKicked = (ctx, event) => push('kicked', event);
+ext.onGroupUpload = (ctx, event) => push('upload', event);
+ext.onGroupBan = (ctx, event) => push('ban', event);
+ext.onGroupAdmin = (ctx, event) => push('admin', event);
+ext.onFriendRecall = (ctx, event) => push('friendRecall', event);
+ext.onMessageDeleted = (ctx, msg) => globalThis.__log.push(`deleted:${msg.rawId}:${msg.messageType}`);
+ext.onGroupTitle = (ctx, event) => push('title', event);
+ext.onGroupHonor = (ctx, event) => push('honor', event);
+ext.onGroupEssence = (ctx, event) => push('essence', event);
+ext.onFriendRequest = (ctx, event) => {
+  globalThis.__log.push(`friendReq:${event.userId}:${event.flag}:${event.comment}`);
+  if (event.userId === 'no') dicenext.setFriendAddRequest(ctx, event, false, '拒绝');
+  if (event.userId === 'ok') dicenext.setFriendAddRequest(ctx, event, true, '想同意');
+};
+seal.ext.register(ext);
+)JS";
+        plugin.close();
+
+        std::vector<std::string> friendCalls;
+        JsPluginManager manager;
+        ASSERT_TRUE(manager.init());
+        ASSERT_EQ(manager.loadDir(root.string()), 1);
+        const auto sealFriend = manager.evalString("typeof seal.setFriendAddRequest");
+        const auto nextFriend = manager.evalString("typeof dicenext.setFriendAddRequest");
+        ASSERT_TRUE(sealFriend && *sealFriend == "undefined");
+        ASSERT_TRUE(nextFriend && *nextFriend == "function");
+        manager.setFriendRequest([&](const std::string&, const std::string&,
+                                     const std::string& flag, const std::string& reason) {
+            friendCalls.push_back(flag + ":" + reason);
+        });
+
+        BotEvent leave;
+        leave.type = EventType::kGroupDecrease; leave.platform = "onebot_v11";
+        leave.groupId = "g"; leave.userId = "u"; leave.operatorId = "op"; leave.subType = "leave";
+        manager.handleEvent(leave);
+
+        BotEvent kick;
+        kick.type = EventType::kGroupDecrease; kick.platform = "onebot_v11";
+        kick.groupId = "g"; kick.userId = "bot"; kick.selfId = "bot";
+        kick.operatorId = "admin"; kick.subType = "kick_me";
+        manager.handleEvent(kick);
+
+        BotEvent upload;
+        upload.type = EventType::kGroupUpload; upload.platform = "onebot_v11";
+        upload.groupId = "g"; upload.userId = "u";
+        upload.extra = {{"file", {{"id", "f1"}, {"name", "a.zip"}, {"size", "12"}, {"busid", "0"}}}};
+        manager.handleEvent(upload);
+
+        BotEvent ban;
+        ban.type = EventType::kGroupBan; ban.platform = "onebot_v11";
+        ban.groupId = "g"; ban.userId = "bot"; ban.selfId = "bot";
+        ban.subType = "ban"; ban.extra = {{"duration", 600}};
+        manager.handleEvent(ban);
+
+        BotEvent admin;
+        admin.type = EventType::kGroupAdmin; admin.platform = "onebot_v11";
+        admin.groupId = "g"; admin.userId = "bot"; admin.selfId = "bot"; admin.subType = "set";
+        manager.handleEvent(admin);
+
+        BotEvent recall;
+        recall.type = EventType::kFriendRecall; recall.platform = "onebot_v11";
+        recall.userId = "u"; recall.extra = {{"message_id", "99"}};
+        manager.handleEvent(recall);
+
+        BotEvent title;
+        title.type = EventType::kGroupTitle; title.platform = "onebot_v11";
+        title.groupId = "g"; title.userId = "u"; title.subType = "title";
+        title.extra = {{"title", "骰主"}};
+        manager.handleEvent(title);
+
+        BotEvent honor;
+        honor.type = EventType::kGroupHonor; honor.platform = "onebot_v11";
+        honor.groupId = "g"; honor.userId = "u"; honor.subType = "honor";
+        honor.extra = {{"honor_type", "talkative"}};
+        manager.handleEvent(honor);
+
+        BotEvent essence;
+        essence.type = EventType::kEssence; essence.platform = "onebot_v11";
+        essence.groupId = "g"; essence.userId = "u"; essence.subType = "add";
+        essence.extra = {{"message_id", "7"}};
+        manager.handleEvent(essence);
+
+        BotEvent reject;
+        reject.type = EventType::kFriendRequest; reject.platform = "onebot_v11";
+        reject.adapterId = "a1"; reject.userId = "no"; reject.flag = "f-no"; reject.comment = "hi";
+        manager.handleEvent(reject);
+        ASSERT_TRUE(manager.friendRequestRejected());
+        ASSERT_EQ(manager.lastFriendRequestReason(), std::string("拒绝"));
+        ASSERT_EQ(friendCalls.size(), 1u);
+        ASSERT_EQ(friendCalls[0], std::string("f-no:拒绝"));
+
+        BotEvent approve;
+        approve.type = EventType::kFriendRequest; approve.platform = "onebot_v11";
+        approve.adapterId = "a1"; approve.userId = "ok"; approve.flag = "f-ok";
+        manager.handleEvent(approve);
+        ASSERT_FALSE(manager.friendRequestRejected());
+        ASSERT_EQ(friendCalls.size(), 1u);
+
+        const auto log = manager.evalString("globalThis.__log.join('|')");
+        ASSERT_TRUE(log);
+        ASSERT_TRUE(log->find("leave:g:u:leave") != std::string::npos);
+        ASSERT_TRUE(log->find("leave:g:bot:kick_me") != std::string::npos);
+        ASSERT_TRUE(log->find("kicked:g:bot:kick_me") != std::string::npos);
+        ASSERT_TRUE(log->find("upload:g:u:::a.zip") != std::string::npos || log->find("a.zip") != std::string::npos);
+        ASSERT_TRUE(log->find("ban:g:bot:ban") != std::string::npos);
+        ASSERT_TRUE(log->find("admin:g:bot:set") != std::string::npos);
+        ASSERT_TRUE(log->find("friendRecall::u") != std::string::npos);
+        ASSERT_TRUE(log->find("deleted:99:private") != std::string::npos);
+        ASSERT_TRUE(log->find("title:g:u:title::骰主") != std::string::npos);
+        ASSERT_TRUE(log->find("honor:g:u:honor:::talkative") != std::string::npos);
+        ASSERT_TRUE(log->find("essence:g:u:add:7") != std::string::npos);
+        ASSERT_TRUE(log->find("friendReq:no:f-no:hi") != std::string::npos);
+        ASSERT_TRUE(log->find("friendReq:ok:f-ok") != std::string::npos);
+    }
+
+    fs::remove_all(root, ec);
+}

@@ -167,6 +167,31 @@ TEST(MilkyAdapter, RoutesTemporaryMessagesAsPrivate) {
     ASSERT_EQ(received.extra["sourceGroupName"].get<std::string>(), std::string("source group"));
 }
 
+TEST(MilkyAdapter, MapsFriendRecallAndEssenceEvents) {
+    auto adapter = std::make_shared<MilkyAdapter>("42");
+    std::vector<BotEvent> events;
+    adapter->onEvent([&](const BotEvent& event) { events.push_back(event); });
+
+    ASSERT_TRUE(adapter->handleEventPayload({
+        {"event_type", "message_recall"}, {"self_id", 10001},
+        {"data", {{"message_scene", "friend"}, {"peer_id", 30003}, {"sender_id", 30003},
+                   {"operator_id", 30003}, {"message_seq", 88}}}
+    }));
+    ASSERT_TRUE(adapter->handleEventPayload({
+        {"event_type", "group_essence_message_change"}, {"self_id", 10001},
+        {"data", {{"group_id", 20002}, {"message_seq", 77}, {"is_set", true}}}
+    }));
+
+    ASSERT_EQ(events.size(), static_cast<size_t>(2));
+    ASSERT_TRUE(events[0].type == EventType::kFriendRecall);
+    ASSERT_EQ(events[0].userId, std::string("30003"));
+    ASSERT_EQ(events[0].extra["message_id"].get<std::string>(), std::string("88"));
+    ASSERT_TRUE(events[1].type == EventType::kEssence);
+    ASSERT_EQ(events[1].groupId, std::string("20002"));
+    ASSERT_EQ(events[1].subType, std::string("add"));
+    ASSERT_EQ(events[1].extra["message_id"].get<std::string>(), std::string("77"));
+}
+
 TEST(MilkyAdapter, ClampsHistoryRequestsToProtocolLimit) {
     ASSERT_EQ(MilkyAdapter::historyLimitForTest(50), 30);
     ASSERT_EQ(MilkyAdapter::historyLimitForTest(0), 20);

@@ -816,6 +816,24 @@ TEST(NoticeEvents, AdaptersNormalizeOnlyReportedModerationAndDepartureSemantics)
     ASSERT_EQ(dice::milkyDepartureType("group_member_decrease", {{"operator_id", 56}}), std::string("kick"));
     ASSERT_EQ(dice::milkyDepartureType("group_member_decrease", Json::object()), std::string("leave"));
     ASSERT_EQ(dice::milkyDepartureType("group_disband", Json::object()), std::string("disband"));
+    dice::BotEvent recall;
+    ASSERT_TRUE(dice::oneBotFriendRecallEvent(recall, "friend_recall", {{"user_id", 34}, {"message_id", 99}}));
+    ASSERT_TRUE(recall.type == dice::EventType::kFriendRecall);
+    ASSERT_EQ(recall.userId, std::string("34"));
+    ASSERT_EQ(recall.extra["message_id"].get<std::string>(), std::string("99"));
+    dice::BotEvent essence;
+    ASSERT_TRUE(dice::oneBotEssenceEvent(essence, "essence", {{"group_id", 12}, {"sender_id", 34}, {"operator_id", 56}, {"message_id", 7}, {"sub_type", "add"}}));
+    ASSERT_TRUE(essence.type == dice::EventType::kEssence);
+    ASSERT_EQ(essence.groupId, std::string("12"));
+    ASSERT_EQ(essence.subType, std::string("add"));
+    dice::BotEvent title;
+    ASSERT_TRUE(dice::oneBotNotifyHonorOrTitle(title, "notify", {{"sub_type", "title"}, {"group_id", 12}, {"user_id", 34}, {"title", "骰主"}}));
+    ASSERT_TRUE(title.type == dice::EventType::kGroupTitle);
+    ASSERT_EQ(title.extra["title"].get<std::string>(), std::string("骰主"));
+    dice::BotEvent honor;
+    ASSERT_TRUE(dice::oneBotNotifyHonorOrTitle(honor, "notify", {{"sub_type", "honor"}, {"group_id", 12}, {"user_id", 34}, {"honor_type", "talkative"}}));
+    ASSERT_TRUE(honor.type == dice::EventType::kGroupHonor);
+    ASSERT_FALSE(dice::oneBotNotifyHonorOrTitle(honor, "notify", {{"sub_type", "poke"}}));
 }
 TEST(NoticeEvents, RequestDecisionIncludesOutcomeReasonAndCommentWithoutClaimingApprovalConfirmed) {
     dice::BotEvent e; e.type = dice::EventType::kFriendRequest; e.userId = "1707642"; e.comment = "跑团邀请";

@@ -729,7 +729,18 @@ private:
             }
         }
         if (milkyModerationEvent(e, type, d)) { /* Role cache updated above; now deliver the event too. */ }
-        else if (type == "message_recall") { if (d.value("message_scene", std::string()) != "group") return; e.type = EventType::kGroupRecall; e.groupId = field(d, "peer_id"); e.extra["message_id"] = field(d, "message_seq"); }
+        else if (type == "message_recall") {
+            e.userId = field(d, "sender_id");
+            e.operatorId = field(d, "operator_id");
+            e.extra["message_id"] = field(d, "message_seq");
+            if (d.value("message_scene", std::string()) == "group") {
+                e.type = EventType::kGroupRecall;
+                e.groupId = field(d, "peer_id");
+            } else {
+                e.type = EventType::kFriendRecall;
+                if (e.userId.empty()) e.userId = field(d, "peer_id");
+            }
+        }
         else if (type == "friend_request") { e.type = EventType::kFriendRequest; e.userId = field(d, "initiator_id"); e.comment = d.value("comment", ""); e.flag = json{{"kind", "friend"}, {"initiator_uid", d.value("initiator_uid", "")}, {"is_filtered", d.value("is_filtered", false)}}.dump(); }
         else if (type == "group_join_request" || type == "group_invited_join_request") { e.type = EventType::kGroupRequest; e.groupId = field(d, "group_id"); e.userId = type == "group_join_request" ? field(d, "initiator_id") : field(d, "target_user_id"); e.operatorId = field(d, "initiator_id"); e.comment = d.value("comment", ""); e.subType = type == "group_join_request" ? "join_request" : "invited_join_request"; e.flag = json{{"kind", "group"}, {"request_type", e.subType}, {"group_id", e.groupId}, {"notification_seq", field(d, "notification_seq")}, {"is_filtered", d.value("is_filtered", false)}}.dump(); }
         else if (type == "group_invitation") { e.type = EventType::kGroupRequest; e.groupId = field(d, "group_id"); e.userId = field(d, "initiator_id"); e.operatorId = e.userId; e.subType = "invite"; e.flag = json{{"kind", "group"}, {"request_type", "invitation"}, {"group_id", e.groupId}, {"notification_seq", field(d, "invitation_seq")}}.dump(); }
@@ -742,6 +753,12 @@ private:
         else if (type == "group_nudge") { e.type = EventType::kPoke; e.groupId = field(d, "group_id"); e.userId = field(d, "receiver_id"); e.operatorId = field(d, "sender_id"); }
         else if (type == "group_disband") { e.type = EventType::kGroupDecrease; e.groupId = field(d, "group_id"); e.userId = loginId_; e.operatorId = field(d, "operator_id"); e.subType = "disband"; }
         else if (type == "group_file_upload") { e.type = EventType::kGroupUpload; e.groupId = field(d, "group_id"); e.userId = field(d, "user_id"); e.extra["file"] = {{"id", d.value("file_id", "")}, {"name", d.value("file_name", "")}, {"size", d.value("file_size", static_cast<int64_t>(0))}, {"busid", ""}}; }
+        else if (type == "group_essence_message_change") {
+            e.type = EventType::kEssence;
+            e.groupId = field(d, "group_id");
+            e.extra["message_id"] = field(d, "message_seq");
+            e.subType = d.value("is_set", false) ? "add" : "delete";
+        }
         else return;
         for (auto& cb : eventCallbacks_) cb(e);
     }
