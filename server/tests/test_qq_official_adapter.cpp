@@ -1,9 +1,13 @@
 #include <set>
 #include "test_framework.h"
 #include <limits>
+#include <chrono>
+#include <filesystem>
+#include <memory>
 #include "../src/adapter/qq_official_adapter.h"
 #include "../src/adapter/adapter_manager.h"
 #include "../src/storage/group_account_settings.h"
+#include "../src/service/image_resource_service.h"
 
 using namespace dice;
 
@@ -102,6 +106,8 @@ TEST(QQOfficialAdapter, MapsExtensionsToOfficialFileTypes) {
     ASSERT_EQ(QQOfficialAdapter::fileTypeForTest(2, "a.mp4"), 2);
     ASSERT_EQ(QQOfficialAdapter::fileTypeForTest(3, "a.silk"), 3);
     // 官方只认 png/jpg、mp4、silk；其余一律降级成文件类型，而不是报错丢弃。
+    ASSERT_EQ(QQOfficialAdapter::fileTypeForTest(1, "a.gif"), 4);
+    ASSERT_EQ(QQOfficialAdapter::fileTypeForTest(1, "a.webp"), 4);
     ASSERT_EQ(QQOfficialAdapter::fileTypeForTest(1, "a.psd"), 4);
     ASSERT_EQ(QQOfficialAdapter::fileTypeForTest(2, "a.mkv"), 4);
     ASSERT_EQ(QQOfficialAdapter::fileTypeForTest(4, "a.zip"), 4);
@@ -132,6 +138,117 @@ TEST(QQOfficialAdapter, SplitsMediaCodesAndKeepsUnsendableOnes) {
     const json kept = QQOfficialAdapter::splitMediaForTest("x[CQ:file,name=doc.txt,id=42]y");
     ASSERT_EQ(kept["media"].size(), static_cast<size_t>(0));
     ASSERT_EQ(kept["text"].get<std::string>(), std::string("x[CQ:file,name=doc.txt,id=42]y"));
+
+    const json deck = QQOfficialAdapter::splitMediaForTest("[img,file=data/images/TAROT/a17.jpg]大吉");
+    ASSERT_EQ(deck["text"].get<std::string>(), std::string("大吉"));
+    ASSERT_EQ(deck["media"].size(), static_cast<size_t>(1));
+    ASSERT_EQ(deck["media"][0]["kind"].get<int>(), 1);
+    ASSERT_EQ(deck["media"][0]["ref"].get<std::string>(), std::string("data/images/TAROT/a17.jpg"));
+}
+
+TEST(QQOfficialAdapter, MixesLeftoverTextIntoFirstImageCaption) {
+    const json deck = QQOfficialAdapter::mixedMediaForTest("[img,file=data/images/TAROT/a17.jpg]大吉");
+    ASSERT_EQ(deck["text"].get<std::string>(), std::string());
+    ASSERT_EQ(deck["media"].size(), static_cast<size_t>(1));
+    ASSERT_EQ(deck["media"][0]["kind"].get<int>(), 1);
+    ASSERT_EQ(deck["media"][0]["caption"].get<std::string>(), std::string("大吉"));
+
+    const json before = QQOfficialAdapter::mixedMediaForTest("抽到：[img,file=data/images/deck/test-deck.json/b1.jpg]");
+    ASSERT_EQ(before["text"].get<std::string>(), std::string());
+    ASSERT_EQ(before["media"][0]["caption"].get<std::string>(), std::string("抽到："));
+
+    const json two = QQOfficialAdapter::mixedMediaForTest(
+        "前[img,file=a.jpg]中[img,file=b.jpg]后");
+    ASSERT_EQ(two["text"].get<std::string>(), std::string());
+    ASSERT_EQ(two["media"].size(), static_cast<size_t>(2));
+    ASSERT_EQ(two["media"][0]["caption"].get<std::string>(), std::string("前中后"));
+    ASSERT_EQ(two["media"][1]["caption"].get<std::string>(), std::string());
+
+    const json video = QQOfficialAdapter::mixedMediaForTest(
+        "[video,url=https://example.test/a.mp4]说明");
+    ASSERT_EQ(video["text"].get<std::string>(), std::string("说明"));
+    ASSERT_EQ(video["media"].size(), static_cast<size_t>(1));
+    ASSERT_EQ(video["media"][0]["kind"].get<int>(), 2);
+    ASSERT_EQ(video["media"][0]["caption"].get<std::string>(), std::string());
+
+    const json md = QQOfficialAdapter::mixedMediaForTest(
+        "[img,file=a.jpg]**大吉**", ContentFormat::kMarkdown);
+    ASSERT_EQ(md["text"].get<std::string>(), std::string());
+    ASSERT_EQ(md["media"][0]["caption"].get<std::string>(), std::string("大吉"));
+
+    const json diceText = QQOfficialAdapter::mixedMediaForTest(
+        "Alice 掷出了 D100=42[img,file=data/images/dice/crit.jpg]");
+    ASSERT_EQ(diceText["text"].get<std::string>(), std::string());
+    ASSERT_EQ(diceText["media"][0]["caption"].get<std::string>(), std::string("Alice 掷出了 D100=42"));
+
+    const json customReply = QQOfficialAdapter::mixedMediaForTest(
+        "欢迎[img,file=data/images/welcome.png]新人入群");
+    ASSERT_EQ(customReply["text"].get<std::string>(), std::string());
+    ASSERT_EQ(customReply["media"][0]["caption"].get<std::string>(), std::string("欢迎新人入群"));
+}
+
+TEST(QQOfficialAdapter, PrefersMixedImageTextOverRichCardAndSplit) {
+    const json mixedDice = QQOfficialAdapter::sendPlanForTest(
+        "{pc} 掷骰：[img,file=a.jpg]D100=8", ContentFormat::kPlainText, true);
+    ASSERT_FALSE(mixedDice["rich"].get<bool>());
+    ASSERT_EQ(mixedDice["text"].get<std::string>(), std::string());
+    ASSERT_EQ(mixedDice["media"][0]["caption"].get<std::string>(), std::string("{pc} 掷骰：D100=8"));
+
+    const json richOnly = QQOfficialAdapter::sendPlanForTest(
+        "Alice 掷骰：D100=8", ContentFormat::kPlainText, true);
+    ASSERT_TRUE(richOnly["rich"].get<bool>());
+    ASSERT_EQ(richOnly["text"].get<std::string>(), std::string("Alice 掷骰：D100=8"));
+    ASSERT_TRUE(richOnly["media"].empty());
+
+    const json reply = QQOfficialAdapter::sendPlanForTest(
+        "签到成功[img,file=ok.jpg]明天再来");
+    ASSERT_FALSE(reply["rich"].get<bool>());
+    ASSERT_EQ(reply["text"].get<std::string>(), std::string());
+    ASSERT_EQ(reply["media"][0]["caption"].get<std::string>(), std::string("签到成功明天再来"));
+}
+
+TEST(QQOfficialAdapter, MediaMessageContentUsesCaptionOrInvisiblePlaceholder) {
+    ASSERT_EQ(QQOfficialAdapter::mediaMessageContentForTest("大吉"), std::string("大吉"));
+    ASSERT_EQ(QQOfficialAdapter::mediaMessageContentForTest(""),
+              QQOfficialAdapter::mediaPlaceholderForTest());
+    ASSERT_EQ(QQOfficialAdapter::mixedMediaContentForTest("大吉"), std::string("大吉"));
+    ASSERT_EQ(QQOfficialAdapter::mixedMediaContentForTest(""),
+              QQOfficialAdapter::mediaPlaceholderForTest());
+    ASSERT_EQ(QQOfficialAdapter::mixedMediaContentForTest("大吉", "HP 10/10"),
+              std::string("HP 10/10\n大吉"));
+    ASSERT_TRUE(QQOfficialAdapter::mixesImageCaptionForTest(1));
+    ASSERT_FALSE(QQOfficialAdapter::mixesImageCaptionForTest(4));
+}
+
+TEST(QQOfficialAdapter, MediaPlaceholderIsNotVisibleZero) {
+    const auto placeholder = QQOfficialAdapter::mediaPlaceholderForTest();
+    ASSERT_FALSE(placeholder.empty());
+    ASSERT_TRUE(placeholder != std::string("0"));
+    ASSERT_TRUE(placeholder != std::string(" "));
+}
+
+TEST(QQOfficialAdapter, MissingDeckImageIsNotTreatedAsUploadableLocalFile) {
+    std::string path;
+    ASSERT_EQ(QQOfficialAdapter::localFileKindForTest("data/images/TAROT/missing.jpg", path), 2);
+    ASSERT_EQ(QQOfficialAdapter::localFileKindForTest("base64://AAAA", path), 2);
+    ASSERT_EQ(QQOfficialAdapter::localFileKindForTest("https://example.test/a.png", path), 0);
+}
+
+TEST(QQOfficialAdapter, CataloguedDeckImageResolvesToReadableFile) {
+    namespace fs = std::filesystem;
+    const auto folder = fs::temp_directory_path() / ("dice-next-qq-img-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    auto previous = dice::image_resources::current();
+    auto service = std::make_shared<dice::image_resources::Service>(folder / "data");
+    dice::image_resources::setDefault(service);
+    const std::string jpeg = std::string("\xff\xd8\xff\xe0", 4) + "official-jpeg-body";
+    service->upload("TAROT", "a17.jpg", jpeg);
+    std::string path;
+    ASSERT_EQ(QQOfficialAdapter::localFileKindForTest("data/images/TAROT/a17.jpg", path), 1);
+    ASSERT_TRUE(fs::is_regular_file(dice::image_resources::fromUtf8(path)));
+    dice::image_resources::setDefault(std::move(previous));
+    std::error_code ec;
+    fs::remove_all(folder, ec);
 }
 
 TEST(QQOfficialAdapter, KeepsOfficialHardSizeLimit) {

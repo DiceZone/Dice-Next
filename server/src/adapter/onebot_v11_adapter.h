@@ -881,7 +881,16 @@ private:
             return false;
         }
         json req{{"action", action}, {"params", params}};
-        req["echo"] = echo.empty() ? std::to_string(++echoSeq_) : echo;
+        std::string requestEcho = echo;
+        if (requestEcho.empty() && managedPeer_
+            && (action == "send_group_msg" || action == "send_private_msg")
+            && imgsend::messageHasLocalImage(params.contains("message") ? params["message"] : json())) {
+            requestEcho = "imglocal:" + std::to_string(++echoSeq_);
+            std::lock_guard<std::mutex> lk(dataMutex_);
+            while (pendingImageSends_.size() >= 64) pendingImageSends_.erase(pendingImageSends_.begin());
+            pendingImageSends_[requestEcho] = PendingImageSend{action, params};
+        }
+        req["echo"] = requestEcho.empty() ? std::to_string(++echoSeq_) : requestEcho;
         const auto requestId = req["echo"].get<std::string>();
         if (outgoing) {
             std::lock_guard lock(outboundLogMutex_);
@@ -894,6 +903,7 @@ private:
                 if (!sendRevWsFrame(dumpJsonUtf8Safe(req))) {
                     if (outgoing) outgoing->failed("反向 WS 客户端已断开，没有提交发送");
                     std::lock_guard lock(outboundLogMutex_); pendingOutboundLogs_.erase(requestId);
+                    std::lock_guard lk(dataMutex_); pendingImageSends_.erase(requestId);
                     return false;
                 }
             } else if (auto conn = wsClient_ ? wsClient_->getConnection() : nullptr; conn && conn->connected()) {
@@ -901,6 +911,7 @@ private:
             } else {
                 if (outgoing) outgoing->failed("平台连接不可用，没有提交发送");
                 std::lock_guard lock(outboundLogMutex_); pendingOutboundLogs_.erase(requestId);
+                std::lock_guard lk(dataMutex_); pendingImageSends_.erase(requestId);
                 return false;
             }
             if (outgoing) outgoing->submitted();
@@ -908,6 +919,7 @@ private:
         } catch (...) {
             if (outgoing) outgoing->failed(describeException(std::current_exception()));
             std::lock_guard lock(outboundLogMutex_); pendingOutboundLogs_.erase(requestId);
+            std::lock_guard lk(dataMutex_); pendingImageSends_.erase(requestId);
             throw;
         }
     }
@@ -1147,6 +1159,20 @@ private:
                         uploadGroupFileBase64(pu.groupId, pu.name, pu.content);
                     }
                     return;  // handled (success → nothing more to do)
+                }
+                if (echo.rfind("imglocal:", 0) == 0) {
+                    PendingImageSend pending; bool have = false;
+                    {
+                        std::lock_guard<std::mutex> lk(dataMutex_);
+                        auto it = pendingImageSends_.find(echo);
+                        if (it != pendingImageSends_.end()) { pending = it->second; have = true; pendingImageSends_.erase(it); }
+                    }
+                    if (failed && have && pending.params.contains("message")
+                        && imgsend::rewriteLocalImagesToBase64(pending.params["message"])) {
+                        DICE_LOG_INFO("OneBotV11 '{}': local image send failed, retrying via base64", name_);
+                        sendOneBotAction(pending.action, pending.params, "imgb64:" + std::to_string(++echoSeq_));
+                    }
+                    return;
                 }
                 // 同步调用（invokeAction）的响应 → 兑现等待中的 promise。
                 if (echo.rfind("invoke:", 0) == 0) {
@@ -1517,7 +1543,7 @@ private:
                     json seg = parseCode(text.substr(i + 1, end - i - 1));
                     if (!seg.is_null()) {
                         // 图片按「图片发送方式」配置转换。内置登录同机，优先绝对
-                        // file:///；外置 OneBot 默认 base64:// 或 http://…/api/assets/。
+                        // 本地路径（不要 file:///）；外置 OneBot 默认 base64:// 或 http://…/api/assets/。
                         if (seg.value("type", "") == "image") {
                             auto resolved = imgsend::resolve(
                                 seg["data"].value("file", ""), platform(), id(), managedPeer_);
@@ -1867,6 +1893,8 @@ private:
     // base64:// (cross-container/cross-device, no shared filesystem needed).
     struct PendingUpload { std::string groupId, name, content; };
     std::map<std::string, PendingUpload> pendingUploads_;  // guarded by dataMutex_
+    struct PendingImageSend { std::string action; json params; };
+    std::map<std::string, PendingImageSend> pendingImageSends_;  // guarded by dataMutex_
 
     // 同步调用（invokeAction）等待中的 promise（echo → promise）。
     mutable std::mutex invokeMutex_;

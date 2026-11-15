@@ -15,8 +15,10 @@
 #include "../common/logger.h"
 #include "../common/markdown.h"
 #include "../common/qq_rich_reply.h"
+#include "../common/qq_sn_banner.h"
 #include "../common/outbound_payload.h"
 #include "../service/image_resource_service.h"
+#include "../service/image_transcode.h"
 
 #include <drogon/HttpAppFramework.h>   // drogon::app()：此前靠其他头间接带入，独立编译会缺
 #include <drogon/HttpClient.h>
@@ -682,10 +684,41 @@ public:
         const SplitText parts = splitMedia(text);
         json media = json::array();
         for (const auto& entry : parts.media)
-            media.push_back({{"kind", entry.kind}, {"ref", entry.ref}, {"name", entry.name}});
+            media.push_back({{"kind", entry.kind}, {"ref", entry.ref}, {"name", entry.name}, {"caption", entry.caption}});
         return {{"text", parts.text}, {"media", std::move(media)}};
     }
+    static json mixedMediaForTest(const std::string& text, ContentFormat format = ContentFormat::kPlainText) {
+        auto parts = splitMedia(text);
+        attachImageCaption(parts, format);
+        json media = json::array();
+        for (const auto& entry : parts.media)
+            media.push_back({{"kind", entry.kind}, {"ref", entry.ref}, {"name", entry.name}, {"caption", entry.caption}});
+        return {{"text", parts.text}, {"media", std::move(media)}};
+    }
+    /// Mirrors sendTo: images steal leftover text for 图文混排; rich cards only
+    /// win when the payload has no image to mix.
+    static json sendPlanForTest(const std::string& text, ContentFormat format = ContentFormat::kPlainText,
+                                bool richCardMatches = false) {
+        auto parts = splitMedia(text);
+        if (richCardMatches && format == ContentFormat::kPlainText && !hasMixableImage(parts))
+            return {{"rich", true}, {"text", text}, {"media", json::array()}};
+        attachImageCaption(parts, format);
+        json media = json::array();
+        for (const auto& entry : parts.media)
+            media.push_back({{"kind", entry.kind}, {"ref", entry.ref}, {"name", entry.name}, {"caption", entry.caption}});
+        return {{"rich", false}, {"text", parts.text}, {"media", std::move(media)}};
+    }
+    static std::string mediaMessageContentForTest(const std::string& caption) { return mediaMessageContent(caption); }
+    static std::string mixedMediaContentForTest(const std::string& caption, const std::string& snBanner = {}) {
+        Message m;
+        m.mediaCaption = caption;
+        m.snBanner = snBanner;
+        return mixedMediaContent(m);
+    }
+    static bool mixesImageCaptionForTest(int fileType) { return canMixCaption(fileType); }
     static size_t mediaHardLimitForTest() { return kMediaHardLimitBytes; }
+    static std::string mediaPlaceholderForTest() { return kMediaPlaceholder; }
+    static int localFileKindForTest(const std::string& ref, std::string& localPath) { return localFileKind(ref, localPath); }
 
 private:
     static constexpr int kMarkdownRejectThreshold = 2;
@@ -1545,9 +1578,52 @@ private:
     // 官方硬上限：任何类型超过 200MB 直接报 850031。软上限（图 20MB / 视频 30MB /
     // 语音 20MB）只是被降级成文件类型上传，不必我们拦。
     static constexpr size_t kMediaHardLimitBytes = 200ull * 1024 * 1024;
+    // QQ 拒绝空 content；纯空格会被改写成可见的「0」，牌堆就会变成「大吉0」。
+    static constexpr const char* kMediaPlaceholder = "\xE2\x80\x8B";
 
-    struct MediaItem { int kind = 4; std::string ref; std::string name; };   // 1=图 2=视频 3=语音 4=文件
+    struct MediaItem { int kind = 4; std::string ref; std::string name; std::string caption; };   // 1=图 2=视频 3=语音 4=文件
     struct SplitText { std::string text; std::vector<MediaItem> media; };
+
+    static std::string trimMediaText(const std::string& s) {
+        const auto b = s.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) return {};
+        return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
+    }
+
+    /// 图片可以跟文字走同一条 msg_type=7（content + media）。视频/语音/文件的 content 会被官方丢掉。
+    static bool hasMixableImage(const SplitText& parts) {
+        for (const auto& item : parts.media) if (item.kind == 1) return true;
+        return false;
+    }
+
+    static void attachImageCaption(SplitText& parts, ContentFormat format) {
+        std::string plain = trimMediaText(parts.text);
+        if (plain.empty()) return;
+        if (format == ContentFormat::kMarkdown) plain = markdown::toPlainText(plain);
+        for (auto& item : parts.media) if (item.kind == 1) {
+            item.caption = std::move(plain);
+            parts.text.clear();
+            return;
+        }
+    }
+
+    static std::string mediaMessageContent(const std::string& caption) {
+        return caption.empty() ? std::string(kMediaPlaceholder) : caption;
+    }
+
+    /// file_type=1（png/jpeg）才能把文字放进同一条富媒体消息；其它类型官方会丢掉 content。
+    static bool canMixCaption(int fileType) { return fileType == 1; }
+
+    static std::string mixedMediaContent(const Message& m) {
+        std::string body = m.mediaCaption;
+        if (!m.snBanner.empty())
+            body = qq_sn::prefix(m.snBanner, false, m.snBannerStyle, 2, m.snBannerTemplate, m.snBannerColor) + body;
+        return mediaMessageContent(body);
+    }
+
+    static bool hasSplitCaption(const Message& m) {
+        return !m.mediaCaption.empty() || !m.snBanner.empty();
+    }
 
     /// 按出现顺序拆出平台中立/OneBot 媒体码（url 优先于 file）。
     /// 没有实体引用的码（如入站群文件记录 [CQ:file,name=..,id=..]）原样保留在文本。
@@ -1588,10 +1664,24 @@ private:
         return out;
     }
 
+    static bool readableLocalMedia(const std::string& path) {
+        if (path.empty()) return false;
+        std::error_code ec;
+        const auto file = image_resources::fromUtf8(path);
+        return std::filesystem::is_regular_file(file, ec) && !ec
+            && std::filesystem::file_size(file, ec) > 0 && !ec;
+    }
+
     /// 媒体引用分类：0=远程公网 URL（/files+url 直传）；1=本地文件（分片上传）；2=无法发送。
+    /// 读不到的相对路径不要当本地文件去传，否则官方会回一条可见的「0」。
     static int localFileKind(const std::string& ref, std::string& localPath) {
+        auto accept = [&](std::string path) -> int {
+            if (!readableLocalMedia(path)) return 2;
+            localPath = std::move(path);
+            return 1;
+        };
         if (auto resources = image_resources::current()) {
-            if (auto path = resources->resolve(ref)) {localPath = image_resources::utf8(*path); return 1;}
+            if (auto path = resources->resolve(ref)) return accept(image_resources::utf8(*path));
             if (resources->known(ref)) return 2;
         }
         std::string v = ref;
@@ -1601,15 +1691,19 @@ private:
             return p == std::string::npos ? std::string() : v.substr(p + std::string(seg).size());
         };
         std::string n;
-        if (!(n = tailOf("/api/assets/")).empty()) { localPath = "data/assets/" + n; return 1; }
-        if (!(n = tailOf("/api/chat/images/")).empty()) { localPath = image_resources::utf8(image_resources::cacheDirectory("chat") / image_resources::fromUtf8(n)); return 1; }
-        if (v.rfind("http://", 0) == 0 || v.rfind("https://", 0) == 0) return 0;   // 真外链
-        if (v.rfind("file:", 0) == 0 || v.rfind("/file:", 0) == 0) {
-            localPath = image_resources::stripFileUri(v); return 1;
+        if (v.rfind("http://", 0) == 0 || v.rfind("https://", 0) == 0) return 0;
+        if (v.rfind("base64://", 0) == 0) return 2;
+        if (!(n = tailOf("/api/assets/")).empty()) return accept("data/assets/" + n);
+        if (!(n = tailOf("/api/chat/images/")).empty())
+            return accept(image_resources::utf8(image_resources::cacheDirectory("chat") / image_resources::fromUtf8(n)));
+        if (v.rfind("file:", 0) == 0 || v.rfind("/file:", 0) == 0) return accept(image_resources::stripFileUri(v));
+        std::error_code ec;
+        const auto abs = std::filesystem::absolute(image_resources::fromUtf8(v), ec);
+        if (!ec) {
+            const auto utf = image_resources::utf8(abs);
+            if (readableLocalMedia(utf)) return accept(utf);
         }
-        if (v.rfind("base64://", 0) == 0) return 2;   // 官方接口不接受 base64
-        localPath = v;
-        return 1;
+        return accept(std::move(v));
     }
 
     static std::string lowerExt(const std::string& name) {
@@ -1623,7 +1717,8 @@ private:
     static int fileTypeFor(int kind, const std::string& name) {
         const std::string e = lowerExt(name);
         if (kind == 1) {
-            static const std::set<std::string> kImgs = {"png","jpg","jpeg","gif","webp","bmp","heic","heif","svg","ico","tif","tiff"};
+            // 上传接口 file_type=1 只收 png/jpg。gif/webp/avif 等先转 JPEG 再走这个类型。
+            static const std::set<std::string> kImgs = {"png","jpg","jpeg"};
             return kImgs.count(e) ? 1 : 4;
         }
         if (kind == 2) return e == "mp4" ? 2 : 4;
@@ -1658,7 +1753,7 @@ private:
     }
 
     static std::string readLocalFile(const std::string& path) {
-        std::ifstream f(std::filesystem::path(std::u8string(path.begin(), path.end())), std::ios::binary);
+        std::ifstream f(image_resources::fromUtf8(path), std::ios::binary);
         if (!f) return {};
         return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     }
@@ -1808,20 +1903,46 @@ private:
         }
     }
 
+    /// 图片没发出去时，把原本要混排的文字单独发出去，避免牌堆只剩空白。
+    void sendCaptionFallback(const Message& m, std::string_view reason) {
+        if (!hasSplitCaption(m)) return;
+        DICE_LOG_WARN("QQOfficial '{}': {}，改为只发文字", name_, reason);
+        sendTextTo(m, m.mediaCaption, ContentFormat::kPlainText);
+    }
+
+    /// 不能混排（或混排失败）时：图走富媒体，文字另发一条。
+    void sendSplitCaption(const Message& m) {
+        if (!hasSplitCaption(m)) return;
+        sendTextTo(m, m.mediaCaption, ContentFormat::kPlainText);
+    }
+
     /// 富媒体消息发送：拿到 file_info 后 POST /messages (msg_type=7)。
-    void sendFileInfoTo(const Message& m, const std::string& target, const std::string& fileInfo) {
+    /// png/jpeg 优先把同条文字放进 content（图文混排）；官方丢掉 content 的类型、
+    /// 或混排被拒时，再拆成图片 + 文字两条。空 content 官方会拒；纯空格会显示成「0」。
+    void sendFileInfoTo(const Message& m, const std::string& target, const std::string& fileInfo,
+                        int fileType, bool allowMixed = true, std::string eventId = {}) {
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         auto outgoing = OutboundAttempt::prepare("QQ 官方「" + name_ + "」", (m.type == MessageType::kPrivate ? "私聊 " : "群 ") + m.targetId,
             m.logMediaSummary.empty() ? "[富媒体消息]" : m.logMediaSummary);
-        if (fileInfo.empty()) { DICE_LOG_WARN("QQOfficial '{}': 富媒体上传未返回 file_info，跳过发送", name_); return; }
-        if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; outgoing.failed(lastError_); return; }
+        if (fileInfo.empty()) {
+            DICE_LOG_WARN("QQOfficial '{}': 富媒体上传未返回 file_info，跳过发送", name_);
+            sendCaptionFallback(m, "富媒体上传未返回 file_info");
+            return;
+        }
+        if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; outgoing.failed(lastError_); sendCaptionFallback(m, lastError_); return; }
         const bool priv = m.type == MessageType::kPrivate;
         const std::string msgPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/messages";
-        // 官方要求 msg_type=7 时 content 需非空（文档注明的占位空格）。
-        json body = {{"content", " "}, {"msg_type", 7}, {"media", {{"file_info", fileInfo}}}};
+        const bool tryMix = allowMixed && canMixCaption(fileType);
+        if (!tryMix && allowMixed && hasSplitCaption(m))
+            DICE_LOG_INFO("QQOfficial '{}': 该文件类型不支持图文混排，改为图文分离发送", name_);
+        json body = {{"content", tryMix ? mixedMediaContent(m) : std::string(kMediaPlaceholder)},
+                     {"msg_type", 7}, {"media", {{"file_info", fileInfo}}}};
         if (!m.id.empty()) { body["msg_id"] = m.id; const int seq = nextReplySeq(m.id); if (seq > 0) body["msg_seq"] = seq; }
-        else { const auto ev = takePassiveEvent(m.type, target); if (!ev.empty()) body["event_id"] = ev; }
-        auto c2 = httpsClient("api.bot.qq.com"); if (!c2) { outgoing.failed("无法解析 api.bot.qq.com，没有提交发送"); return; }
+        else {
+            if (eventId.empty()) eventId = takePassiveEvent(m.type, target);
+            if (!eventId.empty()) body["event_id"] = eventId;
+        }
+        auto c2 = httpsClient("api.bot.qq.com"); if (!c2) { outgoing.failed("无法解析 api.bot.qq.com，没有提交发送"); sendCaptionFallback(m, "无法解析 api.bot.qq.com"); return; }
         auto r2 = drogon::HttpRequest::newHttpRequest();
         r2->setMethod(drogon::Post); r2->setPath(msgPath);
         r2->setContentTypeCode(drogon::CT_APPLICATION_JSON);
@@ -1830,7 +1951,7 @@ private:
         r2->setBody(body.dump());
         auto self = shared_from_this();
         outgoing.submitted();
-        c2->sendRequest(r2, [self, msgPath, outgoing](drogon::ReqResult rr2, const drogon::HttpResponsePtr& resp2) {
+        c2->sendRequest(r2, [self, m, target, fileInfo, fileType, tryMix, eventId, msgPath, outgoing](drogon::ReqResult rr2, const drogon::HttpResponsePtr& resp2) {
             self->safeMediaStep("发送富媒体消息回调", [&] {
                 if (rr2 != drogon::ReqResult::Ok || !resp2 || resp2->statusCode() >= 300) {
                     self->lastError_ = "QQ 官方富媒体消息发送失败";
@@ -1838,10 +1959,17 @@ private:
                         resp2 ? std::string(resp2->body()) : drogon::to_string(rr2)));
                     DICE_LOG_DEBUG("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, msgPath,
                                   resp2 ? static_cast<int>(resp2->statusCode()) : 0, resp2 ? std::string(resp2->body()) : std::string("网络请求未完成"));
+                    if (tryMix && hasSplitCaption(m)) {
+                        DICE_LOG_WARN("QQOfficial '{}': 图文混排失败，改为图文分离发送", self->name_);
+                        self->sendFileInfoTo(m, target, fileInfo, fileType, false, eventId);
+                        return;
+                    }
+                    self->sendCaptionFallback(m, "富媒体消息发送失败");
                     return;
                 }
                 const auto response = json::parse(resp2->body(), nullptr, false);
                 outgoing.accepted(response.is_object() ? logJsonId(response, "id") : "");
+                if (!tryMix) self->sendSplitCaption(m);
             });
         });
     }
@@ -1849,12 +1977,12 @@ private:
     /// 公网 URL 直传：POST /files 换 file_info → 发消息。
     void uploadRemoteTo(const Message& m, const std::string& target, const MediaItem& item, const std::string& url) {
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
-        if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
+        if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; sendCaptionFallback(m, lastError_); return; }
         const bool priv = m.type == MessageType::kPrivate;
         const int ftype = fileTypeFor(item.kind, item.name.empty() ? url : item.name);
         const std::string filesPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/files";
         auto c = httpsClient("api.bot.qq.com");
-        if (!c) { lastError_ = "无法解析 api.bot.qq.com"; return; }
+        if (!c) { lastError_ = "无法解析 api.bot.qq.com"; sendCaptionFallback(m, lastError_); return; }
         auto r = drogon::HttpRequest::newHttpRequest();
         r->setMethod(drogon::Post); r->setPath(filesPath);
         r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
@@ -1862,20 +1990,21 @@ private:
         r->addHeader("Authorization", "QQBot " + accessToken_);
         r->setBody(json{{"file_type", ftype}, {"url", url}, {"srv_send_msg", false}}.dump());
         auto self = shared_from_this();
-        c->sendRequest(r, [self, m, target, filesPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
+        c->sendRequest(r, [self, m, target, ftype, filesPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
             OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
             self->safeMediaStep("URL 直传回调", [&] {
                 if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
                     self->lastError_ = "QQ 官方富媒体上传失败";
                     DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, filesPath,
                                   resp ? static_cast<int>(resp->statusCode()) : 0, resp ? std::string(resp->body()) : std::string("网络请求未完成"));
+                    self->sendCaptionFallback(m, "富媒体 URL 直传失败");
                     return;
                 }
                 auto j = json::parse(resp->body(), nullptr, false);
                 const std::string fileInfo = field(j, "file_info");
-                if (fileInfo.empty()) { DICE_LOG_WARN("QQOfficial '{}': /files 未返回 file_info: {}", self->name_, std::string(resp->body())); return; }
+                if (fileInfo.empty()) { DICE_LOG_WARN("QQOfficial '{}': /files 未返回 file_info: {}", self->name_, std::string(resp->body())); self->sendCaptionFallback(m, "富媒体上传未返回 file_info"); return; }
                 DICE_LOG_INFO("QQOfficial '{}': URL 直传成功，获得 file_info，开始发送", self->name_);
-                self->sendFileInfoTo(m, target, fileInfo);
+                self->sendFileInfoTo(m, target, fileInfo, ftype);
             });
         });
     }
@@ -1886,28 +2015,45 @@ private:
     void uploadLocalTo(const Message& m, const std::string& target, const MediaItem& item, const std::string& localPath) {
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         safeMediaStep("uploadLocalTo 入口", [&] {
-            if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
-            const std::string data = readLocalFile(localPath);
-            if (data.empty()) { DICE_LOG_WARN("QQOfficial '{}': 本地媒体文件不存在或为空，跳过: {}", name_, localPath); return; }
+            if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; sendCaptionFallback(m, lastError_); return; }
+            const auto prepared = item.kind == 1
+                ? image_transcode::prepareForQq(image_resources::fromUtf8(localPath))
+                : std::nullopt;
+            if (item.kind == 1 && !prepared) {
+                DICE_LOG_WARN("QQOfficial '{}': 本地图片不是 png/jpeg 且无法转换，跳过: {}", name_, localPath);
+                sendCaptionFallback(m, "本地图片无法转为官方支持的 png/jpeg");
+                return;
+            }
+            const std::string sendPath = prepared ? image_resources::utf8(prepared->path) : localPath;
+            const std::string data = readLocalFile(sendPath);
+            if (data.empty()) { DICE_LOG_WARN("QQOfficial '{}': 本地媒体文件不存在或为空，跳过: {}", name_, localPath); sendCaptionFallback(m, "本地媒体文件不存在或为空"); return; }
             // 先量大小再上传：超过硬上限的文件官方会在最后一步才报 850031，
             // 此前的分片全部白传。
             if (data.size() > kMediaHardLimitBytes) {
                 lastError_ = "媒体文件超过官方 200MB 上限";
                 DICE_LOG_WARN("QQOfficial '{}': 本地媒体 {} 为 {} 字节，超过官方 200MB 硬上限，跳过", name_, localPath, data.size());
+                sendCaptionFallback(m, lastError_);
                 return;
             }
-            DICE_LOG_INFO("QQOfficial '{}': 本地媒体 {} ({} bytes, kind={})，开始官方分片上传", name_, localPath, data.size(), item.kind);
+            if (prepared && prepared->transcoded)
+                DICE_LOG_INFO("QQOfficial '{}': 本地图片 {} 为 {}，已转成 JPEG 再上传",
+                    name_, localPath, image_transcode::kindName(prepared->kind));
+            DICE_LOG_INFO("QQOfficial '{}': 本地媒体 {} ({} bytes, kind={})，开始官方分片上传", name_, sendPath, data.size(), item.kind);
             const bool priv = m.type == MessageType::kPrivate;
-            const std::string fname = mediaFileName(item, localPath);
+            std::string fname = mediaFileName(item, localPath);
+            if (prepared && prepared->transcoded) {
+                const auto dot = fname.find_last_of('.');
+                fname = (dot == std::string::npos ? fname : fname.substr(0, dot)) + ".jpg";
+            }
             const int ftype = fileTypeFor(item.kind, fname);
             const std::string md5 = hexDigest(data, EVP_md5());
             const std::string sha1 = hexDigest(data, EVP_sha1());
             const size_t k10m = 10002432;   // 官方要求前 10,002,432 字节的 MD5
             const std::string md5_10m = hexDigest(data.substr(0, data.size() < k10m ? data.size() : k10m), EVP_md5());
-            if (md5.empty() || sha1.empty() || md5_10m.empty()) { DICE_LOG_WARN("QQOfficial '{}': 计算本地媒体摘要失败，跳过: {}", name_, localPath); return; }
+            if (md5.empty() || sha1.empty() || md5_10m.empty()) { DICE_LOG_WARN("QQOfficial '{}': 计算本地媒体摘要失败，跳过: {}", name_, localPath); sendCaptionFallback(m, "计算本地媒体摘要失败"); return; }
             const std::string prepPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/upload_prepare";
             auto c = httpsClient("api.bot.qq.com");
-            if (!c) { lastError_ = "无法解析 api.bot.qq.com"; return; }
+            if (!c) { lastError_ = "无法解析 api.bot.qq.com"; sendCaptionFallback(m, lastError_); return; }
             auto r = drogon::HttpRequest::newHttpRequest();
             r->setMethod(drogon::Post); r->setPath(prepPath);
             r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
@@ -1925,15 +2071,16 @@ private:
                         self->lastError_ = "QQ 官方分片上传准备失败";
                         DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, prepPath,
                                       resp ? static_cast<int>(resp->statusCode()) : 0, resp ? std::string(resp->body()) : std::string("网络请求未完成"));
+                        self->sendCaptionFallback(m, "分片上传准备失败");
                         return;
                     }
                     auto j = json::parse(resp->body(), nullptr, false);
                     const json* d = dataObj(j);
-                    if (!d) { DICE_LOG_WARN("QQOfficial '{}': upload_prepare 响应无效: {}", self->name_, std::string(resp->body())); return; }
+                    if (!d) { DICE_LOG_WARN("QQOfficial '{}': upload_prepare 响应无效: {}", self->name_, std::string(resp->body())); self->sendCaptionFallback(m, "upload_prepare 响应无效"); return; }
                     const std::string uploadId = d->value("upload_id", std::string());
                     const size_t blockSize = d->contains("block_size") ? jsonSize((*d)["block_size"], size_t(1024 * 1024)) : size_t(1024 * 1024);
                     if (uploadId.empty() || !d->contains("parts") || !(*d)["parts"].is_array()) {
-                        DICE_LOG_WARN("QQOfficial '{}': upload_prepare 缺少 upload_id/parts: {}", self->name_, std::string(resp->body())); return;
+                        DICE_LOG_WARN("QQOfficial '{}': upload_prepare 缺少 upload_id/parts: {}", self->name_, std::string(resp->body())); self->sendCaptionFallback(m, "upload_prepare 缺少分片信息"); return;
                     }
                     std::vector<UploadPart> parts;
                     size_t offset = 0;
@@ -1949,7 +2096,7 @@ private:
                         offset += p.size;
                         parts.push_back(std::move(p));
                     }
-                    if (parts.empty()) { DICE_LOG_WARN("QQOfficial '{}': upload_prepare 返回的分片列表无效", self->name_); return; }
+                    if (parts.empty()) { DICE_LOG_WARN("QQOfficial '{}': upload_prepare 返回的分片列表无效", self->name_); self->sendCaptionFallback(m, "upload_prepare 分片列表无效"); return; }
                     DICE_LOG_INFO("QQOfficial '{}': upload_prepare 成功 upload_id={} block_size={} parts={}", self->name_, uploadId, blockSize, parts.size());
                     self->uploadPartLoop(m, target, priv, data, uploadId, fname, ftype, std::move(parts), 0);
                 });
@@ -1967,9 +2114,9 @@ private:
             const UploadPart p = parts[idx];
             const std::string chunk = data.substr(p.offset, p.size);
             ParsedUrl pu;
-            if (!parseUrl(p.presignedUrl, pu)) { DICE_LOG_WARN("QQOfficial '{}': 分片预签名地址无效，上传中止", name_); return; }
+            if (!parseUrl(p.presignedUrl, pu)) { DICE_LOG_WARN("QQOfficial '{}': 分片预签名地址无效，上传中止", name_); sendCaptionFallback(m, "分片预签名地址无效"); return; }
             auto c = clientFor(pu.host, pu.port, pu.scheme == "https");
-            if (!c) { lastError_ = "无法解析分片上传域名 " + pu.host; return; }
+            if (!c) { lastError_ = "无法解析分片上传域名 " + pu.host; sendCaptionFallback(m, lastError_); return; }
             auto r = drogon::HttpRequest::newHttpRequest();
             r->setMethod(drogon::Put);
             r->setPathEncode(false);
@@ -1985,14 +2132,15 @@ private:
                         self->lastError_ = "QQ 官方分片上传失败";
                         DICE_LOG_WARN("QQOfficial '{}': PUT 分片 {} 失败: HTTP {} {}", self->name_, p.index,
                                       resp ? static_cast<int>(resp->statusCode()) : 0, resp ? std::string(resp->body()) : std::string("网络请求未完成"));
+                        self->sendCaptionFallback(m, "分片上传失败");
                         return;
                     }
                     DICE_LOG_INFO("QQOfficial '{}': PUT 分片 {} 成功 ({} bytes)，确认分片", self->name_, p.index, p.size);
                     const std::string partMd5 = self->hexDigest(data.substr(p.offset, p.size), EVP_md5());
-                    if (partMd5.empty()) { DICE_LOG_WARN("QQOfficial '{}': 分片摘要计算失败，上传中止", self->name_); return; }
+                    if (partMd5.empty()) { DICE_LOG_WARN("QQOfficial '{}': 分片摘要计算失败，上传中止", self->name_); self->sendCaptionFallback(m, "分片摘要计算失败"); return; }
                     const std::string finishPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/upload_part_finish";
                     auto c2 = httpsClient("api.bot.qq.com");
-                    if (!c2) { self->lastError_ = "无法解析 api.bot.qq.com"; return; }
+                    if (!c2) { self->lastError_ = "无法解析 api.bot.qq.com"; self->sendCaptionFallback(m, self->lastError_); return; }
                     auto r2 = drogon::HttpRequest::newHttpRequest();
                     r2->setMethod(drogon::Post); r2->setPath(finishPath);
                     r2->setContentTypeCode(drogon::CT_APPLICATION_JSON);
@@ -2007,6 +2155,7 @@ private:
                                 self->lastError_ = "QQ 官方分片确认失败";
                                 DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, finishPath,
                                               resp2 ? static_cast<int>(resp2->statusCode()) : 0, resp2 ? std::string(resp2->body()) : std::string("网络请求未完成"));
+                                self->sendCaptionFallback(m, "分片确认失败");
                                 return;
                             }
                             DICE_LOG_INFO("QQOfficial '{}': 分片 {} 确认完成", self->name_, p.index);
@@ -2024,7 +2173,7 @@ private:
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         const std::string filesPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/files";
         auto c = httpsClient("api.bot.qq.com");
-        if (!c) { lastError_ = "无法解析 api.bot.qq.com"; return; }
+        if (!c) { lastError_ = "无法解析 api.bot.qq.com"; sendCaptionFallback(m, lastError_); return; }
         auto r = drogon::HttpRequest::newHttpRequest();
         r->setMethod(drogon::Post); r->setPath(filesPath);
         r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
@@ -2032,20 +2181,21 @@ private:
         r->addHeader("Authorization", "QQBot " + accessToken_);
         r->setBody(json{{"file_type", ftype}, {"file_name", fname}, {"upload_id", uploadId}, {"srv_send_msg", false}}.dump());
         auto self = shared_from_this();
-        c->sendRequest(r, [self, m, target, filesPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
+        c->sendRequest(r, [self, m, target, ftype, filesPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
             OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
             self->safeMediaStep("分片合并回调", [&] {
                 if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
                     self->lastError_ = "QQ 官方分片合并失败";
                     DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, filesPath,
                                   resp ? static_cast<int>(resp->statusCode()) : 0, resp ? std::string(resp->body()) : std::string("网络请求未完成"));
+                    self->sendCaptionFallback(m, "分片合并失败");
                     return;
                 }
                 auto j = json::parse(resp->body(), nullptr, false);
                 const std::string fileInfo = field(j, "file_info");
-                if (fileInfo.empty()) { DICE_LOG_WARN("QQOfficial '{}': /files 未返回 file_info: {}", self->name_, std::string(resp->body())); return; }
+                if (fileInfo.empty()) { DICE_LOG_WARN("QQOfficial '{}': /files 未返回 file_info: {}", self->name_, std::string(resp->body())); self->sendCaptionFallback(m, "分片合并未返回 file_info"); return; }
                 DICE_LOG_INFO("QQOfficial '{}': 分片合并成功，获得 file_info，开始发送", self->name_);
-                self->sendFileInfoTo(m, target, fileInfo);
+                self->sendFileInfoTo(m, target, fileInfo, ftype);
             });
         });
     }
@@ -2054,30 +2204,35 @@ private:
     void sendMediaTo(const Message& message, const MediaItem& item) {
         markNameActivity();
         Message m = message;
+        m.mediaCaption = item.caption;
         m.logMediaSummary = "[" + std::string(item.kind == 1 ? "图片" : item.kind == 2 ? "视频" : item.kind == 3 ? "语音" : "文件")
             + "：" + (item.name.empty() ? item.ref : item.name) + "]";
+        if (!item.caption.empty()) m.logMediaSummary = item.caption + " " + m.logMediaSummary;
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         try {
-            if (m.type == MessageType::kChannel) { DICE_LOG_WARN("QQOfficial '{}': 频道富媒体暂未接入，跳过", name_); return; }
-            if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; return; }
+            if (m.type == MessageType::kChannel) { DICE_LOG_WARN("QQOfficial '{}': 频道富媒体暂未接入，跳过", name_); sendCaptionFallback(m, "频道富媒体暂未接入"); return; }
+            if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; sendCaptionFallback(m, lastError_); return; }
             const std::string target = resolveTarget(m);
-            if (target.empty()) { DICE_LOG_WARN("QQOfficial '{}': 无法解析发送目标，跳过媒体", name_); return; }
+            if (target.empty()) { DICE_LOG_WARN("QQOfficial '{}': 无法解析发送目标，跳过媒体", name_); sendCaptionFallback(m, "无法解析发送目标"); return; }
             std::string localPath;
             const int loc = localFileKind(item.ref, localPath);
-            if (loc == 2) { DICE_LOG_WARN("QQOfficial '{}': 不支持的媒体引用（官方接口不接受 base64://），跳过: {}", name_, item.ref); return; }
+            if (loc == 2) { DICE_LOG_WARN("QQOfficial '{}': 不支持的媒体引用（官方接口不接受 base64://），跳过: {}", name_, item.ref); sendCaptionFallback(m, "不支持的媒体引用"); return; }
             DICE_LOG_INFO("QQOfficial '{}': 发送媒体 kind={} ref={} target={} 路由={}", name_, item.kind, item.ref, target, loc == 0 ? "URL直传" : "本地分片");
             if (loc == 0) uploadRemoteTo(m, target, item, item.ref);
             else uploadLocalTo(m, target, item, localPath);
         } catch (const std::exception& e) {
             lastError_ = std::string("QQ 官方富媒体异常: ") + e.what();
             DICE_LOG_ERROR("QQOfficial '{}': sendMediaTo 异常: {}", name_, e.what());
+            sendCaptionFallback(m, lastError_);
         } catch (...) {
             lastError_ = "QQ 官方富媒体未知异常";
             DICE_LOG_ERROR("QQOfficial '{}': sendMediaTo 未知异常", name_);
+            sendCaptionFallback(m, lastError_);
         }
     }
 
-    /// 出站入口：拆出媒体标记走富媒体（限 3 条防刷频），剩余文本走文字消息。
+    /// 出站入口：同条消息里的图+文（自定义掷骰、自定义回复、牌堆等）优先走
+    /// msg_type=7 图文混排。没有可混排的图片时才发独立文字；视频/文件仍图文分离。
     void sendTo(const Message& message, const std::string& text, ContentFormat format) {
         markNameActivity();
         Message m = message;
@@ -2088,19 +2243,18 @@ private:
         if (!m.logOutput) m.logOutput = std::make_shared<PreparedOutput>(
             (m.type == MessageType::kPrivate ? "私聊 " : "群 ") + m.targetId, text);
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
-        // Structured replies contain literal card names/attributes, not media directives.
-        // Preserve their exact original text for safe fallback and payload matching.
-        if (m.platform == "qq_official" && format == ContentFormat::kPlainText
+        auto parts = splitMedia(text);
+        // Structured dice cards stay on the Markdown/card path only when there is
+        // no image to mix. Image + 掷骰文本 / 自定义回复 always prefer 图文混排.
+        if (!hasMixableImage(parts) && m.platform == "qq_official" && format == ContentFormat::kPlainText
             && richStyle_ != "off" && m.qqRichReply && m.qqRichReply->original == text) {
             sendTextTo(m, text, format);
             return;
         }
-        auto parts = splitMedia(text);
+        attachImageCaption(parts, format);
         for (size_t i = 0; i < parts.media.size() && i < 3; ++i) sendMediaTo(m, parts.media[i]);
-        std::string plain = parts.text;
-        const auto b = plain.find_first_not_of(" \t\r\n");
-        plain = (b == std::string::npos) ? std::string() : plain.substr(b, plain.find_last_not_of(" \t\r\n") - b + 1);
-        if (plain.empty()) { if (parts.media.empty()) sendTextTo(m, text, format); return; }   // 纯媒体不再发空文本
+        const std::string plain = trimMediaText(parts.text);
+        if (plain.empty()) { if (parts.media.empty()) sendTextTo(m, text, format); return; }
         sendTextTo(m, plain, format);
     }
 public:

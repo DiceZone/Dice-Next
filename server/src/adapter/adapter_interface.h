@@ -71,6 +71,10 @@ struct Message {
     std::shared_ptr<const PreparedOutput> logOutput;
     size_t logPart = 0, logParts = 0;
     std::string logMediaSummary;
+    // Outbound QQ official: leftover text from the same message, sent as
+    // msg_type=7 content with the first image (图文混排). Empty means a
+    // zero-width placeholder; mixed send is retried as image+text if it fails.
+    std::string mediaCaption;
 };
 
 // ═══════════════════════════════════════════════════════════════

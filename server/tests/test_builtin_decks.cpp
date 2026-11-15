@@ -113,6 +113,11 @@ TEST(BundledDecks, SafeTemplatesShareFunctionsAndNeverEvaluateInsertedData) {
     ASSERT_EQ(rolls, 0);
     ASSERT_EQ(decks.expandText("[1d{ran:6~6}] [CQ:image,file=https://example.test/a.png]"), "6 [CQ:image,file=https://example.test/a.png]");
     ASSERT_EQ(rolls, 1);
+    ASSERT_EQ(decks.expandText("[img,file=data/images/TAROT/a17.jpg]大吉"),
+              "[img,file=data/images/TAROT/a17.jpg]大吉");
+    ASSERT_EQ(decks.expandText("中吉[img,file=data/images/TAROT/a17.jpg]"),
+              "中吉[img,file=data/images/TAROT/a17.jpg]");
+    ASSERT_EQ(rolls, 1);
     ASSERT_EQ(decks.expandText("{case:uid?123=chosen&else=[1d1]}"), "chosen");
     ASSERT_EQ(rolls, 1);
     ASSERT_EQ(decks.expandText(R"(\[1d1] \{ran:1~1} {wait:1}{js:1}{py:1})"), "[1d1] {ran:1~1} {js:1}{py:1}");
@@ -196,4 +201,29 @@ TEST(BundledDecks, ReloadAppliesUserOverridesAndDropsRemovedEntries) {
 
     std::error_code cleanupError;
     fs::remove_all(root, cleanupError);
+}
+
+TEST(BundledDecks, NeutralImageCodesAreNotRolledAsFailedDice) {
+    const auto root = fs::temp_directory_path() /
+        ("dicenext-deck-img-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code ec; fs::remove_all(path,ec); } } cleanup{root};
+    fs::create_directories(root);
+    {
+        std::ofstream out(root / "test.json");
+        out << R"({"测试牌堆":["[img,file=data/images/TAROT/a17.jpg]大吉","中吉[img,file=data/images/TAROT/a17.jpg]"]})";
+    }
+    dice::CardDeck decks;
+    int rolls = 0;
+    decks.setDiceEval([&](const std::string&) { ++rolls; return 0LL; });
+    ASSERT_TRUE(decks.loadDir(root.string()) >= 1);
+    for (int i = 0; i < 8; ++i) {
+        const auto card = decks.drawFromDeck("测试牌堆").value_or("");
+        ASSERT_TRUE(card.find("[img,file=data/images/TAROT/a17.jpg]") != std::string::npos);
+        ASSERT_TRUE(card.find('0') == std::string::npos);
+        ASSERT_TRUE(card == "[img,file=data/images/TAROT/a17.jpg]大吉"
+                 || card == "中吉[img,file=data/images/TAROT/a17.jpg]");
+    }
+    ASSERT_EQ(rolls, 0);
+    ASSERT_EQ(decks.expandText("[1d1]"), "0");
+    ASSERT_EQ(rolls, 1);
 }

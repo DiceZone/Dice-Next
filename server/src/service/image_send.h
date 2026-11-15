@@ -6,13 +6,15 @@
 // 平台可用形式：
 //   base64  — 读本地文件转 base64://…（默认，给 NapCat 等外置协议端，跨设备通用）
 //   httpurl — http://<host>/api/assets/<名>（host 默认 localhost:<端口>，可配公网）
-// 内置登录与骰同机：未选 httpurl 时发绝对 file:///（OpenOPQ 可直接 open），
+// 内置登录与骰同机：未选 httpurl 时发操作系统绝对路径（不要 file:///）。
+// OpenOPQ 在 Windows 上会把 file:///E:/x 当成 /E:/x 去 open，群里只剩「0大吉」。
 // 文件读不到再回退 base64。不要把相对 data/images/… 交给它当缓存名。
 // 旧数据里已存的 http://..../api/assets/.. 链接同样被识别并按此重新转换。
 
 #include "../config/config_manager.h"
 #include "../config/scoped_settings.h"
 #include "image_resource_service.h"
+#include "image_transcode.h"
 
 #include <drogon/utils/Utilities.h>
 #include <nlohmann/json.hpp>
@@ -69,9 +71,24 @@ inline bool readableFile(const std::filesystem::path& path) {
         && std::filesystem::file_size(path, ec) > 0 && !ec;
 }
 
-/// 同机协议端：绝对 file:///；文件不在盘上再读成 base64（失败为空）。
-inline std::string fileToUriOrBase64(const std::filesystem::path& path) {
-    if (readableFile(path)) return image_resources::toFileUri(path);
+/// 同机协议端要的是磁盘路径，不是 file URI。Windows 必须用盘符加反斜杠，
+/// 否则 Go 的 url.Parse("E:/x").Path 是 /E:/x，os.Open 报 123。
+inline std::string toNativePath(const std::filesystem::path& path) {
+    std::error_code ec;
+    auto abs = std::filesystem::absolute(path, ec);
+    if (ec) abs = path;
+    abs = abs.lexically_normal();
+#ifdef _WIN32
+    const auto text = abs.u8string();
+#else
+    const auto text = abs.generic_u8string();
+#endif
+    return std::string(text.begin(), text.end());
+}
+
+/// 同机协议端：绝对本地路径；文件不在盘上再读成 base64（失败为空）。
+inline std::string fileToNativeOrBase64(const std::filesystem::path& path) {
+    if (readableFile(path)) return toNativePath(path);
     return fileToBase64(path);
 }
 
@@ -90,13 +107,51 @@ inline std::string encodeLocal(const std::filesystem::path& path,
             catch (...) { /* Private caches must stay inline, never become public links. */ }
         }
     }
-    if (preferFileUri) return fileToUriOrBase64(path);
-    return fileToBase64(path);
+    auto prepared = image_transcode::prepareForQq(path);
+    if (!prepared) return {};
+    if (preferFileUri) return fileToNativeOrBase64(prepared->path);
+    return fileToBase64(prepared->path);
+}
+
+inline bool isEmbeddedOrRemote(const std::string& file) {
+    return file.rfind("base64://", 0) == 0
+        || file.rfind("http://", 0) == 0
+        || file.rfind("https://", 0) == 0;
+}
+
+inline bool messageHasLocalImage(const nlohmann::json& message) {
+    if (!message.is_array()) return false;
+    for (const auto& seg : message) {
+        if (!seg.is_object() || seg.value("type", "") != "image") continue;
+        const auto file = seg.contains("data") && seg["data"].is_object()
+            ? seg["data"].value("file", std::string()) : std::string();
+        if (!file.empty() && !isEmbeddedOrRemote(file)) return true;
+    }
+    return false;
+}
+
+/// 把尚未内嵌的本地图读成 base64://。平台拒绝本地路径时（OpenOPQ 错误码 100）再发一次。
+inline bool rewriteLocalImagesToBase64(nlohmann::json& message) {
+    if (!message.is_array()) return false;
+    bool changed = false;
+    for (auto& seg : message) {
+        if (!seg.is_object() || seg.value("type", "") != "image" || !seg.contains("data") || !seg["data"].is_object()) continue;
+        const auto file = seg["data"].value("file", std::string());
+        if (file.empty() || isEmbeddedOrRemote(file)) continue;
+        auto prepared = image_transcode::prepareForQq(
+            image_resources::fromUtf8(image_resources::stripFileUri(file)));
+        auto b64 = fileToBase64(prepared ? prepared->path
+            : image_resources::fromUtf8(image_resources::stripFileUri(file)));
+        if (b64.empty()) continue;
+        seg["data"]["file"] = std::move(b64);
+        changed = true;
+    }
+    return changed;
 }
 
 /// 发送期解析：把图片段里的本地路径/本站资产链接转成平台可用值。
-/// 远程外链、base64:// 原样放行。preferFileUri（内置登录）发绝对 file:///；
-/// 否则读文件内嵌。读不到返回空——不要把相对路径交给协议端去 open。
+/// 远程外链、base64:// 原样放行。preferFileUri（内置登录）发操作系统绝对路径；
+/// 否则读文件内嵌。读不到返回空——不要把相对路径或 file:/// 交给协议端去 open。
 inline std::string resolve(const std::string& file,
                            const std::string& platform = {},
                            const std::string& adapterId = {},
@@ -137,8 +192,10 @@ inline std::string resolve(const std::string& file,
         return host + "/api/assets/" + name;
     }
     const auto path = image_resources::fromUtf8(localPath);
-    if (preferFileUri) return fileToUriOrBase64(path);
-    return fileToBase64(path);
+    auto prepared = image_transcode::prepareForQq(path);
+    if (!prepared) return {};
+    if (preferFileUri) return fileToNativeOrBase64(prepared->path);
+    return fileToBase64(prepared->path);
 }
 
 }  // namespace dice::imgsend
