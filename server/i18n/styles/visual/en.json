@@ -1,14 +1,14 @@
 {
   "dice": {
     "roll": {
-      "result": "**{nick}** rolled\n> `{res}`\n[[action:Roll again|.r]]",
-      "result_reason": "**{nick}** rolled for {reason}\n> `{res}`\n[[action:Roll again|.r]]",
-      "multi": "**{nick}** rolled {turn} times\n{res}\n[[action:Roll again|.r]]",
-      "multi_reason": "**{nick}** rolled {turn} times for {reason}\n{res}\n[[action:Roll again|.r]]"
+      "result": "**{nick}** rolled\n> `{res}`",
+      "result_reason": "**{nick}** rolled for {reason}\n> `{res}`",
+      "multi": "**{nick}** rolled {turn} times\n{res}",
+      "multi_reason": "**{nick}** rolled {turn} times for {reason}\n{res}"
     },
     "check": {
-      "result": "**{nick}** — {attr} check\n> `{roll}/{rate}` **{level}**\n[[action:Recheck|{command}]]",
-      "result_reason": "**{nick}** — {attr} check for {reason}\n> `{roll}/{rate}` **{level}**\n[[action:Recheck|{command}]]"
+      "result": "**{nick}** — {attr} check\n> `{roll}/{rate}` **{level}**",
+      "result_reason": "**{nick}** — {attr} check for {reason}\n> `{roll}/{rate}` **{level}**"
     },
     "brp": {
       "result": "**{nick}** — {attr} check\n> `{roll}/{rate}` **{level}**",
@@ -21,7 +21,7 @@
       "result": "**{nick}** — opposed check\n> **{la}** `1D100={ra}/{va}` {lva}\n> **{lb}** `1D100={rb}/{vb}` {lvb}\n\nResult: **{outcome}**"
     },
     "sc": {
-      "result": "**Sanity check**\n{output}\n[[action:SAN check|.sc]]"
+      "result": "**Sanity check**\n{output}"
     },
     "st": {
       "result": "**Skill check**\n{output}\n[[action:Edit card|.st ]]"
@@ -44,8 +44,8 @@
     "show": "**{nick}**'s character card\n{detail}\n[[action:View card|.pc show]]",
     "show_one": "**{nick}** — {attr}\n> `{val}`",
     "sc": {
-      "result": "**{nick}** — Sanity check\n> `1D100={res}/{san}` **{grade}**\n> SAN {san} → **{final}** (lost {loss})\n[[action:SAN check|.sc]]",
-      "result_noloss": "**{nick}** — Sanity check\n> `1D100={res}/{san}` **{grade}**\n> No Sanity lost\n[[action:SAN check|.sc]]"
+      "result": "**{nick}** — Sanity check\n> `1D100={res}/{san}` **{grade}**\n> SAN {san} → **{final}** (lost {loss})",
+      "result_noloss": "**{nick}** — Sanity check\n> `1D100={res}/{san}` **{grade}**\n> No Sanity lost"
     }
   },
   "pc": {
@@ -55,7 +55,7 @@
     "redo_done": "**{nick}**'s character card was regenerated\n{detail}\n[[action:View card|.pc show]]"
   },
   "deck": {
-    "result": "**{nick}** drew from “{name}”\n> {res}\n[[action:Draw again|.draw {name}]]",
+    "result": "**{nick}** drew from “{name}”\n> {res}",
     "list": "**Available decks ({count})**\n{list}",
     "default_show": "Group default deck: **{name}**\n[[action:Draw|.draw]]"
   },
@@ -92,10 +92,10 @@
   },
   "dnd": {
     "rc": {
-      "result": "**{nick}** — {attr} check\n> `{roll} {mod} = {total}`\n[[action:Recheck|{command}]]"
+      "result": "**{nick}** — {attr} check\n> `{roll} {mod} = {total}`"
     },
     "rdc": {
-      "result": "**{nick}** — {attr} check{reason}\n{detail}\n[[action:Recheck|.rdc {attr}]]"
+      "result": "**{nick}** — {attr} check{reason}\n{detail}"
     },
     "ss": {
       "show": "**{nick}**'s spell slots\n{detail}\n[[action:Restore|.ss rest]]",

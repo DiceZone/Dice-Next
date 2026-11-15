@@ -1,14 +1,14 @@
 {
   "dice": {
     "roll": {
-      "result": "**{nick}** のロール\n> `{res}`\n[[action:もう一度ロール|.r]]",
-      "result_reason": "**{nick}** のロール（{reason}）\n> `{res}`\n[[action:もう一度ロール|.r]]",
-      "multi": "**{nick}** の {turn} 回ロール\n{res}\n[[action:もう一度ロール|.r]]",
-      "multi_reason": "**{nick}** の {turn} 回ロール（{reason}）\n{res}\n[[action:もう一度ロール|.r]]"
+      "result": "**{nick}** のロール\n> `{res}`",
+      "result_reason": "**{nick}** のロール（{reason}）\n> `{res}`",
+      "multi": "**{nick}** の {turn} 回ロール\n{res}",
+      "multi_reason": "**{nick}** の {turn} 回ロール（{reason}）\n{res}"
     },
     "check": {
-      "result": "**{nick}** の{attr}判定\n> `{roll}/{rate}` **{level}**\n[[action:もう一度判定|{command}]]",
-      "result_reason": "**{nick}** の{attr}判定（{reason}）\n> `{roll}/{rate}` **{level}**\n[[action:もう一度判定|{command}]]"
+      "result": "**{nick}** の{attr}判定\n> `{roll}/{rate}` **{level}**",
+      "result_reason": "**{nick}** の{attr}判定（{reason}）\n> `{roll}/{rate}` **{level}**"
     },
     "brp": {
       "result": "**{nick}** の{attr}判定\n> `{roll}/{rate}` **{level}**",
@@ -21,7 +21,7 @@
       "result": "**{nick}** の対抗判定\n> **{la}** `1D100={ra}/{va}` {lva}\n> **{lb}** `1D100={rb}/{vb}` {lvb}\n\n結果：**{outcome}**"
     },
     "sc": {
-      "result": "**正気度判定**\n{output}\n[[action:もう一度正気度判定|.sc]]"
+      "result": "**正気度判定**\n{output}"
     },
     "st": {
       "result": "**技能判定**\n{output}\n[[action:キャラクターシートを編集|.st ]]"
@@ -44,8 +44,8 @@
     "show": "**{nick}** のキャラクターシート\n{detail}\n[[action:シート全体を見る|.pc show]]",
     "show_one": "**{nick}** の{attr}\n> `{val}`",
     "sc": {
-      "result": "**{nick}** の正気度判定\n> `1D100={res}/{san}` **{grade}**\n> 正気度 {san} → **{final}**（減少 {loss}）\n[[action:もう一度正気度判定|.sc]]",
-      "result_noloss": "**{nick}** の正気度判定\n> `1D100={res}/{san}` **{grade}**\n> 正気度の減少なし\n[[action:もう一度正気度判定|.sc]]"
+      "result": "**{nick}** の正気度判定\n> `1D100={res}/{san}` **{grade}**\n> 正気度 {san} → **{final}**（減少 {loss}）",
+      "result_noloss": "**{nick}** の正気度判定\n> `1D100={res}/{san}` **{grade}**\n> 正気度の減少なし"
     }
   },
   "pc": {
@@ -55,7 +55,7 @@
     "redo_done": "**{nick}** のキャラクターシートを再生成しました\n{detail}\n[[action:シート全体を見る|.pc show]]"
   },
   "deck": {
-    "result": "**{nick}** が「{name}」から引きました\n> {res}\n[[action:もう一度引く|.draw {name}]]",
+    "result": "**{nick}** が「{name}」から引きました\n> {res}",
     "list": "**利用可能なデッキ（{count}）**\n{list}",
     "default_show": "グループの既定デッキ：**{name}**\n[[action:既定デッキから引く|.draw]]"
   },
@@ -92,10 +92,10 @@
   },
   "dnd": {
     "rc": {
-      "result": "**{nick}** の{attr}判定\n> `{roll} {mod} = {total}`\n[[action:もう一度判定|{command}]]"
+      "result": "**{nick}** の{attr}判定\n> `{roll} {mod} = {total}`"
     },
     "rdc": {
-      "result": "**{nick}** の{attr}判定{reason}\n{detail}\n[[action:もう一度判定|.rdc {attr}]]"
+      "result": "**{nick}** の{attr}判定{reason}\n{detail}"
     },
     "ss": {
       "show": "**{nick}** の呪文スロット\n{detail}\n[[action:全スロットを回復|.ss rest]]",

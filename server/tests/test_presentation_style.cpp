@@ -108,9 +108,11 @@ TEST(PresentationStyle, I18nSelectsPartialProfileOverlays) {
         {{"nick", "希亚"}, {"res", "D100=42"}});
     I18n::endOutboundCapture();
     const auto visual = presentation::expandComponents(
-        visualTemplate, PresentationStyle::kVisual, ContentFormat::kMarkdown).text;
-    ASSERT_TRUE(visual.find("**希亚** 掷骰\n> `D100=42`") != std::string::npos);
-    ASSERT_TRUE(visual.find(".r  // 再次掷骰") != std::string::npos);
+        visualTemplate, PresentationStyle::kVisual, ContentFormat::kMarkdown);
+    ASSERT_TRUE(visual.text.find("**希亚** 掷骰\n> `D100=42`") != std::string::npos);
+    ASSERT_TRUE(visual.text.find("再次掷骰") == std::string::npos);
+    ASSERT_TRUE(visual.text.find("[[action:") == std::string::npos);
+    ASSERT_TRUE(visual.actions.empty());
 }
 
 TEST(PresentationStyle, ActionArgumentsStayRawWhileMessageTextIsEscaped) {
@@ -118,9 +120,10 @@ TEST(PresentationStyle, ActionArgumentsStayRawWhileMessageTextIsEscaped) {
     ASSERT_TRUE(i18n.load());
     for (const auto format : {ContentFormat::kMarkdown, ContentFormat::kPlainText}) {
         I18n::beginOutboundCapture(format, PresentationStyle::kVisual);
-        const auto reply = i18n.tr(Locale::kZhHans, "dnd.rc.result",
+        const auto reply = I18n::previewTemplate(
+            "**{nick}** 的{attr}检定\n> `{roll} {mod} = {total}`\n[[action:再次检定|{command}]]",
             {{"nick", "玩家_1"}, {"attr", "力量-20"}, {"command", ".rc 力量-20"},
-             {"roll", "1d20=10"}, {"mod", "+0"}, {"total", "10"}});
+             {"roll", "1d20=10"}, {"mod", "+0"}, {"total", "10"}}, format);
         I18n::endOutboundCapture();
         const auto expanded = presentation::expandComponents(reply, PresentationStyle::kVisual, format);
         ASSERT_EQ(expanded.actions.size(), size_t(1));
@@ -161,8 +164,8 @@ TEST(PresentationStyle, EditedVisualPresetRetainsButtonsForGlobalAndPersonaOverr
     ASSERT_TRUE(i18n.load());
     const auto presets = i18n.defaultTemplates(Locale::kZhHans, "dice.check.result");
     auto edited = presets["visual"]["value"].get<std::string>();
-    ASSERT_TRUE(edited.find("[[action:") != std::string::npos);
-    edited = "我的检定：" + edited;
+    ASSERT_TRUE(edited.find("[[action:") == std::string::npos);
+    edited = "我的检定：" + edited + "\n[[action:再次检定|{command}]]";
     const I18n::Args args{{"nick", "测试"}, {"attr", "侦查"}, {"roll", "42"}, {"rate", "60"}, {"level", "成功"}, {"command", ".ra侦查"}};
     for (const bool persona : {false, true}) {
         if (persona) i18n.setPersonaBundles(9, Locale::kZhHans, {{"dice.check.result", edited}}, {{"dice.check.result", "markdown"}});
