@@ -64,6 +64,7 @@
 #include "../common/card_sheet_format.h"
 #include "../i18n/locale_resolver.h"
 #include "../service/log_service.h"
+#include "../service/live_log_service.h"
 #include "../service/image_host.h"
 #include "../service/ai_translate.h"   // 阶段三：.lang AI 翻译语言
 #include "persona/persona_manager.h"
@@ -110,6 +111,7 @@ inline std::string u8str(const std::filesystem::path& p) {
 
 class CommandRouter {
 public:
+    void setLiveLogService(LiveLogService* service) { liveLogs_ = service; }
     CommandRouter(Database& db, ConfigManager& cfg, DiceEngine& engine,
                   I18n& i18n, LocaleResolver& resolver, CharacterCardStore& cards,
                   CardDeck& deck, AdapterManager& adapters, identity_email::Sender emailSender = {},
@@ -10033,7 +10035,8 @@ private:
         auto* st = db_.getLogStorage();
         if (!st) return;
         std::string txt = logsvc::renderSealdice(db_, logId, &cfg_);   // 图片→稳定图床 URL
-        if (txt.empty()) return;
+        const std::string liveLink = liveLogs_ ? liveLogs_->link(logId) : std::string();
+        if (txt.empty() && liveLink.empty()) return;
         std::string logName = "log" + std::to_string(logId);
         std::string logGroup = msg.targetId;
         try {
@@ -10043,7 +10046,7 @@ private:
         } catch (...) {}
         // 群文件内容按本群设置的格式渲染（html=自包含网页含内嵌图）。
         std::string fileBody, fileName, path;
-        if (sendFile) {
+        if (sendFile && !txt.empty()) {
             const bool asHtml = getGroupSetting(msg, "logUploadType") == "html";
             fileBody = txt;
             if (asHtml) {
@@ -10082,6 +10085,13 @@ private:
                 a->sendGroupMessage(groupId, i18n_.tr(loc, "log.upload_failed", {{"error", res}}));
             }
         };
+        if (!liveLink.empty()) {
+            if (auto adapter = adapters_.getAdapter(adapterId)) {
+                adapter->sendGroupMessage(groupId, liveLink);
+                if (sendFile && !fileBody.empty()) adapter->uploadGroupFile(groupId, fileName, fileBody, path);
+            }
+            return;
+        }
         std::string fmt = logsvc::uploadFormat(cfg_);
         if (fmt == "legacy") {
             // 旧自建端点协议：POST 多段 txt，uniform_id 须每次唯一（<gid>:<ts>）。
@@ -10189,6 +10199,23 @@ private:
         int active = activeLogId(msg);
 
         try {
+            if (sub == "live" || sub == "fork") {
+                if (!liveLogs_) return "实时云日志服务未启用。";
+                if (active > 0) {
+                    if (sub == "fork") return "本群正在记录日志，请先用 .log off 暂停或 .log end 结束，再续写另一份日志。";
+                    auto link = liveLogs_->link(active);
+                    return link.empty() ? "本群正在记录本地日志，请先结束当前日志。" : link;
+                }
+                if (!isMaster(msg) && !senderIsGroupAdmin(msg))
+                    return "请由骰主或群管理开启实时云日志。";
+                int id = 0;
+                const auto result = sub == "fork" ? liveLogs_->fork(msg, name, id)
+                                                  : liveLogs_->start(msg, name, id);
+                if (!id) return result;
+                setGroupSetting(msg, "activeLog", std::to_string(id));
+                setGroupSetting(msg, "activeLogName", st->get<GameLogRow>(id).name);
+                return result + timerSuffixStart(loc, msg, id, true);
+            }
             if (sub == "new") {
                 // Refuse to start a new log while one is already running — tell the
                 // user which one is active so they can .log end it first.
@@ -10291,7 +10318,9 @@ private:
                     setGroupSetting(msg, "activeLogName", logName);
                     return i18n_.tr(loc, "log.new", {{"name", logName}}) + timerSuffixStart(loc, msg, id, true);
                 }
-                auto r = rows.front(); r.status = 0; st->update(r);
+                auto r = rows.front();
+                if (liveLogs_ && !liveLogs_->belongsTo(r.id,msg.adapterId)) return "这份云日志属于另一适配器。";
+                r.status = 0; st->update(r);
                 setGroupSetting(msg, "activeLog", std::to_string(r.id));
                 std::string resumedName = r.name.empty() ? ("log" + std::to_string(r.id)) : r.name;
                 setGroupSetting(msg, "activeLogName", resumedName);
@@ -10328,6 +10357,7 @@ private:
                     if (rows.empty()) return i18n_.tr(loc, "log.not_recording");
                     target = rows.front().id;
                 }
+                if (liveLogs_ && !liveLogs_->belongsTo(target,msg.adapterId)) return "这份云日志属于另一适配器。";
                 try { auto r = st->get<GameLogRow>(target); r.status = 2; st->update(r); } catch (...) {}
                 std::string timerSuf = timerSuffixStop(loc, msg, target);   // 结算计时
                 setGroupSetting(msg, "activeLog", "");
@@ -11126,8 +11156,17 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     /// 入站消息落游戏日志。与骰娘回复拆开——回复可能经 AI 后台线程润色/翻译
     /// 后才定稿，入站部分必须在消息线程即时记录且只记一次。
     /// 总开关、日志功能开关和会话状态共同决定是否写入，包括延迟生成的回复。
+    bool isLiveLogLinkCommand(const Message& msg) const {
+        auto body = commandBody(msg.content);
+        if (!body) return false;
+        std::istringstream input(*body);
+        std::string cmd, sub;
+        input >> cmd >> sub;
+        sub = toLower(sub);
+        return toLower(cmd) == "log" && (sub == "live" || sub == "fork");
+    }
     void recordIncoming(const Message& msg) {
-        if (isIdentityEmailCommand(msg)) return;
+        if (isIdentityEmailCommand(msg) || isLiveLogLinkCommand(msg)) return;
         if (!isLogRecording(msg)) return;
         int logId = activeLogId(msg);
         if (logId <= 0) return;
@@ -11156,7 +11195,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
 
     /// 骰娘回复落游戏日志（最终发送文本，含润色/翻译后的版本）。
     void recordBotReply(const Message& msg, const std::string& reply) {
-        if (isIdentityEmailCommand(msg)) return;
+        if (isIdentityEmailCommand(msg) || isLiveLogLinkCommand(msg)) return;
         if (reply.empty() || !isLogRecording(msg)) return;
         int logId = activeLogId(msg);
         if (logId <= 0) return;
@@ -13408,6 +13447,7 @@ private:
 
     // ─── State ───────────────────────────────────────────────
 
+    LiveLogService* liveLogs_ = nullptr;
     Database& db_;
     ConfigManager& cfg_;
     DiceEngine& engine_;

@@ -66,6 +66,29 @@ struct LogFixture {
 
 } // namespace
 
+TEST(LiveLog, ForkDoesNotRecordViewerCredentialsOrDisplaceAnActiveLog) {
+    LogFixture f;
+    LiveLogService live(f.db.logPath(), f.cfg);
+    f.router.setLiveLogService(&live);
+    f.master();
+    ASSERT_TRUE(f.run(".log fork INVALID").find("用法") != std::string::npos);
+    ASSERT_TRUE(f.run(".log fork aB3d 123456").find("BDC") != std::string::npos);
+    ASSERT_TRUE(f.run(".log fork aB3d#123456").find("BDC") != std::string::npos);
+    ASSERT_TRUE(f.run(".log fork aB3d#123456 第二幕").find("BDC") != std::string::npos);
+    ASSERT_TRUE(f.run(".log fork aB3d# 第二幕").find("用法") != std::string::npos);
+    ASSERT_TRUE(f.logs().empty());
+    f.run(".log new table");
+    const auto original = f.logs().front().id;
+    const auto reply = f.run(".log fork https://example.test/?key=aB3d#123456");
+    ASSERT_TRUE(reply.find(".log off") != std::string::npos);
+    f.router.recordMessage(f.msg, reply);
+    ASSERT_TRUE(f.messages().empty());
+    f.msg.content = "ordinary message";
+    f.router.recordIncoming(f.msg);
+    ASSERT_EQ(f.messages().size(), size_t(1));
+    ASSERT_EQ(f.messages().front().logId, original);
+}
+
 TEST(LogBotOff, OverallOffPausesWithoutEndingAndWarnsOnce) {
     LogFixture f;
     ASSERT_EQ(f.run(".log new 测试记录"), "log.new");

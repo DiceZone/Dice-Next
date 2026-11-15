@@ -152,6 +152,7 @@ set(SOURCES
     src/service/openopq_runtime.cpp
     src/service/network_info_service.cpp
     src/service/cloud_card_service.cpp
+    src/service/live_log_service.cpp
     src/service/identity_email_service.cpp
     src/service/notice_api.cpp
     src/service/mcp_service.cpp

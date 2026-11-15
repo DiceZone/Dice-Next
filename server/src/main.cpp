@@ -692,6 +692,13 @@ static int realMain(int argc, char* argv[]) {
         cardDeck.deckCount(), deckCount);
     dice::CommandRouter cmdRouter(db, configMgr, engine, i18n, localeResolver,
         cardStore, cardDeck, adapterMgr);
+    std::unique_ptr<dice::LiveLogService> liveLogs;
+    try {
+        liveLogs = std::make_unique<dice::LiveLogService>(db.logPath(), configMgr);
+        cmdRouter.setLiveLogService(liveLogs.get());
+    } catch (const std::exception& e) {
+        DICE_LOG_WARN("实时云日志初始化失败：{}", e.what());
+    }
     dice::ReplyManager replyManager(db, configMgr);
     replyManager.loadRules();
 
@@ -5394,6 +5401,7 @@ static int realMain(int argc, char* argv[]) {
     dice::openopq::Runtime::instance().stopAll();
     imageResources->waitForBackground();
     dice::image_resources::setDefault(nullptr);
+    if (liveLogs) liveLogs->stop();
     db.close();
     DICE_LOG_SUCCESS_M("系统", "数据保存与服务关闭完成，程序正常退出。");
 

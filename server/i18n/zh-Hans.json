@@ -476,7 +476,7 @@
       "group": "群设置 .group\n.group [群号] <state|info> // 查看本群状态或信息\n.group [群号] +<词条> // 启用某项，如 +禁用回复\n.group [群号] -<词条> // 关闭某项，如 -禁用help\n.group [群号] clr // 清除本群设置\n.group all +<词条> // 对所有群启用，需要骰主或信任≥5，仅限当前账号\n.group all -<词条> // 对所有群关闭，条件同上",
       "ob": "旁观 .ob\n.ob // 查看帮助\n.ob join // 加入旁观\n.ob list // 查看旁观名单\n.ob exit // 退出旁观\n.ob on // 允许本群旁观，需要群管理权限\n.ob off // 禁止本群旁观，需要群管理权限\n.ob clr // 清空旁观名单，需要群管理或本团 GM",
       "send": "留言 .send\n.send <留言> // 把留言转交给骰主\n.send group <群号> <消息> // 骰主主动发送到群\n.send user <QQ号> <消息> // 骰主主动发送给用户",
-      "log": "跑团记录 .log\n.log new [名称] // 新建并开始记录\n.log on // 继续记录\n.log off // 暂停记录\n.log end // 结束并上传，发送链接与群文件\n.log halt // 强行结束，不上传\n.log list // 查看日志列表\n.log get [名称] // 重新上传并取链接\n.log del <名称> // 删除日志\n.log stat [名称] // 查看统计\n.log export [名称] // 只发群文件，不上传\n.log type <txt|html> // 设置群文件格式，需要群管理权限\n.log <time|timer> // 计时\n.log masterget <群号> [名称] // 骰主跨群取链接",
+      "log": "跑团记录 .log\n.log live [团名] // 开启实时云日志并取得观看地址（需 BDC 密钥）\n.log fork <原观看链接> [新名称] // 复制历史到新链接，也可用「编码#查看密码」或「编码 查看密码」续写\n.log new [名称] // 新建并开始记录\n.log on // 继续记录\n.log off // 暂停记录\n.log end // 结束并上传，发送链接与群文件\n.log halt // 强行结束，不上传\n.log list // 查看日志列表\n.log get [名称] // 重新上传并取链接\n.log del <名称> // 删除日志\n.log stat [名称] // 查看统计\n.log export [名称] // 只发群文件，不上传\n.log type <txt|html> // 设置群文件格式，需要群管理权限\n.log <time|timer> // 计时\n.log masterget <群号> [名称] // 骰主跨群取链接",
       "nn": "昵称 .nn\n.nn <新名> // 设定你在骰娘处显示的名字\n.nn // 清除昵称",
       "set": "默认骰与规则系统 .set\n.set <1-9999> // 设置自己的默认骰面数，.r 不带表达式时使用\n.set // 清除个人默认骰覆盖（通常回到 D100；群规则包可设置群默认骰）\n.set list / show // 列出已启用规则包及当前群规则\n.set <规则键> // 群管理切换本群规则包，如 coc7、coc7r；可用键以 list 为准\n切换规则包会更新群默认骰；已有个人默认骰仍优先。不会自动改写旧人物卡。\nCOC 大成功/大失败房规另用 .setcoc，详见 .help setcoc。",
       "ww": "骰池 .ww\n.ww <N> [成功线] // WOD 加骰池，旧写法，如 .ww 5 或 .ww 5 7\n.ww <N>a<加骰线>c<成功线>[+附加成功] // 扩展写法，如 .ww 10a8c7+2\n加骰线默认 10，成功线默认 8。成功骰以⑦⑧⑨⑩标注，逐轮列出骰池和成功数。",
@@ -669,7 +669,7 @@
     "roulette_too_big": "这么大……{nick}丢得完吗？"
   },
   "log": {
-    "usage": "跑团日志 .log\n.log new [名称] // 新建日志\n.log on/off // 继续或暂停记录\n.log end // 结束并上传\n.log halt // 结束但不上传\n.log list // 列出本窗口日志\n.log get [名称] // 取回日志\n.log del [名称] // 删除日志\n.log stat [名称] // 查看统计\n.log export [名称] // 导出日志\n.log type txt/html // 设定群文件格式\n.log time/timer // 计时\n.log // 不带参数时查看当前状态",
+    "usage": "跑团日志 .log\n.log live [团名] // 开启实时云日志并取得观看地址（需 BDC 密钥）\n.log fork <原观看链接> [新名称] // 复制历史到新链接，也可用「编码#查看密码」或「编码 查看密码」续写\n.log new [名称] // 新建日志\n.log on/off // 继续或暂停记录\n.log end // 结束并上传\n.log halt // 结束但不上传\n.log list // 列出本窗口日志\n.log get [名称] // 取回日志\n.log del [名称] // 删除日志\n.log stat [名称] // 查看统计\n.log export [名称] // 导出日志\n.log type txt/html // 设定群文件格式\n.log time/timer // 计时\n.log // 不带参数时查看当前状态",
     "unofficial_site": "注意：当前配置的日志站并非官方站点，链接安全性请自行确认。",
     "halted": "已强行结束本次记录（未上传）。",
     "not_found": "没有找到日志「{name}」。用 .log list 查看本群日志。",

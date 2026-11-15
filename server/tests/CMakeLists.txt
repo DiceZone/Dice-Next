@@ -109,6 +109,7 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/network_info_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/mcp_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/cloud_card_service.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/live_log_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/identity_email_service.cpp
     ${VERSION_BUILD_SOURCE}
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/markdown.cpp
