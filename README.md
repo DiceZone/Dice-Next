@@ -120,6 +120,7 @@ Thanks also to these projects and communities:
 - [NapCat](https://github.com/NapNeko/NapCatQQ): QQ protocol client and OneBot ecosystem support.
 - [LLOneBot](https://www.llonebot.com/): QQ protocol client and OneBot ecosystem support.
 - [SnowLuma](https://github.com/SnowLuma/SnowLuma): QQ protocol client, and the reference for this README's layout.
+- [MaiBot](https://github.com/Mai-with-u/MaiBot) — Its group conversation and memory design informed Dice!Next’s AI chat.
 
 Thanks to all the contributors and users who take part in development, testing, feedback and documentation.
 

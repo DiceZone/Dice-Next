@@ -1490,6 +1490,8 @@ private:
         if(d.contains("attachments"))m.extra["attachments"]=d["attachments"];
         if(d.contains("msg_elements"))m.extra["msg_elements"]=d["msg_elements"];
         for(const char* field:{"message_scene","message_type","ark_data"})if(d.contains(field))m.extra[field]=d[field];
+        if (d.contains("message_reference") && d["message_reference"].is_object())
+            m.extra["quoted_message_id"] = qqprotocol::text(d["message_reference"], "message_id");
         const auto messageIndex=qqprotocol::sceneValue(d,"msg_idx");
         if(!messageIndex.empty())m.extra["message_reference_id"]=messageIndex;
         const auto normalized = qqmsg::normalizeIncoming(m.content, d.value("attachments", json::array()));

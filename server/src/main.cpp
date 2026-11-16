@@ -29,6 +29,7 @@
 #include "service/image_resource_documents.h"
 #include "service/ai_polish.h"         // AI 回复润色
 #include "service/ai_translate.h"      // AI 回复翻译（.lang 自定义语言）
+#include "service/ai_chat_history.h"
 #include "service/ai_chat.h"           // 智能化阶段A：AI 对话回复
 #include "service/ai_memory.h"         // 智能化阶段B/C：群聊滚动摘要 + 长期事实记忆
 #include "service/chat_persistence.h"  // 聊天记录是否写入 chat.db
@@ -1695,7 +1696,10 @@ static int realMain(int argc, char* argv[]) {
 
     // Wire: incoming messages → command router; if no command matched, fall back
     // to the custom-reply word library; then send via the originating adapter.
-    adapterMgr.onMessage([&adapterMgr, &cmdRouter, &jsMod, &luaMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, &i18n, &deferredReplies, replyFallback, kbSearch](const dice::Message& msg) {
+    dice::aichat::ConversationTurns turns([](auto due, auto work) {
+        return dice::aiwork::Worker::instance().postAt(due, std::move(work));
+    });
+    adapterMgr.onMessage([&turns, &adapterMgr, &cmdRouter, &jsMod, &luaMod, &db, &configMgr, &engine, &cardDeck, &makeAiTool, &i18n, &deferredReplies, replyFallback, kbSearch](const dice::Message& msg) {
         dice::safe_template::Delay requestedDelay;
         dice::safe_template::DelayScope delayScope(&requestedDelay);
         dice::I18n::TemplateContextScope templateScope(
@@ -1839,7 +1843,7 @@ static int realMain(int argc, char* argv[]) {
             const dice::Message& msg, std::string reply, std::string broadcast,
             const std::string& aiCat, const std::string& quoteId,
             std::vector<std::string> fwdNodes, bool linkReplyOk,
-            dice::ContentFormat replyFormat) {
+            dice::ContentFormat replyFormat, bool wholeRoom = false) {
             dice::ProcessingContext processing{replySources, processingTrigger,
                 processingPartial ? "已生成回复；处理链存在失败或尚未完成的异步任务，具体结果见相邻记录"
                                   : "处理完成，生成 1 条回复", dice::notice::messageOrigin(msg, adapterMgr)};
@@ -1978,7 +1982,7 @@ static int realMain(int argc, char* argv[]) {
                 // 分段发送：超长回复切成多段；首段引用回复，其余作为普通消息（避免 N 次引用）。
                 // 引用开关：骰主关「引用投掷对象发言」后，首段也不引用（但 .log on 等指定引用
                 // 的 quoteOverride 仍生效——那是刻意的定向引用）。
-                bool quote = cmdRouter.quoteReplyEnabled() || !quoteId.empty();
+                bool quote = !wholeRoom && (cmdRouter.quoteReplyEnabled() || !quoteId.empty());
                 if (msg.platform == "qq_official") {
                     // A quote reference is not a passive-reply msg_id. New QQ
                     // events provide msg_idx; retain the current message ID for
@@ -2089,78 +2093,155 @@ static int realMain(int argc, char* argv[]) {
                 && dice::ainpc::match(configMgr, gkey, dice::aichat::cleanForAi(configMgr, trigText), npc);
             dice::aichat::Trigger tkind = dice::aichat::enabled(configMgr)
                 ? dice::aichat::triggerKind(configMgr, trigText, atMe) : dice::aichat::Trigger::None;
+            using Turns = dice::aichat::ConversationTurns;
+            using Action = dice::aichat::TurnAction;
+            Turns::Key room{msg.platform, msg.adapterId, msg.targetId, ""};
+            const auto cooldownKey = nlohmann::json(room).dump();
+            bool continuation = false;
+            if (!npcHit && tkind != dice::aichat::Trigger::Strong) {
+                if (auto role = turns.currentRole(room)) {
+                    if (role->empty()) continuation = dice::aichat::enabled(configMgr);
+                    else if (dice::ainpc::enabled(configMgr)) {
+                        for (auto& active : dice::ainpc::list(configMgr, gkey)) {
+                            if (*role != (active.id.empty() ? active.name : active.id)) continue;
+                            npc = active; npcHit = true; continuation = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (npcHit) room[3] = npc.id.empty() ? npc.name : npc.id;
             bool defaultHit = !npcHit && tkind != dice::aichat::Trigger::None;
             // 语音消息：文字触发判断在转写之后进行（后台线程），这里只认出「带语音」。
-            bool voiceCand = !npcHit && !defaultHit && dice::aispeech::hasVoice(msg) && dice::aispeech::enabled(configMgr);
+            bool voiceCand = !continuation && !npcHit && !defaultHit && dice::aispeech::hasVoice(msg) && dice::aispeech::enabled(configMgr);
             // 被@/命中关键词（Strong）或 NPC 命中 → 必回，无视冷却；待机搭话（Standby）受冷却。
             bool bypassCd = npcHit || tkind == dice::aichat::Trigger::Strong;
-            bool cdOk = voiceCand || bypassCd;
+            bool cdOk = continuation || voiceCand || bypassCd;
             if (!cdOk && defaultHit) {
-                cdOk = dice::aichat::cooldownOk(configMgr, gkey);   // 消费式：只调用一次
+                cdOk = dice::aichat::cooldownOk(configMgr, cooldownKey);   // 消费式：只调用一次
                 if (!cdOk) DICE_LOG_DEBUG_M("AI 对话", "群 {} 待机搭话冷却中，不回复。", msg.targetId);
             }
-            if ((npcHit || defaultHit || voiceCand) && cdOk) {
+            if ((continuation || npcHit || defaultHit || voiceCand) && cdOk) {
                 std::string senderNick = msg.senderName.empty() ? msg.senderId : msg.senderName;
                 dice::aitools::ToolExec toolExec = dice::aitools::enabled(configMgr) ? makeAiTool(msg) : nullptr;
                 bool lnk = linkReplyOk;
                 dice::Message msgC = msg;
-                const int64_t contextCutoff = (int64_t)std::time(nullptr);
-                auto job = [&configMgr, &db, &adapterMgr, finishReply, msgC, gkey, npc, npcHit,
-                            senderNick, trigText, toolExec, lnk, tkind, voiceCand, kbSearch, contextCutoff]() mutable {
+                // Snapshot the high-water mark before this incoming message is persisted.
+                const int rounds = dice::aichat::contextRounds(configMgr);
+                int64_t historyEnd = 0;
+                if (rounds > 0) {
+                    if (auto* cst = db.getChatStorage()) {
+                        try {
+                            auto latest = cst->max(&dice::ChatMsgRow::id);
+                            if (latest) historyEnd = *latest;
+                        } catch (...) { DICE_LOG_EXCEPTION("AI chat history boundary"); }
+                    }
+                }
+                auto job = [&turns, room, &configMgr, &cmdRouter, &db, &adapterMgr, finishReply, msgC, gkey, npc, npcHit,
+                            senderNick, trigText, toolExec, lnk, tkind, voiceCand, kbSearch, rounds, historyEnd, continuation, cooldownKey, voiceReady = false,
+                            extraLines = dice::aichat::History{}, anchorImage = std::optional<std::string>{}](const std::vector<dice::Message>& batch,
+                            bool canWait, const std::function<bool()>& newer) mutable -> Action {
+                    auto allowed = [&] {
+                        return !cmdRouter.isGroupDisabled(msgC) && !cmdRouter.isGroupLocked(msgC) && !cmdRouter.isBlocked(msgC)
+                            && !cmdRouter.isReplyDisabledFor(msgC.platform, msgC.targetId, msgC.adapterId)
+                            && cmdRouter.aiEnabledForGroup(msgC.platform, msgC.targetId, msgC.adapterId)
+                            && cmdRouter.aiWhitelistOk(msgC.platform, msgC.targetId, true)
+                            && (npcHit ? dice::ainpc::enabled(configMgr) : dice::aichat::enabled(configMgr) || (voiceCand && dice::ainpc::enabled(configMgr)));
+                    };
+                    if (!allowed()) return Action::DropFirst;
                     dice::ai::TraceScope trace("[" + msgC.platform + " 群 " + msgC.targetId + " 消息 " + msgC.id + "]");
-                    DICE_LOG_INFO_M("AI 对话", "{} 收到 {}：{}；触发原因：{}", dice::ai::traceContext(), senderNick, trigText,
-                        npcHit ? "NPC「" + npc.name + "」" : voiceCand ? std::string("语音待转写") : tkind == dice::aichat::Trigger::Strong ? std::string("被 @ 或命中关键词，不经过决策模型") : std::string("待机搭话"));
+                    DICE_LOG_INFO_M("AI 对话", "{} {}，合并 {} 条发言。", dice::ai::traceContext(),
+                        continuation ? "接续对话" : npcHit ? "NPC 触发" : "对话触发", batch.size());
                     // 语音：先转文字，再用转写结果做触发判断（语音里无法 @，只看 NPC/关键词/待机）。
                     std::string voiceText;
-                    if (dice::aispeech::hasVoice(msgC) && dice::aispeech::enabled(configMgr)) {
+                    if (!voiceReady && dice::aispeech::hasVoice(msgC) && dice::aispeech::enabled(configMgr)) {
                         auto adapter = adapterMgr.getAdapter(msgC.adapterId);
                         voiceText = dice::aispeech::transcribe(configMgr, adapter.get(), msgC);
                         if (!voiceText.empty()) DICE_LOG_INFO_M("AI 语音", "{} 转写结果：{}", dice::ai::traceContext(), voiceText);
                         if (!voiceText.empty()) trigText = trigText.empty() ? voiceText : (trigText + " " + voiceText);
                     }
-                    if (voiceCand) {
-                        if (voiceText.empty()) return;
+                    if (voiceCand && !voiceReady) {
+                        if (voiceText.empty()) return Action::DropFirst;
                         std::string clean = dice::aichat::cleanForAi(configMgr, trigText);
                         npcHit = dice::ainpc::enabled(configMgr) && dice::ainpc::match(configMgr, gkey, clean, npc);
+                        if (npcHit) turns.resolvedRole(room, npc.id.empty() ? npc.name : npc.id);
                         tkind = npcHit || !dice::aichat::enabled(configMgr) ? dice::aichat::Trigger::None
                               : dice::aichat::triggerKind(configMgr, trigText, false);
-                        if (!npcHit && tkind == dice::aichat::Trigger::None) return;
-                        if (!npcHit && tkind == dice::aichat::Trigger::Standby && !dice::aichat::cooldownOk(configMgr, gkey)) {
+                        if (!npcHit && tkind == dice::aichat::Trigger::None) return Action::DropFirst;
+                        if (!npcHit && tkind == dice::aichat::Trigger::Standby && !dice::aichat::cooldownOk(configMgr, cooldownKey)) {
                             DICE_LOG_DEBUG_M("AI 对话", "群 {} 待机搭话冷却中，不回复。", msgC.targetId);
-                            return;
+                            return Action::Skip;
                         }
                     }
-                    std::string ctx;
-                    if (auto* cst = db.getChatStorage()) {
-                        try {
-                            namespace orm = sqlite_orm;
-                            int rounds = dice::aichat::contextRounds(configMgr);
-                            if (rounds > 0) {
-                                auto rows = cst->get_all<dice::ChatMsgRow>(
-                                    orm::where(orm::c(&dice::ChatMsgRow::platform) == msgC.platform
-                                        and orm::c(&dice::ChatMsgRow::groupId) == msgC.targetId
-                                        and orm::c(&dice::ChatMsgRow::time) <= contextCutoff
-                                        and orm::c(&dice::ChatMsgRow::recalled) == 0
-                                        and (orm::c(&dice::ChatMsgRow::adapterId) == msgC.adapterId or orm::c(&dice::ChatMsgRow::adapterId) == std::string())),
-                                    orm::order_by(&dice::ChatMsgRow::id).desc(), orm::limit(rounds));
-                                for (auto it = rows.rbegin(); it != rows.rend(); ++it)
-                                    ctx += it->sender + "\xef\xbc\x9a" + dice::aichat::cleanForAi(configMgr, it->content) + "\n";
-                            }
-                        } catch (...) { DICE_LOG_EXCEPTION("AI chat context database read"); }
-                    }
+                    voiceReady = true;
+                    const std::string curText = dice::aichat::cleanForAi(configMgr, trigText);
+                    const std::string quotedId = msgC.extra.is_object()
+                        ? msgC.extra.value("quoted_message_id", std::string()) : std::string();
+                    const bool vision = dice::aivision::enabled(configMgr);
+                    auto ctx = dice::aichat::loadTurnHistory(configMgr, db.getChatStorage(), msgC,
+                        rounds, historyEnd, quotedId, vision, curText);
                     // 多模态 —— 消息带图且开启图像识别时，识别图片内容并注入当前消息。
-                    std::string curText = dice::aichat::cleanForAi(configMgr, trigText);
-                    if (dice::aivision::enabled(configMgr) && !msgC.rawContent.empty()) {
-                        std::string vdesc = dice::aivision::describe(configMgr, msgC.rawContent);
-                        if (!vdesc.empty())
-                            curText += "\n\xef\xbc\x88\xe6\x88\x91\xe5\x8f\x91\xe7\x9a\x84\xe5\x9b\xbe\xe7\x89\x87\xe5\x86\x85\xe5\xae\xb9\xef\xbc\x9a" + vdesc + "\xef\xbc\x89";  // （我发的图片内容：...）
+                    if (!anchorImage && vision && !msgC.rawContent.empty()) {
+                        bool recognized = false;
+                        anchorImage = dice::aivision::describe(configMgr, msgC.rawContent, dice::aichat::truncateChars(curText, 300), &recognized);
+                        if (recognized && rounds > 0)
+                            dice::aichat::recentImages().remember({msgC.platform, msgC.adapterId, msgC.targetId, msgC.id}, *anchorImage);
                     }
-                    if (!npcHit && tkind == dice::aichat::Trigger::Standby && !dice::aichat::decisionEnabled(configMgr))
-                        DICE_LOG_INFO_M("AI 决策", "{} 待机搭话命中，决策开关未开启，直接生成回复。", dice::ai::traceContext());
-                    // 决策：待机搭话先问「决策」用途的模型要不要插话（被 @、关键词、NPC 命中不经过决策）。
-                    if (!npcHit && tkind == dice::aichat::Trigger::Standby && dice::aichat::decisionEnabled(configMgr)
-                        && !dice::aichat::decide(configMgr, ctx, senderNick, curText))
-                        return;
+                    const auto image = anchorImage.value_or(std::string());
+                    bool addressed = !continuation && (npcHit || tkind == dice::aichat::Trigger::Strong);
+                    for (size_t i = 1; i < batch.size(); ++i) {
+                        const auto& m = batch[i];
+                        if (cmdRouter.isBlocked(m)) {
+                            if (i > extraLines.size()) extraLines.push_back({});
+                            continue;
+                        }
+                        if (m.senderId != msgC.senderId) toolExec = nullptr;
+                        if (dice::aichat::triggerKind(configMgr, m.content, dice::CommandRouter::isAtSelf(m), false)
+                            == dice::aichat::Trigger::Strong) addressed = true;
+
+                        if (npcHit && !addressed) {
+                            dice::ainpc::Npc named;
+                            addressed = dice::ainpc::match(configMgr, gkey, m.content, named) && named.name == npc.name;
+                        }
+                        if (i <= extraLines.size()) continue;
+                        auto words = dice::aichat::cleanForAi(configMgr, m.displayContent.empty() ? m.content : m.displayContent);
+                        if (dice::aispeech::enabled(configMgr) && dice::aispeech::hasVoice(m)) {
+                            auto adapter = adapterMgr.getAdapter(m.adapterId);
+                            words += " " + dice::aispeech::transcribe(configMgr, adapter.get(), m);
+                        }
+                        std::string observation;
+                        if (vision && !m.rawContent.empty()) {
+                            bool recognized = false;
+                            observation = dice::aivision::describe(configMgr, m.rawContent, dice::aichat::truncateChars(words, 300), &recognized);
+                            if (recognized && rounds > 0)
+                                dice::aichat::recentImages().remember({m.platform, m.adapterId, m.targetId, m.id}, observation);
+                        }
+                        extraLines.push_back({m.senderName.empty() ? m.senderId : m.senderName, words, false, false,
+                            dice::aichat::truncateChars(observation, 480), true});
+                    }
+                    std::vector<size_t> visible{0};
+                    dice::aichat::TurnFocus focus;
+                    auto turnQuery = curText;
+                    for (size_t i = 0; i < extraLines.size(); ++i) {
+                        const auto& line = extraLines[i];
+                        if (!line.supplement || cmdRouter.isBlocked(batch[i + 1])) continue;
+                        visible.push_back(i + 1);
+                        ctx.push_back(line);
+                        turnQuery += "\n" + dice::aichat::truncateChars(line.sender, 48) + "：" + dice::aichat::truncateChars(line.text, 200);
+                    }
+                    // A first standby hit can still opt out of its admission check. Once a
+                    // conversation is underway every batch gets its own timing decision.
+                    if (continuation || npcHit || addressed || batch.size() > 1 || dice::aichat::decisionEnabled(configMgr)) {
+                        const auto plan = dice::aichat::planTurn(configMgr, ctx, senderNick, curText, image,
+                            npcHit ? npc.name : std::string(), canWait, addressed, npcHit ? npc.modelId : std::string(), &focus);
+                        if (newer()) return Action::Recheck;
+                        if (plan != Action::Reply) return plan;
+                    }
+                    const bool roomReply = focus.target == 0;
+                    const auto& recipient = batch[roomReply ? 0 : visible.at(focus.target - 1)];
+                    const auto audience = roomReply ? std::string("全群") : "第" + std::to_string(focus.target) + "条发言（" +
+                        (recipient.senderName.empty() ? recipient.senderId : recipient.senderName) + "）";
+                    if (!allowed() || cmdRouter.isBlocked(recipient)) return Action::Skip;
                     DICE_LOG_DEBUG_M("AI 对话", "群 {} 开始生成回复：{}{}。", msgC.targetId,
                                      npcHit ? "NPC「" + npc.name + "」" : std::string("骰娘"),
                                      tkind == dice::aichat::Trigger::Standby ? "（待机搭话）" : "");
@@ -2170,15 +2251,17 @@ static int realMain(int argc, char* argv[]) {
                     if (dice::aimemory::shortEnabled(configMgr))
                         memBg = dice::aimemory::currentSummary(db.getChatStorage(), "group", gkey);
                     if (!memBg.empty()) DICE_LOG_DEBUG_M("AI 记忆", "[{}] 注入群摘要：\n{}", gkey, memBg);
-                    if (dice::aimemory::longEnabled(configMgr)) {
+                    if (dice::aimemory::longEnabled(configMgr) && (!focus.recall || !focus.recall->empty())) {
                         auto facts = dice::aimemory::retrieveFacts(configMgr, db.getChatStorage(), "group", gkey,
-                            dice::aichat::cleanForAi(configMgr, trigText));
+                            focus.recall.value_or(dice::aichat::recallQuery(turnQuery, ctx)));
                         if (!facts.empty()) {
                             std::string fb = "\xe7\x9b\xb8\xe5\x85\xb3\xe8\xae\xb0\xe5\xbf\x86\xef\xbc\x9a\n";  // 相关记忆：
                             for (auto& f : facts) fb += "- " + f + "\n";
                             memBg = memBg.empty() ? fb : (memBg + "\n" + fb);
                         }
                     }
+                    if (dice::aimemory::longConf(configMgr).value("enabled", false))
+                        memBg += dice::aimemory::glossary(db.getChatStorage(), gkey, turnQuery);
                     // 阶段E：NPC 命中时用其人设/模型覆盖，否则走默认骰娘对话。
                     // A1：NPC 开了情绪记忆时，注入对该玩家的当前关系（好感/情绪）。
                     nlohmann::json npcMood = nlohmann::json::object();
@@ -2189,31 +2272,34 @@ static int realMain(int argc, char* argv[]) {
                     // 知识库：FAQ 命中直接回复（不调用模型）；否则把高分段落作为参考资料注入。
                     std::string kbText;
                     if (dice::kb::enabled(configMgr)) {
-                        auto kr = kbSearch(msgC, curText, std::nullopt);
-                        if (kr.faq && !npcHit) {
+                        auto kr = kbSearch(msgC, turnQuery, std::nullopt);
+                        if (kr.faq && !npcHit && quotedId.empty() && batch.size() == 1) {
                             DICE_LOG_INFO_M("AI 知识库", "{} FAQ 直答「{}」（相似度 {:.2f}），不调用模型：{}", dice::ai::traceContext(), kr.faq->title, kr.faq->coverage, kr.faq->text);
-                            std::string rep = dice::aichat::replyAt(configMgr)
-                                ? ("[CQ:at,qq=" + msgC.senderId + "] " + kr.faq->text) : kr.faq->text;
-                            finishReply(msgC, rep, "", "", "", {}, lnk, dice::ContentFormat::kPlainText);
-                            return;
+                            std::string rep = !roomReply && dice::aichat::replyAt(configMgr)
+                                ? ("[CQ:at,qq=" + recipient.senderId + "] " + kr.faq->text) : kr.faq->text;
+                            if (!allowed()) return Action::Skip;
+                            finishReply(recipient, rep, "", "", "", {}, lnk, dice::ContentFormat::kPlainText, roomReply);
+                            return Action::Reply;
                         }
                         kbText = dice::kb::KnowledgeBase::buildContext(kr.hits, dice::kb::optionsFrom(dice::kb::conf(configMgr)).maxChars);
                     }
                     std::string aiReply = dice::aichat::generate(configMgr, ctx, senderNick,
-                        curText, memBg, toolExec, sysOv, modelOv, kbText);
-                    if (aiReply.empty()) return;
-                    std::string rep = dice::aichat::replyAt(configMgr)
-                        ? ("[CQ:at,qq=" + msgC.senderId + "] " + aiReply) : aiReply;
+                        curText, memBg, toolExec, sysOv, modelOv, kbText, image, audience);
+                    if (aiReply.empty() || !allowed() || cmdRouter.isBlocked(recipient)) return Action::Skip;
+                    std::string rep = !roomReply && dice::aichat::replyAt(configMgr)
+                        ? ("[CQ:at,qq=" + recipient.senderId + "] " + aiReply) : aiReply;
                     // AI 对话回复不带一次性路由状态（无引用覆写/转发节点），类别为空 →
                     // finishReply 内的润色/翻译自然跳过（本就是 AI 生成，无需再加工）。
-                    finishReply(msgC, rep, "", "", "", {}, lnk, dice::ContentFormat::kPlainText);
+                    finishReply(recipient, rep, "", "", "", {}, lnk, dice::ContentFormat::kPlainText, roomReply);
                     // A1：互动结束后评估好感变化并写回（已在后台线程，先发后评不拖回复）。
-                    if (npcHit && npc.moodEnabled)
+                    if (npcHit && npc.moodEnabled && std::all_of(batch.begin(), batch.end(),
+                            [&](const auto& m) { return m.senderId == msgC.senderId; }))
                         dice::ainpc::updateMood(configMgr, db.getChatStorage(), npc, gkey,
-                            msgC.senderId, senderNick, curText, aiReply);
+                            msgC.senderId, senderNick, turnQuery, aiReply);
+                    return Action::Reply;
                 };
-                if (!dice::aiwork::Worker::instance().post(std::move(job)))
-                    DICE_LOG_INFO("AI \xe9\x98\x9f\xe5\x88\x97\xe5\xb7\xb2\xe6\xbb\xa1\xef\xbc\x8c\xe4\xb8\xa2\xe5\xbc\x83\xe6\x9c\xac\xe6\xac\xa1 AI \xe5\xaf\xb9\xe8\xaf\x9d\xe8\xa7\xa6\xe5\x8f\x91 group {}", msg.targetId);  // 队列已满，丢弃本次 AI 对话触发
+                if (!turns.offer(room, msg, std::move(job)))
+                    DICE_LOG_INFO_M("AI 对话", "群 {} 待处理发言过多，本条未加入。", msg.targetId);
             }
         }
 
@@ -4115,11 +4201,16 @@ static int realMain(int argc, char* argv[]) {
                         dice::aichat::Trigger pKind = !pNpcHit && dice::aichat::enabled(configMgr)
                             ? dice::aichat::triggerKind(configMgr, msg.content, atMe) : dice::aichat::Trigger::None;
                         bool pDefaultHit = pKind != dice::aichat::Trigger::None;
-                        // 测试台同样走「决策」：待机搭话先判断要不要插话，便于骰主预览。
-                        if (pDefaultHit && pKind == dice::aichat::Trigger::Standby && dice::aichat::decisionEnabled(configMgr)
-                            && !dice::aichat::decide(configMgr, "", msg.senderName.empty() ? msg.senderId : msg.senderName,
-                                                     dice::aichat::cleanForAi(configMgr, msg.content)))
-                            pDefaultHit = false;
+                        std::string image;
+                        if ((pNpcHit || pDefaultHit) && dice::aivision::enabled(configMgr) && !msg.rawContent.empty())
+                            image = dice::aivision::describe(configMgr, msg.rawContent, dice::aichat::truncateChars(dice::aichat::cleanForAi(configMgr, msg.content), 300));
+                        dice::aichat::TurnFocus focus;
+                        if ((pNpcHit || pKind == dice::aichat::Trigger::Strong ||
+                             (pDefaultHit && dice::aichat::decisionEnabled(configMgr))) &&
+                            dice::aichat::planTurn(configMgr, {}, msg.senderName.empty() ? msg.senderId : msg.senderName,
+                                dice::aichat::cleanForAi(configMgr, msg.content), image, pNpcHit ? pnpc.name : std::string(),
+                                false, pNpcHit || pKind == dice::aichat::Trigger::Strong, pnpc.modelId, &focus) != dice::aichat::TurnAction::Reply)
+                            pNpcHit = pDefaultHit = false;
                         if (pNpcHit || pDefaultHit) {
                             std::string sn = msg.senderName.empty() ? msg.senderId : msg.senderName;
                             // 阶段B/C：测试台也注入本群摘要 + 检索到的持久事实，便于预览记忆效果。
@@ -4127,15 +4218,17 @@ static int realMain(int argc, char* argv[]) {
                             std::string gk = msg.platform + ":" + msg.targetId;
                             if (dice::aimemory::shortEnabled(configMgr) && !msg.targetId.empty())
                                 memBg = dice::aimemory::currentSummary(db.getChatStorage(), "group", gk);
-                            if (dice::aimemory::longEnabled(configMgr) && !msg.targetId.empty()) {
+                            if (dice::aimemory::longEnabled(configMgr) && !msg.targetId.empty() && (!focus.recall || !focus.recall->empty())) {
                                 auto facts = dice::aimemory::retrieveFacts(configMgr, db.getChatStorage(), "group", gk,
-                                    dice::aichat::cleanForAi(configMgr, msg.content));
+                                    focus.recall.value_or(dice::aichat::cleanForAi(configMgr, msg.content)));
                                 if (!facts.empty()) {
                                     std::string fb = "\xe7\x9b\xb8\xe5\x85\xb3\xe8\xae\xb0\xe5\xbf\x86\xef\xbc\x9a\n";
                                     for (auto& f : facts) fb += "- " + f + "\n";
                                     memBg = memBg.empty() ? fb : (memBg + "\n" + fb);
                                 }
                             }
+                            if (!msg.targetId.empty() && dice::aimemory::longConf(configMgr).value("enabled", false))
+                                memBg += dice::aimemory::glossary(db.getChatStorage(), gk, msg.content);
                             dice::aitools::ToolExec texec = dice::aitools::enabled(configMgr) ? makeAiTool(msg) : nullptr;
                             // A1：测试台注入 NPC 情绪记忆（只读预览，不更新好感）。
                             nlohmann::json pMood = nlohmann::json::object();
@@ -4145,11 +4238,6 @@ static int realMain(int argc, char* argv[]) {
                             std::string modelOv = pNpcHit ? pnpc.modelId : std::string();
                             // 测试台也走图像识别注入（便于骰主预览）。
                             std::string pcur = dice::aichat::cleanForAi(configMgr, msg.content);
-                            if (dice::aivision::enabled(configMgr) && !msg.rawContent.empty()) {
-                                std::string vd = dice::aivision::describe(configMgr, msg.rawContent);
-                                if (!vd.empty())
-                                    pcur += "\n\xef\xbc\x88\xe6\x88\x91\xe5\x8f\x91\xe7\x9a\x84\xe5\x9b\xbe\xe7\x89\x87\xe5\x86\x85\xe5\xae\xb9\xef\xbc\x9a" + vd + "\xef\xbc\x89";
-                            }
                             // 测试台同样走知识库（FAQ 直答 / 注入参考资料），便于预览。
                             std::string kbText;
                             std::string faqReply;
@@ -4159,7 +4247,7 @@ static int realMain(int argc, char* argv[]) {
                                 else kbText = dice::kb::KnowledgeBase::buildContext(kr.hits, dice::kb::optionsFrom(dice::kb::conf(configMgr)).maxChars);
                             }
                             std::string ar = !faqReply.empty() ? faqReply
-                                : dice::aichat::generate(configMgr, "", sn, pcur, memBg, texec, sysOv, modelOv, kbText);
+                                : dice::aichat::generate(configMgr, {}, sn, pcur, memBg, texec, sysOv, modelOv, kbText, image);
                             if (!ar.empty()) { reply = ar; replyFormat = dice::ContentFormat::kPlainText; }
                         }
                     }
@@ -5473,6 +5561,7 @@ static int realMain(int argc, char* argv[]) {
 
     // Drain the active (time-bounded) turn and discard queued plugin work before
     // closing the DB or destroying runtime/native bridge targets.
+    dice::aiwork::Worker::instance().stop();
     deferredReplies.cancel();
     deferredCallbacks->stop();
     jsCallbacks->stop();

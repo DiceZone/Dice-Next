@@ -150,8 +150,9 @@ inline std::map<std::string, VisionCacheEntry>& visionCache() {
     static std::map<std::string, VisionCacheEntry> c; return c;
 }
 
-// 识别 content 里的图片，返回一段文字描述（供注入对话）。无图/未启用/失败返回空。
-inline std::string describe(ConfigManager& cfg, const std::string& content) {
+// 识别 content 里的图片，返回一段文字描述（供注入对话）。无图或未启用返回空，读取失败时返回状态说明。
+inline std::string describe(ConfigManager& cfg, const std::string& content, const std::string& caption = "", bool* recognized = nullptr) {
+    if (recognized) *recognized = false;
     if (!enabled(cfg)) return "";
     std::string imageError;
     auto srcs = extractImageSrcs(content, maxImages(cfg), false, maxImageBytes(cfg), &imageError);
@@ -159,7 +160,7 @@ inline std::string describe(ConfigManager& cfg, const std::string& content) {
     if (srcs.empty()) {
         if (content.find("[CQ:image") != std::string::npos) {
             DICE_LOG_WARN_M("AI 识图", "图片无法读取：消息没有可访问的图片地址，或下载/格式校验失败。");
-            return "[图片未能读取。请明确告知用户无法确认图片内容，不要猜测图中信息。]";
+            return "[图片未能读取。]";
         }
         return "";
     }
@@ -178,6 +179,7 @@ inline std::string describe(ConfigManager& cfg, const std::string& content) {
     // A2：查缓存（24h TTL）。
     std::vector<std::string> cacheParts = srcs;
     cacheParts.push_back(settings.dump());
+    cacheParts.push_back(caption);
     for (const auto& model : ai::pick(cfg, "vision", "", false)) cacheParts.push_back(model.id + ":" + model.model + ":" + model.baseUrl + ":" + model.options.dump());
     const std::string ckey = visionCacheKey(cacheParts);
     const long long now = (long long)std::time(nullptr);
@@ -186,11 +188,14 @@ inline std::string describe(ConfigManager& cfg, const std::string& content) {
         auto it = visionCache().find(ckey);
         if (it != visionCache().end() && now - it->second.ts < 86400) {
             DICE_LOG_INFO_M("AI 识图", "{} 识图结果（缓存，{} 张）：{}", ai::traceContext(), srcs.size(), it->second.desc);
+            if (recognized) *recognized = true;
             return it->second.desc + (imageError.empty() ? std::string() : "\n[另有图片未读取：" + imageError + "；不要猜测未读取的图片。]");
         }
     }
     std::string prompt = conf(cfg).value("prompt", std::string());
     if (prompt.empty()) prompt = defaultPrompt();
+    if (!caption.empty()) prompt += "\n以下是随图发言，仅用于定位画面中相关细节。优先读出和发言有关的可见文字、数字或动作；"
+        "看不清就说明，不代替角色回复。\n" + json(caption).dump(-1, ' ', false, json::error_handler_t::replace);
     json contentArr = json::array();
     contentArr.push_back({{"type", "text"}, {"text", prompt}});
     for (auto& s : srcs)
@@ -200,7 +205,7 @@ inline std::string describe(ConfigManager& cfg, const std::string& content) {
     ai::ChatRawResult r = ai::chatRawFor(cfg, "vision", messages, json(nullptr), settings["max_tokens"].get<int>(), settings["timeout_sec"].get<int>());
     if (!r.ok || r.content.empty()) {
         DICE_LOG_WARN_M("AI 识图", "{} 图像识别失败：{}", ai::traceContext(), r.error.empty() ? "视觉模型未返回图片描述" : r.error);
-        return "[图片识别失败，无法确认图片内容。请告知用户本次未能读图，不要编造图中信息。]";
+        return "[图片识别失败，无法确认图片内容。]";
     }
     DICE_LOG_INFO_M("AI 识图", "{} 识图结果（{} 张）：{}", ai::traceContext(), srcs.size(), r.content);
     // A2：写缓存（超量按最旧淘汰）。
@@ -215,6 +220,7 @@ inline std::string describe(ConfigManager& cfg, const std::string& content) {
         }
         c[ckey] = {r.content, (long long)std::time(nullptr)};
     }
+    if (recognized) *recognized = true;
     return r.content + (imageError.empty() ? std::string() : "\n[另有图片未读取：" + imageError + "；不要猜测未读取的图片。]");
 }
 

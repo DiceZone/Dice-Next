@@ -120,6 +120,7 @@ Dice!Next 自体は QQ のプロトコルのクライアントではありませ
 - [NapCat](https://github.com/NapNeko/NapCatQQ)：QQ のプロトコルのクライアントと OneBot の生態系の支援。
 - [LLOneBot](https://www.llonebot.com/)：QQ のプロトコルのクライアントと OneBot の生態系の支援。
 - [SnowLuma](https://github.com/SnowLuma/SnowLuma)：QQ のプロトコルのクライアント、そしてこの README のレイアウトの参考。
+- [MaiBot](https://github.com/Mai-with-u/MaiBot) — グループ会話の応答判断と記憶の設計を参考にしました。
 
 開発、テスト、フィードバック、文書の保守に参加してくださったすべての貢献者とユーザーに感謝します。
 

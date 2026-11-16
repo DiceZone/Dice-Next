@@ -284,6 +284,8 @@ private:
         Message m;
         m.platform = platform(); m.adapterId = id_; m.selfId = loginId_;
         m.id = d.value("msg_id", std::string());
+        const auto quote = objOf(extra, "quote");
+        if (quote.contains("id") && quote["id"].is_string()) m.extra["quoted_message_id"] = quote["id"];
         m.content = d.value("content", std::string());
         m.timestamp = std::time(nullptr);
         m.senderId = authorId;

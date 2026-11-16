@@ -703,7 +703,7 @@ private:
             else if (t == "mention_all") { raw += "[CQ:at,qq=all]"; display += "@全体成员"; m.atList.push_back("all"); }
             else if (t == "face") { raw += "[CQ:face,id=" + field(x, "face_id") + "]"; display += "[表情]"; }
             else if (t == "market_face") { std::string url = x.value("url", std::string()); raw += url.empty() ? "[表情]" : "[CQ:image,file=" + url + "]"; display += "[表情]"; }
-            else if (t == "reply") { raw += "[CQ:reply,id=" + field(x, "message_seq") + "]"; display += "[回复]"; }
+            else if (t == "reply") { m.extra["quoted_message_id"] = field(x, "message_seq"); raw += "[CQ:reply,id=" + field(x, "message_seq") + "]"; display += "[回复]"; }
             else if (t == "image") { std::string ref = x.value("temp_url", std::string()); if (ref.empty()) ref = x.value("resource_id", std::string()); if (ref.empty()) ref = x.value("uri", std::string()); raw += "[CQ:image,file=" + ref + "]"; display += "[图片]"; }
             else if (t == "record") { std::string ref = x.value("temp_url", std::string()); if (ref.empty()) ref = x.value("resource_id", std::string()); raw += "[CQ:record,file=" + ref + "]"; display += "[语音]"; }
             else if (t == "video") { std::string ref = x.value("temp_url", std::string()); if (ref.empty()) ref = x.value("resource_id", std::string()); raw += "[CQ:video,file=" + ref + "]"; display += "[视频]"; }

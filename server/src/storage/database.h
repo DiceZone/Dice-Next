@@ -197,6 +197,7 @@ struct ChatMsgRow {
 /// AI 记忆（chat.db）。阶段 B：滚动对话摘要（kind="summary"，每群一行）；
 /// 阶段 C 复用同表存持久事实（kind="fact"，带 embedding 向量做检索）。
 struct AiMemoryRow {
+    std::string metadata = "{}"; // glossary review and previous fact versions
     int64_t id = 0;
     std::string scope;       // "group" | "user" | ...
     std::string scopeId;     // 例如 "onebot_v11:123456"
@@ -830,6 +831,7 @@ private:
             orm::make_column("embedding", &AiMemoryRow::embedding),
             orm::make_column("created_at", &AiMemoryRow::createdAt),
             orm::make_column("updated_at", &AiMemoryRow::updatedAt),
+            orm::make_column("metadata", &AiMemoryRow::metadata, orm::default_value("{}")),
             orm::make_column("hits", &AiMemoryRow::hits)
         )
     ));

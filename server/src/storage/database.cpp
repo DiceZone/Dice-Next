@@ -478,7 +478,8 @@ bool Database::open(const std::string& path) {
                     orm::make_column("embedding", &AiMemoryRow::embedding),
                     orm::make_column("created_at", &AiMemoryRow::createdAt),
                     orm::make_column("updated_at", &AiMemoryRow::updatedAt),
-                    orm::make_column("hits", &AiMemoryRow::hits)
+                    orm::make_column("metadata", &AiMemoryRow::metadata, orm::default_value("{}")),
+            orm::make_column("hits", &AiMemoryRow::hits)
                 )
             )
         );

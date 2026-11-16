@@ -988,6 +988,11 @@ private:
                     // CQ codes (incl. images) for the transcript.
                     std::string s = rawMsg.get<std::string>();
                     cqContent = s;
+                    if (s.starts_with("[CQ:reply,id=")) {
+                        auto end = s.find_first_of(",]", 13);
+                        if (end != std::string::npos && end > 13)
+                            msg.extra["quoted_message_id"] = s.substr(13, end - 13);
+                    }
                     if (auto rp = s.find("[CQ:record,"); rp != std::string::npos) {
                         auto re = s.find(']', rp);
                         std::string inner = s.substr(rp, re == std::string::npos ? std::string::npos : re - rp);
@@ -1026,6 +1031,8 @@ private:
                             std::string file = jsonField(data, "file");
                             std::string ref = !url.empty() ? url : file;     // url is viewable; file as fallback
                             if (!ref.empty()) cqContent += "[CQ:image,file=" + ref + "]";
+                        } else if (segType == "reply") {
+                            msg.extra["quoted_message_id"] = jsonField(data, "id");
                         } else if (segType == "face") {
                             std::string id = jsonField(data, "id");
                             if (!id.empty()) cqContent += "[CQ:face,id=" + id + "]";

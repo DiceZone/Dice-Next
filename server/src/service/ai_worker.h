@@ -10,7 +10,8 @@
 
 #include <condition_variable>
 #include <cstddef>
-#include <deque>
+#include <chrono>
+#include <map>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -27,39 +28,49 @@ public:
 
     /// 入队执行；队列已满返回 false（调用方自行降级：丢弃或原地执行）。
     bool post(std::function<void()> job) {
-        {
-            std::lock_guard<std::mutex> lk(m_);
-            if (q_.size() >= kMaxQueue) return false;
-            q_.push_back(std::move(job));
-            if (!started_) {   // 首次使用才起线程；进程生命周期内常驻
-                started_ = true;
-                std::thread([this] { run(); }).detach();
-            }
-        }
+        return postAt(std::chrono::steady_clock::now(), std::move(job));
+    }
+
+    using Clock = std::chrono::steady_clock;
+    bool postAt(Clock::time_point due, std::function<void()> job) {
+        std::lock_guard lock(m_);
+        if (stopping_ || q_.size() >= 16) return false;
+        q_.emplace(due, std::move(job));
+        if (!thread_.joinable()) thread_ = std::thread([this] { run(); });
         cv_.notify_one();
         return true;
     }
 
-private:
-    static constexpr std::size_t kMaxQueue = 16;
+    void stop() {
+        {
+            std::lock_guard lock(m_);
+            stopping_ = true;
+            q_.clear();
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) thread_.join();
+    }
+    ~Worker() { stop(); }
 
+private:
     void run() {
-        for (;;) {
-            std::function<void()> job;
-            {
-                std::unique_lock<std::mutex> lk(m_);
-                cv_.wait(lk, [this] { return !q_.empty(); });
-                job = std::move(q_.front());
-                q_.pop_front();
-            }
+        std::unique_lock lock(m_);
+        while (!stopping_) {
+            if (q_.empty()) { cv_.wait(lock); continue; }
+            auto due = q_.begin()->first;
+            if (due > Clock::now()) { cv_.wait_until(lock, due); continue; }
+            auto job = std::move(q_.begin()->second);
+            q_.erase(q_.begin());
+            lock.unlock();
             try { job(); } catch (...) { DICE_LOG_EXCEPTION("AI background job"); }
+            lock.lock();
         }
     }
-
     std::mutex m_;
     std::condition_variable cv_;
-    std::deque<std::function<void()>> q_;
-    bool started_ = false;
+    std::multimap<Clock::time_point, std::function<void()>> q_;
+    std::thread thread_;
+    bool stopping_ = false;
 };
 
 }  // namespace dice::aiwork

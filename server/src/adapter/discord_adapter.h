@@ -392,6 +392,8 @@ private:
         if (first == std::string::npos) m.content.clear();
         else { const auto last = m.content.find_last_not_of(" \t\r\n"); m.content = m.content.substr(first, last - first + 1); }
         m.rawContent = m.content; m.displayContent = m.content;
+        if (d.contains("message_reference") && d["message_reference"].is_object())
+            m.extra["quoted_message_id"] = d["message_reference"].value("message_id", std::string());
         if (d.contains("attachments") && !d["attachments"].empty()) m.extra["attachments"] = d["attachments"];
         if (messageCb_) messageCb_(m);
     }

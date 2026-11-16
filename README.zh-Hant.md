@@ -120,6 +120,7 @@ Dice!Next 本身不是 QQ 協議端；使用 OneBot / Milky 時，需要另行�
 - [NapCat](https://github.com/NapNeko/NapCatQQ) — QQ 協議端與 OneBot 生態支援。
 - [LLOneBot](https://www.llonebot.com/) — QQ 協議端與 OneBot 生態支援。
 - [SnowLuma](https://github.com/SnowLuma/SnowLuma) — QQ 協議端，以及本專案 README 排版的參考。
+- [MaiBot](https://github.com/Mai-with-u/MaiBot) — 群聊決策與記憶設計為 Dice!Next 的 AI 對話提供了參考。
 
 感謝所有參與開發、測試、反饋與文件維護的貢獻者和使用者。
 

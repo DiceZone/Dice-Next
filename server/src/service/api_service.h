@@ -1135,10 +1135,23 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 const auto j = J::parse(req->body());
                 const auto id = j.at("id").get<int64_t>();
                 auto row = cst->get<AiMemoryRow>(id);
-                if (row.kind != "summary" && row.kind != "fact") throw std::invalid_argument("unsupported memory kind");
+                if (row.kind != "summary" && row.kind != "fact" && row.kind != "alias") throw std::invalid_argument("unsupported memory kind");
                 const std::string text = j.at("content").get<std::string>();
                 if (text.empty() || text.size() > 24000) throw std::invalid_argument("memory content must be 1-24000 bytes");
                 if (j.value("previous_content", row.content) != row.content) throw std::invalid_argument("memory changed; reload before editing");
+                auto meta = aimemory::metadata(row);
+                if (row.kind == "alias") {
+                    if (j.value("previous_approved", meta.value("approved",false)) != meta.value("approved",false))
+                        throw std::runtime_error("term changed; reload before editing");
+                    if (text.size() > 600) throw std::invalid_argument("meaning too long");
+                    meta["approved"] = j.value("approved", meta.value("approved", false));
+                }
+                if (row.kind == "fact" && text != row.content) {
+                    auto& previous = meta["previous"];
+                    if (!previous.is_array()) previous = J::array();
+                    if (previous.size() >= 20) previous.erase(previous.begin());
+                    previous.push_back({{"text",row.content},{"source",row.refId}});
+                }
                 std::string embedding = row.embedding;
                 if (row.kind == "fact" && text != row.content) {
                     auto result = dice::ai::embedFor(cfg, {text}, 30);
@@ -1146,11 +1159,26 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                         throw std::runtime_error("embedding failed; memory was not changed: " + result.error);
                     embedding = dice::ai::vecToJson(result.vectors[0]);
                 }
-                cst->update_all(orm::set(orm::c(&AiMemoryRow::content) = text,
-                    orm::c(&AiMemoryRow::embedding) = embedding,
-                    orm::c(&AiMemoryRow::updatedAt) = (int64_t)std::time(nullptr)),
-                    orm::where(orm::c(&AiMemoryRow::id) == id and orm::c(&AiMemoryRow::content) == row.content));
-                if (!cst->changes()) throw std::runtime_error("memory changed or was deleted; reload before editing");
+                cst->transaction([&] {
+                    cst->update_all(orm::set(orm::c(&AiMemoryRow::content) = text,
+                        orm::c(&AiMemoryRow::embedding) = embedding, orm::c(&AiMemoryRow::metadata) = meta.dump(),
+                        orm::c(&AiMemoryRow::refId) = (row.kind == "fact" && text != row.content ? int64_t(0) : row.refId),
+                        orm::c(&AiMemoryRow::updatedAt) = (int64_t)std::time(nullptr)),
+                        orm::where(orm::c(&AiMemoryRow::id) == id && orm::c(&AiMemoryRow::content) == row.content
+                            && orm::c(&AiMemoryRow::metadata) == row.metadata));
+                    if (!cst->changes()) throw std::runtime_error("memory changed; reload before editing");
+                    if (row.kind == "alias" && meta.value("approved", false)) {
+                        for (auto& other : cst->get_all<AiMemoryRow>(orm::where(orm::c(&AiMemoryRow::scopeId) == row.scopeId
+                            && orm::c(&AiMemoryRow::kind) == row.kind && orm::c(&AiMemoryRow::id) != id))) {
+                            auto m = aimemory::metadata(other);
+                            if (m.value("approved",false) && m.value("term",std::string()) == meta.value("term",std::string())) {
+                                m["approved"] = false;
+                                other.metadata = m.dump(); cst->update(other);
+                            }
+                        }
+                    }
+                    return true;
+                });
                 jsonReply(ok(nullptr), std::move(cb)); return;
             }
             if (req->method() == drogon::Delete && !req->getParameter("id").empty()) {
@@ -1161,7 +1189,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     cst->update_all(orm::set(orm::c(&AiMemoryRow::content) = std::string(),
                         orm::c(&AiMemoryRow::updatedAt) = (int64_t)std::time(nullptr)),
                         orm::where(orm::c(&AiMemoryRow::id) == id));
-                } else if (row.kind == "fact") cst->remove<AiMemoryRow>(id);
+                } else if (row.kind == "fact" || row.kind == "alias") cst->remove<AiMemoryRow>(id);
                 else throw std::invalid_argument("unsupported memory kind");
                 jsonReply(ok(nullptr), std::move(cb)); return;
             }
@@ -1184,7 +1212,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 std::string kind = req->getParameter("kind");   // 空=summary+fact 都清
                 try {
                     auto kindMatch = [&](const std::string& k) { return kind.empty() || kind == k; };
-                    for (const std::string& k : {std::string("summary"), std::string("fact")}) {
+                    for (const std::string& k : {std::string("summary"), std::string("fact"), std::string("alias")}) {
                         if (!kindMatch(k)) continue;
                         if (sid.empty())
                             cst->remove_all<AiMemoryRow>(orm::where(orm::c(&AiMemoryRow::kind) == k));
@@ -1197,17 +1225,32 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 return;
             }
             std::string kind = req->getParameter("kind"); if (kind.empty()) kind = "summary";
-            std::string fsid = req->getParameter("scope_id");   // 可选，只看某群
+            std::string fsid = req->getParameter("scope_id");
+            const auto detail = req->getParameter("id");
             J arr = J::array();
             try {
-                auto rows = cst->get_all<AiMemoryRow>(
-                    orm::where(orm::c(&AiMemoryRow::kind) == kind),
-                    orm::order_by(&AiMemoryRow::updatedAt).desc());
+                std::vector<AiMemoryRow> rows;
+                if (!detail.empty()) {
+                    auto row = cst->get_pointer<AiMemoryRow>(std::stoll(detail));
+                    if (row && row->kind == kind) rows.push_back(*row);
+                } else rows = cst->get_all<AiMemoryRow>(
+                    orm::where(orm::c(&AiMemoryRow::kind) == kind), orm::order_by(&AiMemoryRow::updatedAt).desc());
                 for (auto& r : rows) {
                     if (!fsid.empty() && r.scopeId != fsid) continue;
                     if (kind == "summary" && r.content.empty()) continue;   // 仅做水位线的空摘要行不展示
-                    arr.push_back(J{{"id", r.id}, {"kind", r.kind}, {"scope", r.scope}, {"scope_id", r.scopeId}, {"content", r.content},
-                                    {"ref_id", r.refId}, {"updated_at", r.updatedAt}, {"hits", r.hits}});
+                    J item = {{"id", r.id}, {"kind", r.kind}, {"scope", r.scope}, {"scope_id", r.scopeId}, {"content", r.content},
+                              {"ref_id", r.refId}, {"updated_at", r.updatedAt}, {"hits", r.hits}};
+                    if (r.kind == "fact" || r.kind == "alias") {
+                        auto meta = aimemory::metadata(r);
+                        if (detail.empty()) meta.erase("previous");
+                        item["meta"] = meta;
+                        if (!detail.empty() && r.refId > 0) {
+                            auto source = cst->get_pointer<ChatMsgRow>(r.refId);
+                            if (source && !source->recalled && source->platform + ":" + source->groupId == r.scopeId)
+                                item["source"] = {{"sender",source->sender},{"text",aichat::truncateChars(aichat::cleanForAi(cfg,source->content),300)}};
+                        }
+                    }
+                    arr.push_back(std::move(item));
                 }
             } catch (...) {}
             jsonReply(ok(J{{"items", arr}}), std::move(cb));

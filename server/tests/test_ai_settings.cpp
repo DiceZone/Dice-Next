@@ -1,3 +1,4 @@
+#include "../src/service/ai_chat.h"
 #include "../src/service/ai_settings_patch.h"
 #include "../src/service/ai_vision.h"
 #include "test_framework.h"
@@ -10,6 +11,160 @@
 #include <map>
 
 using namespace dice;
+
+TEST(AiConversation, PlayerCaptionAndVisionStayDistinctFromEarlierSpeakers) {
+    const aichat::History history{{"阿青", "你看一下版本号", false}, {"骰娘", "发我看看", true}};
+    auto turn = json::parse(aichat::conversationTurn(history, "阿青", "怎么没更新？", "版本号是 581"));
+    ASSERT_EQ(turn.at("当前发言").get<std::string>(), std::string("怎么没更新？"));
+    ASSERT_EQ(turn.at("当前附件的识图观察（可能有误）").get<std::string>(), std::string("版本号是 581"));
+    const auto& lines = turn.at("此前对话（从早到晚）");
+    ASSERT_FALSE(lines.at(0).at("本账号发言").get<bool>());
+    ASSERT_TRUE(lines.at(1).at("本账号发言").get<bool>());
+    ASSERT_FALSE(json::parse(aichat::conversationTurn({}, "阿青", "走吧", "")).contains("当前附件的识图观察（可能有误）"));
+}
+
+TEST(AiConversation, FollowupRecallsRecentSubjectWithoutCarryingItAcrossTopicChanges) {
+    const aichat::History history{{"甲", "晚饭吃什么", false}, {"乙", "守门人拿走了钥匙", false}, {"旅店老板", "我见过他", true}};
+    const auto followup = aichat::recallQuery("那后来呢？", history);
+    ASSERT_TRUE(followup.find("守门人") != std::string::npos);
+    ASSERT_TRUE(followup.find("晚饭") == std::string::npos);
+    ASSERT_EQ(aichat::recallQuery("今天开团吗？", history), std::string("今天开团吗？"));
+    ASSERT_EQ(aichat::stripCodes("[压低声音]把[图纸]给我[CQ:image,file=a]"), std::string("[压低声音]把[图纸]给我[图片]"));
+}
+
+TEST(AiConversation, ExplicitQuoteBeatsInterleavedChatForReplyAndRecall) {
+    const aichat::History lines{{"守卫", "钥匙在井里", false, true, "井边有绳子"},
+                                {"路人", "一会儿去吃饭", false}};
+    const auto payload = json::parse(aichat::conversationTurn(lines, "甲", "怎么拿？", ""));
+    ASSERT_EQ(payload.at("当前发言引用的原消息").at("内容").get<std::string>(), std::string("钥匙在井里"));
+    ASSERT_EQ(payload.at("此前对话（从早到晚）").size(), size_t(1));
+    const auto query = aichat::recallQuery("怎么拿？", lines);
+    ASSERT_TRUE(query.find("井边有绳子") != std::string::npos);
+    ASSERT_TRUE(query.find("吃饭") == std::string::npos);
+    const aichat::History missing{{"乙", "开饭了", false}, {"", "", false, true}};
+    ASSERT_TRUE(json::parse(aichat::conversationTurn(missing, "甲", "后来呢？", "")).at("当前发言引用的原消息").is_null());
+    ASSERT_EQ(aichat::recallQuery("后来呢？", missing), std::string("后来呢？"));
+}
+
+TEST(AiConversation, PastImageObservationBelongsToItsGroupAccountAndMessage) {
+    aichat::RecentImageObservations images;
+    images.remember({"qq", "bot-a", "group-a", "123"}, "截图显示版本 581");
+    ASSERT_EQ(images.find({"qq", "bot-a", "group-a", "123"}), std::string("截图显示版本 581"));
+    ASSERT_TRUE(images.find({"qq", "bot-b", "group-a", "123"}).empty());
+    ASSERT_TRUE(images.find({"qq", "bot-a", "group-b", "123"}).empty());
+    ASSERT_TRUE(images.find({"qq", "bot-a", "group-a", "124"}).empty());
+    ASSERT_TRUE(aichat::refersToEarlierImage("那张图里显示的是什么版本？"));
+    ASSERT_FALSE(aichat::refersToEarlierImage("我们去图书馆吧"));
+}
+
+TEST(AiConversation, LongHistoryKeepsTheQuoteAndMostRecentTurns) {
+    aichat::History lines{{"守卫", "铁门", false, true}};
+    for (int i = 0; i < 40; ++i) lines.push_back({std::to_string(i), std::string(3000, 'x'), false});
+    auto turn = json::parse(aichat::conversationTurn(lines, "甲", "继续", ""));
+    const auto& dialog = turn.at("此前对话（从早到晚）");
+    ASSERT_TRUE(dialog.size() < 40);
+    ASSERT_EQ(dialog.back().at("发言人").get<std::string>(), std::string("39"));
+    ASSERT_TRUE(dialog.back().at("内容").get<std::string>().ends_with("…"));
+    ASSERT_EQ(turn.at("当前发言引用的原消息").at("内容").get<std::string>(), std::string("铁门"));
+}
+
+namespace {
+struct TurnHarness {
+    using Turns = aichat::ConversationTurns;
+    using Action = aichat::TurnAction;
+    Turns::Clock::time_point now{};
+    std::multimap<Turns::Clock::time_point, std::function<void()>> timers;
+    Turns turns{[this](auto at, auto job) { timers.emplace(at, std::move(job)); return true; }, [this] { return now; }};
+    Turns::Key key{"onebot", "bot", "group", ""};
+    Message msg(const std::string& id, const std::string& speaker) {
+        Message m; m.id = id; m.senderId = speaker; m.content = id; return m;
+    }
+    void advance(int ms) {
+        auto end = now + std::chrono::milliseconds(ms);
+        while (!timers.empty() && timers.begin()->first <= end) {
+            now = timers.begin()->first;
+            auto task = std::move(timers.begin()->second);
+            timers.erase(timers.begin()); task();
+        }
+        now = end;
+    }
+};
+}
+
+TEST(AiConversation, WaitsForAnotherSpeakerAndRepliesOnceForTheBatch) {
+    using Action = aichat::TurnAction;
+    TurnHarness h;
+    std::vector<std::vector<std::string>> batches;
+    int replies = 0;
+    auto job = [&](const auto& messages, bool canWait, const auto&) {
+        std::vector<std::string> speakers;
+        for (auto& m : messages) speakers.push_back(m.senderId);
+        batches.push_back(speakers);
+        if (canWait) return Action::Wait;
+        ++replies; return Action::Reply;
+    };
+    ASSERT_TRUE(h.turns.offer(h.key, h.msg("first", "A"), job));
+    h.advance(700);
+    ASSERT_TRUE(h.turns.offer(h.key, h.msg("second", "B"), job));
+    h.advance(1250);
+    ASSERT_TRUE(batches.empty());
+    h.advance(50);
+    ASSERT_EQ(batches.size(), size_t(1));
+    ASSERT_EQ(batches.front().size(), size_t(2));
+    ASSERT_EQ(replies, 0);
+    h.turns.offer(h.key, h.msg("third", "A"), job);
+    h.turns.offer(h.key, h.msg("third", "A"), job);
+    h.advance(6000);
+    ASSERT_EQ(replies, 1);
+    ASSERT_TRUE(batches.back() == std::vector<std::string>({"A", "B", "A"}));
+    ASSERT_TRUE(h.turns.currentRole(h.key).has_value());
+    h.advance(40001);
+    ASSERT_FALSE(h.turns.currentRole(h.key).has_value());
+}
+
+TEST(AiConversation, NewInputDuringDecisionIsReplannedAndRoomsAreIsolated) {
+    using Action = aichat::TurnAction;
+    TurnHarness h;
+    auto other = h.key; other[1] = "another-bot";
+    h.key[3] = "守卫";
+    int calls = 0;
+    h.turns.offer(h.key, h.msg("a", "A"), [&](const auto& batch, bool canWait, const auto& newer) {
+        ++calls;
+        if (canWait) {
+            h.turns.offer(h.key, h.msg("b", "B"), [](const auto&, bool, const auto&) { return Action::Skip; });
+            return newer() ? Action::Recheck : Action::Skip;
+        }
+        return batch.size() == 2 ? Action::Reply : Action::Skip;
+    });
+    ASSERT_FALSE(h.turns.currentRole(other).has_value());
+    h.advance(3000);
+    ASSERT_EQ(calls, 2);
+    ASSERT_EQ(h.turns.currentRole(h.key).value_or(""), std::string("守卫"));
+    ASSERT_TRUE(aichat::parseTurnAction(R"({"action":"wait"})",Action::Skip) == Action::Wait);
+    ASSERT_TRUE(aichat::parseTurnAction(R"({"action":"skip"})",Action::Reply) == Action::Skip);
+    ASSERT_TRUE(aichat::parseTurnAction("invalid",Action::Skip) == Action::Skip);
+}
+
+TEST(AiConversation, WaitingTimesOutAndAnIneligibleAnchorDoesNotSwallowTheNextTrigger) {
+    using Action = aichat::TurnAction;
+    TurnHarness h;
+    int decisions = 0;
+    h.turns.offer(h.key, h.msg("waiting", "A"), [&](const auto&, bool canWait, const auto&) {
+        ++decisions;
+        return canWait ? Action::Wait : Action::Skip;
+    });
+    h.advance(100000);
+    ASSERT_EQ(decisions, 2);
+    ASSERT_FALSE(h.turns.currentRole(h.key).has_value());
+    h.turns.offer(h.key, h.msg("voice", "A"), [](const auto&, bool, const auto&) { return Action::DropFirst; });
+    int replies = 0;
+    h.turns.offer(h.key, h.msg("direct", "B"), [&](const auto& lines, bool, const auto&) {
+        if (lines.size() == 1 && lines.front().id == "direct") ++replies;
+        return Action::Reply;
+    });
+    h.advance(4000);
+    ASSERT_EQ(replies, 1);
+}
 
 TEST(AiVision, ReasoningOnlyAndTruncatedResponsesAreNotSuccessful) {
     auto response=json{{"choices",json::array({{{"finish_reason","length"},{"message",{{"content",""},{"reasoning_content","分析图片"}}}}})},

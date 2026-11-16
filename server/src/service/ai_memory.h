@@ -62,16 +62,17 @@ inline float minSim(ConfigManager& cfg) { double s = longConf(cfg).value("min_si
 inline int maxFacts(ConfigManager& cfg) { int n = longConf(cfg).value("max_facts", 300); return n < 20 ? 20 : (n > 5000 ? 5000 : n); }
 
 inline std::string defaultExtractPrompt() {
-    return "你在为一个 TRPG 跑团 QQ 群维护长期记忆。从下面的对话里，抽取值得长期记住的**持久事实**："
-        "人物设定与偏好、人物卡/角色信息、正在进行的剧情线索、群内约定与关系、重要事件。"
-        "忽略寒暄、临时话题、掷骰结果等易过时内容。以 JSON 字符串数组输出，每条一句话、"
-        "自带主语（如「希亚的调查员叫阿罗，力量60」），最多 8 条；没有可记的就输出 []。只输出 JSON 数组。";
+    return "提取可长期使用的群事实或本群称呼。每项对应一条带行号的原话。"
+        "type=fact 表示确认的事实；event 表示新发生的进展，写明主体、事件与先后；"
+        "correction 仅用于发言人明确纠正原说法，before 填被纠正的旧事实，text 填完整新事实；"
+        "alias 用于明确的群内称呼或黑话，term 是原词，text 是含义。玩家本人和角色分开。"
+        "猜测、玩笑、尚未承诺的行动不作为事实或纠正。最多8项，只输出 JSON 数组。";
 }
 
 inline std::string defaultSummaryPrompt() {
     return "你在维护一个 TRPG 跑团 QQ 群的对话记忆。下面给你【已有摘要】和【新增对话】，"
         "请把它们整合、改写成一份更新后的简洁摘要：保留群里的人物、正在进行的话题/剧情、"
-        "重要决定与约定、人物关系与情绪；丢弃寒暄和无意义刷屏。用要点或短句，不要逐条复述原文，"
+        "重要决定与约定、人物关系与情绪；分清场内剧情与场外聊天，以当事人最后确认的说法为准；丢弃寒暄和无意义刷屏。用要点或短句，不要逐条复述原文，"
         "控制在指定字数内。只输出摘要正文，不要额外说明。";
 }
 
@@ -90,30 +91,55 @@ inline std::string summarize(ConfigManager& cfg, const std::string& prevSummary,
     return dice::aichat::truncateChars(r.reply, maxChars);
 }
 
-// 阶段C：从一批对话里抽取持久事实（LLM 调用，期望 JSON 字符串数组）。任何失败返回空。
-inline std::vector<std::string> extractFacts(ConfigManager& cfg, const std::string& dialog) {
-    std::vector<std::string> out;
-    if (!ai::hasModel(cfg, "extract")) return out;
-    std::string sys = longConf(cfg).value("extract_prompt", std::string());
+struct Finding {
+    std::string type, text, before, term;
+    int64_t source = 0;
+};
+
+inline std::vector<Finding> parseFindings(const json& items, const std::vector<ChatMsgRow>& lines) {
+    std::vector<Finding> found;
+    if (!items.is_array()) return found;
+    for (const auto& item : items) {
+        Finding f;
+        if (item.is_string()) { f.type = "fact"; f.text = item.get<std::string>(); } // custom legacy extractors
+        else if (item.is_object()) {
+            auto field = [&](const char* key) -> std::string {
+                auto it = item.find(key);
+                return it != item.end() && it->is_string() ? it->get<std::string>() : "";
+            };
+            f.type = field("type"); f.text = field("text"); f.before = field("before"); f.term = field("term");
+            auto id = item.find("source");
+            if (id == item.end() || !id->is_number_integer()) continue;
+            f.source = id->get<int64_t>();
+            auto line = std::find_if(lines.begin(), lines.end(), [&](const auto& l){ return !l.recalled && l.id == f.source; });
+            if (line == lines.end()) continue;
+            if (f.type == "alias" && (line->self || f.term.empty() || f.term.size() > 96 || line->content.find(f.term) == std::string::npos)) continue;
+            if (f.type == "correction" && (line->self || f.before.empty() || f.before.size() > 600)) continue;
+            if (f.type != "alias" && f.type != "fact" && f.type != "event" && f.type != "correction") continue;
+        }
+        if (!f.text.empty() && f.text.size() <= 600) found.push_back(std::move(f));
+        if (found.size() == 8) break;
+    }
+    return found;
+}
+
+inline std::optional<std::vector<Finding>> extractFacts(ConfigManager& cfg, const std::string& dialog,
+                                                         const std::vector<ChatMsgRow>& lines) {
+    auto sys = longConf(cfg).value("extract_prompt", std::string());
     if (sys.empty()) sys = defaultExtractPrompt();
-    std::string user = "对话：\n" + dialog + "\n请抽取持久事实，输出 JSON 字符串数组：";
-    ai::Result r = ai::chatFor(cfg, "extract", sys, user, 512, 40, 0.2);
-    if (!r.ok || r.reply.empty()) return out;
-    // 解析 JSON 数组（容错：截取第一个 [ 到最后一个 ]）。
-    std::string s = r.reply;
-    auto lb = s.find('['), rb = s.rfind(']');
-    if (lb != std::string::npos && rb != std::string::npos && rb > lb) s = s.substr(lb, rb - lb + 1);
-    try {
-        json a = json::parse(s);
-        if (a.is_array())
-            for (auto& e : a) {
-                if (!e.is_string()) continue;
-                std::string f = e.get<std::string>();
-                if (!f.empty() && f.size() <= 400) out.push_back(f);
-                if (out.size() >= 8) break;
-            }
-    } catch (...) {}
-    return out;
+    std::string user = dialog + "\n输出数组，每项包含 type,text,source（原消息行号）；correction 另有 before，alias 另有 term。";
+    auto r = ai::chatFor(cfg, "extract", sys, user, 1000, 40, 0.2);
+    if (!r.ok) return {};
+    auto start = r.reply.find('['), end = r.reply.rfind(']');
+    if (start == std::string::npos || end == std::string::npos || end < start) return {};
+    auto items = json::parse(r.reply.substr(start, end - start + 1), nullptr, false);
+    if (!items.is_array()) return {};
+    return parseFindings(items, lines);
+}
+
+inline json metadata(const AiMemoryRow& row) {
+    auto parsed = json::parse(row.metadata, nullptr, false);
+    return parsed.is_object() ? parsed : json::object();
 }
 
 // 读取某 scope 的当前摘要（供对话注入）。无则返回空。Store = ChatStorage*。
@@ -131,36 +157,132 @@ inline std::string currentSummary(Store* cst, const std::string& scope, const st
     return "";
 }
 
-// 阶段C：把抽取到的事实向量化后存入（去重：与已有事实余弦>0.92 视为重复跳过；超量则
-// 按 hits 升序、旧的优先剪枝）。Store = ChatStorage*。
-template <class Store>
-inline void storeFacts(ConfigManager& cfg, Store* cst, const std::string& scope, const std::string& scopeId,
-                       const std::vector<std::string>& facts) {
-    if (!cst || facts.empty() || !longEnabled(cfg)) return;
+// Optimistic update protects panel edits made during the extraction/model call.
+template<class Store>
+bool correctFact(Store* cst, const AiMemoryRow& old, const Finding& f, const std::string& embedding, int64_t now) {
     namespace orm = sqlite_orm;
-    ai::EmbedResult er = ai::embedFor(cfg, facts, 30);
-    if (!er.ok) return;
+    auto meta = metadata(old);
+    auto& prior = meta["previous"];
+    if (!prior.is_array()) prior = json::array();
+    if (prior.size() >= 20) prior.erase(prior.begin());
+    prior.push_back({{"text", old.content}, {"source", old.refId}});
+    meta["type"] = "correction";
+    cst->update_all(orm::set(orm::c(&AiMemoryRow::content) = f.text, orm::c(&AiMemoryRow::metadata) = meta.dump(),
+        orm::c(&AiMemoryRow::refId) = f.source, orm::c(&AiMemoryRow::embedding) = embedding,
+        orm::c(&AiMemoryRow::updatedAt) = now),
+        orm::where(orm::c(&AiMemoryRow::id) == old.id && orm::c(&AiMemoryRow::content) == old.content
+            && orm::c(&AiMemoryRow::metadata) == old.metadata && orm::c(&AiMemoryRow::refId) == old.refId));
+    return cst->changes() == 1;
+}
+
+template<class Store>
+std::string glossary(Store* cst, const std::string& scopeId, const std::string& text) {
+    if (!cst || text.empty()) return {};
+    namespace orm = sqlite_orm;
+    std::string context;
+    for (const auto& row : cst->template get_all<AiMemoryRow>(orm::where(
+        orm::c(&AiMemoryRow::scopeId) == scopeId && orm::c(&AiMemoryRow::kind) == std::string("alias")),
+        orm::order_by(&AiMemoryRow::updatedAt).desc())) {
+        auto m = metadata(row);
+        auto term = m.value("term", std::string());
+        if (!m.value("approved", false) || term.empty()) continue;
+        auto word = [](char c){ return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; };
+        size_t at = text.find(term);
+        while (at != std::string::npos) {
+            auto end = at + term.size();
+            if ((!word(term.front()) || !at || !word(text[at-1])) && (!word(term.back()) || end == text.size() || !word(text[end]))) break;
+            at = text.find(term, at + 1);
+        }
+        if (at == std::string::npos) continue;
+        context += "\n" + term + "：" + row.content;
+        if (context.size() >= 1500) break;
+    }
+    return context;
+}
+
+template<class Store, class Embed, class Verify>
+bool writeFindings(ConfigManager& cfg, Store* cst, const std::string& scope, const std::string& scopeId,
+                   const std::vector<Finding>& findings, Embed embed, Verify verify) {
+    if (!cst) return false;
+    namespace orm = sqlite_orm;
+    std::vector<std::string> texts;
+    for (auto& f : findings) if (f.type != "alias") texts.push_back(f.text);
+    ai::EmbedResult er;
+    if (!texts.empty()) {
+        er = embed(texts);
+        if (!er.ok || er.vectors.size() != texts.size()) return false;
+        for (auto& v : er.vectors) if (v.empty()) return false;
+    }
     try {
-        // 载入本 scope 已有事实的向量（去重用）。
-        auto existing = cst->template get_all<AiMemoryRow>(
-            orm::where(orm::c(&AiMemoryRow::scope) == scope and orm::c(&AiMemoryRow::scopeId) == scopeId
-                and orm::c(&AiMemoryRow::kind) == std::string("fact")));
-        std::vector<std::vector<float>> exVecs;
-        exVecs.reserve(existing.size());
-        for (auto& e : existing) exVecs.push_back(ai::vecFromJson(e.embedding));
-        int64_t now = (int64_t)std::time(nullptr);
-        for (size_t i = 0; i < facts.size(); ++i) {
-            const auto& v = er.vectors[i];
-            if (v.empty()) continue;
-            bool dup = false;
-            for (auto& ev : exVecs) if (ai::cosine(v, ev) > 0.92f) { dup = true; break; }
-            if (dup) { DICE_LOG_DEBUG_M("AI 记忆", "[{}] 事实与已有记忆重复，跳过：{}", scopeId, facts[i]); continue; }
-            DICE_LOG_DEBUG_M("AI 记忆", "[{}] 记住新事实：{}", scopeId, facts[i]);
-            AiMemoryRow nr; nr.scope = scope; nr.scopeId = scopeId; nr.kind = "fact";
-            nr.content = facts[i]; nr.embedding = ai::vecToJson(v);
-            nr.createdAt = now; nr.updatedAt = now;
-            cst->insert(nr);
-            exVecs.push_back(v);   // 让同批内也去重
+        size_t next = 0;
+        auto now = static_cast<int64_t>(std::time(nullptr));
+        for (auto& f : findings) {
+            std::string kind = f.type == "alias" ? "alias" : "fact";
+            auto existing = cst->template get_all<AiMemoryRow>(orm::where(
+                orm::c(&AiMemoryRow::scope) == scope && orm::c(&AiMemoryRow::scopeId) == scopeId && orm::c(&AiMemoryRow::kind) == kind));
+            AiMemoryRow row; row.scope = scope; row.scopeId = scopeId; row.kind = kind;
+            row.content = f.text; row.refId = f.source; row.createdAt = row.updatedAt = now;
+            row.metadata = json{{"type",f.type}}.dump();
+            if (kind == "alias") {
+                if (existing.size() >= 200 || std::any_of(existing.begin(),existing.end(),[&](const auto& e){
+                    return metadata(e).value("term",std::string()) == f.term && (e.content == f.text || e.refId == f.source);
+                })) continue;
+                row.metadata = json{{"term",f.term},{"approved",false}}.dump();
+            } else {
+                const auto& v = er.vectors[next++];
+                row.embedding = ai::vecToJson(v);
+                if (std::any_of(existing.begin(),existing.end(),[&](const auto& e){
+                    if (e.content == f.text && (f.type == "fact" || e.refId == f.source)) return true;
+                    if (f.source) {
+                        auto m = metadata(e);
+                        for (const auto& prior : m.value("previous", json::array()))
+                            if (prior.value("source",int64_t(0)) == f.source && prior.value("text",std::string()) == f.text) return true;
+                    }
+                    return false;
+                })) continue;
+                if (f.type == "fact") {
+                    const AiMemoryRow* closest = nullptr;
+                    double best = 0.92;
+                    for (const auto& e : existing) {
+                        if (metadata(e).value("type",std::string()) == "event") continue;
+                        auto score = ai::cosine(v, ai::vecFromJson(e.embedding));
+                        if (score > best) { best = score; closest = &e; }
+                    }
+                    if (closest) {
+                        auto same = verify(ChatMsgRow{}, *closest, f);
+                        if (!same) return false;
+                        if (*same) continue;
+                    }
+                }
+                if (f.type == "correction") {
+                    // Exact prior wording first. A close embedding alone cannot invalidate a fact.
+                    auto match = std::find_if(existing.begin(), existing.end(), [&](const auto& e){ return e.content == f.before; });
+                    if (match == existing.end() && !existing.empty()) {
+                        auto prior = embed(std::vector<std::string>{f.before});
+                        if (!prior.ok || prior.vectors.empty()) return false;
+                        double best = 0.75;
+                        for (auto it = existing.begin(); it != existing.end(); ++it) {
+                            auto score = ai::cosine(prior.vectors.front(), ai::vecFromJson(it->embedding));
+                            if (metadata(*it).value("type",std::string()) == "event") continue;
+                            if (score > best) { best = score; match = it; }
+                        }
+                    }
+                    if (match != existing.end() && f.source > match->refId && metadata(*match).value("type",std::string()) != "event") {
+                        auto source = cst->template get_pointer<ChatMsgRow>(f.source);
+                        if (!source || source->recalled || source->platform + ":" + source->groupId != scopeId) continue;
+                        auto check = verify(*source, *match, f);
+                        if (!check.has_value()) return false;
+                        if (*check) {
+                            if (!correctFact(cst,*match,f,row.embedding,now)) return false;
+                            continue;
+                        }
+                    }
+                    // Keep unmatched statements attributed, so retrieval can distinguish a claim from a confirmed replacement.
+                    row.content = "更正陈述：" + f.text;
+                    if (std::any_of(existing.begin(),existing.end(),[&](const auto& e){return e.refId == f.source && e.content == row.content;})) continue;
+                }
+            }
+            cst->insert(row);
         }
         // 超量剪枝：保留 hits 高/较新的，删多余。
         int cap = maxFacts(cfg);
@@ -176,7 +298,35 @@ inline void storeFacts(ConfigManager& cfg, Store* cst, const std::string& scope,
             DICE_LOG_DEBUG_M("AI 记忆", "[{}] 事实共 {} 条，超过上限 {}，删除命中最少的 {} 条。", scopeId, total, cap, toDel);
             for (auto& e : all) { if (toDel-- <= 0) break; DICE_LOG_DEBUG_M("AI 记忆", "[{}] 删除事实：{}", scopeId, e.content); cst->template remove<AiMemoryRow>(e.id); }
         }
-    } catch (...) {}
+    } catch (...) { DICE_LOG_EXCEPTION("store AI memory"); return false; }
+    return true;
+}
+
+template<class Store>
+bool storeFacts(ConfigManager& cfg, Store* cst, const std::string& scope, const std::string& scopeId,
+                const std::vector<Finding>& findings) {
+    auto verify = [&](const ChatMsgRow& source, const AiMemoryRow& old, const Finding& f) -> std::optional<bool> {
+        json evidence = {{"更正人",source.sender},{"更正原话",aichat::cleanForAi(cfg,source.content)},
+                         {"旧事实",old.content},{"新说法",f.text}};
+        if (old.refId) {
+            auto origin = cst->template get_pointer<ChatMsgRow>(old.refId);
+            if (origin && !origin->recalled && origin->platform + ":" + origin->groupId == scopeId) {
+                evidence["旧事实的发言人"] = origin->sender;
+                evidence["旧事实的原话"] = aichat::cleanForAi(cfg,origin->content);
+                evidence["同一发言人"] = origin->userId == source.userId;
+            }
+        }
+        const std::string instruction = f.type == "fact"
+            ? "新旧事实是否表达完全相同的信息？主体、地点、数值、时间、确定程度都一致才输出 yes，否则 no。"
+            : "判断更正原话是否明确纠正同一主体的这条旧事实。角色猜测、剧情后续、"
+            "第三者猜测他人的个人偏好或不清楚对应关系都输出 no。直接更正输出 yes。只输出 yes 或 no。";
+        auto r = ai::chatFor(cfg,"extract",instruction,evidence.dump(),16,15,0);
+        if (!r.ok) return {};
+        const auto first = r.reply.find_first_not_of(" \r\n\t"), last = r.reply.find_last_not_of(" \r\n\t");
+        return first != std::string::npos && r.reply.substr(first,last-first+1) == "yes";
+    };
+    return writeFindings(cfg,cst,scope,scopeId,findings,
+        [&](const std::vector<std::string>& texts){return ai::embedFor(cfg,texts,30);},verify);
 }
 
 // 阶段C：向量检索 —— 把 query 向量化，对本 scope 的事实算余弦，取 >=阈值 的 Top-K 内容
@@ -210,8 +360,16 @@ inline std::vector<std::string> retrieveFacts(ConfigManager& cfg, Store* cst, co
         }
         for (auto& sc : scored) {
             if ((int)out.size() >= k) break;
-            out.push_back(rows[sc.second].content);
-            try { auto row = rows[sc.second]; row.hits += 1; row.updatedAt = (int64_t)std::time(nullptr); cst->update(row); } catch (...) {}
+            const auto& row = rows[sc.second];
+            auto m = metadata(row);
+            std::string fact = row.content;
+            if (m.value("type",std::string()) == "event") fact = "剧情进展：" + fact;
+            if (row.refId) fact += "（群消息顺序 " + std::to_string(row.refId) + "）";
+            if (m.contains("previous") && m["previous"].is_array() && !m["previous"].empty())
+                fact += "；更正前曾记录为「" + m["previous"].back().value("text",std::string()) + "」，现以更正为准";
+            out.push_back(std::move(fact));
+            try { cst->update_all(orm::set(orm::c(&AiMemoryRow::hits) = orm::c(&AiMemoryRow::hits) + 1),
+                orm::where(orm::c(&AiMemoryRow::id) == rows[sc.second].id)); } catch (...) {}
         }
     } catch (...) {}
     return out;
@@ -229,6 +387,9 @@ inline void maybeFold(ConfigManager& cfg, Store* cst, const std::string& platfor
     try {
         const std::string scope = "group";
         const std::string scopeId = platform + ":" + groupId;
+        static std::array<std::mutex,64> folding;
+        std::unique_lock lock(folding[std::hash<std::string>{}(scopeId) % folding.size()], std::try_to_lock);
+        if (!lock.owns_lock()) return;
         int keep = keepRounds(cfg);
         int total = (int)cst->template count<ChatMsgRow>(
             orm::where(orm::c(&ChatMsgRow::platform) == platform and orm::c(&ChatMsgRow::groupId) == groupId));
@@ -261,24 +422,23 @@ inline void maybeFold(ConfigManager& cfg, Store* cst, const std::string& platfor
         DICE_LOG_DEBUG_M("AI 记忆", "[{}] 开始整理记忆：折叠 {} 条已滑出近期窗口的消息（水位线 {} → 窗口起点 {}），摘要{}、事实抽取{}。",
                          scopeId, fold.size(), watermark, firstVerbatimId, sEn ? "开" : "关", lEn ? "开" : "关");
 
-        std::string dialog; int64_t newWatermark = watermark;
+        std::string dialog;
+        const int64_t newWatermark = fold.back().id;
         for (auto& mm : fold) {
             if (mm.recalled) continue;  // 已撤回的不进记忆
-            dialog += mm.sender + "\xef\xbc\x9a" + dice::aichat::cleanForAi(cfg, mm.content) + "\n";
-            if (mm.id > newWatermark) newWatermark = mm.id;
+            dialog += "[" + std::to_string(mm.id) + "] " + (mm.self ? "本账号 " : "群友 ") + mm.sender + "\xef\xbc\x9a" + dice::aichat::cleanForAi(cfg, mm.content) + "\n";
         }
 
         bool advance = true;
         std::string newSummary = have ? row.content : std::string();
-        if (sEn) {
+        if (sEn && !dialog.empty()) {
             std::string updated = summarize(cfg, have ? row.content : std::string(), dialog);
             if (updated.empty()) { advance = false; DICE_LOG_DEBUG_M("AI 记忆", "[{}] 摘要失败，保留旧摘要，下次再试。", scopeId); }   // 不推进水位线
             else { newSummary = updated; DICE_LOG_DEBUG_M("AI 记忆", "[{}] 摘要已更新：\n{}", scopeId, updated); }
         }
-        if (lEn && advance) {                        // 长期事实：只在会提交这一批时抽取
-            auto facts = extractFacts(cfg, dialog);
-            DICE_LOG_DEBUG_M("AI 记忆", "[{}] 抽取到 {} 条事实。", scopeId, facts.size());
-            if (!facts.empty()) storeFacts(cfg, cst, scope, scopeId, facts);
+        if (lEn && advance && !dialog.empty()) {                        // 长期事实：只在会提交这一批时抽取
+            auto facts = extractFacts(cfg, dialog, fold);
+            if (!facts || !storeFacts(cfg, cst, scope, scopeId, *facts)) return;
         }
         if (!advance) return;
 
