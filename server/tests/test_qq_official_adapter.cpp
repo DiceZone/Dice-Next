@@ -275,7 +275,7 @@ TEST(QQOfficialAdapter, MixedSendDoesNotCrashWhenMediaTotalIsString) {
     adapter->setMediaIndexDirForTest(folder / "media");
     int lists = 0, prepares = 0;
     std::string digest;
-    adapter->setApiTransportForTest([&](auto, const auto& path, const auto& body, auto cb) {
+    adapter->setApiTransportForTest([&](auto, const std::string& path, const json& body, auto cb) {
         if (path == "/v2/media-images") {
             ++lists;
             cb(QQOfficialAdapter::apiResponseForTest(200, {{"total", "1"}, {"images", json::array()}}));

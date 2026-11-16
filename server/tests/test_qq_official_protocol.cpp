@@ -172,9 +172,9 @@ TEST(OfficialProtocol, MaterialUploadRemembersCacheSourceAndQuotaEvictsOldestCac
     }());
     const auto png = drogon::utils::base64Decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aRZkAAAAASUVORK5CYII=");
     std::string digest;
-    f.adapter->setApiTransportForTest([&](auto method, const auto& path, const auto& body, auto cb) {
+    f.adapter->setApiTransportForTest([&](auto method, const std::string& path, const json& body, auto cb) {
         if (path == "/v2/media-images/prepare") {
-            digest = body["md5"].template get<std::string>();
+            digest = body["md5"].get<std::string>();
             cb(QQOfficialAdapter::apiResponseForTest(200, {{"upload_id", "upload"},
                 {"presigned_url", "https://bucket.cos.ap-guangzhou.myqcloud.com/image?signature=test"}}));
             return;
@@ -235,18 +235,18 @@ TEST(OfficialProtocol, MaterialUploadUsesSignedPutWithoutBotCredentialsAndChecks
     std::string digest;
     bool badEtag = false;
     int completed = 0, puts = 0;
-    f.adapter->setApiTransportForTest([&](auto method, const auto& path, const auto& body, auto cb) {
+    f.adapter->setApiTransportForTest([&](auto method, const std::string& path, const json& body, auto cb) {
         ASSERT_EQ(method, drogon::Post);
         if (path == "/v2/media-images/prepare") {
             ASSERT_EQ(body["content_type"].get<std::string>(), std::string("image/png"));
             ASSERT_TRUE(body["file_name"].get<std::string>().size() >= 4
                 && body["file_name"].get<std::string>().substr(body["file_name"].get<std::string>().size() - 4) == ".png");
-            ASSERT_EQ(body["file_size"].template get<size_t>(), png.size());
-            digest = body["md5"].template get<std::string>();
+            ASSERT_EQ(body["file_size"].get<size_t>(), png.size());
+            digest = body["md5"].get<std::string>();
             cb(QQOfficialAdapter::apiResponseForTest(200, {{"upload_id", "upload"}, {"presigned_url", "https://bucket.cos.ap-guangzhou.myqcloud.com/image?signature=test"}}));
         } else {
             ASSERT_EQ(path, "/v2/media-images/complete"); ++completed;
-            ASSERT_EQ(body["md5"].template get<std::string>(), digest);
+            ASSERT_EQ(body["md5"].get<std::string>(), digest);
             cb(QQOfficialAdapter::apiResponseForTest(200, {{"image_id", "image"}, {"url", "qqbot-media://image/v1/token"}}));
         }
     });
