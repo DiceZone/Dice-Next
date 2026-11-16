@@ -122,7 +122,7 @@ ext.cmdMap.origin = cmd; seal.ext.register(ext);
     {
         JsPluginManager manager;
         manager.setScheduler([&](double, std::function<void()> cb) { callbacks.push_back(std::move(cb)); });
-        manager.setSender([&](const auto&, bool, const auto&, const auto&, const auto& text) {
+        manager.setSender([&](const auto&, const auto&, bool, const auto&, const auto&, const auto& text) {
             if (text == "timer-reply") timerSource = activeProcessingContext.sources[0].file;
         });
         ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir(root.string()), 1);
@@ -209,7 +209,7 @@ ext.cmdMap.originb = cmd; seal.ext.register(ext);
     {
         JsPluginManager manager;
         manager.setScheduler([&](double, std::function<void()> cb) { callbacks.push_back(std::move(cb)); });
-        manager.setSender([&](const auto&, bool, const auto&, const auto&, const auto& text) {
+        manager.setSender([&](const auto&, const auto&, bool, const auto&, const auto&, const auto& text) {
             if (text == "owned-by-b") sendOwner = activeProcessingContext.sources[0].file;
         });
         ASSERT_TRUE(manager.init()); ASSERT_EQ(manager.loadDir(root.string()), 2);
@@ -427,7 +427,7 @@ ext.cmdMap.temp = temp;
 
         const auto tempReply = manager.handle(msg, "temp");
         ASSERT_EQ(tempReply.reply,
-                  std::string("Tester|dnd5e|channel-9|Camel Group|QQ|group|bot-1|20|30|20|bot-1"
+                  std::string("Tester|dnd5e|QQ-CH-Group:guild-7-channel-9|Camel Group|QQ|group|QQ:bot-1|20|30|20|QQ:bot-1"
                               "\ncommand-hook:temp:RAW-CONTENT:true:true"));
 
         const auto builtin = manager.handleCommandReceived(msg, "roll reason");
@@ -447,7 +447,7 @@ ext.cmdMap.temp = temp;
         sent.content = "DONE"; sent.rawContent = "DONE"; sent.displayContent = "DONE";
         manager.handleMessageSend(msg, sent, "delivered");
         const auto sentState = manager.evalString("globalThis.__sent");
-        ASSERT_TRUE(sentState && *sentState == "sent:user-1:bot-1:DONE:delivered");
+        ASSERT_TRUE(sentState && *sentState == "sent:QQ-CH:user-1:QQ:bot-1:DONE:delivered");
     }
 
     fs::remove_all(root, ec);
@@ -495,21 +495,21 @@ seal.ext.register(ext);
         poke.userId = "bot"; poke.operatorId = "u";
         manager.handleEvent(poke);
         const auto pokeState = manager.evalString("globalThis.__lastEvent");
-        ASSERT_TRUE(pokeState && *pokeState == "poke:g:u:bot:false");
+        ASSERT_TRUE(pokeState && *pokeState == "poke:QQ-Group:g:QQ:u:QQ:bot:false");
 
         BotEvent leave;
         leave.type = EventType::kGroupDecrease; leave.platform = "onebot"; leave.groupId = "g";
         leave.userId = "kicked"; leave.operatorId = "admin";
         manager.handleEvent(leave);
         const auto leaveState = manager.evalString("globalThis.__lastEvent");
-        ASSERT_TRUE(leaveState && *leaveState == "leave:g:kicked:admin");
+        ASSERT_TRUE(leaveState && *leaveState == "leave:QQ-Group:g:QQ:kicked:QQ:admin");
 
         BotEvent joined;
         joined.type = EventType::kGroupIncrease; joined.platform = "onebot"; joined.groupId = "g";
         joined.selfId = "bot"; joined.userId = "newcomer"; joined.operatorId = "inviter";
         manager.handleEvent(joined);
         const auto joinState = manager.evalString("globalThis.__lastEvent");
-        ASSERT_TRUE(joinState && *joinState == "join:newcomer:g");
+        ASSERT_TRUE(joinState && *joinState == "join:QQ:newcomer:QQ-Group:g");
 
         BotEvent friendAdded;
         friendAdded.type = EventType::kFriendAdd; friendAdded.platform = "qq_official";
@@ -528,19 +528,19 @@ seal.ext.register(ext);
 
         BotEvent interaction;
         interaction.type = EventType::kOther; interaction.platform = "qq_official"; interaction.userId = "public-user";
-        interaction.subType = "interaction"; interaction.extra = {{"interaction_type", 11}, {"user_name", "互动者"}};
+        interaction.subType = "interaction"; interaction.extra = {{"official_bot_uin", "9988"}, {"interaction_type", 11}, {"user_name", "互动者"}};
         manager.handleEvent(interaction);
         const auto interactionState = manager.evalString("globalThis.__lastEvent");
-        ASSERT_TRUE(interactionState && *interactionState == "interaction:11:public-user:互动者:互动者");
+        ASSERT_TRUE(interactionState && *interactionState == "interaction:11:OpenQQ:9988-public-user:互动者:互动者");
         interaction.subType = "subscription_status";
         interaction.extra["subscription_results"] = json::array({{{"op", 2}}});
         manager.handleEvent(interaction);
         const auto subscriptionState = manager.evalString("globalThis.__lastEvent");
-        ASSERT_TRUE(subscriptionState && *subscriptionState == "subscription:2:public-user");
+        ASSERT_TRUE(subscriptionState && *subscriptionState == "subscription:2:OpenQQ:9988-public-user");
         interaction.subType.clear(); interaction.extra["event_type"] = "FRIEND_DEL";
         manager.handleEvent(interaction);
         const auto otherState = manager.evalString("globalThis.__lastEvent");
-        ASSERT_TRUE(otherState && *otherState == "official:FRIEND_DEL:public-user");
+        ASSERT_TRUE(otherState && *otherState == "official:FRIEND_DEL:OpenQQ:9988-public-user");
     }
 
     fs::remove_all(root, ec);
@@ -562,8 +562,8 @@ globalThis.__lastRequest = '';
 ext.onGroupRequest = (ctx, event) => {
   globalThis.__lastRequest =
     `${event.groupId}:${event.userId}:${event.flag}:${event.subType}:${event.comment}:${ctx.endPoint.id}`;
-  if (event.userId === 'ok') dicenext.setGroupAddRequest(ctx, event, true, '');
-  else if (event.userId === 'no') dicenext.setGroupAddRequest(ctx, event.flag, event.subType, false, '仅限公寓骰主');
+  if (event.userId === 'QQ:ok') dicenext.setGroupAddRequest(ctx, event, true, '');
+  else if (event.userId === 'QQ:no') dicenext.setGroupAddRequest(ctx, event.flag, event.subType, false, '仅限公寓骰主');
 };
 seal.ext.register(ext);
 )JS";
@@ -596,7 +596,7 @@ seal.ext.register(ext);
         ASSERT_FALSE(manager.requestDecisionTaken());
         ASSERT_TRUE(calls.empty());
         const auto ignored = manager.evalString("globalThis.__lastRequest");
-        ASSERT_TRUE(ignored && *ignored == "1071356242:wait:f-wait:add:申请:adapter-1");
+        ASSERT_TRUE(ignored && *ignored == "QQ-Group:1071356242:QQ:wait:f-wait:add:申请:adapter-1");
 
         BotEvent approve;
         approve.type = EventType::kGroupRequest;
@@ -659,8 +659,8 @@ ext.onGroupHonor = (ctx, event) => push('honor', event);
 ext.onGroupEssence = (ctx, event) => push('essence', event);
 ext.onFriendRequest = (ctx, event) => {
   globalThis.__log.push(`friendReq:${event.userId}:${event.flag}:${event.comment}`);
-  if (event.userId === 'no') dicenext.setFriendAddRequest(ctx, event, false, '拒绝');
-  if (event.userId === 'ok') dicenext.setFriendAddRequest(ctx, event, true, '想同意');
+  if (event.userId === 'QQ:no') dicenext.setFriendAddRequest(ctx, event, false, '拒绝');
+  if (event.userId === 'QQ:ok') dicenext.setFriendAddRequest(ctx, event, true, '想同意');
 };
 seal.ext.register(ext);
 )JS";
@@ -748,20 +748,74 @@ seal.ext.register(ext);
 
         const auto log = manager.evalString("globalThis.__log.join('|')");
         ASSERT_TRUE(log);
-        ASSERT_TRUE(log->find("leave:g:u:leave") != std::string::npos);
-        ASSERT_TRUE(log->find("leave:g:bot:kick_me") != std::string::npos);
-        ASSERT_TRUE(log->find("kicked:g:bot:kick_me") != std::string::npos);
-        ASSERT_TRUE(log->find("upload:g:u:::a.zip") != std::string::npos || log->find("a.zip") != std::string::npos);
-        ASSERT_TRUE(log->find("ban:g:bot:ban") != std::string::npos);
-        ASSERT_TRUE(log->find("admin:g:bot:set") != std::string::npos);
-        ASSERT_TRUE(log->find("friendRecall::u") != std::string::npos);
+        ASSERT_TRUE(log->find("leave:QQ-Group:g:QQ:u:leave") != std::string::npos);
+        ASSERT_TRUE(log->find("leave:QQ-Group:g:QQ:bot:kick_me") != std::string::npos);
+        ASSERT_TRUE(log->find("kicked:QQ-Group:g:QQ:bot:kick_me") != std::string::npos);
+        ASSERT_TRUE(log->find("upload:QQ-Group:g:QQ:u:::a.zip") != std::string::npos || log->find("a.zip") != std::string::npos);
+        ASSERT_TRUE(log->find("ban:QQ-Group:g:QQ:bot:ban") != std::string::npos);
+        ASSERT_TRUE(log->find("admin:QQ-Group:g:QQ:bot:set") != std::string::npos);
+        ASSERT_TRUE(log->find("friendRecall::QQ:u") != std::string::npos);
         ASSERT_TRUE(log->find("deleted:99:private") != std::string::npos);
-        ASSERT_TRUE(log->find("title:g:u:title::骰主") != std::string::npos);
-        ASSERT_TRUE(log->find("honor:g:u:honor:::talkative") != std::string::npos);
-        ASSERT_TRUE(log->find("essence:g:u:add:7") != std::string::npos);
-        ASSERT_TRUE(log->find("friendReq:no:f-no:hi") != std::string::npos);
-        ASSERT_TRUE(log->find("friendReq:ok:f-ok") != std::string::npos);
+        ASSERT_TRUE(log->find("title:QQ-Group:g:QQ:u:title::骰主") != std::string::npos);
+        ASSERT_TRUE(log->find("honor:QQ-Group:g:QQ:u:honor:::talkative") != std::string::npos);
+        ASSERT_TRUE(log->find("essence:QQ-Group:g:QQ:u:add:7") != std::string::npos);
+        ASSERT_TRUE(log->find("friendReq:QQ:no:f-no:hi") != std::string::npos);
+        ASSERT_TRUE(log->find("friendReq:QQ:ok:f-ok") != std::string::npos);
     }
 
+    fs::remove_all(root, ec);
+}
+
+TEST(JsPluginManager, SealAddressesSeparateNativeEndpointsFromBoundPublicIds) {
+    const auto root = fs::temp_directory_path() / ("dice_seal_addresses_" + newLogCorrelationId());
+    fs::create_directories(root);
+    std::ofstream(root / "probe.js") << R"JS(
+const ext = seal.ext.new('addresses', 'test', '1');
+const cmd = seal.ext.newCmdItemInfo();
+cmd.solve = (ctx, msg, args) => {
+  seal.replyPerson(ctx, msg, 'private');
+  const proxy = seal.getCtxProxyFirst(ctx, args);
+  seal.replyToSender(ctx, msg, [msg.platform, ctx.endPoint.platform, ctx.player.userId,
+    msg.sender.userId, ctx.group.groupId, msg.groupId, msg.guildId, args.at[0].userId,
+    proxy.player.userId, ctx.endPoint.userId].join('|'));
+  return seal.ext.newCmdExecuteResult(true);
+};
+ext.cmdMap.ids = cmd;
+seal.ext.register(ext);
+)JS";
+    JsPluginManager manager;
+    ASSERT_TRUE(manager.init());
+    ASSERT_EQ(manager.loadDir(root.string()), 1);
+    std::string sent;
+    manager.setSender([&](const auto& adapter, const auto& platform, bool priv, const auto&, const auto& user, const auto& text) {
+        sent = adapter + "|" + platform + "|" + (priv ? "private" : "group") + "|" + user + "|" + text;
+    });
+    manager.setIdentityResolver([](const auto&, const auto&, const auto& raw, bool, bool) {
+        return raw == "123" ? std::string("2000000000001") : std::string();
+    });
+    for (const std::string platform : {"kook", "discord", "qq_official", "onebot_v11", "milky"}) {
+        const std::string label = platform == "kook" ? "KOOK" : platform == "discord" ? "DISCORD" :
+                                  platform == "qq_official" ? "OpenQQ" : "QQ";
+        const std::string user = label + (label == "OpenQQ" ? ":900-" : ":");
+        const std::string group = label + (label == "OpenQQ" ? "-Group:900-" :
+                                           label == "QQ" ? "-Group:" : "-CH-Group:");
+        Message m;
+        m.platform = platform; m.adapterId = "second"; m.type = MessageType::kGroup;
+        m.senderId = "2000000000001"; m.targetId = "1000000000001"; m.selfId = "900";
+        m.atList = {"2000000000002"};
+        m.extra = {{"guild_id","789"}, {"official_bot_uin","900"},
+                   {"__identity_native_sender","123"}, {"__identity_native_target","456"},
+                   {"__identity_native_mentions", json::array({"321"})}};
+        const auto guild = platform == "kook" ? "KOOK-Guild:789" : "789";
+        for (auto type : {MessageType::kGroup, MessageType::kPrivate}) {
+            m.type = type; sent.clear();
+            const auto gid = type == MessageType::kGroup ? group + "456" : std::string();
+            const auto reply = manager.handle(m, "ids").reply;
+            ASSERT_EQ(reply, label + "|" + (label == "OpenQQ" ? "QQ" : label) + "|" + user + "123|" + user + "123|" + gid + "|" + gid +
+                             "|" + guild + "|" + user + "321|" + user + "321|" + label + ":900");
+            ASSERT_EQ(sent, "second|" + platform + "|private|2000000000001|private");
+        }
+    }
+    std::error_code ec;
     fs::remove_all(root, ec);
 }

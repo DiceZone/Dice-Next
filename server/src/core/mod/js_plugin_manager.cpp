@@ -1,5 +1,6 @@
 #include "core/mod/js_plugin_manager.h"
 #include "adapter/adapter_interface.h"
+#include "core/identity/seal_id.h"
 #include "common/logger.h"
 #include "common/utils.h"
 
@@ -180,11 +181,75 @@ static JSValue jsConsoleLog(JSContext* ctx, JSValueConst, int argc, JSValueConst
     logPluginText(static_cast<LogLevel>(level), line);
     return JS_UNDEFINED;
 }
+// Read ctx.<obj>.<key> (e.g. ctx.endPoint.platform / ctx.group.groupId / ctx.player.userId).
+static std::string ctxStr(JSContext* ctx, JSValueConst c, const char* obj, const char* key) {
+    JSValue o = JS_GetPropertyStr(ctx, c, obj);
+    std::string s = getStrProp(ctx, o, key);
+    JS_FreeValue(ctx, o);
+    return s;
+}
+static std::string optionalString(JSContext* ctx, JSValueConst obj, const char* key) {
+    if (!JS_IsObject(obj)) return {};
+    JSValue v = JS_GetPropertyStr(ctx, obj, key);
+    auto result = JS_IsString(v) ? toStr(ctx, v) : std::string();
+    JS_FreeValue(ctx, v);
+    return result;
+}
+static std::string messageField(const Message& msg, const char* key, const std::string& fallback = {}) {
+    if (!msg.extra.is_object()) return fallback;
+    const auto it = msg.extra.find(key);
+    return it != msg.extra.end() && it->is_string() ? it->get<std::string>() : fallback;
+}
+static identity::SealAddress addressOf(const Message& msg) {
+    auto bot = messageField(msg, "official_bot_uin");
+    if (bot.empty()) bot = messageField(msg, "official_bot_id", msg.selfId);
+    return {msg.platform, bot, messageField(msg, "guild_id"), msg.type == MessageType::kChannel};
+}
+static std::string mentionId(const Message& msg, size_t pos) {
+    const auto address = addressOf(msg);
+    if (!msg.selfId.empty() && msg.atList[pos] == msg.selfId) return address.self(msg.selfId);
+    if (msg.atList[pos] == "all") return "all";
+    if (msg.extra.is_object()) {
+        auto it = msg.extra.find("__identity_native_mentions");
+        if (it != msg.extra.end() && it->is_array() && pos < it->size() && (*it)[pos].is_string())
+            return address.id((*it)[pos].get<std::string>(), false);
+    }
+    return address.id(msg.atList[pos], false);
+}
+static std::string transportOf(JSContext* ctx, JSValueConst obj) {
+    JSValue ep = JS_GetPropertyStr(ctx, obj, "endPoint");
+    auto platform = optionalString(ctx, ep, "_transport");
+    if (platform.empty()) platform = optionalString(ctx, ep, "platform");
+    JS_FreeValue(ctx, ep);
+    return platform;
+}
+static std::string publicTarget(JSContext* ctx, JSValueConst obj, const std::string& value, bool group) {
+    if (value.empty() || value == "undefined" || value == "null") return {};
+    if (value.find(':') == std::string::npos) return value; // existing Next plugin
+    JSValue ep = JS_GetPropertyStr(ctx, obj, "endPoint");
+    const auto adapter = optionalString(ctx, ep, "id");
+    identity::SealAddress addr{transportOf(ctx, obj), optionalString(ctx, ep, "_bot"), optionalString(ctx, ep, "_guild"),
+        optionalString(ctx, ep, "_channel") == "1"};
+    JS_FreeValue(ctx, ep);
+    const std::string alias = group ? "UnionID-Group:" : "UnionID:";
+    auto* m = mgrOf(ctx);
+    if (value.starts_with(alias)) return m->publicId(addr.platform, adapter, value.substr(alias.size()), group, true);
+    if (addr.name() != "QQ") {
+        const std::string qq = group ? "QQ-Group:" : "QQ:";
+        if (value.starts_with(qq)) return m->publicId(addr.platform, adapter, value, group, true);
+        if (group && value.starts_with("QQGroup:")) return m->publicId(addr.platform, adapter, value, true, true);
+    } else if (group && value.starts_with("QQGroup:")) {
+        return value.substr(8);
+    }
+    if (!group && addr.name() == "OpenQQ" && value == addr.self(addr.bot)) return addr.bot;
+    const auto prefix = addr.prefix(group);
+    if (prefix.empty() || !value.starts_with(prefix) || value.size() == prefix.size()) return {};
+    return m->publicId(addr.platform, adapter, value.substr(prefix.size()), group, false);
+}
 // Extract the reply target (platform / private / group / user) from ctx(argv0)+msg(argv1).
 static void replyTarget(JSContext* ctx, JSValueConst msg, JSValueConst cctx,
                         std::string& platform, bool& isPrivate, std::string& gid, std::string& uid) {
-    platform = getStrProp(ctx, msg, "platform");
-    if (platform.empty()) { JSValue ep = JS_GetPropertyStr(ctx, cctx, "endPoint"); platform = getStrProp(ctx, ep, "platform"); JS_FreeValue(ctx, ep); }
+    platform = transportOf(ctx, cctx);
     isPrivate = getStrProp(ctx, msg, "messageType") == "private";
     gid = getStrProp(ctx, msg, "groupId");
     JSValue sender = JS_GetPropertyStr(ctx, msg, "sender");
@@ -192,11 +257,13 @@ static void replyTarget(JSContext* ctx, JSValueConst msg, JSValueConst cctx,
     JS_FreeValue(ctx, sender);
     // seal.newMessage()/createTempCtx() 构造的临时消息可能没有 sender，
     // 此时以 ctx.player 为目标，符合 replyPerson 的私聊语义。
-    if (uid.empty()) {
+    if (uid.empty() || uid == "undefined") {
         JSValue player = JS_GetPropertyStr(ctx, cctx, "player");
         uid = getStrProp(ctx, player, "userId");
         JS_FreeValue(ctx, player);
     }
+    gid = publicTarget(ctx, cctx, gid, true);
+    uid = publicTarget(ctx, cctx, uid, false);
 }
 // Shared reply: during a message turn → accumulate (returned by handle); from a
 // fired timer / async callback → send immediately via the injected sender.
@@ -205,37 +272,38 @@ static JSValue jsReplyCommon(JSContext* ctx, int argc, JSValueConst* argv) {
     if (!m || argc < 3) return JS_UNDEFINED;
     ProcessingScope logScope(m->loggingContextForCall());
     std::string text = toStr(ctx, argv[2]);
-    if (m->capturing()) { m->appendReply(text); return JS_UNDEFINED; }
+    const bool privateMsg = optionalString(ctx, argv[1], "messageType") == "private";
+    JSValue origin = JS_GetPropertyStr(ctx, argv[0], "_replyTarget");
+    const bool hasOrigin = JS_IsString(origin);
+    const auto current = hasOrigin ? toStr(ctx, origin) : std::string();
+    JS_FreeValue(ctx, origin);
+    JSValue sender = JS_GetPropertyStr(ctx, argv[1], "sender");
+    const auto requested = privateMsg ? optionalString(ctx, sender, "userId") : optionalString(ctx, argv[1], "groupId");
+    JS_FreeValue(ctx, sender);
+    if (m->capturing() && hasOrigin && current == requested) { m->appendReply(text); return JS_UNDEFINED; }
     std::string platform, gid, uid; bool isPriv = false;
     replyTarget(ctx, argv[1], argv[0], platform, isPriv, gid, uid);
-    m->routeReply(platform, isPriv, gid, uid, text);
+    m->routeReply(ctxStr(ctx, argv[0], "endPoint", "id"), platform, isPriv, gid, uid, text);
     return JS_UNDEFINED;
 }
 static JSValue jsReplyToSender(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     return jsReplyCommon(ctx, argc, argv);
-}
-// Read ctx.<obj>.<key> (e.g. ctx.endPoint.platform / ctx.group.groupId / ctx.player.userId).
-static std::string ctxStr(JSContext* ctx, JSValueConst c, const char* obj, const char* key) {
-    JSValue o = JS_GetPropertyStr(ctx, c, obj);
-    std::string s = getStrProp(ctx, o, key);
-    JS_FreeValue(ctx, o);
-    return s;
 }
 // seal.memberBan(ctx, groupId, userId, duration) / seal.memberKick(ctx, groupId, userId)
 static JSValue jsMemberBan(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     auto* m = mgrOf(ctx);
     if (m && argc >= 3) {
         int64_t dur = 0; if (argc >= 4) JS_ToInt64(ctx, &dur, argv[3]);
-        m->groupAdmin(ctxStr(ctx, argv[0], "endPoint", "platform"), "ban",
-                      toStr(ctx, argv[1]), toStr(ctx, argv[2]), dur, "");
+        m->groupAdmin(ctxStr(ctx, argv[0], "endPoint", "id"), transportOf(ctx, argv[0]), "ban",
+                      publicTarget(ctx, argv[0], toStr(ctx, argv[1]), true), publicTarget(ctx, argv[0], toStr(ctx, argv[2]), false), dur, "");
     }
     return JS_UNDEFINED;
 }
 static JSValue jsMemberKick(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     auto* m = mgrOf(ctx);
     if (m && argc >= 3)
-        m->groupAdmin(ctxStr(ctx, argv[0], "endPoint", "platform"), "kick",
-                      toStr(ctx, argv[1]), toStr(ctx, argv[2]), 0, "");
+        m->groupAdmin(ctxStr(ctx, argv[0], "endPoint", "id"), transportOf(ctx, argv[0]), "kick",
+                      publicTarget(ctx, argv[0], toStr(ctx, argv[1]), true), publicTarget(ctx, argv[0], toStr(ctx, argv[2]), false), 0, "");
     return JS_UNDEFINED;
 }
 // dicenext.setGroupAddRequest(ctx, flag, subType, approve, reason?)
@@ -245,7 +313,7 @@ static JSValue jsMemberKick(JSContext* ctx, JSValueConst, int argc, JSValueConst
 static JSValue jsSetGroupAddRequest(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     auto* m = mgrOf(ctx);
     if (!m || argc < 3) return JS_UNDEFINED;
-    const std::string platform = argc >= 1 ? ctxStr(ctx, argv[0], "endPoint", "platform") : std::string();
+    const std::string platform = argc >= 1 ? transportOf(ctx, argv[0]) : std::string();
     const std::string adapterId = argc >= 1 ? ctxStr(ctx, argv[0], "endPoint", "id") : std::string();
     std::string flag, subType, reason;
     bool approve = false;
@@ -272,7 +340,7 @@ static JSValue jsSetGroupAddRequest(JSContext* ctx, JSValueConst, int argc, JSVa
 static JSValue jsSetFriendAddRequest(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     auto* m = mgrOf(ctx);
     if (!m || argc < 3) return JS_UNDEFINED;
-    const std::string platform = ctxStr(ctx, argv[0], "endPoint", "platform");
+    const std::string platform = transportOf(ctx, argv[0]);
     const std::string adapterId = ctxStr(ctx, argv[0], "endPoint", "id");
     std::string flag, reason;
     bool approve = false;
@@ -298,26 +366,34 @@ static JSValue jsSetPlayerGroupCard(JSContext* ctx, JSValueConst, int argc, JSVa
         if (JS_IsUndefined(argv[1]) || JS_IsNull(argv[1])) return JS_UNDEFINED;
         std::string card = toStr(ctx, argv[1]);
         if (card.empty() || card == "undefined") return JS_UNDEFINED;
-        m->groupAdmin(ctxStr(ctx, argv[0], "endPoint", "platform"), "card",
-                      ctxStr(ctx, argv[0], "group", "groupId"),
-                      ctxStr(ctx, argv[0], "player", "userId"), 0, card);
+        m->groupAdmin(ctxStr(ctx, argv[0], "endPoint", "id"), transportOf(ctx, argv[0]), "card",
+                      publicTarget(ctx, argv[0], ctxStr(ctx, argv[0], "group", "groupId"), true),
+                      publicTarget(ctx, argv[0], ctxStr(ctx, argv[0], "player", "userId"), false), 0, card);
     }
     return JS_UNDEFINED;
 }
 // seal.ban.addBan(ctx,id,place,reason) / addTrust(...) / remove(ctx,id)
+static std::string banTarget(JSContext* ctx, JSValueConst obj, const std::string& value) {
+    const auto colon = value.find(':');
+    if (colon == std::string::npos) return value;
+    const auto tag = value.substr(0, colon);
+    const bool group = tag.ends_with("-Group") || tag == "QQGroup" || tag.ends_with("-Channel");
+    const auto id = publicTarget(ctx, obj, value, group);
+    return group && !id.empty() ? "QQ-Group:" + id : id;
+}
 static JSValue jsBanAdd(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     auto* m = mgrOf(ctx);
-    if (m && argc >= 2) m->banOp("ban", toStr(ctx, argv[1]), argc >= 4 ? toStr(ctx, argv[3]) : "");
+    if (m && argc >= 2) m->banOp("ban", banTarget(ctx, argv[0], toStr(ctx, argv[1])), argc >= 4 ? toStr(ctx, argv[3]) : "");
     return JS_UNDEFINED;
 }
 static JSValue jsBanAddTrust(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     auto* m = mgrOf(ctx);
-    if (m && argc >= 2) m->banOp("trust", toStr(ctx, argv[1]), argc >= 4 ? toStr(ctx, argv[3]) : "");
+    if (m && argc >= 2) m->banOp("trust", banTarget(ctx, argv[0], toStr(ctx, argv[1])), argc >= 4 ? toStr(ctx, argv[3]) : "");
     return JS_UNDEFINED;
 }
 static JSValue jsBanRemove(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     auto* m = mgrOf(ctx);
-    if (m && argc >= 2) m->banOp("remove", toStr(ctx, argv[1]), "");
+    if (m && argc >= 2) m->banOp("remove", banTarget(ctx, argv[0], toStr(ctx, argv[1])), "");
     return JS_UNDEFINED;
 }
 // seal.ban.getList() → 黑白名单条目数组；接 CommandRouter 的 banlist（经 banQuery_ 注入）。
@@ -459,6 +535,11 @@ static JSValue jsCmdArgsIsArgEqual(JSContext* ctx, JSValueConst this_val, int ar
     return JS_NewBool(ctx, eq);
 }
 static JSValue jsNoop(JSContext* ctx, JSValueConst, int, JSValueConst*) { return JS_NewInt32(ctx, 0); }
+static JSValue jsNewMessage(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    JSValue msg = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, msg, "sender", JS_NewObject(ctx));
+    return msg;
+}
 static JSValue jsNewObj(JSContext* ctx, JSValueConst, int, JSValueConst*) { return JS_NewObject(ctx); }
 // gameSystem.newTemplate(ByYaml) — 记当前插件为「规则类」，并收集模板原文（JSON/YAML）
 // 供宿主解析属性别名/衍生（attribute template 集成）。返回空对象（插件后续 .x 等调用无害）。
@@ -539,7 +620,7 @@ static JSValue jsGetCtxProxy(JSContext* ctx, JSValueConst, int argc, JSValueCons
     JS_FreeValue(ctx, at);
     if (uid.empty()) return JS_DupValue(ctx, orig);   // no @target → fall back to self
     JSValue proxy = JS_NewObject(ctx);
-    for (const char* k : {"group", "isPrivate", "privilegeLevel", "endPoint", "isCurGroupBotOn", "_at"}) {
+    for (const char* k : {"group", "isPrivate", "privilegeLevel", "endPoint", "isCurGroupBotOn", "_at", "_replyTarget"}) {
         JSValue v = JS_GetPropertyStr(ctx, orig, k);
         if (!JS_IsUndefined(v)) JS_SetPropertyStr(ctx, proxy, k, v); else JS_FreeValue(ctx, v);
     }
@@ -549,10 +630,21 @@ static JSValue jsGetCtxProxy(JSContext* ctx, JSValueConst, int argc, JSValueCons
     JS_SetPropertyStr(ctx, proxy, "player", player);
     return proxy;
 }
-static JSValue jsCreateTempCtx(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+static JSValue jsCreateTempCtx(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     JSValue c = JS_NewObject(ctx);
-    JSValue p = JS_NewObject(ctx); JS_SetPropertyStr(ctx, p, "userId", JS_NewString(ctx, "")); JS_SetPropertyStr(ctx, p, "name", JS_NewString(ctx, "")); JS_SetPropertyStr(ctx, c, "player", p);
-    JSValue gp = JS_NewObject(ctx); JS_SetPropertyStr(ctx, gp, "groupId", JS_NewString(ctx, "")); JS_SetPropertyStr(ctx, c, "group", gp);
+    JSValue msg = argc > 1 && JS_IsObject(argv[1]) ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
+    JSValue sender = JS_GetPropertyStr(ctx, msg, "sender");
+    JSValue p = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, p, "userId", JS_NewString(ctx, optionalString(ctx, sender, "userId").c_str()));
+    JS_SetPropertyStr(ctx, p, "name", JS_NewString(ctx, optionalString(ctx, sender, "nickname").c_str()));
+    JS_SetPropertyStr(ctx, c, "player", p);
+    JS_FreeValue(ctx, sender);
+    JSValue group = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, group, "groupId", JS_NewString(ctx, optionalString(ctx, msg, "groupId").c_str()));
+    JS_SetPropertyStr(ctx, c, "group", group);
+    JS_SetPropertyStr(ctx, c, "isPrivate", JS_NewBool(ctx, optionalString(ctx, msg, "messageType") == "private"));
+    if (argc > 0) JS_SetPropertyStr(ctx, c, "endPoint", JS_DupValue(ctx, argv[0]));
+    JS_FreeValue(ctx, msg);
     return c;
 }
 static JSValue jsExtRegister(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -570,7 +662,7 @@ static JSValue jsReplyPerson(JSContext* ctx, JSValueConst, int argc, JSValueCons
     replyTarget(ctx, argv[1], argv[0], platform, ignoredPrivate, gid, uid);
     std::string text = toStr(ctx, argv[2]);
     if (!platform.empty() && !uid.empty() && !text.empty()) {
-        m->routeReply(platform, true, "", uid, text);
+        m->routeReply(ctxStr(ctx, argv[0], "endPoint", "id"), platform, true, "", uid, text);
         m->markSideEffectReply();
     }
     return JS_UNDEFINED;
@@ -628,9 +720,9 @@ static JSValue jsApplyPlayerGroupCardByTemplate(JSContext* ctx, JSValueConst, in
     }
     if (tmpl.empty() || tmpl == "undefined") return JS_NewString(ctx, "");
     const std::string text = formatTemplateStr(ctx, argv[0], tmpl);
-    m->groupAdmin(ctxStr(ctx, argv[0], "endPoint", "platform"), "card",
-                  ctxStr(ctx, argv[0], "group", "groupId"),
-                  ctxStr(ctx, argv[0], "player", "userId"), 0, text);
+    m->groupAdmin(ctxStr(ctx, argv[0], "endPoint", "id"), transportOf(ctx, argv[0]), "card",
+                  publicTarget(ctx, argv[0], ctxStr(ctx, argv[0], "group", "groupId"), true),
+                  publicTarget(ctx, argv[0], ctxStr(ctx, argv[0], "player", "userId"), false), 0, text);
     return JS_NewString(ctx, text.c_str());
 }
 
@@ -776,8 +868,8 @@ static std::string varKeyOf(JSContext* ctx, JSValueConst ctxObj, const std::stri
     std::string uid, gid;
     JSValue player = JS_GetPropertyStr(ctx, ctxObj, "player"); uid = getStrProp(ctx, player, "userId"); JS_FreeValue(ctx, player);
     JSValue group  = JS_GetPropertyStr(ctx, ctxObj, "group");  gid = getStrProp(ctx, group, "groupId"); JS_FreeValue(ctx, group);
-    if (scope == "m") return "u:" + uid + ":" + n;
-    if (scope == "g") return "g:" + gid + ":" + n;
+    if (scope == "m") return "u:" + publicTarget(ctx, ctxObj, uid, false) + ":" + n;
+    if (scope == "g") return "g:" + publicTarget(ctx, ctxObj, gid, true) + ":" + n;
     return "G:" + n;
 }
 static JSValue pairVal(JSContext* ctx, JSValue v, bool ok) {
@@ -790,7 +882,9 @@ static JSValue pairVal(JSContext* ctx, JSValue v, bool ok) {
 static void ctxIds(JSContext* ctx, JSValueConst ctxObj, std::string& plat, std::string& uid, std::string& gid) {
     JSValue player = JS_GetPropertyStr(ctx, ctxObj, "player"); uid = getStrProp(ctx, player, "userId"); JS_FreeValue(ctx, player);
     JSValue group  = JS_GetPropertyStr(ctx, ctxObj, "group");  gid = getStrProp(ctx, group, "groupId"); JS_FreeValue(ctx, group);
-    JSValue ep = JS_GetPropertyStr(ctx, ctxObj, "endPoint");   plat = getStrProp(ctx, ep, "platform"); JS_FreeValue(ctx, ep);
+    plat = transportOf(ctx, ctxObj);
+    uid = publicTarget(ctx, ctxObj, uid, false);
+    gid = publicTarget(ctx, ctxObj, gid, true);
 }
 
 // seal.favor：直接调用内置好感度系统。ctx 决定平台，userId 省略时为 ctx.player.userId。
@@ -799,7 +893,7 @@ static bool favorIds(JSContext* ctx, JSValueConst ctxObj, int argc, JSValueConst
     std::string gid;
     ctxIds(ctx, ctxObj, platform, uid, gid);
     if (argc > userArg && !JS_IsUndefined(argv[userArg]) && !JS_IsNull(argv[userArg]))
-        uid = toStr(ctx, argv[userArg]);
+        uid = publicTarget(ctx, ctxObj, toStr(ctx, argv[userArg]), false);
     return !platform.empty() && !uid.empty();
 }
 static JSValue jsFavorGet(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -1090,6 +1184,8 @@ static JSValue jsGetEndPoints(JSContext* ctx, JSValueConst, int, JSValueConst*) 
         JS_SetPropertyStr(ctx, value, "onlineTotalTime", JS_NewInt64(ctx, endpoint.onlineTotalTime));
         JS_SetPropertyStr(ctx, value, "platform", JS_NewString(ctx, endpoint.platform.c_str()));
         JS_SetPropertyStr(ctx, value, "enable", JS_NewBool(ctx, endpoint.enable));
+        JS_SetPropertyStr(ctx, value, "_transport", JS_NewString(ctx, endpoint.transport.c_str()));
+        JS_SetPropertyStr(ctx, value, "_bot", JS_NewString(ctx, endpoint.bot.c_str()));
         JS_SetPropertyStr(ctx, value, "protocolType", JS_NewString(ctx, endpoint.protocolType.c_str()));
         JS_SetPropertyUint32(ctx, array, i, value);
     }
@@ -1486,7 +1582,7 @@ void JsPluginManager::installGlobals() {
     JS_SetPropertyStr(ctx_, seal, "memberBan",  JS_NewCFunction(ctx_, jsMemberBan, "memberBan", 4));
     JS_SetPropertyStr(ctx_, seal, "memberKick", JS_NewCFunction(ctx_, jsMemberKick, "memberKick", 3));
     JS_SetPropertyStr(ctx_, seal, "applyPlayerGroupCardByTemplate", JS_NewCFunction(ctx_, jsApplyPlayerGroupCardByTemplate, "applyPlayerGroupCardByTemplate", 2));   // G5
-    JS_SetPropertyStr(ctx_, seal, "newMessage", JS_NewCFunction(ctx_, jsNewObj, "newMessage", 0));
+    JS_SetPropertyStr(ctx_, seal, "newMessage", JS_NewCFunction(ctx_, jsNewMessage, "newMessage", 0));
     JS_SetPropertyStr(ctx_, seal, "getEndPoints", JS_NewCFunction(ctx_, jsGetEndPoints, "getEndPoints", 0));
     JS_SetPropertyStr(ctx_, seal, "getCtxProxyFirst", JS_NewCFunction(ctx_, jsGetCtxProxy, "getCtxProxyFirst", 2));
     JS_SetPropertyStr(ctx_, seal, "getCtxProxyAtPos", JS_NewCFunction(ctx_, jsGetCtxProxy, "getCtxProxyAtPos", 3));
@@ -1733,10 +1829,10 @@ void JsPluginManager::fireTimer(int64_t id) {
     else { JS_FreeValue(ctx_, it->second.cb); timers_.erase(it); }               // one-shot
 }
 
-void JsPluginManager::routeReply(const std::string& platform, bool isPrivate,
+void JsPluginManager::routeReply(const std::string& adapterId, const std::string& platform, bool isPrivate,
                                  const std::string& groupId, const std::string& userId, const std::string& text) {
     OutboundScope newOutput(nullptr);
-    if (sender_) sender_(platform, isPrivate, groupId, userId, text);
+    if (sender_ && !(isPrivate ? userId : groupId).empty()) sender_(adapterId, platform, isPrivate, groupId, userId, text);
 }
 
 ProcessingSource JsPluginManager::loggingSource(const std::string& file, const std::string& entry) const {
@@ -2218,7 +2314,14 @@ void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
         if (value.is_number_unsigned()) return std::to_string(value.get<uint64_t>());
         return {};
     };
+    const auto address = addressOf(message);
+    const auto currentSelfId = message.selfId.empty() ? selfId_ : message.selfId;
+    const auto sealSelf = address.self(currentSelfId);
+    const auto sealUser = !currentSelfId.empty() && userId == currentSelfId ? sealSelf :
+        address.id(messageField(message, "__identity_native_sender", userId), false);
+    const auto sealGroup = isPrivate ? std::string() : address.id(messageField(message, "__identity_native_target", groupId), true);
     JSValue jctx = JS_NewObject(ctx_);
+    JS_SetPropertyStr(ctx_, jctx, "_replyTarget", JS_NewString(ctx_, (isPrivate ? sealUser : sealGroup).c_str()));
     JSValue player = JS_NewObject(ctx_);
     // 群名片（沿用 SealDice 语义：player.name = 群名片/显示名，非群或无名片时回退 QQ 昵称）。
     // OneBot 入站 sender.card 是当前消息的权威值；成员缓存只作为合成消息的兜底。
@@ -2226,7 +2329,8 @@ void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
     if (groupCard.empty() && cardNameResolver_ && !groupId.empty())
         groupCard = cardNameResolver_(platform, groupId, userId);
     std::string dispName = groupCard.empty() ? nickname : groupCard;
-    JS_SetPropertyStr(ctx_, player, "userId", JS_NewString(ctx_, userId.c_str()));
+    JS_SetPropertyStr(ctx_, player, "userId", JS_NewString(ctx_, sealUser.c_str()));
+    JS_SetPropertyStr(ctx_, player, "publicId", JS_NewString(ctx_, messageField(message, "__identity_qualified_sender").c_str()));
     JS_SetPropertyStr(ctx_, player, "name",   JS_NewString(ctx_, dispName.c_str()));
     JS_SetPropertyStr(ctx_, player, "card",   JS_NewString(ctx_, groupCard.c_str()));
     // 海豹字段：玩家自动名片模板名。我们暂不跟踪，给定义空串避免插件读到 undefined
@@ -2235,10 +2339,12 @@ void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
     JS_SetPropertyStr(ctx_, jctx, "player", player);
     // @ targets (for getCtxProxyFirst/AtPos → 代骰/代查).
     JSValue atArr = JS_NewArray(ctx_);
-    for (uint32_t i = 0; i < atList.size(); ++i) JS_SetPropertyUint32(ctx_, atArr, i, JS_NewString(ctx_, atList[i].c_str()));
+    for (uint32_t i = 0; i < atList.size(); ++i) JS_SetPropertyUint32(ctx_, atArr, i, JS_NewString(ctx_, mentionId(message, i).c_str()));
     JS_SetPropertyStr(ctx_, jctx, "_at", atArr);
     JSValue group = JS_NewObject(ctx_);
-    JS_SetPropertyStr(ctx_, group, "groupId", JS_NewString(ctx_, groupId.c_str()));
+    JS_SetPropertyStr(ctx_, group, "groupId", JS_NewString(ctx_, sealGroup.c_str()));
+    JS_SetPropertyStr(ctx_, group, "publicId", JS_NewString(ctx_, (isPrivate ? std::string() :
+        messageField(message, "__identity_qualified_target")).c_str()));
     // Adapters use both API-style groupName and protocol-style group_name.
     std::string groupName = extraString("groupName");
     if (groupName.empty()) groupName = extraString("group_name");
@@ -2264,12 +2370,16 @@ void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
     JS_SetPropertyStr(ctx_, jctx, "commandHideFlag", JS_NewString(ctx_, ""));  // SealDice 字段，默认空
     JS_SetPropertyStr(ctx_, jctx, "delegateText", JS_NewString(ctx_, ""));
     JSValue endPoint = JS_NewObject(ctx_);
-    JS_SetPropertyStr(ctx_, endPoint, "platform", JS_NewString(ctx_, platform.c_str()));
+    JS_SetPropertyStr(ctx_, endPoint, "platform", JS_NewString(ctx_, address.endpointPlatform().c_str()));
     // 海豹 EndPointInfo 常用字段（插件读 endPoint.userId 判「是否 @ 骰子自己」等，缺则 undefined）。
     const std::string endpointId = message.adapterId.empty() ? platform : message.adapterId;
-    const std::string currentSelfId = message.selfId.empty() ? selfId_ : message.selfId;
+    JS_SetPropertyStr(ctx_, endPoint, "protocolType", JS_NewString(ctx_, address.protocol().c_str()));
+    JS_SetPropertyStr(ctx_, endPoint, "_transport", JS_NewString(ctx_, platform.c_str()));
+    JS_SetPropertyStr(ctx_, endPoint, "_bot", JS_NewString(ctx_, address.bot.c_str()));
+    JS_SetPropertyStr(ctx_, endPoint, "_guild", JS_NewString(ctx_, address.guild.c_str()));
+    JS_SetPropertyStr(ctx_, endPoint, "_channel", JS_NewString(ctx_, address.channel ? "1" : "0"));
     JS_SetPropertyStr(ctx_, endPoint, "id",       JS_NewString(ctx_, endpointId.c_str()));
-    JS_SetPropertyStr(ctx_, endPoint, "userId",   JS_NewString(ctx_, currentSelfId.c_str()));
+    JS_SetPropertyStr(ctx_, endPoint, "userId",   JS_NewString(ctx_, sealSelf.c_str()));
     JS_SetPropertyStr(ctx_, endPoint, "nickname", JS_NewString(ctx_, selfNick_.c_str()));
     JS_SetPropertyStr(ctx_, endPoint, "state",    JS_NewInt32(ctx_, 1));
     JS_SetPropertyStr(ctx_, endPoint, "enable",   JS_NewBool(ctx_, 1));
@@ -2285,30 +2395,23 @@ void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
     auto setTempInt = [&](const char* key, int64_t value) {
         JS_SetPropertyStr(ctx_, tempVars, key, JS_NewInt64(ctx_, value));
     };
-    const auto sealPlatform = [](const std::string& value) {
-        if (value == "onebot_v11" || value == "milky" || value == "qq_official")
-            return std::string("QQ");
-        if (value == "discord") return std::string("DISCORD");
-        if (value == "kook") return std::string("KOOK");
-        return value;
-    };
     setTemp("$t玩家", "<" + dispName + ">");
     setTemp("$t玩家_RAW", dispName);
     setTemp("$tQQ昵称", "<" + nickname + ">");
     setTemp("$t帐号昵称", "<" + nickname + ">");
     setTemp("$t账号昵称", "<" + nickname + ">");
-    setTemp("$t帐号ID", userId);
-    setTemp("$t账号ID", userId);
-    setTemp("$tQQ", userId);
+    setTemp("$t帐号ID", sealUser);
+    setTemp("$t账号ID", sealUser);
+    setTemp("$tQQ", sealUser);
     std::array<int, 3> diceSides{0, 100, 100};
     if (diceSidesResolver_) diceSides = diceSidesResolver_(message);
     setTempInt("$t个人骰子面数", diceSides[0]);
-    setTemp("$t骰子帐号", currentSelfId);
-    setTemp("$t骰子账号", currentSelfId);
+    setTemp("$t骰子帐号", sealSelf);
+    setTemp("$t骰子账号", sealSelf);
     setTemp("$t骰子昵称", selfNick_);
-    setTemp("$t帐号ID_RAW", userId);
-    setTemp("$t账号ID_RAW", userId);
-    setTemp("$t平台", platform == "qq_official" ? "QQ-official" : sealPlatform(platform));
+    setTemp("$t帐号ID_RAW", sealUser.substr(sealUser.find(':') + 1));
+    setTemp("$t账号ID_RAW", sealUser.substr(sealUser.find(':') + 1));
+    setTemp("$t平台", platform == "qq_official" ? "QQ-official" : address.name());
 
     const std::time_t now = std::time(nullptr);
     std::tm localNow{};
@@ -2335,9 +2438,9 @@ void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
     setTempInt("$t人品", static_cast<int64_t>(rpHash % 100) + 1);
 
     if (!groupId.empty()) {
-        setTemp("$t群号", groupId);
+        setTemp("$t群号", sealGroup);
         setTemp("$t群名", groupName);
-        setTemp("$t群号_RAW", groupId);
+        setTemp("$t群号_RAW", sealGroup.substr(sealGroup.find(':') + 1));
     }
     setTempInt("$t群组骰子面数", diceSides[1]);
     setTempInt("$t当前骰子面数", diceSides[2]);
@@ -2352,13 +2455,14 @@ void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
 
     JSValue jmsg = JS_NewObject(ctx_);
     JS_SetPropertyStr(ctx_, jmsg, "message", JS_NewString(ctx_, fullMsg.c_str()));
-    JS_SetPropertyStr(ctx_, jmsg, "platform", JS_NewString(ctx_, platform.c_str()));
+    JS_SetPropertyStr(ctx_, jmsg, "platform", JS_NewString(ctx_, address.name().c_str()));
     JS_SetPropertyStr(ctx_, jmsg, "messageType", JS_NewString(ctx_, isPrivate ? "private" : "group"));
-    JS_SetPropertyStr(ctx_, jmsg, "groupId", JS_NewString(ctx_, groupId.c_str()));
+    JS_SetPropertyStr(ctx_, jmsg, "groupId", JS_NewString(ctx_, sealGroup.c_str()));
     JS_SetPropertyStr(ctx_, jmsg, "rawId", JS_NewString(ctx_, message.id.c_str()));
-    const std::string guildId = extraString("guild_id");
+    const std::string guildId = address.guildId();
     std::string channelId = extraString("channel_id");
-    if (channelId.empty() && message.type == MessageType::kChannel) channelId = message.targetId;
+    if (address.name() == "OpenQQCH") channelId = sealGroup;
+    else if (channelId.empty() && message.type == MessageType::kChannel) channelId = messageField(message, "__identity_native_target", message.targetId);
     JS_SetPropertyStr(ctx_, jmsg, "guildId", JS_NewString(ctx_, guildId.c_str()));
     JS_SetPropertyStr(ctx_, jmsg, "channelId", JS_NewString(ctx_, channelId.c_str()));
     if (message.platform == "qq_official" && message.extra.is_object()) {
@@ -2398,7 +2502,7 @@ void JsPluginManager::buildCtxMsg(const Message& message, int privilege,
     }
     JS_SetPropertyStr(ctx_, jmsg, "segment", jsegments);
     JSValue sender = JS_NewObject(ctx_);
-    JS_SetPropertyStr(ctx_, sender, "userId", JS_NewString(ctx_, userId.c_str()));
+    JS_SetPropertyStr(ctx_, sender, "userId", JS_NewString(ctx_, sealUser.c_str()));
     JS_SetPropertyStr(ctx_, sender, "nickname", JS_NewString(ctx_, nickname.c_str()));
     JS_SetPropertyStr(ctx_, sender, "card", JS_NewString(ctx_, groupCard.c_str()));   // 群名片
     JS_SetPropertyStr(ctx_, jmsg, "sender", sender);
@@ -2435,7 +2539,7 @@ JSValue JsPluginManager::buildCmdArgs(const Message& message, const std::string&
     JSValue atArr = JS_NewArray(ctx_);
     for (uint32_t i = 0; i < message.atList.size(); ++i) {
         JSValue o = JS_NewObject(ctx_);
-        JS_SetPropertyStr(ctx_, o, "userId", JS_NewString(ctx_, message.atList[i].c_str()));
+        JS_SetPropertyStr(ctx_, o, "userId", JS_NewString(ctx_, mentionId(message, i).c_str()));
         JS_SetPropertyUint32(ctx_, atArr, i, o);
     }
     JS_SetPropertyStr(ctx_, jargs, "at", atArr);
@@ -2773,6 +2877,14 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
         break;
     }
 
+    const auto address = addressOf(message);
+    const auto nativeUser = messageField(message, "__identity_native_sender", event.userId);
+    const auto nativeOperator = messageField(message, "__identity_native_operator", event.operatorId);
+    const auto eventUser = !event.selfId.empty() && event.userId == event.selfId ? address.self(event.selfId) : address.id(nativeUser, false);
+    const auto eventOperator = !event.selfId.empty() && event.operatorId == event.selfId ? address.self(event.selfId) : address.id(nativeOperator, false);
+    const auto eventGroup = address.id(messageField(message, "__identity_native_target", event.groupId), true);
+    if (!event.operatorId.empty() && message.senderId == event.operatorId)
+        message.extra["__identity_native_sender"] = nativeOperator;
     if (event.platform == "qq_official") {
         if (message.senderId == event.operatorId) message.senderName = extraId("operator_name");
         if (message.senderName.empty() && message.senderId == event.userId) message.senderName = extraId("user_name");
@@ -2789,12 +2901,12 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
     };
     auto makeNotice = [&]() {
         JSValue o = JS_NewObject(ctx_);
-        setStr(o, "groupId", event.groupId);
-        setStr(o, "userId", event.userId);
-        setStr(o, "operatorId", event.operatorId);
-        setStr(o, "selfId", event.selfId);
+        setStr(o, "groupId", eventGroup);
+        setStr(o, "userId", eventUser);
+        setStr(o, "operatorId", eventOperator);
+        setStr(o, "selfId", address.self(event.selfId));
         setStr(o, "subType", event.subType);
-        setStr(o, "platform", event.platform);
+        setStr(o, "platform", address.name());
         setStr(o, "adapterId", event.adapterId);
         setStr(o, "flag", event.flag);
         setStr(o, "comment", event.comment);
@@ -2803,7 +2915,7 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
         if (!messageId.empty()) setStr(o, "messageId", messageId);
         if (event.type == EventType::kGroupBan) {
             JS_SetPropertyStr(ctx_, o, "duration", JS_NewInt64(ctx_, extraInt("duration")));
-            const bool whole = event.userId == "0" || event.subType == "whole_ban" || event.subType == "whole_lift_ban";
+            const bool whole = eventUser == "0" || event.subType == "whole_ban" || event.subType == "whole_lift_ban";
             JS_SetPropertyStr(ctx_, o, "isWhole", JS_NewBool(ctx_, whole));
         }
         if (event.type == EventType::kGroupTitle) setStr(o, "title", extraId("title"));
@@ -2831,37 +2943,37 @@ void JsPluginManager::handleEvent(const BotEvent& event, int privilege) {
     auto makeHookArg = [&](EventArgKind kind) -> JSValue {
         if (kind == EventArgKind::Official) {
             auto payload = event.extra.is_object() ? event.extra : json::object();
-            payload["groupId"] = event.groupId; payload["userId"] = event.userId; payload["operatorId"] = event.operatorId;
-            payload["platform"] = event.platform; payload["adapterId"] = event.adapterId; payload["timestamp"] = event.timestamp;
+            payload["groupId"] = eventGroup; payload["userId"] = eventUser; payload["operatorId"] = eventOperator;
+            payload["platform"] = address.name(); payload["adapterId"] = event.adapterId; payload["timestamp"] = event.timestamp;
             const auto source = payload.dump();
             return JS_ParseJSON(ctx_, source.c_str(), source.size(), "qq-official-event");
         }
         if (kind == EventArgKind::Poke) {
             JSValue o = JS_NewObject(ctx_);
-            setStr(o, "groupId", event.groupId);
-            const std::string senderId = event.operatorId.empty() ? event.userId : event.operatorId;
+            setStr(o, "groupId", eventGroup);
+            const std::string senderId = eventOperator.empty() ? eventUser : eventOperator;
             setStr(o, "senderId", senderId);
-            setStr(o, "targetId", event.userId);
-            JS_SetPropertyStr(ctx_, o, "isPrivate", JS_NewBool(ctx_, event.groupId.empty()));
+            setStr(o, "targetId", eventUser);
+            JS_SetPropertyStr(ctx_, o, "isPrivate", JS_NewBool(ctx_, eventGroup.empty()));
             return o;
         }
         if (kind == EventArgKind::Leave) {
             JSValue o = JS_NewObject(ctx_);
-            setStr(o, "groupId", event.groupId);
-            setStr(o, "userId", event.userId);
-            setStr(o, "operatorId", event.operatorId);
+            setStr(o, "groupId", eventGroup);
+            setStr(o, "userId", eventUser);
+            setStr(o, "operatorId", eventOperator);
             setStr(o, "subType", event.subType);
             return o;
         }
         if (kind == EventArgKind::Request) {
             JSValue o = JS_NewObject(ctx_);
-            setStr(o, "groupId", event.groupId);
-            setStr(o, "userId", event.userId);
-            setStr(o, "operatorId", event.operatorId);
+            setStr(o, "groupId", eventGroup);
+            setStr(o, "userId", eventUser);
+            setStr(o, "operatorId", eventOperator);
             setStr(o, "flag", event.flag);
             setStr(o, "subType", event.subType);
             setStr(o, "comment", event.comment);
-            setStr(o, "platform", event.platform);
+            setStr(o, "platform", address.name());
             setStr(o, "adapterId", event.adapterId);
             return o;
         }

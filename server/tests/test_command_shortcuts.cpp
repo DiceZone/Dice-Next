@@ -234,8 +234,8 @@ seal.ext.register(ext);
     f.msg.senderId = "1001";
     f.msg.extra["raw"] = {{"message", json::array({{{"type", "text"}, {"data", {{"text", ".&插件"}}}}})}};
     const auto reply = f.run(".&插件 more --flag=1");
-    ASSERT_TRUE(contains(reply, "1001|1001|0|.shortcutprobe fixed more --flag=1|fixed more --flag=1"));
-    ASSERT_TRUE(contains(reply, "2000|shortcut-test"));
+    ASSERT_TRUE(contains(reply, "QQ:1001|QQ:1001|0|.shortcutprobe fixed more --flag=1|fixed more --flag=1"));
+    ASSERT_TRUE(contains(reply, "QQ-Group:2000|shortcut-test"));
     ASSERT_TRUE(contains(reply, "shortcut-test|.shortcutprobe fixed more --flag=1"));
     ASSERT_TRUE(f.router.lastShortcutWasPlugin());
     ASSERT_EQ(*plugins.evalString("String(globalThis.__shortcutCalls)"), "1");
@@ -243,7 +243,7 @@ seal.ext.register(ext);
     f.setting("pluginEnabled", "0"); f.run(".&插件");
     ASSERT_EQ(*plugins.evalString("String(globalThis.__shortcutCalls)"), "1");
     f.setting("pluginEnabled", "1"); f.msg.senderId = "1000";
-    ASSERT_TRUE(contains(f.run(".a 插件"), "1000|1000|100|"));
+    ASSERT_TRUE(contains(f.run(".a 插件"), "QQ:1000|QQ:1000|100|"));
     ASSERT_EQ(*plugins.evalString("String(globalThis.__shortcutHooks)"), "2");
 }
 

@@ -116,7 +116,11 @@ TEST(IdentityEmail, VerifiedBindCannotMoveAnAlreadyBoundAccount) {
     ASSERT_EQ(bindings.publicForOfficial(db, "test", "openid", identity::Kind::User), std::string("160703953"));
     const auto id = bindings.observeVirtual(db, "discord", "adapter", "native", identity::Kind::User);
     ASSERT_TRUE(identity::BindingStore::isVirtual(id));
+    ASSERT_EQ(identity::BindingStore::qualified(identity::Kind::User, id), "UnionID:" + id);
     ASSERT_TRUE(bindings.bindVerifiedPlatformToQQ(db, "discord", "native", "160703953", error));
+    ASSERT_EQ(bindings.resolveUnion(db, id, identity::Kind::User), std::string("160703953"));
+    ASSERT_TRUE(bindings.resolveUnion(db, id, identity::Kind::Group).empty());
+    ASSERT_TRUE(bindings.observeVirtual(db, "kook", "second", "other", identity::Kind::User) != id);
     ASSERT_FALSE(bindings.bindVerifiedPlatformToQQ(db, "discord", "native", "160703954", error));
     ASSERT_EQ(bindings.transportEndpoint(db, "discord", "160703953", identity::Kind::User), std::string("native"));
 }

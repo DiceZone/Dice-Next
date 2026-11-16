@@ -65,6 +65,7 @@
 #include "core/causal/cooldown_manager.h"
 #include "core/causal/counter_store.h"
 #include "core/mod/js_plugin_manager.h"
+#include "core/identity/seal_id.h"
 #include "core/mod/lua_plugin_manager.h"
 #include "core/mod/legacy_log_context.h"
 #include "core/deck/deck_file_utils.h"
@@ -783,16 +784,14 @@ static int realMain(int argc, char* argv[]) {
             endpoint.id = adapter->id();
             endpoint.nickname = adapter->getLoginName();
             endpoint.userId = adapter->getLoginId();
-            endpoint.protocolType = adapter->platform() == "onebot_v11" ? "onebot"
-                : adapter->platform() == "qq_official" ? "official"
-                : adapter->platform();
-            endpoint.platform =
-                (adapter->platform() == "onebot_v11" ||
-                 adapter->platform() == "milky" ||
-                 adapter->platform() == "qq_official") ? "QQ"
-                : adapter->platform() == "discord" ? "DISCORD"
-                : adapter->platform() == "kook" ? "KOOK"
-                : adapter->platform();
+            dice::identity::SealAddress address{adapter->platform(), {}, {}};
+            if (const auto qq = std::dynamic_pointer_cast<dice::QQOfficialAdapter>(adapter))
+                address.bot = qq->displayQQ().empty() ? qq->appId() : qq->displayQQ();
+            endpoint.transport = adapter->platform();
+            endpoint.bot = address.bot;
+            endpoint.platform = address.endpointPlatform();
+            endpoint.protocolType = address.protocol();
+            endpoint.userId = address.self(endpoint.userId);
             const std::string state = adapter->connectionStatus();
             endpoint.state = adapter->isConnected() ? 1
                 : (state == "connecting" || state == "reconnecting") ? 2
@@ -872,30 +871,48 @@ static int realMain(int argc, char* argv[]) {
         return std::make_pair(!id.empty(), name);
     });
     // 计时器/异步回调里的 replyToSender → 通过对应平台适配器直接发出。
-    jsMod.setSender([&adapterMgr, &cmdRouter](const std::string& platform, bool isPrivate,
-                                  const std::string& groupId, const std::string& userId, const std::string& text) {
-        auto send = [&](const auto& a) {
-            if (!isPrivate && (cmdRouter.isGroupDisabledFor(a->platform(), groupId, a->id())
-                || !cmdRouter.isPluginAllowedInGroup(a->platform(), groupId, a->id()))) return;
-            if (isPrivate) a->sendPrivateMessage(userId, text);
-            else           a->sendGroupMessage(groupId, text);
-        };
-        for (auto& a : adapterMgr.allAdapters())
-            if (a->isConnected() && a->platform() == platform) { send(a); return; }
-        for (auto& a : adapterMgr.allAdapters())
-            if (a->isConnected()) { send(a); return; }   // fallback: first connected
+    jsMod.setIdentityResolver([&db, &adapterMgr](const std::string& platform, const std::string& adapterId,
+                                               const std::string& raw, bool group, bool alias) -> std::string {
+        const auto kind = group ? dice::identity::Kind::Group : dice::identity::Kind::User;
+        auto& bindings = dice::identity::BindingStore::instance();
+        if (alias) {
+            const auto number = dice::identity::BindingStore::rawQQ(raw);
+            const auto id = number != raw && dice::identity::BindingStore::isRealQQ(number)
+                ? number : bindings.resolveUnion(db, raw, kind);
+            if (id.empty()) return {};
+            const auto adapter = adapterMgr.getAdapter(adapterId);
+            if (!adapter || adapter->platform() != platform) return {};
+            const auto qq = std::dynamic_pointer_cast<dice::QQOfficialAdapter>(adapter);
+            const auto account = qq ? qq->appId() : adapterId;
+            for (const auto& ep : bindings.endpoints(db, id, kind))
+                if (ep.adapterType == platform && ep.adapterAccount == account) return id;
+            return {};
+        }
+        if (platform == "qq_official") {
+            const auto qq = std::dynamic_pointer_cast<dice::QQOfficialAdapter>(adapterMgr.getAdapter(adapterId));
+            return qq ? bindings.publicForOfficial(db, qq->appId(), raw, kind) : std::string();
+        }
+        if (platform == "discord" || platform == "kook")
+            return bindings.observeVirtual(db, platform, adapterId, raw, kind);
+        return raw;
     });
-    // 群管：禁言/踢/改名片（按 platform 找适配器）。
-    jsMod.setGroupAdmin([&adapterMgr](const std::string& platform, const std::string& op,
+    jsMod.setSender([&adapterMgr, &cmdRouter](const std::string& adapterId, const std::string& platform, bool isPrivate,
+                                  const std::string& groupId, const std::string& userId, const std::string& text) {
+        const auto a = adapterMgr.getAdapter(adapterId);
+        if (!a || !a->isConnected() || a->platform() != platform) return;
+        if (!isPrivate && (cmdRouter.isGroupDisabledFor(platform, groupId, adapterId)
+            || !cmdRouter.isPluginAllowedInGroup(platform, groupId, adapterId))) return;
+        if (isPrivate) a->sendPrivateMessage(userId, text);
+        else a->sendGroupMessage(groupId, text);
+    });
+    jsMod.setGroupAdmin([&adapterMgr](const std::string& adapterId, const std::string& platform, const std::string& op,
                                       const std::string& groupId, const std::string& userId,
                                       int64_t num, const std::string& text) {
-        for (auto& a : adapterMgr.allAdapters()) {
-            if (!a->isConnected() || a->platform() != platform) continue;
-            if (op == "ban")       a->setGroupBan(groupId, userId, (int)num);
-            else if (op == "kick") a->setGroupKick(groupId, userId);
-            else if (op == "card") a->setGroupCard(groupId, userId, text);
-            return;
-        }
+        const auto a = adapterMgr.getAdapter(adapterId);
+        if (!a || !a->isConnected() || a->platform() != platform || groupId.empty() || userId.empty()) return;
+        if (op == "ban") a->setGroupBan(groupId, userId, (int)num);
+        else if (op == "kick") a->setGroupKick(groupId, userId);
+        else if (op == "card") a->setGroupCard(groupId, userId, text);
     });
     jsMod.setGroupRequest([&adapterMgr](const std::string& adapterId, const std::string& platform,
                                         const std::string& flag, const std::string& subType,
@@ -928,19 +945,36 @@ static int realMain(int argc, char* argv[]) {
         cmdRouter.jsBanOp(op, id, reason);
     });
     // seal.ban.getList/getUser → 读我方黑白名单（rank: 黑名单 -30 / 白名单 +30，仿海豹 BanRankInfo）。
-    jsMod.setBanQuery([&cmdRouter](const std::string& op, const std::string& id) -> std::string {
-        auto entryJson = [](const dice::BanlistRow& r) {
-            return nlohmann::json{{"id", r.targetId}, {"name", ""}, {"score", 0},
+    jsMod.setBanQuery([&cmdRouter, &db, &adapterMgr](const std::string& op, const std::string& id) -> std::string {
+        auto entryJson = [](const dice::BanlistRow& r, const std::string& address) {
+            return nlohmann::json{{"id", address}, {"name", ""}, {"score", 0},
                 {"rank", r.listType == 0 ? -30 : 30},
                 {"reasons", nlohmann::json::array({r.reason})}, {"banTime", 0}};
         };
-        if (op == "list") {
-            nlohmann::json arr = nlohmann::json::array();
-            for (auto& r : cmdRouter.banlistAll()) arr.push_back(entryJson(r));
-            return arr.dump();
+        auto& bindings = dice::identity::BindingStore::instance();
+        nlohmann::json list = nlohmann::json::array();
+        for (const auto& row : cmdRouter.banlistAll()) {
+            const bool group = row.targetType == 1;
+            const auto kind = group ? dice::identity::Kind::Group : dice::identity::Kind::User;
+            const auto canonical = dice::identity::BindingStore::qualified(kind, row.targetId);
+            if (op == "list") { list.push_back(entryJson(row, canonical)); continue; }
+            if (row.targetId == id || canonical == id) return entryJson(row, id).dump();
+            const std::string prefix = group ? "UnionID-Group:" : "UnionID:";
+            if (id.starts_with(prefix) && bindings.resolveUnion(db, id.substr(prefix.size()), kind) == row.targetId)
+                return entryJson(row, id).dump();
+            for (const auto& ep : bindings.endpoints(db, row.targetId, kind)) {
+                dice::identity::SealAddress addr{ep.adapterType, {}, {}};
+                if (ep.adapterType == "qq_official") {
+                    addr.bot = ep.adapterAccount;
+                    for (const auto& adapter : adapterMgr.allAdapters()) {
+                        const auto qq = std::dynamic_pointer_cast<dice::QQOfficialAdapter>(adapter);
+                        if (qq && qq->appId() == ep.adapterAccount && !qq->displayQQ().empty()) { addr.bot = qq->displayQQ(); break; }
+                    }
+                }
+                if (addr.id(ep.endpointId, group) == id) return entryJson(row, id).dump();
+            }
         }
-        for (auto& r : cmdRouter.banlistAll())
-            if (r.targetId == id) return entryJson(r).dump();
+        if (op == "list") return list.dump();
         return "null";
     });
     // 规则包 data/rulepacks/<包>/js 附加加载（按群激活 gating）。
@@ -1907,6 +1941,8 @@ static int realMain(int argc, char* argv[]) {
                 sent.platform = adapter->platform(); sent.adapterId = adapter->id();
                 sent.selfId = adapter->getLoginId(); sent.senderId = adapter->getLoginId();
                 sent.senderName = adapter->getLoginName(); sent.targetId = msg.targetId;
+                sent.extra = msg.extra;
+                if (sent.extra.is_object()) sent.extra.erase("__identity_native_sender");
                 sent.type = privateOut ? dice::MessageType::kPrivate : msg.type;
                 sent.content = text; sent.rawContent = text; sent.displayContent = text;
                 sent.timestamp = static_cast<int64_t>(std::time(nullptr)); sent.fromSelf = true;
