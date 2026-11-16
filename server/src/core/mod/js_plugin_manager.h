@@ -160,17 +160,22 @@ public:
     void wsSend(int64_t id, const std::string& data);
     void wsClose(int64_t id);
     void wsCleanup();
-    using SenderFn = std::function<void(const std::string& platform, bool isPrivate,
+    using IdentityResolver = std::function<std::string(const std::string&, const std::string&, const std::string&, bool, bool)>;
+    void setIdentityResolver(IdentityResolver resolver) { identityResolver_ = std::move(resolver); }
+    std::string publicId(const std::string& platform, const std::string& adapter, const std::string& id, bool group, bool alias) const {
+        return identityResolver_ ? identityResolver_(platform, adapter, id, group, alias) : id;
+    }
+    using SenderFn = std::function<void(const std::string& adapterId, const std::string& platform, bool isPrivate,
                         const std::string& groupId, const std::string& userId, const std::string& text)>;
     void setSender(SenderFn f) { sender_ = std::move(f); }
     // 群管（禁言/踢/改名片，按 platform 路由到适配器）+ 黑名单（addBan/addTrust/remove）。
-    using GroupAdminFn = std::function<void(const std::string& platform, const std::string& op,
+    using GroupAdminFn = std::function<void(const std::string& adapterId, const std::string& platform, const std::string& op,
         const std::string& groupId, const std::string& userId, int64_t num, const std::string& text)>;
     void setGroupAdmin(GroupAdminFn f) { groupAdmin_ = std::move(f); }
-    void groupAdmin(const std::string& platform, const std::string& op, const std::string& groupId,
+    void groupAdmin(const std::string& adapterId, const std::string& platform, const std::string& op, const std::string& groupId,
                     const std::string& userId, int64_t num, const std::string& text) const {
         ProcessingScope logScope(loggingContextForCall());
-        if (groupAdmin_) groupAdmin_(platform, op, groupId, userId, num, text);
+        if (groupAdmin_) groupAdmin_(adapterId, platform, op, groupId, userId, num, text);
     }
     using GroupRequestFn = std::function<void(const std::string& adapterId, const std::string& platform,
         const std::string& flag, const std::string& subType, bool approve, const std::string& reason)>;
@@ -204,7 +209,7 @@ public:
     void clearTimer(int64_t id);                                        // caller holds mutex_
     void fireTimer(int64_t id);                                         // locks mutex_ (loop cb)
     bool capturing() const { return capturing_; }                      // true during a message turn
-    void routeReply(const std::string& platform, bool isPrivate,
+    void routeReply(const std::string& adapterId, const std::string& platform, bool isPrivate,
                     const std::string& groupId, const std::string& userId, const std::string& text);
     JSValue findExt(const std::string& name) const;                    // seal.ext.find
     bool hasCommand(const std::string& word);                          // is `word` a registered JS cmd?
@@ -248,7 +253,7 @@ public:
 
     // seal.getEndPoints(): live adapter snapshots in SealDice's public shape.
     struct EndpointInfo {
-        std::string id, nickname, userId, platform, protocolType;
+        std::string id, nickname, userId, platform, protocolType, transport, bot;
         int state = 0;
         bool enable = true;
         int64_t groupNum = 0;
@@ -398,6 +403,7 @@ private:
 
     ScheduleFn scheduler_;
     SenderFn sender_;
+    IdentityResolver identityResolver_;
     GroupGateFn groupGate_;   // 分群启停 gate（地基）
     EndpointProviderFn endpointProvider_;
     CardGetFn cardGet_;       // seal.vars ↔ 人物卡桥接

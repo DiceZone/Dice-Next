@@ -447,6 +447,7 @@ private:
                     msg.extra["__sender_name_source"] = "missing";
                 }
             }
+            msg.extra["__identity_native_mentions"] = msg.atList;
             for (auto& at : msg.atList) {
                 if (at == msg.selfId) continue;
                 at = bindings.observeOfficial(db_, botId, at, Kind::User);
@@ -468,6 +469,7 @@ private:
             msg.extra["__identity_qualified_sender"] = BindingStore::qualified(Kind::User, publicSender);
             if (!publicTarget.empty()) msg.targetId = publicTarget;
             if (!publicSender.empty()) msg.senderId = publicSender;
+            msg.extra["__identity_native_mentions"] = msg.atList;
             for (auto& at : msg.atList) {
                 if (at == msg.selfId || at == "all") continue;
                 const auto pub = bindings.observeVirtual(db_, msg.platform, msg.adapterId, at, Kind::User);

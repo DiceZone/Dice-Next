@@ -59,8 +59,9 @@ public:
         } catch (...) {}
     }
     static std::string kindName(Kind kind) { return kind == Kind::Group ? "group" : "user"; }
-    static std::string prefix(Kind kind) { return kind == Kind::Group ? "QQGroup:" : "QQ:"; }
-    static std::string qualified(Kind kind, const std::string& id) { return prefix(kind) + id; }
+    static std::string prefix(Kind kind) { return kind == Kind::Group ? "QQ-Group:" : "QQ:"; }
+    static std::string qualified(Kind kind, const std::string& id) { if (id.empty()) return {};
+        return (isVirtual(id) ? (kind == Kind::Group ? "UnionID-Group:" : "UnionID:") : prefix(kind)) + id; }
     static std::string officialId(const std::string& botId, const std::string& openId) { return "QQ-Official-" + botId + ":" + openId; }
     static bool isOfficialId(const std::string& value) {
         const auto p = value.find(':'); return value.rfind("QQ-Official-", 0) == 0 && p != std::string::npos && p > 12 && p + 1 < value.size();
@@ -71,13 +72,21 @@ public:
     }
     static std::string rawQQ(const std::string& value) {
         if (value.rfind("QQ:", 0) == 0) return value.substr(3);
+        if (value.rfind("QQ-Group:", 0) == 0) return value.substr(9);
         if (value.rfind("QQGroup:", 0) == 0) return value.substr(8);
         return value;
     }
     static bool isVirtual(const std::string& id) {
-        return id.size() == 13 && (id[0] == '1' || id[0] == '2');
+        return id.size() == 13 && (id[0] == '1' || id[0] == '2') && id.find_first_not_of("0123456789") == std::string::npos;
     }
 
+    std::string resolveUnion(Database& db, const std::string& id, Kind kind) {
+        if (!isVirtual(id) || id.front() != (kind == Kind::Group ? '1' : '2')) return {};
+        std::lock_guard lock(mu_);
+        const auto alias = unionAlias(db, id, kind);
+        if (!alias.empty()) return alias;
+        return findByPublic(db, id, kind).publicId;
+    }
     // Observe a native QQ endpoint. Existing legacy numeric data retains the
     // same public ID, so Lua/JS compatibility is preserved.
     std::string observeQQ(Database& db, const std::string& adapterType, const std::string& account,
@@ -100,7 +109,7 @@ public:
                 if (isRealQQ(real)) {
                     auto target = findByPublic(db, real, kind); if (!target.id) target = createEntity(db, kind, real, false);
                     if (row.id != target.id) merge(db, row, target, kind);
-                    migrateLegacyRows(db, kind, qualified(kind, real), real);
+                    migrateLegacyRows(db, kind, (kind == Kind::Group ? "QQGroup:" : "QQ:") + real, real);
                     return real;
                 }
             }
@@ -193,7 +202,7 @@ public:
         if (!target.id) target = createEntity(db, kind, real, false);
         if (source.id != target.id) merge(db, source, target, kind);
         migrateLegacyRows(db, kind, official, real);
-        migrateLegacyRows(db, kind, qualified(kind, real), real);
+        migrateLegacyRows(db, kind, (kind == Kind::Group ? "QQGroup:" : "QQ:") + real, real);
         return true;
     }
     bool bindVerifiedOfficialToQQ(Database& db, const std::string& official,
@@ -285,10 +294,19 @@ private:
     IdentityRow createEntity(Database& db, Kind kind, const std::string& publicId, bool virtualId) const {
         IdentityRow row; row.kind = kindName(kind); row.publicId = publicId; row.isVirtual = virtualId; row.createdAt = now(); row.id = (int)db.getStorage()->insert(row); return row;
     }
+    static std::string unionKey(const std::string& id, Kind kind) {
+        return "identity/union/" + kindName(kind) + "/" + id;
+    }
+    static std::string unionAlias(Database& db, const std::string& id, Kind kind) {
+        const auto rows = db.getStorage()->get_all<DiceConfigRow>(orm::where(
+            orm::c(&DiceConfigRow::key) == unionKey(id, kind)), orm::limit(1));
+        return rows.empty() ? std::string() : rows.front().value;
+    }
     std::string nextVirtual(Database& db, Kind kind) const {
         long long maxId = kind == Kind::Group ? 1000000000000LL : 2000000000000LL;
         try { for (const auto& row : db.getStorage()->get_all<IdentityRow>(orm::where(orm::c(&IdentityRow::kind) == kindName(kind)))) if (isVirtual(row.publicId)) maxId = (std::max)(maxId, std::stoll(row.publicId)); } catch (...) {}
-        return std::to_string(maxId + 1);
+        do { ++maxId; } while (!unionAlias(db, std::to_string(maxId), kind).empty());
+        return std::to_string(maxId);
     }
     std::vector<IdentityEndpointRow> endpointsForPublic(Database& db, const std::string& publicId, Kind kind) const {
         auto e = findByPublic(db, publicId, kind); if (!e.id) return {};
@@ -297,6 +315,12 @@ private:
     void merge(Database& db, const IdentityRow& source, const IdentityRow& target, Kind kind) {
         auto* st = db.getStorage(); if (!st) return;
         try {
+            if (source.isVirtual && isVirtual(source.publicId) && unionAlias(db, source.publicId, kind).empty()) {
+                DiceConfigRow alias;
+                alias.key = unionKey(source.publicId, kind);
+                alias.value = target.publicId;
+                st->insert(alias);
+            }
             for (auto ep : st->get_all<IdentityEndpointRow>(orm::where(orm::c(&IdentityEndpointRow::identityId) == source.id))) { ep.identityId = target.id; st->update(ep); }
             const std::string from = source.publicId, to = target.publicId;
             for (auto p : st->get_all<PlayerProfileRow>(orm::where(orm::c(&PlayerProfileRow::userId) == from))) { p.userId = to; st->update(p); }

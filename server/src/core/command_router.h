@@ -1,5 +1,6 @@
 #pragma once
 #include "common/auto_cleanup.h"
+#include "core/identity/seal_id.h"
 #include "../common/legacy_conf_value.h"
 #include "../common/legacy_lua_event.h"
 #include "../common/legacy_model.h"
@@ -723,11 +724,16 @@ private:
         const std::string transport = exval("__identity_transport");
         auto& bindings = BindingStore::instance();
         if (firstL == "help") return i18n_.tr(loc, "help.topic.bind");
+        if (kind == Kind::User && arg.starts_with("QQ:")) arg.erase(0, 3);
+        if (kind == Kind::Group && (arg.starts_with("QQ-Group:") || arg.starts_with("QQGroup:")))
+            arg = BindingStore::rawQQ(arg);
 
         // Discord/KOOK 用户互通：在 OneBot（真实 QQ）窗口执行，把该平台账号并入
         // 当前发送者的真实 QQ（虚拟数据合并，人物卡/好感即互通）。
         if (firstL == "discord" || firstL == "kook") {
             const std::string label = firstL == "discord" ? "Discord" : "KOOK";
+            const std::string prefix = firstL == "discord" ? "DISCORD:" : "KOOK:";
+            if (arg.starts_with(prefix)) arg.erase(0, prefix.size());
             if (arg.empty())
                 return "用法：.bind " + firstL + " <" + label + " 用户ID>\n"
                     "在 OneBot（真实 QQ）窗口执行，把该 " + label + " 账号的数据并入你的 QQ。\n"
@@ -894,7 +900,15 @@ private:
         out << "当前窗口信息\n";
         out << "类型：" << (scope == Kind::Group ? "群聊" : "私聊用户") << "\n";
         out << "规范标识：" << BindingStore::qualified(scope, id) << "\n";
-        out << "业务号码：" << id << (BindingStore::isVirtual(id) ? "（虚拟 QQ 号，尚未绑定真实 QQ）" : "") << "\n";
+        if (!transport.empty()) {
+            const auto raw = msg.extra.value(scope == Kind::Group ? "__identity_native_target" : "__identity_native_sender", std::string());
+            auto bot = msg.extra.value("official_bot_uin", std::string());
+            if (bot.empty()) bot = msg.extra.value("official_bot_id", std::string());
+            const identity::SealAddress source{transport, bot, msg.extra.value("guild_id", std::string()), msg.type == MessageType::kChannel};
+            const auto address = source.id(raw, scope == Kind::Group);
+            if (!address.empty() && address != BindingStore::qualified(scope, id)) out << "平台标识：" << address << "\n";
+        }
+        out << "业务号码：" << id << (BindingStore::isVirtual(id) ? "（Dice!Next 虚拟号，尚未绑定真实 QQ）" : "") << "\n";
         const auto endpoints = BindingStore::instance().endpoints(db_, id, scope);
         if (!endpoints.empty()) {
             out << "已绑定端点：\n";
@@ -10940,16 +10954,18 @@ private:
 
 public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 private: 把它们困住导致编译失败，恢复 public）
     /// Blacklist/trust ops for JS plugins' seal.ban.*  (op: ban/trust/remove).
-    void jsBanOp(const std::string& op, const std::string& id, const std::string& reason) {
+    void jsBanOp(const std::string& op, const std::string& address, const std::string& reason) {
+        const int type = address.starts_with("QQ-Group:") ? 1 : 0;
+        const std::string id = type == 1 ? address.substr(9) : address;
         if (id.empty()) return;
         if (op == "ban" || op == "trust") {
             const int list = op == "ban" ? 0 : 1;
-            const bool fresh = !banlistHas(0, list, id);
-            banlistAdd(0, list, id, reason);
-            if (fresh) notifyListChange(0, list, id, true, reason);
+            const bool fresh = !banlistHas(type, list, id);
+            banlistAdd(type, list, id, reason);
+            if (fresh) notifyListChange(type, list, id, true, reason);
         } else if (op == "remove") {
-            if (banlistRemove(0, 0, id)) notifyListChange(0, 0, id, false);
-            if (banlistRemove(0, 1, id)) notifyListChange(0, 1, id, false);
+            if (banlistRemove(type, 0, id)) notifyListChange(type, 0, id, false);
+            if (banlistRemove(type, 1, id)) notifyListChange(type, 1, id, false);
         }
     }
 
