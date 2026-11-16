@@ -207,6 +207,16 @@ TEST(QQOfficialAdapter, PrefersMixedImageTextOverRichCardAndSplit) {
     ASSERT_EQ(reply["media"][0]["caption"].get<std::string>(), std::string("签到成功明天再来"));
 }
 
+TEST(QQOfficialAdapter, MixedMarkdownPutsCaptionAboveNativeImage) {
+    const auto body = QQOfficialAdapter::mixedMarkdownBodyForTest("大吉", "qqbot-media://image/v1/token");
+    ASSERT_EQ(body, std::string("大吉\n\n![image](qqbot-media://image/v1/token)"));
+    const auto empty = QQOfficialAdapter::mixedMarkdownBodyForTest("", "qqbot-media://image/v1/token");
+    ASSERT_EQ(empty, std::string("![image](qqbot-media://image/v1/token)"));
+    const auto escaped = QQOfficialAdapter::mixedMarkdownBodyForTest("*凶*", "https://example.test/a.png");
+    ASSERT_TRUE(escaped.find("![image](https://example.test/a.png)") != std::string::npos);
+    ASSERT_TRUE(escaped.find("*凶*") == std::string::npos);
+}
+
 TEST(QQOfficialAdapter, MediaMessageContentUsesCaptionOrInvisiblePlaceholder) {
     ASSERT_EQ(QQOfficialAdapter::mediaMessageContentForTest("大吉"), std::string("大吉"));
     ASSERT_EQ(QQOfficialAdapter::mediaMessageContentForTest(""),
@@ -246,6 +256,57 @@ TEST(QQOfficialAdapter, CataloguedDeckImageResolvesToReadableFile) {
     std::string path;
     ASSERT_EQ(QQOfficialAdapter::localFileKindForTest("data/images/TAROT/a17.jpg", path), 1);
     ASSERT_TRUE(fs::is_regular_file(dice::image_resources::fromUtf8(path)));
+    dice::image_resources::setDefault(std::move(previous));
+    std::error_code ec;
+    fs::remove_all(folder, ec);
+}
+
+TEST(QQOfficialAdapter, MixedSendDoesNotCrashWhenMediaTotalIsString) {
+    namespace fs = std::filesystem;
+    const auto folder = fs::temp_directory_path() / ("dice-next-qq-mix-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    auto previous = dice::image_resources::current();
+    auto service = std::make_shared<dice::image_resources::Service>(folder / "data");
+    dice::image_resources::setDefault(service);
+    const std::string jpeg = std::string("\xff\xd8\xff\xe0", 4) + "mix-jpeg-body";
+    service->upload("deck", "b1.jpg", jpeg);
+    auto adapter = std::make_shared<QQOfficialAdapter>("mix-total");
+    adapter->configure({{"appId", "app"}, {"appSecret", "fixture-only"}});
+    adapter->setMediaIndexDirForTest(folder / "media");
+    int lists = 0, prepares = 0;
+    std::string digest;
+    adapter->setApiTransportForTest([&](auto, const auto& path, const auto& body, auto cb) {
+        if (path == "/v2/media-images") {
+            ++lists;
+            cb(QQOfficialAdapter::apiResponseForTest(200, {{"total", "1"}, {"images", json::array()}}));
+            return;
+        }
+        if (path == "/v2/media-images/prepare") {
+            ++prepares;
+            digest = body["md5"].get<std::string>();
+            cb(QQOfficialAdapter::apiResponseForTest(200, {{"upload_id", "upload"},
+                {"presigned_url", "https://bucket.cos.ap-guangzhou.myqcloud.com/image?signature=test"}}));
+            return;
+        }
+        if (path == "/v2/media-images/complete") {
+            cb(QQOfficialAdapter::apiResponseForTest(200, {{"image_id", "img"},
+                {"url", "qqbot-media://image/v1/img"}}));
+            return;
+        }
+        cb(QQOfficialAdapter::apiResponseForTest(200, json::object()));
+    });
+    adapter->setMaterialTransportForTest([&](const auto&, auto cb) {
+        auto response = drogon::HttpResponse::newHttpResponse();
+        response->addHeader("ETag", "\"" + digest + "\"");
+        cb(drogon::ReqResult::Ok, response);
+    });
+    Message msg;
+    msg.type = MessageType::kGroup;
+    msg.targetId = "group";
+    msg.content = "凶[img,file=data/images/deck/b1.jpg]";
+    adapter->sendMessage(msg);
+    ASSERT_EQ(lists, 1);
+    ASSERT_EQ(prepares, 1);
     dice::image_resources::setDefault(std::move(previous));
     std::error_code ec;
     fs::remove_all(folder, ec);

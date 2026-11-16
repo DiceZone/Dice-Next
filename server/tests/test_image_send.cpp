@@ -113,6 +113,27 @@ TEST(ImageSend, SniffsRealFormatInsteadOfExtension) {
     ASSERT_TRUE(dice::image_transcode::qqImageOk(Kind::jpeg));
     ASSERT_TRUE(dice::image_transcode::qqImageOk(Kind::png));
     ASSERT_FALSE(dice::image_transcode::qqImageOk(Kind::avif));
+    ASSERT_TRUE(dice::image_transcode::officialMaterialOk(Kind::gif));
+    ASSERT_TRUE(dice::image_transcode::officialMaterialOk(Kind::webp));
+    ASSERT_FALSE(dice::image_transcode::officialMaterialOk(Kind::avif));
+}
+
+TEST(ImageSend, MaterialBytesFixesMismatchedExtensionAndKeepsMatchingJpeg) {
+    using dice::image_transcode::prepareMaterialBytes;
+    using dice::image_transcode::Kind;
+    const auto png = std::string("\x89PNG\r\n\x1a\n", 8) + "x";
+    const auto pngNamedJpg = prepareMaterialBytes(png, "card.jpg");
+    ASSERT_TRUE(pngNamedJpg.has_value());
+    ASSERT_EQ(pngNamedJpg->mime, std::string("image/png"));
+    ASSERT_EQ(pngNamedJpg->fileName, std::string("card.png"));
+    ASSERT_FALSE(pngNamedJpg->transcoded);
+    ASSERT_EQ(pngNamedJpg->bytes, png);
+    const auto jpegOk = prepareMaterialBytes(jpeg, "card.jpg");
+    ASSERT_TRUE(jpegOk.has_value());
+    ASSERT_EQ(jpegOk->mime, std::string("image/jpeg"));
+    ASSERT_EQ(jpegOk->fileName, std::string("card.jpg"));
+    ASSERT_FALSE(jpegOk->transcoded);
+    ASSERT_TRUE(jpegOk->kind == Kind::jpeg);
 }
 
 #ifdef _WIN32
@@ -140,6 +161,14 @@ TEST(ImageSend, TranscodesBmpToJpegBeforeQqSend) {
     char mag[3]{};
     in.read(mag, 3);
     ASSERT_EQ(std::string(mag, 3), std::string("\xff\xd8\xff", 3));
+}
+
+TEST(ImageSend, MaterialBytesTranscodesBmpToPng) {
+    const auto out = dice::image_transcode::prepareMaterialBytes(bmp1x1(), "card.bmp");
+    ASSERT_TRUE(out.has_value());
+    ASSERT_EQ(out->mime, std::string("image/png"));
+    ASSERT_TRUE(out->transcoded);
+    ASSERT_TRUE(dice::image_transcode::sniff(out->bytes) == dice::image_transcode::Kind::png);
 }
 
 #endif

@@ -83,6 +83,7 @@ set(TEST_SOURCES
     test_friend_approval_policy.cpp
     test_sensitive_word_filter.cpp
     test_builtin_decks.cpp
+    test_qq_media_index.cpp
     test_qq_official_adapter.cpp
     test_qq_official_names.cpp
     test_qq_official_protocol.cpp

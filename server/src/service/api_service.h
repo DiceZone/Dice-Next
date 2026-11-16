@@ -290,6 +290,17 @@ static J adapterToJson(const AdapterRow& a, const std::string& lastActive = std:
     };
 }
 
+static void injectLiveAdapterFields(J& j, const AdapterPtr& adapter) {
+    if (!adapter) return;
+    j["loginId"] = adapter->getLoginId();
+    j["loginName"] = adapter->getLoginName();
+    if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(adapter)) {
+        if (!official->displayQQ().empty()) j["qqNumber"] = official->displayQQ();
+        j["shareUrl"] = official->shareUrl();
+        j["avatarUrl"] = official->loginAvatar();
+    }
+}
+
 static J adapterToConfigJson(const AdapterRow& a) {
     J extra = J::parse(a.config, nullptr, false); if (!extra.is_object()) extra = J::object();
     J out{{"id", a.id}, {"name", a.name}, {"type", adapterTypeToString(static_cast<AdapterType>(a.type))},
@@ -2889,14 +2900,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     // Inject live connection status from adapter manager
                     auto adapter = adapterMgr.getAdapter(std::to_string(r.id));
                     j["status"] = adapter ? adapter->connectionStatus() : std::string("disconnected");
-                    if (adapter) {
-                        j["loginId"] = adapter->getLoginId();
-                        j["loginName"] = adapter->getLoginName();
-                        if (auto official = std::dynamic_pointer_cast<QQOfficialAdapter>(adapter)) {
-                            j["qqNumber"] = official->displayQQ();
-                            j["shareUrl"] = official->shareUrl();
-                        }
-                    }
+                    injectLiveAdapterFields(j, adapter);
                     arr.push_back(j);
                 }
                 jsonReply(ok(arr), std::move(cb));
@@ -3131,10 +3135,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 auto jj = adapterToJson(a, adapterMgr.lastActiveAt(std::to_string(a.id)));
                 auto adapter = adapterMgr.getAdapter(std::to_string(a.id));
                 jj["status"] = adapter ? adapter->connectionStatus() : std::string("disconnected");
-                if (adapter) {
-                    jj["loginId"] = adapter->getLoginId();
-                    jj["loginName"] = adapter->getLoginName();
-                }
+                injectLiveAdapterFields(jj, adapter);
                 jsonReply(ok(jj), std::move(cb));
             } else if (req->method() == drogon::Delete) {
                 const auto existing = st->get_pointer<AdapterRow>(aid);
