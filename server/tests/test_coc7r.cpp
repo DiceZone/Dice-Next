@@ -165,6 +165,15 @@ TEST(CheckRegression62, ModifiedChecksUseLinkedAttributesAndExplicitZero) {
 TEST(CheckRegression62, OfficialRecheckKeepsModifiersReasonsAndConfiguredPrefix) {
     CocFixture f;
     f.cfg.set<json>("dice/command_prefixes", json::array({"/"}));
+    f.i18n.setOverride(Locale::kZhHans, "dnd.rc.result",
+        "**{nick}** 的{attr}检定\n> `{roll} {mod} = {total}`\n[[action:再次检定|{command}]]",
+        ContentFormat::kMarkdown);
+    f.i18n.setOverride(Locale::kZhHans, "dice.check.result",
+        "**{nick}** 的{attr}检定\n> `{roll}/{rate}` **{level}**\n[[action:再次检定|{command}]]",
+        ContentFormat::kMarkdown);
+    f.i18n.setOverride(Locale::kZhHans, "dice.check.result_reason",
+        "**{nick}** 为「{reason}」进行{attr}检定\n> `{roll}/{rate}` **{level}**\n[[action:再次检定|{command}]]",
+        ContentFormat::kMarkdown);
     f.run("/setdnd on");
     f.run("/st 力量18");
     const std::string command = "/rc 优势力量-5 打开门";
@@ -185,6 +194,23 @@ TEST(CheckRegression62, OfficialRecheckKeepsModifiersReasonsAndConfiguredPrefix)
     ASSERT_EQ(coc.actions.size(), size_t(1));
     ASSERT_EQ(coc.actions[0].text, "/rc(90)侦查-20 搜索房间");
     ASSERT_TRUE(f.run(coc.actions[0].text).find("90/30") != std::string::npos);
+}
+
+TEST(CheckRegression62, DefaultVisualRepliesHaveNoAgainActions) {
+    CocFixture f;
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown, PresentationStyle::kVisual);
+    const auto roll = f.run(".r 1d100");
+    I18n::endOutboundCapture();
+    const auto rollView = presentation::expandComponents(roll, PresentationStyle::kVisual, ContentFormat::kMarkdown);
+    ASSERT_TRUE(rollView.actions.empty());
+    ASSERT_TRUE(roll.find("再次") == std::string::npos);
+    f.run(".st 侦查50");
+    I18n::beginOutboundCapture(ContentFormat::kMarkdown, PresentationStyle::kVisual);
+    const auto check = f.run(".ra(90)侦查");
+    I18n::endOutboundCapture();
+    const auto checkView = presentation::expandComponents(check, PresentationStyle::kVisual, ContentFormat::kMarkdown);
+    ASSERT_TRUE(checkView.actions.empty());
+    ASSERT_TRUE(check.find("再次") == std::string::npos);
 }
 TEST(Coc7r, ProfileInputAliasesAndUnknownSkillIsolation) {
     CocFixture f; f.stats();

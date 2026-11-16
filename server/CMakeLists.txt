@@ -104,6 +104,7 @@ add_library(dice-image-resources STATIC
     src/service/image_resource_api.cpp
     src/service/image_archive.cpp
     src/service/deck_package.cpp
+    src/service/image_transcode.cpp
 )
 target_include_directories(dice-image-resources PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dice-image-resources PUBLIC nlohmann_json::nlohmann_json
@@ -111,6 +112,9 @@ target_link_libraries(dice-image-resources PUBLIC nlohmann_json::nlohmann_json
 if(MSVC)
     target_compile_options(dice-image-resources PRIVATE /utf-8 /bigobj)
     target_compile_definitions(dice-image-resources PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+if(WIN32)
+    target_link_libraries(dice-image-resources PUBLIC windowscodecs ole32 uuid)
 endif()
 if(NOT WIN32)
     target_link_libraries(dice-image-resources PUBLIC Iconv::Iconv)

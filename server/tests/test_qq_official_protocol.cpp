@@ -26,6 +26,14 @@ struct OfficialProtocolFixture {
 };
 }
 
+TEST(OfficialProtocol, IntegerFieldsAcceptNumericStrings) {
+    ASSERT_EQ(qqprotocol::integer({{"total", 3}}, "total", -1), 3);
+    ASSERT_EQ(qqprotocol::integer({{"total", "3"}}, "total", -1), 3);
+    ASSERT_EQ(qqprotocol::integer({{"total", "x"}}, "total", -1), -1);
+    ASSERT_EQ(qqprotocol::asInteger(json("45000")).value_or(0), int64_t(45000));
+    ASSERT_FALSE(qqprotocol::asInteger(json("bad")).has_value());
+}
+
 TEST(OfficialProtocol, TimestampAcceptsUnixAndRFC3339OffsetsAndRejectsBrokenDates) {
     const auto utc = qqprotocol::timestamp("2026-10-09T10:37:20Z", -1);
     ASSERT_TRUE(utc > 0);
@@ -102,6 +110,7 @@ TEST(OfficialProtocol, AllAdvertisedApiActionsHaveADocumentedWireRoute) {
     }
     // The upload orchestration spans prepare/PUT/complete and has its own wire test below.
     tested.insert("qq_material_upload");
+    tested.insert("qq_material_pin");
     const auto advertised = qqprotocol::actions(); ASSERT_EQ(tested.size(), advertised.size());
     for (const auto& action : advertised) ASSERT_TRUE(tested.count(action.get<std::string>()));
 }
@@ -128,6 +137,67 @@ TEST(OfficialProtocol, MaterialsValidateMetadataAndPreserveAccountScopedReferenc
     ASSERT_EQ(f.result["data"]["next_cursor"].get<std::string>(), "next");
     f.call("qq_material_delete", {{"imageId", "a/b?x"}});
     ASSERT_TRUE(f.requests.back().path.find("a/b?x") == std::string::npos);
+}
+
+TEST(OfficialProtocol, MaterialListAnnotatesSourceAndPinStaysLocal) {
+    OfficialProtocolFixture f;
+    f.adapter->mediaIndexForTest().upsert([]{
+        qq_media::Entry e; e.imageId = "kept"; e.url = "qqbot-media://kept";
+        e.source = qq_media::kCache; e.md5 = std::string(32, 'c'); return e;
+    }());
+    f.response = {{"images", json::array({
+        json{{"image_id", "kept"}, {"url", "qqbot-media://kept"}, {"file_name", "a.png"}, {"expires_at", 1}},
+        json{{"image_id", "other"}, {"url", "qqbot-media://other"}, {"file_name", "b.png"}, {"expires_at", 1}}
+    })}, {"total", 2}};
+    f.call("qq_material_list", json::object());
+    ASSERT_TRUE(f.result.value("ok", false));
+    ASSERT_EQ(f.result["data"]["images"][0]["source"].get<std::string>(), std::string(qq_media::kCache));
+    ASSERT_EQ(f.result["data"]["images"][1]["source"].get<std::string>(), std::string(qq_media::kUntracked));
+    const auto before = f.requests.size();
+    f.call("qq_material_pin", {{"imageId", "kept"}});
+    ASSERT_TRUE(f.result.value("ok", false));
+    ASSERT_EQ(f.requests.size(), before);
+    ASSERT_EQ(f.adapter->mediaIndexForTest().byId("kept")->source, std::string(qq_media::kManual));
+}
+
+TEST(OfficialProtocol, MaterialUploadRemembersCacheSourceAndQuotaEvictsOldestCache) {
+    OfficialProtocolFixture f;
+    f.adapter->mediaIndexForTest().upsert([]{
+        qq_media::Entry e; e.imageId = "old"; e.url = "qqbot-media://old";
+        e.source = qq_media::kCache; e.lastUsed = 1; e.md5 = std::string(32, '1'); return e;
+    }());
+    f.adapter->mediaIndexForTest().upsert([]{
+        qq_media::Entry e; e.imageId = "kept"; e.url = "qqbot-media://kept";
+        e.source = qq_media::kManual; e.lastUsed = 0; e.md5 = std::string(32, '2'); return e;
+    }());
+    const auto png = drogon::utils::base64Decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aRZkAAAAASUVORK5CYII=");
+    std::string digest;
+    f.adapter->setApiTransportForTest([&](auto method, const auto& path, const auto& body, auto cb) {
+        if (path == "/v2/media-images/prepare") {
+            digest = body["md5"].template get<std::string>();
+            cb(QQOfficialAdapter::apiResponseForTest(200, {{"upload_id", "upload"},
+                {"presigned_url", "https://bucket.cos.ap-guangzhou.myqcloud.com/image?signature=test"}}));
+            return;
+        }
+        if (path == "/v2/media-images/complete") {
+            cb(QQOfficialAdapter::apiResponseForTest(200, {{"image_id", "new"},
+                {"url", "qqbot-media://image/v1/new"}}));
+            return;
+        }
+        cb(QQOfficialAdapter::apiResponseForTest(200, json::object()));
+    });
+    f.adapter->setMaterialTransportForTest([&](const auto& request, auto cb) {
+        auto response = drogon::HttpResponse::newHttpResponse();
+        response->addHeader("ETag", "\"" + digest + "\"");
+        cb(drogon::ReqResult::Ok, response);
+    });
+    f.call("qq_material_upload", {{"fileName", "sample.png"},
+        {"base64", drogon::utils::base64Encode(png)}, {"source", "cache"}});
+    ASSERT_TRUE(f.result.value("ok", false));
+    ASSERT_EQ(f.adapter->mediaIndexForTest().byId("new")->source, std::string(qq_media::kCache));
+    const auto victim = f.adapter->mediaIndexForTest().oldestCache();
+    ASSERT_TRUE(victim.has_value());
+    ASSERT_EQ(victim->imageId, std::string("old"));
 }
 
 TEST(OfficialProtocol, V2PictureCardsAreSentUnchangedInGroupsAndPrivateChats) {
@@ -168,6 +238,9 @@ TEST(OfficialProtocol, MaterialUploadUsesSignedPutWithoutBotCredentialsAndChecks
     f.adapter->setApiTransportForTest([&](auto method, const auto& path, const auto& body, auto cb) {
         ASSERT_EQ(method, drogon::Post);
         if (path == "/v2/media-images/prepare") {
+            ASSERT_EQ(body["content_type"].get<std::string>(), std::string("image/png"));
+            ASSERT_TRUE(body["file_name"].get<std::string>().size() >= 4
+                && body["file_name"].get<std::string>().substr(body["file_name"].get<std::string>().size() - 4) == ".png");
             ASSERT_EQ(body["file_size"].template get<size_t>(), png.size());
             digest = body["md5"].template get<std::string>();
             cb(QQOfficialAdapter::apiResponseForTest(200, {{"upload_id", "upload"}, {"presigned_url", "https://bucket.cos.ap-guangzhou.myqcloud.com/image?signature=test"}}));
@@ -181,8 +254,10 @@ TEST(OfficialProtocol, MaterialUploadUsesSignedPutWithoutBotCredentialsAndChecks
         ++puts;
         ASSERT_EQ(request->method(), drogon::Put);
         ASSERT_TRUE(request->getHeader("authorization").empty());
-        ASSERT_EQ(request->body(), png);
+        ASSERT_EQ(request->getPath(), "/image?signature=test");
+        ASSERT_EQ(request->getHeader("host"), "bucket.cos.ap-guangzhou.myqcloud.com");
         ASSERT_EQ(request->contentType(), drogon::CT_IMAGE_PNG);
+        ASSERT_EQ(request->body(), png);
         auto response = drogon::HttpResponse::newHttpResponse();
         response->addHeader("ETag", "\"" + (badEtag ? std::string(32, '0') : digest) + "\"");
         cb(drogon::ReqResult::Ok, response);
@@ -193,12 +268,14 @@ TEST(OfficialProtocol, MaterialUploadUsesSignedPutWithoutBotCredentialsAndChecks
     badEtag = true;
     f.call("qq_material_upload", params);
     ASSERT_FALSE(f.result.value("ok", true)); ASSERT_EQ(completed, 1);
-    auto invalid = params; invalid["fileName"] = "sample.jpg";
-    f.call("qq_material_upload", invalid); ASSERT_FALSE(f.result.value("ok", true)); ASSERT_EQ(puts, 2);
+    badEtag = false;
+    auto renamed = params; renamed["fileName"] = "sample.jpg";
+    f.call("qq_material_upload", renamed);
+    ASSERT_TRUE(f.result.value("ok", false)); ASSERT_EQ(puts, 3); ASSERT_EQ(completed, 2);
     f.adapter->setApiTransportForTest([&](auto, const auto&, const auto&, auto cb) {
         cb(QQOfficialAdapter::apiResponseForTest(200, {{"upload_id", "upload"}, {"presigned_url", "https://127.0.0.1/image"}}));
     });
-    f.call("qq_material_upload", params); ASSERT_FALSE(f.result.value("ok", true)); ASSERT_EQ(puts, 2);
+    f.call("qq_material_upload", params); ASSERT_FALSE(f.result.value("ok", true)); ASSERT_EQ(puts, 3);
 }
 
 TEST(OfficialProtocol, PictureCardsRejectBadLimitsAndInsecureUrls) {

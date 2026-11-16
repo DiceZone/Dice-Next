@@ -246,6 +246,26 @@ static bool looksDice(const std::string& s) {
     return hasDigit;
 }
 
+// Image / CQ codes must not be treated as dice. [CQ:image,file=…] has a colon so
+// the old scan caught it; the platform-neutral [img,file=…] does not, and
+// engine.roll() of that string fails → 0. Deck cards like
+// "[img,file=data/images/TAROT/a17.jpg]大吉" were therefore sent as "0大吉".
+static bool looksMediaCode(const std::string& inner) {
+    auto starts = [&](const char* prefix) { return inner.rfind(prefix, 0) == 0; };
+    if (starts("CQ:") || starts("img,") || starts("img:") || starts("image:")
+        || starts("图:") || starts("图片:") || inner.find("file=") != std::string::npos)
+        return true;
+    size_t braces = 0;
+    for (size_t i = 0; i < inner.size(); ++i) {
+        if (sample_template::escaped(inner, i)) continue;
+        if (inner[i] == '{') ++braces;
+        else if (inner[i] == '}' && braces) --braces;
+        else if (!braces && (inner[i] == ':' || static_cast<unsigned char>(inner[i]) >= 128))
+            return true;
+    }
+    return false;
+}
+
 // Convert only authored square-bracket dice blocks into an internal reference.
 // This happens BEFORE interpolation; a nickname containing [1d100] is just data.
 static std::string deckDiceSyntax(const std::string& text) {
@@ -257,14 +277,8 @@ static std::string deckDiceSyntax(const std::string& text) {
         const auto end = text.find(']', pos + 1);
         if (end == std::string::npos) { out += text.substr(pos); break; }
         const auto inner = text.substr(pos + 1, end - pos - 1);
-        size_t braces = 0; bool media = false;
-        for (size_t i = 0; i < inner.size(); ++i) {
-            if (sample_template::escaped(inner, i)) continue;
-            if (inner[i] == '{') ++braces;
-            else if (inner[i] == '}' && braces) --braces;
-            else if (!braces && (inner[i] == ':' || static_cast<unsigned char>(inner[i]) >= 128)) media = true;
-        }
-        out += media ? text.substr(pos, end - pos + 1) : "{" + std::string("\x1e") + "deck-roll:" + inner + "}";
+        out += looksMediaCode(inner) ? text.substr(pos, end - pos + 1)
+            : "{" + std::string("\x1e") + "deck-roll:" + inner + "}";
         pos = end + 1;
     }
     return out;
@@ -296,6 +310,7 @@ std::string CardDeck::expand(const std::string& expr, ReferenceContext& context,
             if (!diceEval_) return "[" + token.substr(11) + "]";
             const auto expression = safe_template::materialize(expand(token.substr(11), context, nested), {}, remaining);
             if (!remaining.nodes || !remaining.bytes) return "";
+            if (!looksDice(expression)) return safe_template::hold("[" + expression + "]", remaining);
             return safe_template::hold(std::to_string(diceEval_(expression)), remaining);
         }
         const bool back = !token.empty() && token.front() == '%';

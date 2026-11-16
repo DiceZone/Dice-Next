@@ -1,14 +1,14 @@
 {
   "dice": {
     "roll": {
-      "result": "**{nick}** 掷骰\n> `{res}`\n[[action:再次掷骰|.r]]",
-      "result_reason": "**{nick}** 为「{reason}」掷骰\n> `{res}`\n[[action:再次掷骰|.r]]",
-      "multi": "**{nick}** 连续掷骰 {turn} 次\n{res}\n[[action:再次掷骰|.r]]",
-      "multi_reason": "**{nick}** 为「{reason}」连续掷骰 {turn} 次\n{res}\n[[action:再次掷骰|.r]]"
+      "result": "**{nick}** 掷骰\n> `{res}`",
+      "result_reason": "**{nick}** 为「{reason}」掷骰\n> `{res}`",
+      "multi": "**{nick}** 连续掷骰 {turn} 次\n{res}",
+      "multi_reason": "**{nick}** 为「{reason}」连续掷骰 {turn} 次\n{res}"
     },
     "check": {
-      "result": "**{nick}** 的{attr}检定\n> `{roll}/{rate}` **{level}**\n[[action:再次检定|{command}]]",
-      "result_reason": "**{nick}** 为「{reason}」进行{attr}检定\n> `{roll}/{rate}` **{level}**\n[[action:再次检定|{command}]]"
+      "result": "**{nick}** 的{attr}检定\n> `{roll}/{rate}` **{level}**",
+      "result_reason": "**{nick}** 为「{reason}」进行{attr}检定\n> `{roll}/{rate}` **{level}**"
     },
     "brp": {
       "result": "**{nick}** 的{attr}检定\n> `{roll}/{rate}` **{level}**",
@@ -21,7 +21,7 @@
       "result": "**{nick}** 的对抗检定\n> **{la}** `1D100={ra}/{va}` {lva}\n> **{lb}** `1D100={rb}/{vb}` {lvb}\n\n结果：**{outcome}**"
     },
     "sc": {
-      "result": "**理智检定**\n{output}\n[[action:再次进行理智检定|.sc]]"
+      "result": "**理智检定**\n{output}"
     },
     "st": {
       "result": "**技能检定**\n{output}\n[[action:编辑人物卡属性|.st ]]"
@@ -44,8 +44,8 @@
     "show": "**{nick}** 的人物卡\n{detail}\n[[action:查看完整人物卡|.pc show]]",
     "show_one": "**{nick}** 的{attr}\n> `{val}`",
     "sc": {
-      "result": "**{nick}** 的理智检定\n> `1D100={res}/{san}` **{grade}**\n> 理智 {san} → **{final}**（损失 {loss}）\n[[action:再次进行理智检定|.sc]]",
-      "result_noloss": "**{nick}** 的理智检定\n> `1D100={res}/{san}` **{grade}**\n> 理智没有损失\n[[action:再次进行理智检定|.sc]]"
+      "result": "**{nick}** 的理智检定\n> `1D100={res}/{san}` **{grade}**\n> 理智 {san} → **{final}**（损失 {loss}）",
+      "result_noloss": "**{nick}** 的理智检定\n> `1D100={res}/{san}` **{grade}**\n> 理智没有损失"
     }
   },
   "pc": {
@@ -55,7 +55,7 @@
     "redo_done": "**{nick}** 的人物卡已重置并重新生成\n{detail}\n[[action:查看完整人物卡|.pc show]]"
   },
   "deck": {
-    "result": "**{nick}** 从「{name}」抽到\n> {res}\n[[action:再次抽取|.draw {name}]]",
+    "result": "**{nick}** 从「{name}」抽到\n> {res}",
     "list": "**可用牌堆（{count} 个）**\n{list}",
     "default_show": "本群默认牌堆：**{name}**\n[[action:从默认牌堆抽取|.draw]]"
   },
@@ -92,10 +92,10 @@
   },
   "dnd": {
     "rc": {
-      "result": "**{nick}** 的{attr}检定\n> `{roll} {mod} = {total}`\n[[action:再次检定|{command}]]"
+      "result": "**{nick}** 的{attr}检定\n> `{roll} {mod} = {total}`"
     },
     "rdc": {
-      "result": "**{nick}** 的{attr}检定{reason}\n{detail}\n[[action:再次检定|.rdc {attr}]]"
+      "result": "**{nick}** 的{attr}检定{reason}\n{detail}"
     },
     "ss": {
       "show": "**{nick}** 的法术位\n{detail}\n[[action:恢复全部法术位|.ss rest]]",

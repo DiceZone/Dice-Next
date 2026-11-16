@@ -7,6 +7,9 @@
 #include <cctype>
 #include <ctime>
 #include <climits>
+#include <cstdint>
+#include <limits>
+#include <optional>
 #include <string>
 
 namespace dice::qqprotocol {
@@ -22,11 +25,31 @@ inline json object(const json& value, const char* field) {
     const auto it = value.find(field);
     return it != value.end() && it->is_object() ? *it : json::object();
 }
-inline int integer(const json& value, const char* field, int fallback = 0) {
+inline std::optional<int64_t> asInteger(const json& value) {
+    if (value.is_number_integer()) return value.get<int64_t>();
+    if (value.is_number_unsigned()) {
+        const auto number = value.get<uint64_t>();
+        if (number > static_cast<uint64_t>((std::numeric_limits<int64_t>::max)())) return std::nullopt;
+        return static_cast<int64_t>(number);
+    }
+    if (!value.is_string()) return std::nullopt;
+    const auto& text = value.get_ref<const std::string&>();
+    if (text.empty()) return std::nullopt;
+    try {
+        std::size_t idx = 0;
+        const auto number = std::stoll(text, &idx, 10);
+        if (idx == text.size()) return number;
+    } catch (...) {}
+    return std::nullopt;
+}
+inline int64_t integer64(const json& value, const char* field, int64_t fallback = 0) {
     if (!value.is_object()) return fallback;
     const auto it = value.find(field);
-    if (it == value.end() || !it->is_number_integer()) return fallback;
-    const auto number = it->get<int64_t>();
+    if (it == value.end()) return fallback;
+    return asInteger(*it).value_or(fallback);
+}
+inline int integer(const json& value, const char* field, int fallback = 0) {
+    const auto number = integer64(value, field, fallback);
     return number >= INT_MIN && number <= INT_MAX ? static_cast<int>(number) : fallback;
 }
 
@@ -108,7 +131,8 @@ inline json actions() {
         "qq_delete_panel", "qq_panel_target", "qq_me", "qq_my_guilds", "qq_guild", "qq_guild_channels", "qq_create_channel", "qq_channel",
         "qq_update_channel", "qq_delete_channel", "qq_interaction", "qq_generate_share_url", "qq_send_message", "qq_input_notify", "qq_wakeup_message",
         "qq_media_files", "qq_upload_prepare", "qq_upload_part_finish", "qq_gateway",
-        "qq_material_prepare", "qq_material_complete", "qq_material_list", "qq_material_delete", "qq_material_upload"});
+        "qq_material_prepare", "qq_material_complete", "qq_material_list", "qq_material_delete", "qq_material_upload",
+        "qq_material_pin"});
 }
 
 inline std::string validate(const std::string& action, const json& params) {
@@ -168,7 +192,8 @@ inline std::string validate(const std::string& action, const json& params) {
             return "upload_id 必须是 prepare 返回的有效上传任务标识。";
         }
     }
-    if (action == "qq_material_delete" && text(params, "imageId").empty()) return "imageId 必填。";
+    if ((action == "qq_material_delete" || action == "qq_material_pin") && text(params, "imageId").empty())
+        return "imageId 必填。";
     for (const char* field : {"seconds", "msg_seq"}) if (params.contains(field) && !params[field].is_number_integer()) return std::string(field) + " 必须为整数。";
     if (params.contains("msg_id") && params.contains("event_id")) return "msg_id 与 event_id 不能同时提供。";
     if ((action == "qq_set_blacklist" || action == "qq_remove_members") && !params.contains("memberOpenIds")) return "memberOpenIds 必填。";
