@@ -10,6 +10,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <atomic>
 #include <thread>
 
@@ -226,4 +227,36 @@ TEST(BundledDecks, NeutralImageCodesAreNotRolledAsFailedDice) {
     ASSERT_EQ(rolls, 0);
     ASSERT_EQ(decks.expandText("[1d1]"), "0");
     ASSERT_EQ(rolls, 1);
+}
+
+// Reported with a user deck: 「赛赛DIY」 holds the cards and 「赛赛diy」 = {赛赛DIY} is
+// its alias. Folding names together made the alias overwrite the deck and refer to
+// itself, so both drew an empty card. Names are case-sensitive, as in Dice!.
+TEST(BundledDecks, DeckNamesDifferingOnlyInCaseStayDistinct) {
+    const auto root = fs::temp_directory_path() /
+        ("dicenext-deck-case-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code ec; fs::remove_all(path,ec); } } cleanup{root};
+    fs::create_directories(root);
+    {
+        std::ofstream out(root / "case.json", std::ios::binary);
+        out << R"({"赛赛DIY":["面包：{_面包}"],"赛赛diy":["{赛赛DIY}"],"_面包":["白面包"],)"
+               R"("随机赛赛":["{赛赛DIY}\n饮料：可乐"],"Alpha":["upper"],"alpha":["lower"]})";
+    }
+    dice::CardDeck decks;
+    ASSERT_EQ(decks.loadDir(root.string()), 6);
+    ASSERT_EQ(decks.drawFromDeck("赛赛DIY").value_or(""), std::string("面包：白面包"));
+    ASSERT_EQ(decks.drawFromDeck("赛赛diy").value_or(""), std::string("面包：白面包"));
+    ASSERT_EQ(decks.drawFromDeck("随机赛赛").value_or(""), std::string("面包：白面包\n饮料：可乐"));
+    ASSERT_EQ(decks.drawFromDeck("Alpha").value_or(""), std::string("upper"));
+    ASSERT_EQ(decks.drawFromDeck("alpha").value_or(""), std::string("lower"));
+    ASSERT_EQ(decks.expandText("{Alpha}/{alpha}"), std::string("upper/lower"));
+    // A name matching no deck exactly still finds one written in another case,
+    // always the byte-wise smallest variant.
+    ASSERT_TRUE(decks.has("ALPHA"));
+    ASSERT_EQ(decks.drawFromDeck("ALPHA").value_or(""), std::string("upper"));
+    ASSERT_EQ(decks.expandText("{ALPHA}"), std::string("upper"));
+    ASSERT_EQ(decks.getSourceFile("ALPHA"), std::string("case.json"));
+    const auto names = decks.deckNames();
+    ASSERT_TRUE(std::find(names.begin(), names.end(), "赛赛DIY") != names.end());
+    ASSERT_TRUE(std::find(names.begin(), names.end(), "赛赛diy") != names.end());
 }

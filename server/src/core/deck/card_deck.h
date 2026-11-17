@@ -26,6 +26,18 @@ class CardDeck {
     using Deck = std::vector<std::string>;
     using DeckMap = std::unordered_map<std::string, Deck>;
     using TempMap = std::unordered_map<std::string, Deck>;
+    // Deck names are case-sensitive, as in Dice! and SealDice: one file may hold
+    // both 「赛赛DIY」 and 「赛赛diy」. An exact name always wins; only a name that
+    // matches no deck exactly falls back to a case-insensitive match, so decks
+    // written with the wrong case keep working. Several case variants resolve
+    // to the byte-wise smallest name, independent of file load order.
+    struct Catalog {
+        DeckMap decks;
+        std::unordered_map<std::string, std::string> folded;  // lower(name) → name
+        void put(const std::string& name, Deck cards);
+        std::optional<std::string> key(const std::string& name) const;
+        const Deck* find(const std::string& name) const;
+    };
 public:
     CardDeck();
 
@@ -74,7 +86,7 @@ public:
     struct ReferenceContext {
         TempMap decks;
         safe_template::Budget budget;
-        std::shared_ptr<const DeckMap> catalog;
+        std::shared_ptr<const Catalog> catalog;
     };
     std::string expandReference(const std::string& token, ReferenceContext& context);
 
@@ -95,7 +107,7 @@ private:
 
     // Copy-on-write snapshots keep an entire render on one catalogue version,
     // without holding a deck mutex across host callbacks or template expansion.
-    std::shared_ptr<DeckMap> decks_ = std::make_shared<DeckMap>();
+    std::shared_ptr<Catalog> decks_ = std::make_shared<Catalog>();
     std::unordered_map<std::string, SourceInfo> sourceFiles_;  // deck name → source
     std::function<long long(const std::string&)> diceEval_;
     std::function<std::optional<std::string>(const std::string&)> helpLookup_;

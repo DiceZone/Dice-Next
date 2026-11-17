@@ -27,14 +27,32 @@ CardDeck::CardDeck() {
 // release decks/ directory, followed by user overrides from data/decks/.
 // Caller holds mutex_ (or single-thread construction). Reload re-seeds these.
 void CardDeck::seedBuiltins() {
-    (*decks_)[lower("数字")]     = {"0","1","2","3","4","5","6","7","8","9"};
-    (*decks_)[lower("大写字母")] = {"A","B","C","D","E","F","G","H","I","J","K","L","M",
-                                 "N","O","P","Q","R","S","T","U","V","W","X","Y","Z"};
-    (*decks_)[lower("小写字母")] = {"a","b","c","d","e","f","g","h","i","j","k","l","m",
-                                 "n","o","p","q","r","s","t","u","v","w","x","y","z"};
-    (*decks_)[lower("天干")]     = {"甲","乙","丙","丁","戊","己","庚","辛","壬","癸"};
-    (*decks_)[lower("地支")]     = {"子","丑","寅","卯","辰","巳","午","未","申","酉","戌","亥"};
-    (*decks_)[lower("八卦")]     = {"乾","坤","震","巽","坎","离","艮","兑"};
+    decks_->put("数字",     {"0","1","2","3","4","5","6","7","8","9"});
+    decks_->put("大写字母", {"A","B","C","D","E","F","G","H","I","J","K","L","M",
+                             "N","O","P","Q","R","S","T","U","V","W","X","Y","Z"});
+    decks_->put("小写字母", {"a","b","c","d","e","f","g","h","i","j","k","l","m",
+                             "n","o","p","q","r","s","t","u","v","w","x","y","z"});
+    decks_->put("天干",     {"甲","乙","丙","丁","戊","己","庚","辛","壬","癸"});
+    decks_->put("地支",     {"子","丑","寅","卯","辰","巳","午","未","申","酉","戌","亥"});
+    decks_->put("八卦",     {"乾","坤","震","巽","坎","离","艮","兑"});
+}
+
+void CardDeck::Catalog::put(const std::string& name, Deck cards) {
+    decks[name] = std::move(cards);
+    const auto [it, added] = folded.emplace(lower(name), name);
+    if (!added && name < it->second) it->second = name;
+}
+
+std::optional<std::string> CardDeck::Catalog::key(const std::string& name) const {
+    if (decks.count(name)) return name;
+    const auto it = folded.find(lower(name));
+    if (it == folded.end()) return std::nullopt;
+    return it->second;
+}
+
+const CardDeck::Deck* CardDeck::Catalog::find(const std::string& name) const {
+    const auto actual = key(name);
+    return actual ? &decks.at(*actual) : nullptr;
 }
 
 std::string CardDeck::lower(const std::string& s) {
@@ -45,8 +63,7 @@ std::string CardDeck::lower(const std::string& s) {
 }
 
 const CardDeck::Deck* CardDeck::find(const std::string& name) const {
-    auto it = decks_->find(lower(name));
-    return it != decks_->end() ? &it->second : nullptr;
+    return decks_->find(name);
 }
 
 bool CardDeck::has(const std::string& name) const {
@@ -62,14 +79,14 @@ std::optional<std::vector<std::string>> CardDeck::entries(const std::string& nam
 
 size_t CardDeck::deckCount() const {
     std::lock_guard<std::mutex> lk(mutex_);
-    return decks_->size();
+    return decks_->decks.size();
 }
 
 std::vector<std::string> CardDeck::deckNames() const {
     std::lock_guard<std::mutex> lk(mutex_);
     std::vector<std::string> names;
-    names.reserve(decks_->size());
-    for (const auto& [k, _] : *decks_) names.push_back(k);
+    names.reserve(decks_->decks.size());
+    for (const auto& [k, _] : decks_->decks) names.push_back(k);
     std::sort(names.begin(), names.end());
     return names;
 }
@@ -93,14 +110,14 @@ int CardDeck::loadDir(const std::string& dir) {
 
 void CardDeck::reload(const std::vector<std::string>& dirs) {
     std::lock_guard<std::mutex> lk(mutex_);
-    decks_ = std::make_shared<DeckMap>();
+    decks_ = std::make_shared<Catalog>();
     sourceFiles_.clear();
     seedBuiltins();                       // 重新铺内置牌堆
     for (const auto& d : dirs) loadDirLocked(d, isBundledDeckDir(d));
 }
 
 int CardDeck::loadDirLocked(const std::string& dir, bool bundled) {   // caller holds mutex_
-    if (decks_.use_count() != 1) decks_ = std::make_shared<DeckMap>(*decks_);
+    if (decks_.use_count() != 1) decks_ = std::make_shared<Catalog>(*decks_);
     std::string d = dir;
     if (!fs::exists(d) && fs::exists("../" + dir)) d = "../" + dir;
     if (!fs::exists(d)) {
@@ -128,9 +145,8 @@ int CardDeck::loadDirLocked(const std::string& dir, bool bundled) {   // caller 
                 for (const auto& c : it.value())
                     if (c.is_string()) cards.push_back(c.get<std::string>());
                 if (!cards.empty()) {
-                    auto key = lower(it.key());
-                    (*decks_)[key] = std::move(cards);
-                    sourceFiles_[key] = {u8name(entry.path().filename()), bundled};
+                    decks_->put(it.key(), std::move(cards));
+                    sourceFiles_[it.key()] = {u8name(entry.path().filename()), bundled};
                     ++count;
                 }
             }
@@ -144,22 +160,24 @@ int CardDeck::loadDirLocked(const std::string& dir, bool bundled) {   // caller 
 
 std::string CardDeck::getSourceFile(const std::string& name) const {
     std::lock_guard<std::mutex> lk(mutex_);
-    auto it = sourceFiles_.find(lower(name));
+    const auto key = decks_->key(name);
+    const auto it = key ? sourceFiles_.find(*key) : sourceFiles_.end();
     return (it != sourceFiles_.end()) ? it->second.filename : "";
 }
 
 std::optional<CardDeck::SourceInfo> CardDeck::getSourceInfo(const std::string& name) const {
     std::lock_guard<std::mutex> lk(mutex_);
-    auto it = sourceFiles_.find(lower(name));
+    const auto key = decks_->key(name);
+    const auto it = key ? sourceFiles_.find(*key) : sourceFiles_.end();
     if (it == sourceFiles_.end()) return std::nullopt;
     return it->second;
 }
 
 std::optional<std::string> CardDeck::drawFromDeck(const std::string& name) {
     ReferenceContext context; prepare(context);
-    const auto it = context.catalog->find(lower(name));
-    if (it == context.catalog->end()) return std::nullopt;
-    const auto text = drawShared(it->second, context, 0);
+    const auto* deck = context.catalog->find(name);
+    if (!deck) return std::nullopt;
+    const auto text = drawShared(*deck, context, 0);
     return safe_template::materialize(text, {}, context.budget);
 }
 
@@ -290,14 +308,14 @@ std::string CardDeck::expand(const std::string& expr, ReferenceContext& context,
     auto program = safe_template::compile(deckDiceSyntax(expr));
     const auto deckName = [](std::string name) {
         if (!name.empty() && name.front() == '%') name.erase(0, 1);
-        return lower(name);
+        return name;
     };
     const auto references = [&](auto&& self, std::vector<safe_template::Node>& nodes) -> void {
         for (auto& node : nodes) {
             if (node.kind != safe_template::Kind::literal && node.text.size() >= 2) {
                 const auto authored = node.text.substr(1, node.text.size() - 2);
                 // Keep existing decks named like variables/control macros usable.
-                if (context.catalog->contains(deckName(authored))) {
+                if (context.catalog->key(deckName(authored))) {
                     node.kind = safe_template::Kind::reference; node.field = authored; node.branches.clear();
                 } else if (node.kind == safe_template::Kind::reference) node.field = "text:" + node.field;
             }
@@ -315,10 +333,11 @@ std::string CardDeck::expand(const std::string& expr, ReferenceContext& context,
         }
         const bool back = !token.empty() && token.front() == '%';
         const auto name = back ? token.substr(1) : token;
-        if (const auto found = context.catalog->find(lower(name)); found != context.catalog->end()) {
-            if (back) return drawShared(found->second, context, nested);
-            auto& cards = context.decks[lower(name)];
-            if (cards.empty()) cards = found->second;
+        if (const auto key = context.catalog->key(name)) {
+            const auto& deck = context.catalog->decks.at(*key);
+            if (back) return drawShared(deck, context, nested);
+            auto& cards = context.decks[*key];
+            if (cards.empty()) cards = deck;
             return drawCard(cards, false, context, nested);
         }
         if (helpLookup_) if (const auto help = helpLookup_(name)) return expand(*help, context, nested);
