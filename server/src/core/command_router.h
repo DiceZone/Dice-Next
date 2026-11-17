@@ -6417,7 +6417,187 @@ public:
                 {"logs", std::to_string(logs)},
             });
         }
+        if (sub == "update" || sub.rfind("update ", 0) == 0 || sub.rfind("update\t", 0) == 0)
+            return handleSystemUpdate(loc, msg, trim(sub.substr(6)));
         return i18n_.tr(loc, "system.usage");
+    }
+
+    // ─── .system update —— 骰主在聊天里检查、安装更新 ─────────
+    //   .system update          检查有没有新版本
+    //   .system update install  下载并安装（安装时重启）
+    // 检查、下载、安装都由 UpdateService 的工作线程完成；这里只排队，然后用事件
+    // 循环定时器每秒看一次状态，有结果时回到发指令的窗口。不另开线程，进程退出时
+    // 事件循环停止，挂着的定时器随之作废。
+    struct UpdateWatch {
+        enum class Stage { check, download };
+        Message origin;
+        Locale loc;
+        AdapterPtr adapter;
+        bool install = false;
+        Stage stage = Stage::check;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    static bool updateBusyPhase(const std::string& phase) {
+        return phase == "checking" || phase == "connecting" || phase == "downloading" ||
+               phase == "verifying" || phase == "preparing" || phase == "installing" ||
+               phase == "cancelling";
+    }
+    std::string updatePhaseName(Locale loc, const std::string& phase) {
+        if (phase == "checking") return i18n_.tr(loc, "system.update_phase_checking");
+        if (phase == "installing") return i18n_.tr(loc, "system.update_phase_installing");
+        return i18n_.tr(loc, "system.update_phase_downloading");
+    }
+    static std::string updateVersionText(const nlohmann::json& version) {
+        if (!version.is_object()) return "";
+        std::string text = version.value("tag", std::string());
+        if (text.empty()) text = version.value("version", std::string());
+        const auto build = version.find("build");
+        if (build != version.end() && build->is_number_integer() && build->get<long long>() > 0)
+            text += " (build " + std::to_string(build->get<long long>()) + ")";
+        return text;
+    }
+    static std::string updateSizeText(const nlohmann::json& status) {
+        const auto& latest = status["latest"];
+        if (!latest.is_object() || !latest.contains("asset") || !latest["asset"].is_object()) return "?";
+        const auto size = latest["asset"].find("size");
+        if (size == latest["asset"].end() || !size->is_number()) return "?";
+        return fmtOneDecimal(size->get<double>() / (1024.0 * 1024.0));
+    }
+    // 不能自行安装的原因；空字符串表示可以安装。
+    std::string updateInstallBlocked(Locale loc, const nlohmann::json& status) {
+        if (status.value("selfUpdateBlockedReason", std::string()) == "container")
+            return i18n_.tr(loc, "system.update_container");
+        if (!status.value("installSupported", false))
+            return i18n_.tr(loc, "system.update_no_installer");
+        return "";
+    }
+    std::string updateAvailableText(Locale loc, const nlohmann::json& status) {
+        const std::string blocked = updateInstallBlocked(loc, status);
+        const auto& latest = status["latest"];
+        return i18n_.tr(loc, "system.update_available", {
+            {"latest", updateVersionText(latest)},
+            {"current", updateVersionText(status["current"])},
+            {"url", latest.is_object() ? latest.value("releaseUrl", std::string()) : std::string()},
+            {"hint", blocked.empty() ? i18n_.tr(loc, "system.update_install_hint") : blocked},
+        });
+    }
+
+    std::string handleSystemUpdate(Locale loc, const Message& msg, const std::string& arg) {
+        const bool install = arg == "install";
+        if (!arg.empty() && !install) return i18n_.tr(loc, "system.usage");
+        if (!updateControl) return i18n_.tr(loc, "system.update_unavailable");
+        const auto adapter = adapters_.getAdapter(msg.adapterId);
+        if (!adapter) return i18n_.tr(loc, "system.update_unavailable");
+
+        const nlohmann::json status = updateControl.status();
+        const std::string phase = status.value("phase", std::string());
+        if (updateWatching_.load() || updateBusyPhase(phase))
+            return i18n_.tr(loc, "system.update_busy",
+                {{"phase", updatePhaseName(loc, updateBusyPhase(phase) ? phase : "checking")}});
+        if (install)
+            if (auto blocked = updateInstallBlocked(loc, status); !blocked.empty()) return blocked;
+
+        auto watch = std::make_shared<UpdateWatch>();
+        watch->origin = msg;
+        watch->loc = loc;
+        watch->adapter = adapter;
+        watch->install = install;
+        std::string error;
+
+        // 安装包已下载好（网页上点过下载，或开启了自动下载）：直接安装。
+        const bool staged = status.value("pending", false) &&
+            (phase == "staged" || phase == "downloaded" || phase == "scheduled");
+        if (install && staged) {
+            updateWatching_ = true;
+            installUpdateSoon(watch);
+            std::string tag = updateVersionText(status["latest"]);
+            if (tag.empty()) tag = status.value("pendingTag", std::string());
+            return i18n_.tr(loc, "system.update_installing", {{"latest", tag}});
+        }
+        // 刚检查过、已知有新版本：省掉一次检查，直接下载。
+        if (install && status.value("updateAvailable", false) && status["latest"].is_object()) {
+            if (!updateControl.download(error))
+                return i18n_.tr(loc, "system.update_download_failed", {{"error", error}});
+            updateWatching_ = true;
+            watch->stage = UpdateWatch::Stage::download;
+            watch->deadline = std::chrono::steady_clock::now() + std::chrono::minutes(30);
+            watchUpdateLater(watch);
+            return i18n_.tr(loc, "system.update_downloading",
+                {{"latest", updateVersionText(status["latest"])}, {"size", updateSizeText(status)}});
+        }
+        if (!updateControl.check(error))
+            return i18n_.tr(loc, "system.update_check_failed", {{"error", error}});
+        updateWatching_ = true;
+        watch->deadline = std::chrono::steady_clock::now() + std::chrono::minutes(2);
+        watchUpdateLater(watch);
+        return i18n_.tr(loc, "system.update_checking");
+    }
+
+    void watchUpdateLater(std::shared_ptr<UpdateWatch> watch) {
+        drogon::app().getLoop()->runAfter(1.0, [this, watch] { stepUpdateWatch(watch); });
+    }
+    void updateWatchSend(const UpdateWatch& watch, const std::string& text) {
+        if (watch.adapter && watch.adapter->isConnected()) watch.adapter->sendReply(watch.origin, text);
+    }
+    void updateWatchSay(const UpdateWatch& watch, const std::string& key, const I18n::Args& args = {}) {
+        updateWatchSend(watch, i18n_.tr(watch.loc, key, args));
+    }
+    // 安装会重启进程：先让「正在安装」这条回复发出去，两秒后再排安装任务。
+    void installUpdateSoon(std::shared_ptr<UpdateWatch> watch) {
+        drogon::app().getLoop()->runAfter(2.0, [this, watch] {
+            std::string error;
+            if (!updateControl.install(error))
+                updateWatchSay(*watch, "system.update_install_failed", {{"error", error}});
+            updateWatching_ = false;
+        });
+    }
+    void stepUpdateWatch(const std::shared_ptr<UpdateWatch>& watch) {
+        const nlohmann::json status = updateControl.status();
+        const std::string phase = status.value("phase", std::string());
+        const std::string error = status.value("error", std::string());
+        const bool timedOut = std::chrono::steady_clock::now() > watch->deadline;
+        const auto finish = [&](const std::string& key, const I18n::Args& args = {}) {
+            updateWatchSay(*watch, key, args);
+            updateWatching_ = false;
+        };
+
+        if (watch->stage == UpdateWatch::Stage::check) {
+            if (phase == "checking") {
+                if (timedOut) return finish("system.update_timeout");
+                return watchUpdateLater(watch);
+            }
+            if (phase == "error") return finish("system.update_check_failed", {{"error", error}});
+            if (!status.value("updateAvailable", false) || !status["latest"].is_object())
+                return finish("system.update_latest", {{"current", updateVersionText(status["current"])}});
+            if (!watch->install || !updateInstallBlocked(watch->loc, status).empty()) {
+                updateWatchSend(*watch, updateAvailableText(watch->loc, status));
+                updateWatching_ = false;
+                return;
+            }
+            watch->stage = UpdateWatch::Stage::download;
+            watch->deadline = std::chrono::steady_clock::now() + std::chrono::minutes(30);
+            // 设成「自动下载」时，检查一结束更新服务就自己开始下载了。
+            if (!updateBusyPhase(phase)) {
+                std::string failed;
+                if (!updateControl.download(failed))
+                    return finish("system.update_download_failed", {{"error", failed}});
+            }
+            updateWatchSay(*watch, "system.update_downloading",
+                {{"latest", updateVersionText(status["latest"])}, {"size", updateSizeText(status)}});
+            return watchUpdateLater(watch);
+        }
+
+        // 下载阶段。设成「自动安装」时，下载完更新服务会自己排安装任务。
+        if (phase == "installing")
+            return finish("system.update_installing", {{"latest", updateVersionText(status["latest"])}});
+        if (updateBusyPhase(phase)) {
+            if (timedOut) return finish("system.update_timeout");
+            return watchUpdateLater(watch);
+        }
+        if (phase == "error" || phase == "cancelled" || !status.value("pending", false))
+            return finish("system.update_download_failed", {{"error", error.empty() ? phase : error}});
+        updateWatchSay(*watch, "system.update_installing", {{"latest", updateVersionText(status["latest"])}});
+        installUpdateSoon(watch);
     }
     /// 把秒数格式化为「Xd Yh Zm Ws」（去掉为 0 的高位）。
     static std::string fmtDuration(long long sec) {
@@ -11011,6 +11191,17 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     /// （main.cpp 接线到 cloudban_service）。参数：targetType("user"/"group")、id、reason。
     std::function<void(const std::string&, const std::string&, const std::string&)> onMasterBan;
 
+    /// 骰主 .system update 用的更新服务入口（main.cpp 接到 UpdateService）。
+    /// 未接线时该指令回报「不可用」。
+    struct UpdateControl {
+        std::function<nlohmann::json()> status;
+        std::function<bool(std::string&)> check;     // 强制检查
+        std::function<bool(std::string&)> download;
+        std::function<bool(std::string&)> install;   // 安装并重启
+        explicit operator bool() const { return status && check && download && install; }
+    };
+    UpdateControl updateControl;
+
     /// 云黑同步（cloudban_service）需要的本地黑名单操作转发（banlist* 本体在 private 区，
     /// 语义不变：自带去重/存在性判断）。
     bool cloudBanHas(int type, int list, const std::string& id) const { return banlistHas(type, list, id); }
@@ -13513,6 +13704,7 @@ private:
     CharacterCardStore& cards_;
     CardDeck& deck_;
     AdapterManager& adapters_;
+    std::atomic<bool> updateWatching_{false};   // 同一时间只跟踪一个 .system update
     cloud_cards::Service cloudCards_;
     identity_email::Service identityEmail_;
     struct IdentityBindPending {

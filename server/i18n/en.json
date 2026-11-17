@@ -1261,9 +1261,26 @@
     "failed": "Failed to save the template override."
   },
   "system": {
-    "usage": "System .system\n.system info // system information\n.system stats // runtime statistics",
+    "usage": "System .system\n.system info // system information\n.system stats // runtime statistics\n.system update // check for updates\n.system update install // download and install the update (restarts)",
     "unknown": "unknown",
     "info": "System info\nOS: {os}\nCPU: {cores} cores · {cpu}% used\nMemory: {memused}/{memtotal} MB ({memload}%)\nProcess memory: {proc} MB",
-    "stats": "Runtime stats\nUptime: {uptime}\nCommands since start: {cmds}\nFriends: {friends} · Groups: {groups}\nPlayers: {players} · Session logs: {logs}"
+    "stats": "Runtime stats\nUptime: {uptime}\nCommands since start: {cmds}\nFriends: {friends} · Groups: {groups}\nPlayers: {players} · Session logs: {logs}",
+    "update_unavailable": "Updates cannot be checked from chat right now. Use the About page in the web console.",
+    "update_busy": "An update task is already running: {phase}. Please try again later.",
+    "update_phase_checking": "checking for updates",
+    "update_phase_downloading": "downloading the update",
+    "update_phase_installing": "installing the update",
+    "update_checking": "Checking for updates. The result will be posted here.",
+    "update_latest": "Already up to date: {current}",
+    "update_available": "New version available: {latest}\nCurrent version: {current}\nRelease page: {url}\n{hint}",
+    "update_install_hint": "Send .system update install to download and install it; Dice!Next restarts during installation.",
+    "update_container": "Dice!Next is running in a container and cannot install updates itself. Update the container image instead.",
+    "update_no_installer": "Dice!Next was not started through dice-next.exe or start.sh, so it cannot install updates automatically. Update manually from the release page.",
+    "update_check_failed": "Update check failed: {error}",
+    "update_downloading": "Downloading {latest} ({size} MB). Dice!Next restarts and installs it once the download finishes.",
+    "update_download_failed": "Update download failed: {error}",
+    "update_installing": "Restarting to install {latest}. Dice!Next will be back shortly.",
+    "update_install_failed": "Could not start the installation: {error}",
+    "update_timeout": "The update task has not finished. Check its progress on the About page in the web console."
   }
 }

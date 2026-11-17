@@ -3917,6 +3917,13 @@ static int realMain(int argc, char* argv[]) {
                 ? dice::notice::kError : dice::notice::kImportant;
             dice::notice::notify(configMgr, adapterMgr, level, message, "", "", event);
         });
+    // 骰主 .system update：与网页「检测与自动更新」走同一个更新服务。
+    cmdRouter.updateControl = {
+        [&updateService] { return updateService.status(); },
+        [&updateService](std::string& error) { return updateService.requestCheck(true, error); },
+        [&updateService](std::string& error) { return updateService.requestDownload(error); },
+        [&updateService](std::string& error) { return updateService.requestInstall(error); },
+    };
 
     // ── Register real REST API endpoints ─────────────────────
     // 主动重启通过更新器协调：自动安装已开启且包已就绪时，不必等定时窗口。

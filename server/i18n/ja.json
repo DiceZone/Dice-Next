@@ -1262,9 +1262,26 @@
     "failed": "テンプレート上書きの保存に失敗しました。"
   },
   "system": {
-    "usage": "システム .system\n.system info // システム情報を表示\n.system stats // 稼働統計を表示",
+    "usage": "システム .system\n.system info // システム情報を表示\n.system stats // 稼働統計を表示\n.system update // 更新を確認\n.system update install // 更新をダウンロードしてインストール（インストール時に再起動）",
     "unknown": "不明",
     "info": "システム情報\nOS: {os}\nCPU: {cores} コア · 使用率 {cpu}%\nメモリ: {memused}/{memtotal} MB（{memload}%）\nプロセスメモリ: {proc} MB",
-    "stats": "稼働統計\n稼働時間: {uptime}\n起動後のコマンド数: {cmds}\n友達: {friends} · グループ: {groups}\nプレイヤー: {players} · セッション記録: {logs}"
+    "stats": "稼働統計\n稼働時間: {uptime}\n起動後のコマンド数: {cmds}\n友達: {friends} · グループ: {groups}\nプレイヤー: {players} · セッション記録: {logs}",
+    "update_unavailable": "現在チャットから更新を確認できません。Web 管理画面の「プロジェクトについて」ページで操作してください。",
+    "update_busy": "更新処理を実行中です：{phase}。しばらくしてから再度お試しください。",
+    "update_phase_checking": "更新の確認",
+    "update_phase_downloading": "更新パッケージのダウンロード",
+    "update_phase_installing": "更新のインストール",
+    "update_checking": "更新を確認しています。結果はここでお知らせします。",
+    "update_latest": "最新バージョンです：{current}",
+    "update_available": "新しいバージョンがあります：{latest}\n現在のバージョン：{current}\nリリースページ：{url}\n{hint}",
+    "update_install_hint": ".system update install を送信するとダウンロードしてインストールします。インストール時に再起動します。",
+    "update_container": "Dice!Next はコンテナ内で動作しているため、自身で更新をインストールできません。コンテナイメージを更新してください。",
+    "update_no_installer": "Dice!Next が dice-next.exe または start.sh から起動されていないため、更新を自動でインストールできません。リリースページから手動で更新してください。",
+    "update_check_failed": "更新の確認に失敗しました：{error}",
+    "update_downloading": "{latest}（{size} MB）のダウンロードを開始しました。完了後に再起動してインストールします。",
+    "update_download_failed": "更新のダウンロードに失敗しました：{error}",
+    "update_installing": "{latest} をインストールするため再起動します。まもなく復帰します。",
+    "update_install_failed": "インストールを開始できませんでした：{error}",
+    "update_timeout": "更新処理が長時間完了していません。Web 管理画面の「プロジェクトについて」ページで進捗を確認してください。"
   }
 }

@@ -1268,9 +1268,26 @@
     "failed": "模板覆盖保存失败。"
   },
   "system": {
-    "usage": "系统 .system\n.system info // 查看系统信息\n.system stats // 查看运行统计",
+    "usage": "系统 .system\n.system info // 查看系统信息\n.system stats // 查看运行统计\n.system update // 检查更新\n.system update install // 下载并安装更新（安装时重启）",
     "unknown": "未知",
     "info": "系统信息\nOS: {os}\nCPU: {cores} 核 · 占用 {cpu}%\n内存: {memused}/{memtotal} MB（{memload}%）\n本进程内存: {proc} MB",
-    "stats": "运行统计\n运行时长: {uptime}\n启动后指令数: {cmds}\n好友: {friends} · 群: {groups}\n玩家: {players} · 群记录: {logs}"
+    "stats": "运行统计\n运行时长: {uptime}\n启动后指令数: {cmds}\n好友: {friends} · 群: {groups}\n玩家: {players} · 群记录: {logs}",
+    "update_unavailable": "当前无法在聊天中检查更新，请在网页「关于项目」页面操作。",
+    "update_busy": "已有更新任务正在进行：{phase}。请稍后再试。",
+    "update_phase_checking": "检查更新",
+    "update_phase_downloading": "下载更新包",
+    "update_phase_installing": "安装更新",
+    "update_checking": "正在检查更新，结果将在此回报。",
+    "update_latest": "已是最新版本：{current}",
+    "update_available": "发现新版本：{latest}\n当前版本：{current}\n发布页：{url}\n{hint}",
+    "update_install_hint": "发送 .system update install 下载并安装，安装时将重启。",
+    "update_container": "Dice!Next 运行在容器中，无法自行安装更新，请更新容器镜像。",
+    "update_no_installer": "Dice!Next 未通过 dice-next.exe 或 start.sh 启动，无法自动安装更新，请前往发布页手动更新。",
+    "update_check_failed": "检查更新失败：{error}",
+    "update_downloading": "开始下载 {latest}（{size} MB），下载完成后将重启并安装。",
+    "update_download_failed": "下载更新失败：{error}",
+    "update_installing": "正在重启并安装 {latest}，稍后恢复。",
+    "update_install_failed": "无法开始安装更新：{error}",
+    "update_timeout": "更新任务长时间未完成，请在网页「关于项目」页面查看进度。"
   }
 }
