@@ -270,6 +270,8 @@ public:
     void setLegacyMessageStage(LegacyMessageStageFn fn) { legacyMessageStage_ = std::move(fn); }
     using LegacyLogEndFn = std::function<bool(const Message&, int)>;
     void setLegacyLogEndHook(LegacyLogEndFn fn) { legacyLogEndHook_ = std::move(fn); }
+    inline static thread_local bool snAcknowledgment_ = false;
+    bool lastReplyIsSnAcknowledgment() const { return snAcknowledgment_; }
     inline static thread_local std::shared_ptr<const qq_rich::Card> officialCard_;
     std::shared_ptr<const qq_rich::Card> lastOfficialCard() const { return officialCard_; }
     /// Official QQ has no group-card API. After .sn, later replies carry that
@@ -317,6 +319,7 @@ public:
         forwardNodes_.clear();    // reset per-message 合并转发节点 (#6)
         s_replyCat.clear();       // 每条消息重置回复类别
         officialCard_.reset();
+        snAcknowledgment_ = false;
         const auto preservedPersona = shortcutNextPersona_; shortcutNextPersona_.reset();
         const int messagePersona = preservedPersona ? *preservedPersona :
             personaMgr_ ? activePersonaFor(msg, true) : i18n_.getActivePersonaId();
@@ -9715,19 +9718,42 @@ private:
 
     /// The group's configured .sn attribute tokens (e.g. {"hp","san","dex"}),
     /// or the default if none set.
-    std::vector<std::string> snAttrs(const Message& msg) const {
-        std::string v = getGroupSetting(msg, "snAttrs");
+    static std::vector<std::string> snTokens(const std::string& v) {
         std::vector<std::string> toks;
         std::istringstream iss(v.empty() ? std::string("hp san dex") : v);
         std::string t; while (iss >> t) toks.push_back(t);
         if (toks.empty()) toks = {"hp", "san", "dex"};
         return toks;
     }
+    std::vector<std::string> snAttrs(const Message& msg) const {
+        return snTokens(getGroupSetting(msg, "snAttrs"));
+    }
+
+    // Use the original display name when the platform echoes the last card we set.
+    Message snNameContext(const Message& msg) const {
+        Message context = msg;
+        const auto current = groupCardOf(msg);
+        if (!current.empty() && current == getUserSetting(msg, "snLastCard")) {
+            const auto base = getUserSetting(msg, "snBaseName");
+            context.extra["card"] = base;
+            if (context.senderName == current) context.senderName = base;
+        }
+        return context;
+    }
+    void sendSnCard(const Message& msg, const std::string& card) {
+        if (msg.platform == "qq_official") return;
+        if (auto ad = adapters_.getAdapter(msg.adapterId)) {
+            const auto base = resolveNickDisplay(snNameContext(msg));
+            ad->setGroupCard(msg.targetId, msg.senderId, card);
+            setUserSetting(msg, "snBaseName", base);
+            setUserSetting(msg, "snLastCard", card);
+        }
+    }
 
     /// Render the group card from an attribute-token list:
     ///   "<nick> hp10/10 san60/94 dex70"  (cur/max for hp/san/mp, plain otherwise)
     std::string renderSnAttrs(const Message& msg, const std::vector<std::string>& toks) {
-        std::string out = displayNameRaw(msg);   // 设群名片：用原始名，不加 <>
+        std::string out = displayNameRaw(snNameContext(msg));   // 设群名片：用原始名，不加 <>
         for (const auto& tok : toks) {
             auto v = cards_.getAttr(msg.senderId, cardScope(msg), tok);
             if (!v) v = evalStrAttr(msg, CharacterCardStore::canonical(tok));  // 关联属性求值
@@ -9746,7 +9772,7 @@ private:
                 size_t e = tmpl.find('}', i + 1);
                 if (e == std::string::npos) { out += tmpl[i++]; continue; }
                 std::string t = tmpl.substr(i + 1, e - i - 1);
-                if (t == "nick") out += resolveNickDisplay(msg);   // 名片模板：群名片/QQ昵称
+                if (t == "nick") out += resolveNickDisplay(snNameContext(msg));   // 名片模板：群名片/QQ昵称
                 else { auto v = cards_.getAttr(msg.senderId, cardScope(msg), t); out += v ? std::to_string(*v) : "0"; }
                 i = e + 1;
             } else out += tmpl[i++];
@@ -9781,13 +9807,13 @@ private:
     std::string renderCurrentSn(const Message& msg) {
         std::string tmpl = getUserSetting(msg, "snTemplate");
         if (!tmpl.empty()) return renderSn(msg, tmpl);
-        return renderSnAttrs(msg, snAttrs(msg));
+        const auto personal = getUserSetting(msg, "snPersonalAttrs");
+        return renderSnAttrs(msg, personal.empty() ? snAttrs(msg) : snTokens(personal));
     }
     // 把当前名片静默应用到群（不返回提示）。官方 QQ 没有这个接口。
     void applySnCard(const Message& msg) {
         if (msg.platform == "qq_official") return;
-        if (auto ad = adapters_.getAdapter(msg.adapterId))
-            ad->setGroupCard(msg.targetId, msg.senderId, renderCurrentSn(msg));
+        sendSnCard(msg, renderCurrentSn(msg));
     }
     void rememberOfficialSn(const Message& msg) {
         if (msg.platform == "qq_official") setUserSetting(msg, "snPinned", "1");
@@ -9829,9 +9855,11 @@ private:
 
     std::string handleSn(Locale loc, const std::string& args, const Message& msg) {
         if (msg.type == MessageType::kPrivate) return i18n_.tr(loc, "sn.group_only");
+        snAcknowledgment_ = true;
         std::string a = trim(args), la = toLower(a);
         if (la == "off" || la == "clr") {
             setUserSetting(msg, "snTemplate", "");
+            setUserSetting(msg, "snPersonalAttrs", "");
             setUserSetting(msg, "snAuto", "");   // 关名片也关自动同步
             setUserSetting(msg, "snPinned", "");
             if (msg.platform != "qq_official")
@@ -9854,18 +9882,14 @@ private:
                 ? (officialSnBannerStyle(msg) == "off" ? "sn.saved_official_hidden" : "sn.auto_on_official") : "sn.auto_on",
                 {{"card", card}});
         }
-        std::string card;
-        if (!a.empty() && a.find('{') != std::string::npos) {
-            // Explicit personal template with {placeholders}.
-            setUserSetting(msg, "snTemplate", a);
-            card = renderSn(msg, a);
-        } else {
-            // Default: render from the group's configured attribute list.
-            card = renderSnAttrs(msg, snAttrs(msg));
+        if (!a.empty()) {
+            const bool isTemplate = a.find('{') != std::string::npos;
+            setUserSetting(msg, "snTemplate", isTemplate ? a : "");
+            setUserSetting(msg, "snPersonalAttrs", isTemplate ? "" : a);
         }
+        const std::string card = renderCurrentSn(msg);
         rememberOfficialSn(msg);
-        if (msg.platform != "qq_official")
-            if (auto ad = adapters_.getAdapter(msg.adapterId)) ad->setGroupCard(msg.targetId, msg.senderId, card);
+        sendSnCard(msg, card);
         return i18n_.tr(loc, msg.platform == "qq_official"
             ? (officialSnBannerStyle(msg) == "off" ? "sn.saved_official_hidden" : "sn.done_official") : "sn.done", {{"card", card}});
     }

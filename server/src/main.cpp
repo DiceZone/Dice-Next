@@ -1755,6 +1755,7 @@ static int realMain(int argc, char* argv[]) {
         if (!reply.empty() && replySources.empty())
             replySources = {{cmdRouter.lastReplyCategory() == "plugin" ? "规则包指令" : "内置指令", msg.content.substr(0, msg.content.find_first_of(" \t")), "", ""}};
         const auto officialCard = cmdRouter.lastOfficialCard();
+        const bool snAcknowledgment = cmdRouter.lastReplyIsSnAcknowledgment();
         dice::ContentFormat replyFormat = dice::I18n::endOutboundCapture();
         bool didCommand = !reply.empty();
         dice::JsPluginManager::Result commandHook;
@@ -1837,7 +1838,7 @@ static int realMain(int argc, char* argv[]) {
         // AI 网关是同步 curl（最长 30s），此前润色/翻译/对话都直接跑在适配器消息线程
         // 上，一次超时全部指令失效 30 秒。需要 AI 后处理的回复把这一整段投给
         // aiwork::Worker 后台执行；不需要 AI 时原地执行，行为与旧版完全一致。
-        auto finishReply = [&adapterMgr, &cmdRouter, &configMgr, &db, &jsMod, officialCard,
+        auto finishReply = [&adapterMgr, &cmdRouter, &configMgr, &db, &jsMod, officialCard, snAcknowledgment,
                             forcePlainText, preferredReplyFormat, replyStyle, replySources, processingPartial,
                             processingTrigger = dice::activeProcessingContext.trigger](
             const dice::Message& msg, std::string reply, std::string broadcast,
@@ -1897,7 +1898,7 @@ static int realMain(int argc, char* argv[]) {
             }
             if (reply.empty() && broadcast.empty()) return;
             // 官方 QQ 不能改群名片。.sn 的内容改放到回复第一行；转发与聊天窗看到的是同一段文字。
-            const std::string snBanner = reply.empty() ? std::string() : cmdRouter.officialSnBanner(msg);
+            const std::string snBanner = reply.empty() || snAcknowledgment ? std::string() : cmdRouter.officialSnBanner(msg);
             const std::string visibleReply = snBanner.empty() ? reply : snBanner + "\n" + reply;
             // .link：骰娘回复按最终文本转发到链接目标。
             if (linkReplyOk && !reply.empty()
@@ -3057,11 +3058,13 @@ static int realMain(int argc, char* argv[]) {
             if (cmdRouter.conversationPlainText(pm)) preferred = dice::ContentFormat::kPlainText;
             dice::I18n::beginOutboundCapture(preferred, style);
             std::string reply;
+            bool snAcknowledgment = false;
             if (pick.rule) {
                 const auto command = definition.value("command", std::string());
                 if (!command.empty()) {
                     pm.content = command; pm.rawContent = command; pm.displayContent = command;
                     reply = cmdRouter.handleMessage(pm);
+                    snAcknowledgment = cmdRouter.lastReplyIsSnAcknowledgment();
                     if (reply.empty()) { std::string source; reply = replyFallback(pm, source); }
                 } else {
                     auto text = replyManager.pickResult(*pick.rule);
@@ -3083,7 +3086,7 @@ static int realMain(int argc, char* argv[]) {
             reply = std::move(expanded.text);
             if (expanded.usedMarkdown) format = dice::ContentFormat::kMarkdown;
             pm.presentationActions = std::move(expanded.actions);
-            pm.snBanner = cmdRouter.officialSnBanner(pm);
+            if (!snAcknowledgment) pm.snBanner = cmdRouter.officialSnBanner(pm);
             if (!pm.snBanner.empty()) {
                 pm.snBannerStyle = cmdRouter.officialSnBannerStyle(pm);
                 pm.snBannerTemplate = cmdRouter.officialSnBannerTemplate(pm);

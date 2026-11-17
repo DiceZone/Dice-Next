@@ -121,7 +121,7 @@ struct LegacyFixture {
     }
 };
 
-class BindingAdapter final : public IAdapter {
+class BindingAdapter : public IAdapter {
 public:
     std::mutex mu; std::condition_variable cv; bool replied = false;
     std::string id() const override { return "log-test"; }
@@ -1353,6 +1353,65 @@ TEST(LegacyCommands, OfficialQQPinsSnCardAboveLaterReplies) {
     ASSERT_TRUE(f.run(".sn").find("hp12") != std::string::npos);
     f.msg.platform = "qq_official";
     ASSERT_TRUE(f.router.officialSnBanner(f.msg).empty());
+}
+
+TEST(LegacyCommands, SnRendersThePlayersSelectedAttributesOnBothPlatforms) {
+    for (const char* platform : {"qq_official", "onebot_v11"}) {
+        LegacyFixture f;
+        ASSERT_TRUE(f.i18n.load());
+        f.msg.platform = platform;
+        const auto blank = f.run(".sn hp sp san");
+        ASSERT_TRUE(blank.find("玩家") != std::string::npos);
+        ASSERT_TRUE(blank.find("99/99") == std::string::npos);
+        ASSERT_TRUE(f.router.lastReplyIsSnAcknowledgment());
+        f.cards.setAttr(f.msg.senderId, f.msg.targetId, "hp", 9);
+        f.cards.setAttr(f.msg.senderId, f.msg.targetId, "sp", 1);
+        f.cards.setAttr(f.msg.senderId, f.msg.targetId, "mp", 0);
+        f.cards.setAttr(f.msg.senderId, f.msg.targetId, "san", 50);
+        auto first = f.run(".sn");
+        ASSERT_TRUE(first.find("sp1") != std::string::npos);
+        ASSERT_TRUE(first.find("mp0") == std::string::npos);
+        auto second = f.run(".sn mp hp san");
+        ASSERT_TRUE(second.find("mp0") < second.find("hp9"));
+        ASSERT_TRUE(second.find("san50") != std::string::npos);
+        ASSERT_TRUE(second.find("sp1") == std::string::npos);
+        ASSERT_EQ(second, f.run(".sn"));
+        f.run(".r 1d1");
+        ASSERT_FALSE(f.router.lastReplyIsSnAcknowledgment());
+        if (f.msg.platform == "qq_official") {
+            auto banner = f.router.officialSnBanner(f.msg);
+            ASSERT_FALSE(banner.empty());
+            ASSERT_TRUE(second.find(banner) != std::string::npos);
+        }
+        f.run(".sn {nick}:{hp}");
+        ASSERT_TRUE(f.run(".sn").find("玩家:9") != std::string::npos);
+        f.run(".sn off");
+        ASSERT_TRUE(f.run(".sn").find("mp0") == std::string::npos);
+    }
+}
+
+TEST(LegacyCommands, SnDoesNotAppendAnEchoedOneBotCardToItself) {
+    class CardAdapter final : public BindingAdapter {
+    public:
+        std::string card;
+        std::string platform() const override { return "onebot_v11"; }
+        void setGroupCard(const std::string&, const std::string&, const std::string& value) override { card = value; }
+    };
+    LegacyFixture f;
+    auto adapter = std::make_shared<CardAdapter>();
+    f.adapters.registerAdapter(adapter);
+    f.msg.extra["card"] = "笑嘻嘻";
+    f.cards.setAttr(f.msg.senderId, f.msg.targetId, "san", 99);
+    f.run(".sn san");
+    ASSERT_TRUE(adapter->card.find("笑嘻嘻 san99") == 0);
+    f.msg.extra["card"] = adapter->card;
+    f.cards.setAttr(f.msg.senderId, f.msg.targetId, "hp", 9);
+    f.run(".sn hp");
+    ASSERT_TRUE(adapter->card.find("笑嘻嘻 hp9") == 0);
+    ASSERT_TRUE(adapter->card.find("san") == std::string::npos);
+    f.msg.extra["card"] = "新名";
+    f.run(".sn");
+    ASSERT_TRUE(adapter->card.find("新名 hp9") == 0);
 }
 
 TEST(LegacyCommands, OfficialSnRespectsScopedSettingsAndRetainsPlayerOptIn) {
