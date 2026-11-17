@@ -250,6 +250,15 @@
         "fumble": ""
       }
     },
+    "outcome_detail": {
+      "sanity": "理智減少 {loss} → 剩餘 {final}",
+      "sanity_noloss": "無理智損失",
+      "growth": "{attr} 變化 {change} → {final}",
+      "growth_unchanged": "{attr} 無變化",
+      "psychology": "對象：{target}（本群 {gid}）\n{receipt}",
+      "opposed": "{la} {ra}/{va} {lva} · {lb} {rb}/{vb} {lvb}",
+      "resist": "{la}（{va}） vs {lb}（{vb}） · 目標 {target}%"
+    },
     "error": {
       "roll": "擲骰錯誤：{error}",
       "non_numeric": "擲骰表達式必須回傳數字。",

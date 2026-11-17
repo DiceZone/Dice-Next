@@ -342,6 +342,11 @@ struct Example {
 std::string familyFor(const std::string &key) {
     if (const auto *family = check_reply::familyForKey(key))
         return family->name;
+    // dice.outcome_detail.<family>[_variant]: the line appended to inherited standard text.
+    if (starts(key, "dice.outcome_detail.")) {
+        const auto rest = key.substr(std::string("dice.outcome_detail.").size());
+        return rest.substr(0, rest.find('_'));
+    }
     if (starts(key, "card.sc.") || starts(key, "dice.sc.") || starts(key, "dice.compat.sanity."))
         return "sanity";
     if (starts(key, "card.en.") || starts(key, "dice.compat.growth."))
@@ -442,8 +447,11 @@ PreviewContext templatePreviewContext(const json &request, const I18n *i18n) {
         if (sourceKey == "card.en.fail" || sourceKey == "card.en.fail_grow" ||
             sourceKey == "dice.compat.growth.unchanged" || sourceKey == "dice.compat.growth.failure")
             wanted = "failure";
-        if (sourceKey == "card.sc.result_noloss")
+        if (sourceKey == "card.sc.result_noloss" || sourceKey == "dice.outcome_detail.sanity_noloss" ||
+            sourceKey == "dice.outcome_detail.growth")
             wanted = "regular";
+        if (sourceKey == "dice.outcome_detail.sanity" || sourceKey == "dice.outcome_detail.growth_unchanged")
+            wanted = "failure";
         if (sourceKey == "dnd.ds.miracle")
             wanted = "critical";
         if (sourceKey == "dnd.ds.critfail")
@@ -471,7 +479,7 @@ PreviewContext templatePreviewContext(const json &request, const I18n *i18n) {
         if (family == "sanity") {
             a["attr"] = ex.word("理智", "SAN");
             const bool failed = c.grade == "failure" || c.grade == "fumble";
-            const bool noLoss = sourceKey == "card.sc.result_noloss";
+            const bool noLoss = sourceKey == "card.sc.result_noloss" || sourceKey == "dice.outcome_detail.sanity_noloss";
             const auto lossRoll = ex.roll(noLoss ? "0" : failed ? "1d6" : "1");
             const int loss = c.grade == "fumble" ? 6 : lossRoll.modifiedTotal;
             ex.number("san", 60);

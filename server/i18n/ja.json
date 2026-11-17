@@ -245,6 +245,15 @@
         "fumble": ""
       }
     },
+    "outcome_detail": {
+      "sanity": "SAN -{loss} → 残り {final}",
+      "sanity_noloss": "SAN減少なし",
+      "growth": "{attr} {change} → {final}",
+      "growth_unchanged": "{attr} は変化しません",
+      "psychology": "対象: {target}（グループ {gid}）\n{receipt}",
+      "opposed": "{la} {ra}/{va} {lva} · {lb} {rb}/{vb} {lvb}",
+      "resist": "{la}（{va}） vs {lb}（{vb}） · 目標 {target}%"
+    },
     "error": {
       "roll": "ロールエラー: {error}",
       "non_numeric": "ダイス式の結果は数値でなければなりません。",

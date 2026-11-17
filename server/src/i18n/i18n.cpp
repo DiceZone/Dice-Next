@@ -390,10 +390,13 @@ std::string I18n::tr(Locale loc, const std::string& key, const Args& args) const
 }
 
 std::optional<std::string> I18n::trCandidates(Locale loc, const std::vector<std::string>& keys,
-                                           const Args& args) const {
+                                           const Args& args, size_t* matched) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& key : keys)
-        if (const auto* value = findTemplate(loc, key, true)) return renderTemplate(*value, args, this, loc);
+    for (size_t i = 0; i < keys.size(); ++i)
+        if (const auto* value = findTemplate(loc, keys[i], true)) {
+            if (matched) *matched = i;
+            return renderTemplate(*value, args, this, loc);
+        }
     return std::nullopt;
 }
 

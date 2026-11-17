@@ -251,6 +251,15 @@
         "fumble": ""
       }
     },
+    "outcome_detail": {
+      "sanity": "理智减少 {loss} → 剩余 {final}",
+      "sanity_noloss": "无理智损失",
+      "growth": "{attr} 变化 {change} → {final}",
+      "growth_unchanged": "{attr} 无变化",
+      "psychology": "对象：{target}（本群 {gid}）\n{receipt}",
+      "opposed": "{la} {ra}/{va} {lva} · {lb} {rb}/{vb} {lvb}",
+      "resist": "{la}（{va}） vs {lb}（{vb}） · 目标 {target}%"
+    },
     "error": {
       "roll": "掷骰错误：{error}",
       "non_numeric": "掷骰表达式必须返回数字。",

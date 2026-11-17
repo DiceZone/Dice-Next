@@ -312,6 +312,49 @@ TEST(OutcomeReplies, HiddenPsychologyAndHiddenChecksNeverExposeGradeToGroup) {
     ASSERT_EQ(adapter->sent[1].content, "standard:regular");
 }
 
+// A user's report: the standard failure text was customised, .sc used it and the
+// reply no longer said how much SAN was lost. The standard text cannot know a
+// family's own results, so a family that falls back to it gets its detail line.
+TEST(OutcomeReplies, InheritedStandardTextKeepsTheFamilysOwnResults) {
+    OutcomeFixture f;
+    f.family("standard");
+    f.set("dice.outcome_detail.sanity", "SAN|{loss}|{final}");
+    f.set("dice.outcome_detail.sanity_noloss", "NOLOSS|{final}");
+    for (int i = 0; i < 12; ++i) {
+        f.cards.setAttr(f.msg.senderId, f.msg.targetId, "理智", 60);
+        const auto lines = split(f.run(".sc 0/1"), '\n');
+        ASSERT_EQ(lines.size(), size_t(2));
+        ASSERT_TRUE(lines[0].starts_with("standard:"));
+        const int left = f.cards.getAttr(f.msg.senderId, f.msg.targetId, "理智").value_or(-1);
+        ASSERT_EQ(lines[1], left == 60 ? "NOLOSS|60" : "SAN|1|59");
+    }
+    f.set("dice.outcome_detail.growth", "GROW|{attr}|{final}");
+    f.set("dice.outcome_detail.growth_unchanged", "SAME|{attr}");
+    for (int i = 0; i < 12; ++i) {
+        f.cards.setAttr(f.msg.senderId, f.msg.targetId, "侦查", 60);
+        const auto grow = split(f.run(".en 侦查 60"), '\n');
+        ASSERT_EQ(grow.size(), size_t(2));
+        const int now = f.cards.getAttr(f.msg.senderId, f.msg.targetId, "侦查").value_or(-1);
+        ASSERT_EQ(grow[1], now == 60 ? std::string("SAME|侦查") : "GROW|侦查|" + std::to_string(now));
+    }
+    f.set("dice.outcome_detail.opposed", "BOTH|{va}|{vb}");
+    ASSERT_EQ(split(f.run(".rav 60 70"), '\n').back(), "BOTH|60|70");
+    f.set("dice.outcome_detail.resist", "SIDES|{va}|{vb}");
+    ASSERT_EQ(f.run(".bav 10000 1"), "standard:regular\nSIDES|10000|1");
+
+    // The family's own text, or the original command text, needs nothing added.
+    f.family("sanity");
+    f.cards.setAttr(f.msg.senderId, f.msg.targetId, "理智", 60);
+    ASSERT_EQ(split(f.run(".sc 0/1"), '\n').size(), size_t(1));
+    for (const auto& grade : check_reply::families()[0].grades) f.i18n.clearOverride(Locale::kZhHans, check_reply::key("standard", grade));
+    f.set("dice.outcome_detail.resist", "SIDES");
+    ASSERT_EQ(f.run(".bav 10000 1").find("SIDES"), std::string::npos);
+    // A standard text muted on purpose stays silent.
+    const auto muted = weighted_templates::encode(json::array({{{"text", ""}, {"weight", 1}}}));
+    f.set(check_reply::key("standard", "regular"), muted);
+    ASSERT_EQ(f.run(".bav 10000 1"), "");
+}
+
 TEST(LegacyCheckText, DistinctSingleMultiLabelsAndPrefixOnlyOnce) {
     OutcomeFixture f; ASSERT_TRUE(f.i18n.load());
     f.set("dice.level.regular", "MULTI");

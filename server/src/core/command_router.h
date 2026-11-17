@@ -1340,9 +1340,25 @@ private:
         return args;
     }
 
+    // A family's own slot, else the standard one. The standard text cannot show
+    // the family's results (SAN lost, new skill value, the other side), so when
+    // it is the one used, the family's detail line is appended. A reply muted on
+    // purpose (empty) stays empty.
+    std::optional<std::string> outcomeCandidates(Locale loc, const std::string& family, const std::string& grade,
+                                                 const I18n::Args& args, const std::string& detailVariant = {}) {
+        size_t matched = 0;
+        auto reply = i18n_.trCandidates(loc, check_reply::candidates(family, grade), args, &matched);
+        if (!reply || matched == 0 || reply->empty()) return reply;
+        const auto key = check_reply::detailKey(family, detailVariant);
+        if (key.empty()) return reply;
+        const auto detail = i18n_.tr(loc, key, args);
+        if (!detail.empty() && detail != key) *reply += "\n" + detail;
+        return reply;
+    }
+
     std::string outcomeReply(Locale loc, const std::string& family, const std::string& grade,
                              const std::string& legacyKey, const I18n::Args& args) {
-        if (auto reply = i18n_.trCandidates(loc, check_reply::candidates(family, grade), args)) return *reply;
+        if (auto reply = outcomeCandidates(loc, family, grade, args)) return *reply;
         return i18n_.tr(loc, legacyKey, args);
     }
 
@@ -4676,7 +4692,7 @@ private:
         args.insert({{"san", std::to_string(san)},
             {"loss", std::to_string(loss)}, {"final", std::to_string(finalSan)}});
         I18n::putFragment(args, "grade", i18n_.trFragment(loc, gradeKey));
-        if (auto reply = i18n_.trCandidates(loc, check_reply::candidates("sanity", replyGrade(lv)), args)) return *reply;
+        if (auto reply = outcomeCandidates(loc, "sanity", replyGrade(lv), args, loss == 0 ? "noloss" : "")) return *reply;
         const std::string nativeKey = loss == 0 ? "card.sc.result_noloss" : "card.sc.result";
         if (!i18n_.hasConfigured(loc, nativeKey) && i18n_.hasConfigured(loc, "dice.compat.sanity.result")) {
             auto legacyArgs = args;
@@ -13353,7 +13369,8 @@ private:
         auto expression = success ? parsed.success : parsed.failure;
         if (success && coc7rRule(msg, "take5") && coc7r::isSkill(attr) && !parsed.explicitGrowth) expression = "+5";
         auto renderGrowth = [&](const std::string& nativeKey, const std::string& compatibilityKey) {
-            if (auto reply = i18n_.trCandidates(loc, check_reply::candidates("growth", success ? "regular" : "failure"), args)) return *reply;
+            if (auto reply = outcomeCandidates(loc, "growth", success ? "regular" : "failure", args,
+                    args["change"].empty() ? "unchanged" : "")) return *reply;
             if (!i18n_.hasConfigured(loc, nativeKey) && (i18n_.hasConfigured(loc, "dice.compat.growth.base") ||
                 i18n_.hasConfigured(loc, compatibilityKey))) {
                 auto legacyArgs = args; legacyArgs["res"] += " " + I18n::fragmentPlainText(args, "level");

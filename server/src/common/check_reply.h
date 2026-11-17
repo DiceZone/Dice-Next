@@ -55,6 +55,24 @@ inline std::vector<std::string> candidates(const std::string& family, const std:
     return keys;
 }
 
+// A family that falls back to the standard slot gets this line appended. The
+// standard text cannot carry the family's own results (SAN lost, the new skill
+// value, the other side of a contest), so inheriting it would hide them.
+// Variants: sanity_noloss when nothing was lost, growth_unchanged when no growth
+// applied. Empty for families whose standard text already shows everything.
+inline std::string detailKey(const std::string& family, const std::string& variant = {}) {
+    for (const char* name : {"sanity", "growth", "psychology", "opposed", "resist"})
+        if (family == name) return "dice.outcome_detail." + (variant.empty() ? family : family + "_" + variant);
+    return {};
+}
+
+// The detail line the editor previews for a slot (its usual case).
+inline std::string representativeDetailKey(const std::string& family, const std::string& grade) {
+    if (family == "sanity" && grade != "failure" && grade != "fumble") return detailKey(family, "noloss");
+    if (family == "growth" && grade == "failure") return detailKey(family, "unchanged");
+    return detailKey(family);
+}
+
 inline std::vector<std::string> fallbackKeys(const std::string& textKey) {
     const auto* family = familyForKey(textKey);
     if (!family) return {};

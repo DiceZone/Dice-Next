@@ -68,9 +68,10 @@ public:
 
     /// Render the first nonempty optional template before weighted/sample
     /// selection. Missing branches return nullopt for command-specific fallback.
+    /// @p matched receives the index of the key that was rendered.
     std::optional<std::string> trCandidates(Locale loc,
                    const std::vector<std::string>& keys,
-                   const Args& args = {}) const;
+                   const Args& args = {}, size_t* matched = nullptr) const;
 
     /// An explicitly configured persona/global entry, including intentional
     /// empty text. No built-in/style or cross-language fallback is considered.

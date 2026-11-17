@@ -127,7 +127,9 @@ inline J outcomeTextMetadata(const I18n& i18n, Locale loc, const std::string& ke
     J metadata{{"vars", vars}, {"legacyReferences", references}};
     if (compatibility) metadata["legacyCompatibility"] = true;
     else { metadata["outcome"] = {{"family", family->name}, {"grade", check_reply::gradeForKey(key)}};
-        metadata["fallbackKeys"] = check_reply::fallbackKeys(key); }
+        metadata["fallbackKeys"] = check_reply::fallbackKeys(key);
+        const auto detail = check_reply::representativeDetailKey(family->name, check_reply::gradeForKey(key));
+        if (!detail.empty()) metadata["inheritedDetailKey"] = detail; }
     return metadata;
 }
 using CB = std::function<void(const drogon::HttpResponsePtr&)>;

@@ -244,6 +244,15 @@
         "fumble": ""
       }
     },
+    "outcome_detail": {
+      "sanity": "San -{loss} → {final} left",
+      "sanity_noloss": "No San loss",
+      "growth": "{attr} {change} → {final}",
+      "growth_unchanged": "{attr} unchanged",
+      "psychology": "Target: {target} (group {gid})\n{receipt}",
+      "opposed": "{la} {ra}/{va} {lva} · {lb} {rb}/{vb} {lvb}",
+      "resist": "{la} ({va}) vs {lb} ({vb}) · Target {target}%"
+    },
     "error": {
       "roll": "Roll error: {error}",
       "non_numeric": "The roll expression must return a number.",
