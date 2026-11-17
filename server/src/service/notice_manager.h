@@ -27,6 +27,7 @@
 #include <functional>
 #include <algorithm>
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <cstdlib>
@@ -50,8 +51,50 @@ inline const std::vector<std::pair<std::string, int>>& eventCatalog() {
 // 某区域掩码覆盖的全部事件（指令 .notice level N 的展开）。
 inline std::vector<std::string> eventsForMask(int mask) {
     std::vector<std::string> v;
-    for (auto& [op, area] : eventCatalog()) if (area & mask) v.push_back(op);
+    for (auto& [op, area] : eventCatalog()) if ((area & mask) && !notice_rules::optInOnly(op)) v.push_back(op);
     return v;
+}
+
+// 同一个故障只在开始时通知一次，之后持续发生也不再重复推送：
+//   · 距上次出现已超过 resolvedAfter 秒 → 视为已恢复，再出现时当作新故障立即通知；
+//   · 一直没恢复 → 每 24 小时提醒一次，并附上期间另出现的次数。
+// 原版 Dice! 的内存／CPU／硬盘警告也是只在越过阈值与恢复时各通知一次。
+class FaultGate {
+  public:
+    struct Decision { bool send = false; size_t suppressed = 0; };
+    static constexpr long long kRemindEvery = 24 * 60 * 60;
+    Decision admit(const std::string& key, long long now, long long resolvedAfter) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = entries_.find(key);
+        if (found == entries_.end() || now < found->second.lastSeen || now - found->second.lastSeen >= resolvedAfter) {
+            if (found == entries_.end() && entries_.size() >= 256) {
+                auto oldest = std::min_element(entries_.begin(), entries_.end(),
+                    [](const auto& a, const auto& b) { return a.second.lastSeen < b.second.lastSeen; });
+                entries_.erase(oldest);
+            }
+            entries_[key] = {now, now, 0};
+            return {true, 0};
+        }
+        auto& e = found->second;
+        e.lastSeen = now;
+        if (now - e.lastSent >= kRemindEvery) {
+            Decision d{true, e.suppressed};
+            e.lastSent = now; e.suppressed = 0;
+            return d;
+        }
+        ++e.suppressed;
+        return {false, 0};
+    }
+  private:
+    struct Entry { long long lastSent, lastSeen; size_t suppressed; };
+    std::mutex mutex_;
+    std::map<std::string, Entry> entries_;
+};
+inline FaultGate& faultGate() { static FaultGate gate; return gate; }
+// 平台或插件的运行错误：一小时没再出现算恢复。更新检查失败按检查周期（默认 6 小时）
+// 才会再出现，所以只按 24 小时提醒；退群失败同理。
+inline long long faultResolvedAfter(const std::string& op) {
+    return op == "error" ? 60 * 60 : 7 * 24 * 60 * 60;
 }
 inline int areaOf(const std::string& op) {
     for (auto& [o, area] : eventCatalog()) if (o == op) return area;
@@ -255,13 +298,23 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
     const auto fromAdapter = originAdapterId.empty() ? processing.origin.adapterId : originAdapterId;
     const auto fromChat = originChat.empty() ? (!processing.origin.groupId.empty() ? processing.origin.groupId : processing.origin.userId) : originChat;
     const auto title = displayTitle.empty() ? eventTitle(op) : readable(displayTitle, 120);
-    const auto content = notificationText(level, op, msg, processing,
+    auto content = notificationText(level, op, msg, processing,
         utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%d %H:%M:%S"), title);
+    // 更新失败／退群失败：同一原因只在开始时推送，持续存在时每天提醒一次。
+    // 运行错误在 ErrorNotifySink 里按更细的键合并，这里不再重复处理。
+    bool deliver = true;
+    if (ruleId.empty() && !ruleIds && !destination && (op == "update_error" || op == "leave_error")) {
+        const auto d = faultGate().admit(json::array({op, fromAdapter, msg}).dump(-1, ' ', false, json::error_handler_t::replace),
+                                         (long long)std::time(nullptr), faultResolvedAfter(op));
+        deliver = d.send;
+        if (d.send && d.suppressed) content += "\n（过去 24 小时内相同问题另出现 " + std::to_string(d.suppressed) + " 次）";
+    }
     ProcessingScope source(ProcessingContext{
         {{"通知", title, "", ""}}, processing.trigger, "通知内容已生成", processing.origin});
     OutboundScope independentNotification(nullptr);
     std::string origin = fromChat.empty() ? std::string() : (fromPlatform + ":" + fromChat);
     audit(level, content, op, origin);
+    if (!deliver) return;
     json c = conf(cfg);
     std::set<std::string> delivered;
     for (const auto &rule : notice_rules::all(c)) {
@@ -437,7 +490,8 @@ inline bool requestGroupLeave(ConfigManager& cfg, AdapterManager& adapters, cons
 // ─── 运行报错推送 ──────────────────────────────────────────────────
 // spdlog 自定义 sink：捕获 ERROR 级日志 → 通知订阅了 kError 的窗口。
 // 防护：① 同步重入保护；② 从日志快照识别异步通知投递，禁止错误自循环；
-//       ③ 同一来源的同种错误 60 秒合并一次，不掩盖其他群/插件的新错误。
+//       ③ 同一个故障（同一插件／适配器的同一错误）只在开始时通知一次，见 FaultGate；
+//          不同群、不同用户触发的同一插件错误算同一个故障，不分别推送。
 // No mutex may be held across cb_: sending a notification can log another error.
 // The callback is immutable, throttling is atomic and reentry is thread-local.
 class ErrorNotifySink : public spdlog::sinks::base_sink<spdlog::details::null_mutex> {
@@ -486,24 +540,12 @@ class ErrorNotifySink : public spdlog::sinks::base_sink<spdlog::details::null_mu
                       .dump(-1, ' ', false, json::error_handler_t::replace)
                 : message.substr(0, 1200);
         const auto key = json::array({report.processing.label(), report.processing.origin.platform,
-                                      report.processing.origin.adapterId, report.processing.origin.groupId,
-                                      report.processing.origin.userId,
+                                      report.processing.origin.adapterId,
                                       report.record.value("module", std::string()), errorKey})
                              .dump(-1, ' ', false, json::error_handler_t::replace);
-        const auto now = clock_();
-        {
-            std::lock_guard<std::mutex> lock(throttleMutex_);
-            auto found = throttles_.find(key);
-            if (found != throttles_.end() && now >= found->second.at && now - found->second.at < 60) {
-                ++found->second.suppressed; return;
-            }
-            if (found != throttles_.end()) report.suppressed = found->second.suppressed;
-            if (throttles_.size() >= 128 && found == throttles_.end()) {
-                auto oldest = std::min_element(throttles_.begin(), throttles_.end(), [](const auto& a,const auto& b){return a.second.at < b.second.at;});
-                throttles_.erase(oldest);
-            }
-            throttles_[key] = {now, 0};
-        }
+        const auto decision = gate_.admit(key, clock_(), faultResolvedAfter("error"));
+        if (!decision.send) return;
+        report.suppressed = decision.suppressed;
         inNotify = true;
         try { cb_(report); }
         catch (...) { DICE_LOG_EXCEPTION("error notification delivery"); }
@@ -513,9 +555,7 @@ class ErrorNotifySink : public spdlog::sinks::base_sink<spdlog::details::null_mu
 private:
     Callback cb_;
     Clock clock_;
-    struct Throttle { long long at; size_t suppressed; };
-    std::mutex throttleMutex_;
-    std::map<std::string, Throttle> throttles_;
+    FaultGate gate_;
 };
 
 }  // namespace dice::notice

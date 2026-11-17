@@ -248,7 +248,7 @@ struct ErrorReport {
         if (!context.empty())
             text += "\n" + context;
         if (suppressed)
-            text += "（相同错误另出现 " + std::to_string(suppressed) + " 次，已合并）";
+            text += "（过去 24 小时内相同错误另出现 " + std::to_string(suppressed) + " 次，已合并）";
         return text;
     }
 };

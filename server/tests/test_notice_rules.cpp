@@ -41,6 +41,40 @@ TEST(NoticeRules, ImportedEmptyEventListsUseTheirMaskWithoutBeingRewritten) {
     ASSERT_TRUE(subscribed(rows[0], 8, "error"));
     ASSERT_EQ(before, old.dump());
 }
+TEST(NoticeRules, SeverityAndAllSubscriptionsFollowWhatOriginalDiceNotified) {
+    auto r = rule();
+    ASSERT_EQ(r["subscription"], Json("levels"));
+    ASSERT_EQ(r["level_mask"], 15);
+    for (const auto *op : {"trust", "friend_req", "group_invite", "group_left", "admin", "blacklist", "error"})
+        ASSERT_TRUE(subscribed(r, areaOf(op), op));
+    for (const auto *op : {"alias", "schedule", "group_request", "group_admin", "group_control"}) {
+        ASSERT_TRUE(optInOnly(op));
+        ASSERT_FALSE(subscribed(r, areaOf(op), op));
+        auto picked = r;
+        picked["subscription"] = "events";
+        picked["events"] = Json::array({op});
+        ASSERT_TRUE(subscribed(picked, areaOf(op), op));
+    }
+    for (const auto &op : dice::notice::eventsForMask(15)) ASSERT_FALSE(optInOnly(op));
+}
+TEST(NoticeRules, NoticeCommandExpansionsReadAsLevelsButHandPickedListsStay) {
+    auto window = [](int mask, Json events) {
+        return Json{{"windows", Json::array({{{"platform", "onebot_v11"}, {"chat_id", "1"}, {"is_group", true},
+                                               {"level_mask", mask}, {"events", events}}})}};
+    };
+    // What .notice level 2 stored before: every area-2 event of that build.
+    Json expanded = Json::array({"friend_req", "friend_add", "group_invite", "leave", "dismiss", "group_left",
+                                 "blacklist_leave", "nonfriend_leave", "keyword_leave", "schedule", "global"});
+    auto shown = all(window(2, expanded))[0];
+    ASSERT_EQ(shown["subscription"], Json("levels"));
+    ASSERT_FALSE(subscribed(shown, 2, "schedule"));
+    ASSERT_TRUE(subscribed(shown, 2, "group_joined"));
+    // A list someone trimmed by hand keeps exactly what they chose.
+    auto picked = all(window(2, Json::array({"friend_req", "schedule"})))[0];
+    ASSERT_EQ(picked["subscription"], Json("events"));
+    ASSERT_TRUE(subscribed(picked, 2, "schedule"));
+    ASSERT_FALSE(subscribed(picked, 2, "friend_add"));
+}
 TEST(NoticeRules, MasksFromOlderDiceKeepOnlyTheFourKnownAreas) {
     auto r = rule();
     r["level_mask"] = 31;
@@ -390,7 +424,7 @@ TEST(NoticeContent, OriginSurvivesNestedAndDeferredPluginScopesWithoutLeakingToN
     ASSERT_EQ(deferred.sources[0].name, std::string("求签"));
     ASSERT_TRUE(dice::activeProcessingOrigin.groupId.empty());
 }
-TEST(NoticeContent, DistinctPluginAndGroupErrorsAreNotGloballySilencedAndRepeatsAreCounted) {
+TEST(NoticeContent, OneFaultIsReportedOnceAcrossGroupsAndAgainOnlyAfterItRecovers) {
     long long now = 1000;
     std::vector<dice::notice::ErrorReport> reports;
     dice::notice::ErrorNotifySink sink([&](const auto &r) { reports.push_back(r); }, [&] { return now; });
@@ -403,25 +437,47 @@ TEST(NoticeContent, DistinctPluginAndGroupErrorsAreNotGloballySilencedAndRepeats
     sink.log(error);
     ASSERT_EQ(reports.size(), size_t(1));
     {
+        // The same plugin bug hit from another group is the same fault.
         auto context = dice::activeProcessingContext;
         context.origin.groupId = "200";
+        context.origin.userId = "300";
         dice::ProcessingScope second(context);
         sink.log(error);
     }
+    ASSERT_EQ(reports.size(), size_t(1));
     {
         dice::ProcessingScope other(dice::ProcessingSource{"JS 插件", "DailyNews", "news.js", "news"});
         sink.log(error);
     }
-    ASSERT_EQ(reports.size(), size_t(3));
-    now = 1061;
+    ASSERT_EQ(reports.size(), size_t(2));
+    // Still happening a few minutes later: no new notice.
+    now = 1000 + 30 * 60;
     sink.log(error);
-    ASSERT_EQ(reports.size(), size_t(4));
-    ASSERT_EQ(reports.back().suppressed, size_t(1));
+    ASSERT_EQ(reports.size(), size_t(2));
+    // Quiet for over an hour counts as recovered; a new occurrence is a new fault.
+    now += 61 * 60;
+    sink.log(error);
+    ASSERT_EQ(reports.size(), size_t(3));
+    ASSERT_EQ(reports.back().suppressed, size_t(0));
     {
         dice::ProcessingScope notification(dice::ProcessingSource{"通知", "错误通知", "", ""});
         sink.log(error);
     }
-    ASSERT_EQ(reports.size(), size_t(4));
+    ASSERT_EQ(reports.size(), size_t(3));
+}
+TEST(NoticeContent, AFaultThatNeverRecoversIsRemindedOncePerDayWithItsCount) {
+    dice::notice::FaultGate gate;
+    long long now = 0;
+    ASSERT_TRUE(gate.admit("k", now, 3600).send);
+    size_t silent = 0;
+    // Every ten minutes for just under a day.
+    for (now = 600; now < dice::notice::FaultGate::kRemindEvery; now += 600)
+        if (!gate.admit("k", now, 3600).send) ++silent;
+    const auto reminder = gate.admit("k", now, 3600);
+    ASSERT_TRUE(reminder.send);
+    ASSERT_EQ(reminder.suppressed, silent);
+    ASSERT_FALSE(gate.admit("k", now + 600, 3600).send);
+    ASSERT_TRUE(gate.admit("other", now + 600, 3600).send);
 }
 TEST(NoticeContent, ErrorSinkSnapshotsSanitizedStructuredRecordBeforeDeferredDelivery) {
     std::vector<dice::notice::ErrorReport> reports;

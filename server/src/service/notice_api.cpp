@@ -262,7 +262,7 @@ void registerNoticeRuleRoutes(Database &db, ConfigManager &cfg, AdapterManager &
             try {
                 Json accounts = Json::array(), events = Json::array();
                 for (const auto &[op, area] : notice_rules::catalog())
-                    events.push_back({{"op", op}, {"area", area}});
+                    events.push_back({{"op", op}, {"area", area}, {"default", !notice_rules::optInOnly(op)}});
                 for (const auto &a : cfg.getAll().value("adapters", Json::array())) {
                     const auto id =
                         a["id"].is_string() ? a["id"].get<std::string>() : std::to_string(a["id"].get<int>());

@@ -32,6 +32,34 @@ inline const std::vector<std::pair<std::string, int>> &catalog() {
         {"group_control", 2},   {"schedule_manage", 1}, {"notice_manage", 1}};
     return value;
 }
+// 原版 Dice! 不会推送的事件：只在「按具体事件」里手动勾选时才发送，
+// 「全部通知」「按通知级别」都不包含它们（原版通知窗口的级别订阅也没有这些）。
+inline bool optInOnly(const std::string &op) {
+    static const std::set<std::string> value{"alias", "schedule", "group_request", "group_admin",
+                                             "group_control"};
+    return value.count(op) > 0;
+}
+inline int areaOf(const std::string &op) {
+    for (const auto &[o, area] : catalog())
+        if (o == op) return area;
+    return 2;
+}
+// .notice 指令旧版会把级别展开成事件列表存下。只要列表覆盖了所选级别里
+// 最早一版就有的全部事件、且没有超出所选级别，就仍当作按级别订阅。
+inline bool commandExpansion(const Json &events, int mask) {
+    static const std::vector<std::string> original{
+        "trust", "alias", "friend_req", "friend_add", "group_invite", "leave", "dismiss", "group_left",
+        "blacklist_leave", "nonfriend_leave", "keyword_leave", "schedule", "global", "admin", "blacklist", "error"};
+    if (!events.is_array() || events.empty() || mask <= 0) return false;
+    std::set<std::string> have;
+    for (const auto &e : events) {
+        if (!e.is_string() || !(areaOf(e.get<std::string>()) & mask)) return false;
+        have.insert(e.get<std::string>());
+    }
+    for (const auto &op : original)
+        if ((areaOf(op) & mask) && !have.count(op)) return false;
+    return true;
+}
 inline bool clean(const std::string &s, size_t max = 1024) {
     return s.size() <= max &&
            std::none_of(s.begin(), s.end(), [](unsigned char c) { return c < 32 || c == 127; });
@@ -168,6 +196,8 @@ inline Json all(const Json &conf) {
         if (w.is_object() && !w.value("chat_id", std::string()).empty()) {
             const auto id = w.value("adapter_id", std::string());
             auto events = w.value("events", Json::array());
+            if (!w.contains("subscription") && commandExpansion(events, (std::max)(0, w.value("level_mask", 15)) & 15))
+                events = Json::array();
             out.push_back({{"id", legacyId(w)},
                            {"legacy", true},
                            {"name", w.value("name", std::string())},
@@ -231,7 +261,7 @@ inline bool subscribed(const Json &r, int level, const std::string &op) {
     const auto events = r.value("events", Json::array());
     const auto mode = r.value("subscription", events.empty() ? std::string("levels") : std::string("events"));
     return mode == "events" ? std::find(events.begin(), events.end(), Json(op)) != events.end()
-                            : (r.value("level_mask", 15) & level) != 0;
+                            : (r.value("level_mask", 15) & level) != 0 && !optInOnly(op);
 }
 inline bool sourceMatches(const Json &r, const std::string &platform, const std::string &adapter) {
     const auto s = r.value("source", Json::object());

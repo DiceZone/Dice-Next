@@ -1922,7 +1922,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                                {"from", std::string()}, {"to", std::string()}, {"level_mask", (int)dice::notice::kAll}};
             // 事件目录（op → 区域），前端据此渲染分区逐项勾选。
             J cat = J::array();
-            for (auto& [op, area] : dice::notice::eventCatalog()) cat.push_back(J{{"op", op}, {"area", area}});
+            for (auto& [op, area] : dice::notice::eventCatalog()) cat.push_back(J{{"op", op}, {"area", area}, {"default", !dice::notice_rules::optInOnly(op)}});
             nc["catalog"] = cat;
             jsonReply(ok(nc), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }

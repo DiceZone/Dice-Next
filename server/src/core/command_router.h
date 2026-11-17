@@ -7819,11 +7819,9 @@ public:
         else if (isAllDigits(act)) mask = parseIntOr(act, dice::notice::kAll);
         else return i18n_.tr(loc, "notice.usage");
         if (mask < 1) mask = 1; if (mask > (int)dice::notice::kAll) mask = dice::notice::kAll;
-        // 指令按区域订阅 = 勾选该区域全部具体事件（细粒度存储，网页可再逐项调整）。
-        J evs = J::array();
-        for (auto& op : dice::notice::eventsForMask(mask)) evs.push_back(op);
+        // 指令按级别订阅（同原版 .admin notice）：只含原版会推送的事件，网页可再改成逐项勾选。
         J w = {{"platform", plat}, {"adapter_id", msg.adapterId}, {"chat_id", chatId},
-               {"is_group", isGroup}, {"level_mask", mask}, {"events", evs}};
+               {"is_group", isGroup}, {"level_mask", mask}, {"events", J::array()}};
         if (idx >= 0) { if (wins[idx].contains("name")) w["name"] = wins[idx]["name"]; wins[idx] = w; }
         else wins.push_back(w);
         nc["windows"] = wins;dice::notice_rules::removeChat(nc,plat,msg.adapterId,chatId,isGroup);
