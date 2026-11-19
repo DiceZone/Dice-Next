@@ -42,6 +42,31 @@ TEST(TemplateSimulation, EveryBundledTextHasExampleDataInEveryLocale) {
     }
 }
 
+TEST(TemplateSimulation, VisualCardSheetMatchesTheSelectedOutput) {
+    auto &i18n = previewTranslations();
+    json request{{"simulation", example("card.show")}, {"text", "**{nick}**\n{detail}\nEND"},
+                 {"format", "markdown"}, {"style", "visual"}, {"platform", "qq_group"}};
+    const auto view = outbound::templatePreview(request, &i18n)["preview"];
+    ASSERT_TRUE(view["text"].get<std::string>().find("\\begin{array}{ll}") != std::string::npos);
+    ASSERT_TRUE(view["text"].get<std::string>().find("侦查") != std::string::npos);
+    ASSERT_TRUE(view["plain"].get<std::string>().find("---") == std::string::npos);
+    request["forcePlain"] = true;
+    ASSERT_TRUE(outbound::templatePreview(request, &i18n)["preview"]["text"].get<std::string>().find("---") == std::string::npos);
+}
+
+TEST(TemplateSimulation, QqTablesRespectEscapesFencesAndDowngradeWithoutDataLoss) {
+    auto table = std::string("| A | B |\n| --- | --- |\n| a\\|b | 60 |");
+    ASSERT_TRUE(qq_table::render(table, true).find(R"(\text{a|b} & 60)") != std::string::npos);
+    ASSERT_TRUE(qq_table::render(table, false).find("60") != std::string::npos);
+    ASSERT_TRUE(markdown::toPlainText("| A | B |\n| --- | --- |\n| 1 | 2 |").find("---") == std::string::npos);
+    const auto code = "~~~\n" + table + "\n~~~";
+    ASSERT_EQ(qq_table::render(code, true), code);
+    for (int i = 0; i < 20; ++i) table += "\n| Another | 10 |";
+    const auto longTable = qq_table::render(table, true);
+    ASSERT_TRUE(longTable.find("\\begin") == std::string::npos);
+    ASSERT_TRUE(longTable.ends_with("Another · 10"));
+}
+
 TEST(TemplateSimulation, SharedCocRulesPreserveTheExistingRuntimeBehavior) {
     // Golden fingerprint of the pre-extraction router implementation: every
     // D100 face, rates 0..150, and all eight house rules (120,800 decisions).

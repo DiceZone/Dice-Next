@@ -374,6 +374,7 @@
     "show": "{nick} のキャラクターシート:\n{detail}",
     "show_one": "{nick} の{attr}: {val}",
     "sheet": {
+      "value": "値",
       "abilities": "能力値",
       "vitals": "状態",
       "skills": "技能",

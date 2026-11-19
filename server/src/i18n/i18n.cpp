@@ -612,6 +612,9 @@ std::string I18n::renderTemplate(const TemplateValue& source, const Args& args, 
     // argument names here would interpolate escaped literals a second time.
     Args values;
     for (const auto& [key, computed] : budget.values) values[key] = computed;
+    // TeX is not Markdown. A customized **success** label must enter the
+    // formula as "success", while an ordinary player-supplied value stays literal.
+    std::optional<Args> mathArgs;
     for (size_t pos = 0; (pos = tmpl.find("[[math-template:", pos)) != std::string::npos;) {
         const auto close = tmpl.find("]]", pos + 16), split = tmpl.find('|', pos + 16);
         if (close == std::string::npos) break;
@@ -619,7 +622,12 @@ std::string I18n::renderTemplate(const TemplateValue& source, const Args& args, 
         const auto formula = presentation::decodeActionField(std::string_view(tmpl).substr(pos + 16, split - pos - 16));
         if (!formula) { pos = close + 2; continue; }
         const auto fallback = interpolate(tmpl.substr(split + 1, close - split - 1), values);
-        const auto component = "[[math-data:" + presentation::encodeActionField(presentation::expandMathVariables(*formula, args))
+        if (!mathArgs) {
+            mathArgs = args;
+            for (const auto& [name, _] : args) if (isFragmentMarker(name))
+                (*mathArgs)[name.substr(1)] = fragmentPlainText(args, name.substr(1));
+        }
+        const auto component = "[[math-data:" + presentation::encodeActionField(presentation::expandMathVariables(*formula, *mathArgs))
             + "|" + presentation::encodeActionField(fallback) + "]]";
         tmpl.replace(pos, close + 2 - pos, component);
         pos += component.size();

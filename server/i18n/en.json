@@ -373,6 +373,7 @@
     "show": "{nick}'s character sheet:\n{detail}",
     "show_one": "{nick}'s {attr}: {val}",
     "sheet": {
+      "value": "Value",
       "abilities": "Attributes",
       "vitals": "Status",
       "skills": "Skills",

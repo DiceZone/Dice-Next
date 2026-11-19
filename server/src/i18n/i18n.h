@@ -171,6 +171,7 @@ public:
     /// presentation style or accumulated format. Supports nested composition.
     static ReplyContent captureFragment(const std::function<std::string()>& render);
     static PresentationStyle outboundPresentationStyle();
+    static ContentFormat outboundPreferredOutput() { return outboundPreferredOutput_; }
 
     /// Flatten the whole bundle for @p loc into {dotted-key → default value} for
     /// every string leaf (powers the "全部文本可自定义" editor). Overrides are NOT

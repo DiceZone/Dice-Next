@@ -1,10 +1,13 @@
 #pragma once
 
+#include "presentation_style.h"
+
 #include <algorithm>
 #include <initializer_list>
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -29,6 +32,7 @@ struct Item {
     std::string literal;
     bool derived = false;
     size_t index = 0;
+    std::optional<std::string> fieldValue; // Named nonnumeric field (formula or typed attribute).
 };
 
 struct Labels {
@@ -44,7 +48,14 @@ struct Labels {
 struct Options {
     Mode mode = Mode::kFull;
     bool bars = false;
+    std::string tableValueHeading;
 };
+
+template <typename Translate>
+inline Labels translatedLabels(Translate tr) {
+    return {tr("card.sheet.abilities"), tr("card.sheet.vitals"), tr("card.sheet.skills"),
+            tr("card.sheet.coins"), tr("card.sheet.formulas"), tr("card.sheet.other"), tr("card.sheet.derived")};
+}
 
 inline Kind classify(const std::string& name) {
     static const std::map<std::string, Kind> kinds = [] {
@@ -86,6 +97,7 @@ inline const char* barLabel(const std::string& name) {
 }
 
 inline std::string cellText(const Item& item, const Options& options) {
+    if (item.fieldValue) return item.name + "=" + *item.fieldValue;
     if (!item.literal.empty()) return item.literal;
     if (!item.value) return {};
     const bool bar = options.bars && options.mode == Mode::kFull && item.maximum && *item.maximum > 0
@@ -109,6 +121,18 @@ inline void appendCells(std::string& out, const std::vector<std::string>& cells)
     }
 }
 
+// Cell contents can come from a player's card. Keep them on one line and
+// literal, including pipes, component markers and Markdown/HTML punctuation.
+inline std::string tableLiteral(const std::string& value) {
+    std::string text;
+    for (char ch : value) {
+        if (ch == '\r' || ch == '\n') { text += ' '; continue; }
+        if (std::string_view(R"(\|`*_{}[]()<>!#~$&)").find(ch) != std::string_view::npos) text += '\\';
+        text += ch;
+    }
+    return text;
+}
+
 inline std::string formatSheet(std::vector<Item> items, const Labels& labels, const Options& options) {
     for (size_t i = 0; i < items.size(); ++i) items[i].index = i;
     std::vector<const Item*> main;
@@ -118,9 +142,9 @@ inline std::string formatSheet(std::vector<Item> items, const Labels& labels, co
     for (const auto& item : items) {
         if (item.derived) { derived.push_back(&item); continue; }
         main.push_back(&item);
-        if (item.name == "体型" || item.name == "外貌" || item.name == "意志" || item.name == "教育")
+        if (item.kind == Kind::kAbility && (item.name == "体型" || item.name == "外貌" || item.name == "意志" || item.name == "教育"))
             cocShape = true;
-        if (item.name == "感知" || item.name == "魅力" || item.kind == Kind::kCoin) dndShape = true;
+        if ((item.kind == Kind::kAbility && (item.name == "感知" || item.name == "魅力")) || item.kind == Kind::kCoin) dndShape = true;
     }
     const bool dndOrder = dndShape && !cocShape;
 
@@ -182,6 +206,30 @@ inline std::string formatSheet(std::vector<Item> items, const Labels& labels, co
     };
     std::string out;
     auto writeSection = [&](const std::string& label, std::vector<const Item*> group, bool showLabel) {
+        if (!options.tableValueHeading.empty() && !group.empty()) {
+            std::string rows;
+            for (const Item* item : group) {
+                std::string name = item->name, value;
+                if (item->fieldValue) {
+                    value = tableLiteral(*item->fieldValue);
+                } else if (!item->literal.empty()) {
+                    name = item->literal;
+                } else if (item->value) {
+                    if (options.bars && item->kind == Kind::kVital && barLabel(name)
+                        && item->maximum && *item->maximum > 0)
+                        value = presentation::statusBar(barLabel(name), *item->value, *item->maximum,
+                            PresentationStyle::kVisual, ContentFormat::kMarkdown);
+                    else value = numberText(*item->value, item->maximum, item->shield);
+                } else continue;
+                rows += "| " + tableLiteral(name) + " | " + value + " |\n";
+            }
+            if (!rows.empty()) {
+                if (!out.empty()) out += "\n\n";
+                out += "| " + tableLiteral(label) + " | " + tableLiteral(options.tableValueHeading)
+                    + " |\n| --- | --- |\n" + rows.substr(0, rows.size() - 1);
+            }
+            return;
+        }
         std::vector<std::string> cells;
         for (const Item* item : group) {
             std::string text = cellText(*item, options);

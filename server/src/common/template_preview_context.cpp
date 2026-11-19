@@ -1,4 +1,5 @@
 #include "template_preview_context.h"
+#include "card_sheet_format.h"
 #include "../core/dice/dice_expression.h"
 #include "../core/dice/dice_result.h"
 #include "check_reply.h"
@@ -736,6 +737,19 @@ PreviewContext templatePreviewContext(const json &request, const I18n *i18n) {
             c.command = key == "card.insane.long" ? ".li" : ".ti";
         } else if (starts(key, "card.") || starts(key, "pc.")) {
             a["body"] = a["detail"] = a["output"] = "HP:12/12 SAN:60 MP:12/12\n" + a["attr"] + ":60";
+            if (key == "card.show" && i18n && request.value("visualSheet", false)) {
+                auto tr = [&](const char* key) { return ex.tr(key); };
+                card_sheet::Item hp, skill;
+                hp.name = ex.word("生命值", "HP");
+                hp.kind = card_sheet::Kind::kVital;
+                hp.value = 6;
+                hp.maximum = 10;
+                skill.name = ex.word("侦查", "Spot Hidden");
+                skill.value = 60;
+                const auto detail = card_sheet::formatSheet({hp, skill}, card_sheet::translatedLabels(tr),
+                    {card_sheet::Mode::kFull, true, tr("card.sheet.value")});
+                ex.put("detail", {"\n" + detail + "\n", ContentFormat::kMarkdown});
+            }
             a["list"] = "★ " + a["card"] + " (4)\n" + ex.word("守秘人 (0)", "Keeper (0)");
             c.command = ".st show";
             if (starts(key, "pc."))

@@ -46,7 +46,9 @@ inline Json replyPreview(const std::string& text, ContentFormat format,
     Json actions = Json::array();
     if (qq && rich)
         for (const auto& action : expanded.actions) actions.push_back({{"label", action.label}, {"text", action.text}});
-    return {{"text", rich ? expanded.text : plain}, {"plain", plain},
+    const auto& displayed = rich && qq && format == ContentFormat::kMarkdown
+        ? payload.at("markdown").at("content").get_ref<const std::string&>() : rich ? expanded.text : plain;
+    return {{"text", displayed}, {"plain", plain},
         {"markdown", rich && format == ContentFormat::kMarkdown}, {"payload", payload}, {"actions", actions}};
 }
 } // namespace dice::outbound

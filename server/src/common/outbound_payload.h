@@ -3,6 +3,7 @@
 #include "content_format.h"
 #include "qq_rich_reply.h"
 #include "qq_sn_banner.h"
+#include "qq_markdown_table.h"
 #include <nlohmann/json.hpp>
 
 namespace dice::outbound {
@@ -24,6 +25,10 @@ inline Json qqText(const std::string& text, ContentFormat format, bool useMarkdo
         ? (format == ContentFormat::kMarkdown ? text : markdown::escapeQQMarkdownLiteral(text))
         : (format == ContentFormat::kMarkdown ? markdown::toPlainText(text) : text);
     if (rich) wire = qq_rich::render(*card, fallbackLevel == 0 && richStyle == "math", false);
+    if (useMarkdown && format == ContentFormat::kMarkdown && text.find("---") != text.npos && text.find('|') != text.npos) {
+        wire = qq_table::render(text, fallbackLevel == 0);
+        if (wire != text && wire.size() > 3500) wire = qq_table::render(text, false);
+    }
     if ((rich || interactive) && fallbackLevel == 0 && interactions == "links") wire += qq_rich::commandLinks(commands);
     if (!nameCard.empty()) wire = qq_sn::prefix(nameCard, useMarkdown, nameCardStyle, fallbackLevel, nameCardTemplate, nameCardColor) + wire;
     if (rich && wire.size() > 3500)

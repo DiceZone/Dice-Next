@@ -3945,8 +3945,9 @@ private:
                 for (auto& [k, e] : listStrAttrs(msg)) {
                     card_sheet::Item item;
                     item.kind = card_sheet::Kind::kFormula;
-                    item.literal = k + "=" + e;
-                    if (auto cv = evalComputedFormula(e, msg)) item.literal += "(=" + std::to_string(*cv) + ")";
+                    item.name = k;
+                    item.fieldValue = e;
+                    if (auto cv = evalComputedFormula(e, msg)) *item.fieldValue += "(=" + std::to_string(*cv) + ")";
                     items.push_back(std::move(item));
                 }
                 // items() is a view: the owning JSON must outlive the loop.
@@ -3956,12 +3957,13 @@ private:
                     if (key.empty() || key.front() == '&' || value.is_number_integer()) continue;
                     card_sheet::Item item;
                     item.kind = card_sheet::Kind::kOther;
-                    item.literal = key + "=" + value.dump();
+                    item.name = key;
+                    item.fieldValue = value.dump();
                     items.push_back(std::move(item));
                 }
                 if (dndModeOn(msg)) for (auto& [k, v] : listDndSkills(msg)) {
                     bool present = false;
-                    for (const auto& item : items) if (item.name == k) present = true;
+                    for (const auto& item : items) if (item.value && item.name == k) present = true;
                     if (present) continue;
                     card_sheet::Item item;
                     item.name = k;
@@ -3970,9 +3972,7 @@ private:
                     items.push_back(std::move(item));
                 }
                 if (items.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
-                const auto detail = renderSheet(loc, std::move(items), card_sheet::Mode::kFull);
-                if (detail.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
-                return withOfficialCard(loc, msg, i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail", detail}}));
+                return withOfficialCard(loc, msg, showStSheet(loc, nick, std::move(items)));
             }
             // SealDice compat: ".st show <数字>" → attributes ≥ N.
             if (isAllDigits(attr)) {
@@ -3982,13 +3982,12 @@ private:
                 if (hi.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
                 std::vector<card_sheet::Item> items;
                 appendNumericSheet(items, hi, sheetMaxima(hi, &msg, user, group));
-                return i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail",
-                    renderSheet(loc, std::move(items), card_sheet::Mode::kFull)}});
+                return showStSheet(loc, nick, std::move(items));
             }
             // ".st show 力量 敏捷 …" → show several specific attributes.
             if (attr.find(' ') != std::string::npos) {
                 std::map<std::string, int> picked;
-                std::vector<std::string> typedPicked;
+                std::vector<std::pair<std::string, std::string>> typedPicked;
                 std::istringstream iss(attr); std::string tk;
                 while (iss >> tk) {
                     std::string canonical = CharacterCardStore::canonical(tk);
@@ -3996,19 +3995,19 @@ private:
                     if (!v && dndModeOn(msg) && !isDndCardSpecialInput(tk)) v = dndSkillValue(msg, canonical);
                     if (v) picked[canonical] = *v;
                     else if (auto value = cards_.getValueByName(user, cards_.boundCard(user, group), tk))
-                        typedPicked.push_back(tk + "=" + (value->is_string() ? value->get<std::string>() : value->dump()));
+                        typedPicked.emplace_back(tk, value->is_string() ? value->get<std::string>() : value->dump());
                 }
                 if (picked.empty() && typedPicked.empty()) return i18n_.tr(loc, "card.empty", {{"nick", nick}});
                 std::vector<card_sheet::Item> items;
                 appendNumericSheet(items, picked, sheetMaxima(picked, &msg, user, group));
-                for (const auto& typed : typedPicked) {
+                for (const auto& [key, value] : typedPicked) {
                     card_sheet::Item item;
                     item.kind = card_sheet::Kind::kOther;
-                    item.literal = typed;
+                    item.name = key;
+                    item.fieldValue = value;
                     items.push_back(std::move(item));
                 }
-                return i18n_.tr(loc, "card.show", {{"nick", nick}, {"detail",
-                    renderSheet(loc, std::move(items), card_sheet::Mode::kFull)}});
+                return showStSheet(loc, nick, std::move(items));
             }
             std::string canonical = CharacterCardStore::canonical(attr);
             auto v = coc7rRule(msg, "skills") ? coc7rAttr(msg, attr) : cards_.getAttr(user, group, attr);
@@ -4505,15 +4504,19 @@ private:
     }
 
     card_sheet::Labels sheetLabels(Locale loc) const {
-        return {
-            i18n_.tr(loc, "card.sheet.abilities"),
-            i18n_.tr(loc, "card.sheet.vitals"),
-            i18n_.tr(loc, "card.sheet.skills"),
-            i18n_.tr(loc, "card.sheet.coins"),
-            i18n_.tr(loc, "card.sheet.formulas"),
-            i18n_.tr(loc, "card.sheet.other"),
-            i18n_.tr(loc, "card.sheet.derived"),
-        };
+        return card_sheet::translatedLabels([&](const char* key) { return i18n_.tr(loc, key); });
+    }
+    std::string showStSheet(Locale loc, const std::string& nick, std::vector<card_sheet::Item> items) const {
+        I18n::Args args{{"nick", nick}};
+        if (I18n::outboundPresentationStyle() == PresentationStyle::kVisual
+            && I18n::outboundPreferredOutput() == ContentFormat::kMarkdown) {
+            card_sheet::Options options{card_sheet::Mode::kFull, true, i18n_.tr(loc, "card.sheet.value")};
+            const auto table = card_sheet::formatSheet(std::move(items), sheetLabels(loc), options);
+            I18n::putFragment(args, "detail", {"\n" + table + "\n", ContentFormat::kMarkdown});
+        } else {
+            args["detail"] = renderSheet(loc, std::move(items), card_sheet::Mode::kFull);
+        }
+        return i18n_.tr(loc, "card.show", args);
     }
     std::string renderSheet(Locale loc, std::vector<card_sheet::Item> items, card_sheet::Mode mode) const {
         card_sheet::Options options;

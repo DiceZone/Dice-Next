@@ -380,6 +380,7 @@
     "show": "{nick} 的人物卡：\n{detail}",
     "show_one": "{nick} 的 {attr}：{val}",
     "sheet": {
+      "value": "数值",
       "abilities": "属性",
       "vitals": "状态",
       "skills": "技能",

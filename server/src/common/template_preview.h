@@ -29,6 +29,9 @@ inline json templatePreview(const json& body, const I18n* i18n = nullptr) {
         auto request = body["simulation"];
         if (!request.is_object()) throw std::invalid_argument("invalid preview simulation");
         request["locale"] = body.value("locale", std::string("zh-Hans"));
+        const auto platform = body.value("platform", std::string("qq_group"));
+        request["visualSheet"] = style == PresentationStyle::kVisual && platform != "plain" &&
+            platform != "qq_channel" && !body.value("forcePlain", false);
         simulation = templatePreviewContext(request, i18n);
     }
     sample_template::RandomScope randomScope(simulation ? std::optional(simulation->seed) : std::nullopt);

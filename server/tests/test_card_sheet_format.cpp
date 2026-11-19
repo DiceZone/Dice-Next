@@ -56,6 +56,21 @@ TEST(CardSheetFormat, ShieldWithoutMaximumStaysVisible) {
     ASSERT_EQ(text, "状态\n生命值:13(+临时3)");
 }
 
+TEST(CardSheetFormat, VisualTablesPreserveGroupsBarsAndLiteralFields) {
+    Item hp = num("生命值", 6);
+    hp.maximum = 10;
+    Item note;
+    note.kind = Kind::kOther;
+    note.name = "A=B";
+    note.fieldValue = "a|b\n[[x]]";
+    auto items = std::vector<Item>{hp, num("侦查", 60), note};
+    const auto text = formatSheet(items, labels(), {Mode::kFull, true, "数值"});
+    ASSERT_EQ(text, "| 状态 | 数值 |\n| --- | --- |\n| 生命值 | **HP** [██████░░░░] 6/10 |"
+                    "\n\n| 技能 | 数值 |\n| --- | --- |\n| 侦查 | 60 |"
+                    "\n\n| 其他 | 数值 |\n| --- | --- |\n| A=B | a\\|b \\[\\[x\\]\\] |");
+    ASSERT_EQ(formatSheet({note}, labels(), {}), "其他\nA=B=a|b\n[[x]]");
+}
+
 TEST(CardSheetFormat, DndAbilitiesUseDndOrderAndDropNothingIntoSkills) {
     std::vector<Item> items = {
         num("魅力", 10), num("力量", 16), num("敏捷", 14),
