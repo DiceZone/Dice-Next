@@ -4,7 +4,8 @@
 // 本模块把「已落地的本地图片」上传到稳定图床，拿到长期可访问的 URL；生成 txt /
 // 上传到 log 站时用这些稳定 URL 替换原始临时链接。**绝不把 base64 塞进 log 站**。
 //
-// 三种模式（config dice.image_host.mode）：
+// 图源模式（config dice.image_host.mode）：
+//   qq      — 直接记录平台原图 URL（默认），不隐式下载或转存。
 //   none    — 不上传（仅本地落地，HTML 导出可 base64 内嵌，但 log 站无稳定图）
 //   generic — 通用第三方图床：multipart POST 上传 → 从 JSON 取 URL。配 url/file_field/
 //             headers[]/result_path(点路径)/extra_fields{}，可适配 ImgBB/sm.ms/兰空/Chevereto
@@ -16,6 +17,7 @@
 #include "../config/scoped_settings.h"
 #include "../common/subprocess.h"
 #include "../message/qq_official_message.h"
+#include "../message/log_images.h"
 #include "image_resource_service.h"
 #include <nlohmann/json.hpp>
 #include <string>
@@ -36,7 +38,7 @@ inline json conf(ConfigManager& cfg, const std::string& platform = {},
 }
 inline std::string mode(ConfigManager& cfg, const std::string& platform = {},
                         const std::string& adapterId = {}) {
-    return conf(cfg, platform, adapterId).value("mode", std::string("none"));
+    return conf(cfg, platform, adapterId).value("mode", std::string("qq"));
 }
 inline std::string publicBase(ConfigManager& cfg, const std::string& platform = {},
                               const std::string& adapterId = {}) {
@@ -54,6 +56,7 @@ inline std::string publicUrlFor(ConfigManager& cfg, const std::string& filename,
 // images 列里的 ref（http 稳定 url 或 本地文件名）→ 对外可访问 URL（无法对外则空）。
 inline std::string resolveRef(ConfigManager& cfg, const std::string& ref,
                               const std::string& platform = {}, const std::string& adapterId = {}) {
+    if (ref.empty()) return "";
     if (auto resources = image_resources::current()) if (auto path = resources->resolve(ref)) {
         auto base = publicBase(cfg, platform, adapterId);
         if (base.empty()) return "";
@@ -92,27 +95,40 @@ inline std::string jsonByPath(const json& j, const std::string& path) {
     return "";
 }
 
-// generic 模式：curl multipart 上传本地图片 → 稳定 url（失败返回 nullopt）。
-// 值来自骰主自配（半可信）：逐个作为参数传给 curl，不拼命令行，也就没有转义问题。
-inline std::optional<std::string> uploadGeneric(ConfigManager& cfg, const std::string& localPath,
-                                                const std::string& platform = {}, const std::string& adapterId = {}) {
-    auto c = conf(cfg, platform, adapterId);
+// Build multipart arguments separately so presets can be verified without
+// uploading private images or requiring third-party credentials.
+inline std::vector<std::string> genericUploadArgs(const json& c, const std::string& localPath) {
     std::string url = c.value("url", std::string());
-    if (url.empty()) return std::nullopt;
+    if (url.empty()) return {};
     std::string field = c.value("file_field", std::string("file"));
-    std::string resultPath = c.value("result_path", std::string("data.url"));
     std::vector<std::string> args{"-s", "-S", "--max-time", "30", "-X", "POST"};
     if (c.contains("headers") && c["headers"].is_array())
         for (auto& h : c["headers"]) if (h.is_string()) { args.push_back("-H"); args.push_back(h.get<std::string>()); }
+    const auto provider = c.value("provider", std::string());
+    const auto key = c.value("api_key", std::string());
+    if (key.find_first_of("\r\n") != std::string::npos) return {};
+    if (provider == "imgbb" && !key.empty()) { args.push_back("--form-string"); args.push_back("key=" + key); }
+    if (provider == "lsky") {
+        args.push_back("-H"); args.push_back("Accept: application/json");
+        if (!key.empty()) { args.push_back("-H"); args.push_back("Authorization: " + (key.starts_with("Bearer ") ? key : "Bearer " + key)); }
+    }
+    if (provider == "chevereto" && !key.empty()) { args.push_back("-H"); args.push_back("X-API-Key: " + key); }
     if (c.contains("extra_fields") && c["extra_fields"].is_object())
         for (auto it = c["extra_fields"].begin(); it != c["extra_fields"].end(); ++it)
-            if (it.value().is_string()) { args.push_back("-F"); args.push_back(it.key() + "=" + it.value().get<std::string>()); }
-    args.push_back("-F");
-    args.push_back(field + "=@" + localPath);
-    args.push_back(url);
+            if (it.value().is_string()) { args.push_back("--form-string"); args.push_back(it.key() + "=" + it.value().get<std::string>()); }
+    args.push_back("-F"); args.push_back(field + "=@" + localPath); args.push_back(url);
+    return args;
+}
+
+inline std::optional<std::string> uploadGeneric(ConfigManager& cfg, const std::string& localPath,
+                                                const std::string& platform = {}, const std::string& adapterId = {}) {
+    const auto c = conf(cfg, platform, adapterId);
+    const auto args = genericUploadArgs(c, localPath);
+    if (args.empty()) return std::nullopt;
+    const auto resultPath = c.value("result_path", std::string("data.url"));
     std::string out = dice::proc::curl(args).output;
     if (out.empty()) return std::nullopt;
-    try { auto j = json::parse(out); std::string u = jsonByPath(j, resultPath); if (!u.empty()) return u; }
+    try { auto j = json::parse(out); std::string u = qqmsg::imageUrl(jsonByPath(j, resultPath)); if (!u.empty()) return u; }
     catch (...) {}
     return std::nullopt;
 }
@@ -124,26 +140,22 @@ inline std::string substituteImages(const std::string& content, const std::strin
     json imgs;
     try { imgs = json::parse(imagesJson); } catch (...) { return content; }
     if (!imgs.is_array() || imgs.empty()) return content;
-    const std::string IMG = "[\xe5\x9b\xbe\xe7\x89\x87]";   // [图片]（8 字节）
-    std::string out; size_t i = 0, idx = 0;
-    auto emit = [&]() {
-        std::string url;
-        if (idx < imgs.size() && imgs[idx].is_string()) {
+    std::string out;
+    size_t last = 0, idx = 0;
+    for (const auto& image : logimages::scan(content)) {
+        out += content.substr(last, image.start - last);
+        // A URL already in the transcript is the source selected at recording
+        // time. Never replace it with a cache filename or a different host.
+        std::string url = qqmsg::imageUrl(image.ref);
+        if (url.empty() && idx < imgs.size() && imgs[idx].is_string()) {
             const auto ref = imgs[idx].get<std::string>();
             url = cfg ? resolveRef(*cfg, ref) : qqmsg::imageUrl(ref);
+            url = qqmsg::imageUrl(url);
         }
-        ++idx;
-        out += url.empty() ? IMG : qqmsg::imageCode(url);
-    };
-    while (i < content.size()) {
-        if (content.compare(i, IMG.size(), IMG) == 0) { emit(); i += IMG.size(); continue; }
-        if (content.compare(i, 9, "[CQ:image") == 0 ||
-            content.compare(i, 5, "[img,") == 0) {   // 平台中立图片码
-            size_t end = content.find(']', i);
-            if (end != std::string::npos) { emit(); i = end + 1; continue; }
-        }
-        out += content[i++];
+        out += url.empty() ? "[图片]" : qqmsg::imageCode(url);
+        ++idx; last = image.start + image.length;
     }
+    out += content.substr(last);
     return out;
 }
 

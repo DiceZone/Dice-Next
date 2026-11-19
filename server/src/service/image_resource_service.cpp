@@ -385,9 +385,9 @@ std::optional<fs::path> Service::resolveInDocument(const Document& document,cons
     }
     return std::nullopt;
 }
-std::string Service::share(const std::string& path) {
+std::string Service::share(const std::string& path, bool allowLogCache) {
     std::lock_guard lock(impl_->mutex);const auto relative=clean(path);
-    if(relative.starts_with("cache/")) throw std::runtime_error("聊天及日志缓存不能通过图片资源公共链接公开");
+    if(relative.starts_with("cache/") && !(allowLogCache && relative.starts_with("cache/log/"))) throw std::runtime_error("聊天及日志缓存不能通过图片资源公共链接公开");
     const auto id=impl_->registerPath(relative);if(fs::is_directory(impl_->path(relative))) throw std::runtime_error("不能公开目录");
     Statement previous(impl_->db,"SELECT token FROM resources WHERE id=?1");previous.bind(1,id);previous.step();auto token=previous.text(0);
     if(token.empty()) {token=randomId(32);Statement put(impl_->db,"UPDATE resources SET token=?2 WHERE id=?1");put.bind(1,id);put.bind(2,token);put.step();}
@@ -396,7 +396,7 @@ std::string Service::share(const std::string& path) {
 std::optional<fs::path> Service::sharedPath(const std::string& token) const {
     std::lock_guard lock(impl_->mutex);if(token.size()!=64) return std::nullopt;
     Statement row(impl_->db,"SELECT path FROM resources WHERE trashed=0 AND is_dir=0 AND (token=?1 OR id IN(SELECT resource_id FROM aliases WHERE alias=?2)) LIMIT 1");row.bind(1,token);row.bind(2,"share:"+token);
-    if(!row.step() || row.text(0).starts_with("cache/")) return std::nullopt;
+    if(!row.step() || (row.text(0).starts_with("cache/") && !row.text(0).starts_with("cache/log/"))) return std::nullopt;
     const auto path=impl_->path(row.text(0));return fs::is_regular_file(path)?std::optional(path):std::nullopt;
 }
 Json Service::scanReferences() {

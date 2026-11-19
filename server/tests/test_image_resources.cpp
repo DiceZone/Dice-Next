@@ -326,3 +326,18 @@ TEST(ImageResources, ListingAFolderPicksUpFilesChangedOutsideTheWebUI) {
     items=f.service->list("cache/chat",1,20)["items"];ASSERT_EQ(items[0]["size"],static_cast<std::int64_t>(png.size()+7));
     fs::remove(dir/"1_a.png");ASSERT_EQ(f.service->list("cache/chat",1,20)["total"],0);
 }
+
+TEST(ImageResources, OnlyRecorderCanExplicitlyPublishLogCacheWithOpaqueToken) {
+    Images f;
+    f.upload("cache/log/record.png");
+    f.upload("cache/chat/private.png");
+    ASSERT_TRUE(f.fails([&]{f.service->share("cache/log/record.png");}));
+    ASSERT_TRUE(f.fails([&]{f.service->share("cache/chat/private.png",true);}));
+    const auto link = f.service->share("cache/log/record.png",true);
+    const auto token = link.substr(link.rfind('/')+1);
+    ASSERT_EQ(token.size(), size_t(64));
+    ASSERT_TRUE(f.service->sharedPath(token).has_value());
+    ASSERT_FALSE(f.service->sharedPath("record.png").has_value());
+    f.service->operate("delete", {"cache/log/record.png"});
+    ASSERT_FALSE(f.service->sharedPath(token).has_value());
+}

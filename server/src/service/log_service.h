@@ -122,7 +122,7 @@ inline std::string renderHtml(Database& db, int logId) {
           << "</head><body><h2>" << esc(logName) << "</h2>";
         for (auto& m : msgs) {
             h << "<div class=\"msg\"><div class=\"meta\"><span class=\"sender\">" << esc(m.sender)
-              << "</span> &nbsp;" << esc(slashTime(m.createdAt)) << "</div><div class=\"content\">" << esc(m.content) << "</div>";
+              << "</span> &nbsp;" << esc(slashTime(m.createdAt)) << "</div><div class=\"content\">" << esc(logimages::labels(m.content)) << "</div>";
             if (!m.images.empty()) {
                 try {
                     auto arr = json::parse(m.images);

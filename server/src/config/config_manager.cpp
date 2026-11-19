@@ -45,7 +45,7 @@ static json makeDefaultConfig() {
             {"qq_sn_color", "#E5484D"},         // 「彩色文字」预设的颜色（#RRGGBB）
             {"save_log_images", false},
             {"image_send", {{"mode", "base64"}, {"host", ""}}},
-            {"image_host", {{"mode", "none"}}},
+            {"image_host", {{"mode", "qq"}}},
             {"chat_retention_days", 7},
             {"chat_persist", false},             // 是否把群聊记录写入 chat.db（启用 AI 的群始终保存）
             {"friend_clean_days", 0},

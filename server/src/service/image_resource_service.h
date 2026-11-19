@@ -75,7 +75,8 @@ public:
     std::filesystem::path root() const;
     std::filesystem::path dataRoot() const;
     // Private, authenticated reads use these paths; public sharing is opt-in per file.
-    std::string share(const std::string& path);
+    // Only the recorder may opt in to publishing a log-cache file.
+    std::string share(const std::string& path, bool allowLogCache = false);
     std::optional<std::filesystem::path> sharedPath(const std::string& token) const;
     void addAlias(const std::string& oldReference, const std::string& path);
     nlohmann::json migrateExisting(bool force = false);

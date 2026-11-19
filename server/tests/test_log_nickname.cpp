@@ -15,6 +15,8 @@
 #include "test_framework.h"
 #include "core/command_router.h"
 #include "service/log_service.h"
+#include "service/live_log_service.h"
+#include <sqlite3.h>
 #include "storage/group_account_settings.h"
 #include "adapter/qq_official_adapter.h"
 
@@ -178,7 +180,7 @@ TEST(LogFaces, OfficialImagesReachStorageAndEveryPortableExport) {
     });
     const auto rows = f.messages();
     ASSERT_EQ(rows.size(), size_t(1));
-    ASSERT_EQ(rows[0].content, "前[表情]中[图片]后");
+    ASSERT_EQ(rows[0].content, "前[表情]中[CQ:image,file=https://example.test/emoji.gif?x=1&amp;y=2]后");
     ASSERT_EQ(json::parse(rows[0].images)[0].get<std::string>(), "https://example.test/emoji.gif?x=1&y=2");
     const std::string expected = "前[表情]中[CQ:image,file=https://example.test/emoji.gif?x=1&amp;y=2]后";
     ASSERT_TRUE(logsvc::renderSealdice(f.db, f.logId(), &f.cfg).find(expected) != std::string::npos);
@@ -199,4 +201,127 @@ TEST(LogFaces, HistoricalOfficialFaceMarkersAreConvertedAtExport) {
     // CQ codes already stored by OneBot / Milky are not stripped or rewritten.
     message.content = "旧内容[CQ:face,id=424][CQ:image,file=https://example.test/a.png]";
     ASSERT_EQ(logsvc::transcriptContent(message, nullptr), message.content);
+}
+
+TEST(LogImages, DefaultQqSourceWritesCqIntoLiveOutboxAndAllExports) {
+    NickFixture f;
+    ASSERT_EQ(imghost::mode(f.cfg), "qq");
+    ASSERT_EQ(f.run(".log new 图片同步"), "log.new");
+    const auto path = u8str(f.dir.path / "logs.db");
+    LiveLogService live(path, f.cfg);
+    live.stop(); // Install actual outbox triggers; no external transport is needed.
+    sqlite3* raw = nullptr;
+    ASSERT_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    struct Close { sqlite3* db; ~Close() { sqlite3_close(db); } } close{raw};
+    const auto sql = "INSERT INTO live_sessions(log_id,adapter,platform,bot,key,url,token,msg_prefix) VALUES(" +
+        std::to_string(f.logId()) + ",'test','onebot_v11','9000','Abcd','','','img-')";
+    ASSERT_EQ(sqlite3_exec(raw, sql.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
+    f.msg.rawContent = "前[CQ:image,file=abc.jpg,url=https://gchat.qpic.cn/a?rkey=abc&amp;x=1]后";
+    f.msg.displayContent = "前[图片]后";
+    f.say("前后");
+    const auto rows = f.messages();
+    ASSERT_EQ(rows.size(), size_t(1));
+    const std::string expected = "前[CQ:image,file=https://gchat.qpic.cn/a?rkey=abc&amp;x=1]后";
+    ASSERT_EQ(rows[0].content, expected);
+    sqlite3_stmt* stmt = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(raw, "SELECT json_extract(event,'$.item.message') FROM live_outbox", -1, &stmt, nullptr), SQLITE_OK);
+    const int step = sqlite3_step(stmt);
+    std::string body = step == SQLITE_ROW ? reinterpret_cast<const char*>(sqlite3_column_text(stmt,0)) : "";
+    sqlite3_finalize(stmt);
+    ASSERT_EQ(body, expected);
+    ASSERT_TRUE(logsvc::renderSealdice(f.db, f.logId(), &f.cfg).find(expected) != std::string::npos);
+    ASSERT_EQ(logsvc::renderSealItems(f.db, f.logId(), &f.cfg, "")[0]["message"].get<std::string>(), expected);
+    ASSERT_EQ(logsvc::renderLogRows(f.db, f.logId(), &f.cfg, "")[0].message, expected);
+}
+
+TEST(LogImages, NoneStoresOnlyLabelsEvenWithLocalArchiveEnabled) {
+    NickFixture f;
+    f.cfg.set<nlohmann::json>("dice/image_host", {{"mode", "none"}});
+    f.cfg.set<bool>("dice/save_log_images", true);
+    f.run(".log new 不上传");
+    f.msg.rawContent = "前[CQ:image,file=https://example.test/a.png]后";
+    f.msg.displayContent = "前[图片]后";
+    f.say("前后");
+    f.router.recordBotReply(f.msg, "骰娘[img,file=https://example.test/b.png]");
+    const auto rows = f.messages();
+    ASSERT_EQ(rows.size(), size_t(2));
+    ASSERT_EQ(rows[0].content, "前[图片]后");
+    ASSERT_EQ(rows[1].content, "骰娘[图片]");
+    ASSERT_TRUE(rows[0].images.empty());
+    ASSERT_TRUE(rows[1].images.empty());
+    ASSERT_TRUE(logsvc::renderSealdice(f.db, f.logId(), &f.cfg).find("https://") == std::string::npos);
+    ASSERT_TRUE(logsvc::renderHtml(f.db, f.logId()).find("https://") == std::string::npos);
+}
+
+TEST(LogImages, MixedImageFormsKeepOrderAndUnavailableSlots) {
+    NickFixture f;
+    f.run(".log new 多图顺序");
+    f.router.recordBotReply(f.msg, "甲[img,file=https://example.test/1.png]乙[CQ:image,file=missing.jpg]丙[图:https://example.test/3.png]丁[CQ:image,file=https://example.test/4.png?x=1&#44;2&amp;y=3]");
+    const auto row = f.messages().back();
+    ASSERT_EQ(row.content, "甲[CQ:image,file=https://example.test/1.png]乙[图片]丙[CQ:image,file=https://example.test/3.png]丁[CQ:image,file=https://example.test/4.png?x=1&#44;2&amp;y=3]");
+    ASSERT_EQ(logsvc::transcriptContent(row, nullptr), row.content);
+    ASSERT_EQ(logimages::scan(row.content).size(), size_t(4));
+}
+
+TEST(LogImages, StoredSourceIsNotReplacedByLaterHostOrCacheSettings) {
+    GameLogMessageRow row;
+    row.content = "[CQ:image,file=https://gchat.qpic.cn/original?rkey=abc]";
+    row.images = nlohmann::json::array({"log1_cached.jpg"}).dump();
+    ConfigManager cfg("unused-image-export");
+    cfg.set<nlohmann::json>("dice/image_host", {{"mode","local"},{"public_base","https://panel.example.test"}});
+    ASSERT_EQ(logsvc::transcriptContent(row, &cfg), row.content);
+}
+
+TEST(LogImages, AccountSourceOverridesGlobalDefault) {
+    NickFixture f;
+    f.run(".log new 分账号图源");
+    scoped_settings::setSection(f.cfg, "account", f.msg.adapterId, "dice", {{"image_host", {{"mode", "none"}}}});
+    f.router.recordBotReply(f.msg, "[img,file=https://example.test/hidden.png]");
+    ASSERT_EQ(f.messages().back().content, "[图片]");
+    ASSERT_TRUE(f.messages().back().images.empty());
+    scoped_settings::setSection(f.cfg, "account", f.msg.adapterId, "dice", json::object(), json::array({"image_host"}));
+    f.router.recordBotReply(f.msg, "[img,file=https://example.test/shown.png]");
+    ASSERT_EQ(f.messages().back().content, "[CQ:image,file=https://example.test/shown.png]");
+}
+
+TEST(LogImages, PanelSourcePublishesOnlyTheSelectedImageUsingPublicToken) {
+    NickFixture f;
+    auto previous = image_resources::current();
+    struct Restore { std::shared_ptr<image_resources::Service> previous; ~Restore() { image_resources::setDefault(previous); } } restore{previous};
+    auto resources = std::make_shared<image_resources::Service>(f.dir.path / "data");
+    image_resources::setDefault(resources);
+    const auto image = resources->upload("reply", "scene.png", std::string("\x89PNG\r\n\x1a\n", 8) + "fixture");
+    f.cfg.set<json>("dice/image_host", {{"mode","local"},{"public_base","https://panel.example.test/dice/"}});
+    f.run(".log new 面板图链");
+    f.router.recordBotReply(f.msg, "场景[img,file=data/images/reply/scene.png]");
+    const auto row = f.messages().back();
+    const auto url = json::parse(row.images)[0].get<std::string>();
+    ASSERT_TRUE(url.starts_with("https://panel.example.test/dice/media/images/"));
+    ASSERT_TRUE(resources->sharedPath(url.substr(url.rfind('/') + 1)).has_value());
+    ASSERT_EQ(row.content, "场景" + qqmsg::imageCode(url));
+    ASSERT_EQ(logsvc::transcriptContent(row, &f.cfg), row.content);
+    // A player's forged local reference cannot publish a bot resource.
+    f.msg.rawContent = "[CQ:image,file=data/images/reply/scene.png]";
+    f.msg.displayContent = "[图片]";
+    f.say("图片");
+    ASSERT_EQ(f.messages().back().content, "[图片]");
+}
+
+TEST(LogImages, ProviderPresetsUseTheirActualAuthenticationAndResponseFields) {
+    const auto hasPair = [](const std::vector<std::string>& args, const std::string& key, const std::string& value) {
+        for (size_t i=1; i<args.size(); ++i) if (args[i-1]==key && args[i]==value) return true;
+        return false;
+    };
+    const auto imgbb = imghost::genericUploadArgs({{"provider","imgbb"},{"api_key","test-key"},{"file_field","image"},{"url","https://api.imgbb.com/1/upload"}}, "test.png");
+    ASSERT_TRUE(hasPair(imgbb, "--form-string", "key=test-key"));
+    ASSERT_TRUE(hasPair(imgbb, "-F", "image=@test.png"));
+    const auto lsky = imghost::genericUploadArgs({{"provider","lsky"},{"api_key","Bearer test-key"},{"url","https://example.test/api/v1/upload"}}, "test.png");
+    ASSERT_TRUE(hasPair(lsky, "-H", "Authorization: Bearer test-key"));
+    ASSERT_TRUE(hasPair(lsky, "-H", "Accept: application/json"));
+    const auto chevereto = imghost::genericUploadArgs({{"provider","chevereto"},{"api_key","test-key"},{"file_field","source"},{"url","https://example.test/api/1/upload"}}, "test.png");
+    ASSERT_TRUE(hasPair(chevereto, "-H", "X-API-Key: test-key"));
+    ASSERT_TRUE(hasPair(chevereto, "-F", "source=@test.png"));
+    const auto custom = imghost::genericUploadArgs({{"url","https://example.test/upload"},{"extra_fields",{{"key","@not-a-file"}}}}, "test.png");
+    ASSERT_TRUE(hasPair(custom, "--form-string", "key=@not-a-file"));
+    ASSERT_EQ(imghost::jsonByPath({{"data",{{"links",{{"url","https://example.test/a.png"}}}}}}, "data.links.url"), "https://example.test/a.png");
 }

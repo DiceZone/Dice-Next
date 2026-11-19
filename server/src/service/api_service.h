@@ -1714,7 +1714,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
 
-    // 图床配置（mode none/generic/local + url/file_field/headers/result_path/public_base）。
+    // 图床配置（mode qq/none/generic/local + url/file_field/headers/result_path/public_base）。
     app.registerHandler("/api/system/image-host", [&cfg](Req req, CB&& cb) {
         try {
             if (req->method() == drogon::Put) {
@@ -1724,7 +1724,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             }
             J cur = cfg.get<J>("dice/image_host", J::object());
             if (!cur.is_object()) cur = J::object();
-            if (!cur.contains("mode")) cur["mode"] = "none";
+            if (!cur.contains("mode")) cur["mode"] = "qq";
             jsonReply(ok(cur), std::move(cb));
         } catch (const std::exception& e) { jsonReply(fail(e.what()), std::move(cb)); }
     }, {drogon::Get, drogon::Put});
@@ -3334,7 +3334,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             {"bot_msg", kDefaultBotMessage}, {"bot_header", ""},
             {"save_log_images", false},
             {"image_send", J{{"mode", "base64"}, {"host", ""}}},
-            {"image_host", J{{"mode", "none"}}},
+            {"image_host", J{{"mode", "qq"}}},
             {"chat_retention_days", 7}, {"chat_persist", false},
             {"user_group", ""}, {"user_group_enforce", false}, {"user_group_invite", true},
         };
@@ -3367,8 +3367,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 return value.is_object() && (value.value("mode", std::string("base64")) == "base64"
                     || value.value("mode", std::string("base64")) == "httpurl");
             if (key == "image_host") {
-                const std::string mode = value.is_object() ? value.value("mode", std::string("none")) : "";
-                return mode == "none" || mode == "generic" || mode == "local";
+                const std::string mode = value.is_object() ? value.value("mode", std::string("qq")) : "";
+                return mode == "qq" || mode == "none" || mode == "generic" || mode == "local";
             }
             if (key == "user_group") return value.is_string();
             if (key == "bot_msg" || key == "bot_header")

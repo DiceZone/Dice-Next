@@ -11323,57 +11323,8 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         return diceSettingsFor(msg).value("save_log_images", false);
     }
     // 从原始消息提取图片引用（[CQ:image,url=/file=..] 与 海豹 [图片:..]/[图:..]）→ JSON 数组串。
-    std::string extractImageRefs(const std::string& raw) const {
-        std::vector<std::string> urls;
-        auto unesc = [](std::string s) {
-            auto rep = [&](const std::string& a, const std::string& b) {
-                size_t p = 0; while ((p = s.find(a, p)) != std::string::npos) { s.replace(p, a.size(), b); p += b.size(); } };
-            rep("&#44;", ","); rep("&#91;", "["); rep("&#93;", "]"); rep("&amp;", "&"); return s;
-        };
-        auto fieldOf = [&](const std::string& inner, const std::string& key) -> std::string {
-            size_t k = inner.find(key + "=");
-            if (k == std::string::npos) return "";
-            k += key.size() + 1;
-            size_t e = inner.find(',', k); if (e == std::string::npos) e = inner.size();
-            return unesc(inner.substr(k, e - k));
-        };
-        // [CQ:image,..] 与 [img,..]（平台中立码，骰娘回复用）
-        for (const std::string& tag : {std::string("[CQ:image"), std::string("[img,")}) {
-            size_t p = 0;
-            while ((p = raw.find(tag, p)) != std::string::npos) {
-                size_t end = raw.find(']', p); if (end == std::string::npos) break;
-                std::string inner = raw.substr(p, end - p);
-                std::string u = fieldOf(inner, "url"); if (u.empty()) u = fieldOf(inner, "file");
-                if (!u.empty()) urls.push_back(u);
-                p = end + 1;
-            }
-        }
-        for (const std::string& tag : {std::string("[\xe5\x9b\xbe\xe7\x89\x87:"), std::string("[\xe5\x9b\xbe:")}) {
-            size_t q = 0;
-            while ((q = raw.find(tag, q)) != std::string::npos) {
-                size_t e = raw.find(']', q); if (e == std::string::npos) break;
-                std::string u = raw.substr(q + tag.size(), e - q - tag.size());
-                if (!u.empty()) urls.push_back(u);
-                q = e + 1;
-            }
-        }
-        if (urls.empty()) return "";
-        nlohmann::json a = urls; return a.dump();
-    }
-    // 把内容里的图片码（[CQ:image,..]/[img,..]）替换成 [图片] 标签，转录里可读；
-    // 实际图片引用另存 images 列，由导出/日志站按序回填。
-    static std::string imageCodesToLabel(std::string s) {
-        for (const std::string& tag : {std::string("[CQ:image"), std::string("[img,")}) {
-            size_t p = 0;
-            while ((p = s.find(tag, p)) != std::string::npos) {
-                size_t end = s.find(']', p);
-                if (end == std::string::npos) break;
-                s.replace(p, end - p + 1, "[\xe5\x9b\xbe\xe7\x89\x87]");
-                p += 8;   // strlen("[图片]")
-            }
-        }
-        return s;
-    }
+    std::string extractImageRefs(const std::string& raw) const { return logimages::refs(raw); }
+    static std::string imageCodesToLabel(const std::string& text) { return logimages::labels(text); }
     /// curl -K 配置文件值转义（与 jsHttpFetch 的 esc 一致）：防配置注入。
     static std::string curlCfgEscape(const std::string& s) {
         std::string o; o.reserve(s.size() + 8);
@@ -11393,7 +11344,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     }
     // 把图片数组里的远端 url 落地到 data/logs/images/，成功的替换为本地文件名。
     std::string downloadLogImages(const std::string& jsonArr, int logId,
-                                  const Message& msg) const {
+                                  const Message& msg, bool allowLocalAssets = false) const {
         nlohmann::json a;
         try { a = nlohmann::json::parse(jsonArr); } catch (...) { return jsonArr; }
         if (!a.is_array()) return jsonArr;
@@ -11403,22 +11354,78 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         int n = 0;
         for (auto& e : a) {
             std::string u = e.is_string() ? e.get<std::string>() : "";
-            if (u.rfind("http", 0) != 0) { out.push_back(u); continue; }   // 非 http（本地/已落地）原样
+            if (u.rfind("http", 0) != 0) {
+                std::string selected;
+                if (allowLocalAssets) if (auto resources = image_resources::current()) if (auto path = resources->resolve(u)) {
+                    const auto relative = image_resources::utf8(path->lexically_relative(resources->root()));
+                    // User-supplied local paths never enter this branch, and bot
+                    // replies cannot publish private chat/log caches as assets.
+                    if (!relative.starts_with("cache/")) {
+                        if (imghost::mode(cfg_, msg.platform, msg.adapterId) == "generic")
+                            selected = imghost::uploadGeneric(cfg_, image_resources::utf8(*path), msg.platform, msg.adapterId).value_or("");
+                        else selected = u;
+                    }
+                }
+                out.push_back(selected); continue;
+            }
             std::string ext = "jpg";
             if (auto dot = u.find_last_of('.'); dot != std::string::npos && u.size() - dot <= 5) {
                 ext = u.substr(dot + 1); if (auto qm = ext.find('?'); qm != std::string::npos) ext = ext.substr(0, qm);
             }
-            std::string fname = "log" + std::to_string(logId) + "_" + std::to_string(nowEpoch()) + "_" + std::to_string(n++) + "." + ext;
+            std::string fname = "log" + std::to_string(logId) + "_" + std::to_string(nowEpoch()) + "_" + drogon::utils::getUuid() + "_" + std::to_string(n++) + "." + ext;
             std::string path = image_resources::utf8(imageDirectory / image_resources::fromUtf8(fname));
-            if (!isHostSafe(u)) { out.push_back(u); continue; }   // SSRF 黑名单：内网/环回/控制字符一律不下载
-            if (!curlDownload(u, path)) { out.push_back(u); continue; }   // 下载失败→保留临时 url
+            if (!isHostSafe(u)) { out.push_back(imghost::mode(cfg_, msg.platform, msg.adapterId) == "qq" ? u : ""); continue; }   // SSRF 黑名单：内网/环回/控制字符一律不下载
+            if (!curlDownload(u, path)) { out.push_back(imghost::mode(cfg_, msg.platform, msg.adapterId) == "qq" ? u : ""); continue; }   // 下载失败→保留临时 url
             // generic 图床：立即上传拿稳定 url（趁 QQ 链接还活着）；失败退回本地文件名。
             if (imghost::mode(cfg_, msg.platform, msg.adapterId) == "generic") {
                 if (auto stable = imghost::uploadGeneric(cfg_, path, msg.platform, msg.adapterId)) { out.push_back(*stable); continue; }
             }
-            out.push_back(fname);   // local / none / 上传失败 → 本地文件名
+            out.push_back(imghost::mode(cfg_, msg.platform, msg.adapterId) == "generic" ? "" : fname);
         }
         return out.dump();
+    }
+
+    void prepareLogImages(GameLogMessageRow& row, const std::string& text,
+                          const std::string& refs, const Message& msg, bool allowLocalAssets = false) {
+        const auto mode = imghost::mode(cfg_, msg.platform, msg.adapterId);
+        row.content = imageCodesToLabel(text);
+        if (mode == "none") { row.images.clear(); return; }
+        if (mode == "qq") {
+            row.content = imghost::substituteImages(row.content, refs, nullptr);
+            nlohmann::json originals = nlohmann::json::array();
+            for (const auto& ref : nlohmann::json::parse(refs))
+                originals.push_back(ref.is_string() ? qqmsg::imageUrl(ref.get<std::string>()) : std::string());
+            row.images = saveLogImages(msg) ? downloadLogImages(originals.dump(), row.logId, msg) : originals.dump();
+            return;
+        }
+        if (mode != "generic" && mode != "local") { row.images.clear(); return; }
+        row.images = downloadLogImages(refs, row.logId, msg, allowLocalAssets);
+        nlohmann::json urls = nlohmann::json::array();
+        for (const auto& ref : nlohmann::json::parse(row.images)) {
+            const auto value = ref.is_string() ? ref.get<std::string>() : std::string();
+            std::string url;
+            if (mode == "generic") url = qqmsg::imageUrl(value);
+            else if (value.find("://") == std::string::npos && !value.empty()) {
+                try { if (auto resources = image_resources::current()) {
+                    auto path = resources->resolve(value);
+                    if (!path) path = resources->resolve("/api/logs/images/" + value);
+                    if (path) {
+                        auto base = imghost::publicBase(cfg_, msg.platform, msg.adapterId);
+                        if (!base.empty()) {
+                            if (base.back() == '/') base.pop_back();
+                            url = base + resources->share(image_resources::utf8(path->lexically_relative(resources->root())), true);
+                        }
+                    }
+                } } catch (const std::exception& e) {
+                    DICE_LOG_WARN_M("跑团日志", "日志图片公开失败：{}", e.what());
+                }
+            }
+            urls.push_back(url);
+        }
+        // Do not fall back to the QQ URL when the selected host failed.
+        row.content = imghost::substituteImages(row.content, urls.dump(), nullptr);
+        // Only selected-source references may be backfilled by later exports.
+        row.images = urls.dump();
     }
 
     void recordMessage(const Message& msg, const std::string& reply) {
@@ -11458,9 +11465,14 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
                 // < 开头」的规则解析，每一个玩家的行都会解析失败。
                 m.logId = logId; m.messageId = msg.id; m.sender = displayNameRaw(msg); m.userId = msg.senderId;
                 m.content = logContent; m.createdAt = nowIso();
-                // 从原始消息提取图片引用；骰主开启「保存图片」则落地到本地。
-                std::string imgs = extractImageRefs(msg.rawContent.empty() ? msg.content : msg.rawContent);
-                if (!imgs.empty()) m.images = saveLogImages(msg) ? downloadLogImages(imgs, logId, msg) : imgs;
+                const auto raw = qqmsg::normalizeLogFaces(msg.rawContent.empty() ? msg.content : msg.rawContent);
+                const auto imgs = extractImageRefs(raw);
+                if (!imgs.empty()) {
+                    // If an adapter omitted image placeholders from its display
+                    // text, use the ordered raw transcript rather than lose URLs.
+                    if (logimages::scan(logContent).size() != logimages::scan(raw).size()) logContent = raw;
+                    prepareLogImages(m, logContent, imgs, msg);
+                }
                 st->insert(m);
             }
         } catch (...) {}
@@ -11482,7 +11494,7 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
             // 骰娘回复也可能带图（[img,file=..]/自定义回复的图码），一并提取，
             // 供导出 HTML 内嵌 / 日志站替换稳定链接。本地资产引用无需下载。
             std::string rimgs = extractImageRefs(reply);
-            if (!rimgs.empty()) { m.images = rimgs; m.content = imageCodesToLabel(reply); }
+            if (!rimgs.empty()) prepareLogImages(m, reply, rimgs, msg, true);
             st->insert(m);
         } catch (...) {}
     }
