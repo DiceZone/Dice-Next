@@ -4599,6 +4599,8 @@ private:
 
     // ─── .sc — sanity check ──────────────────────────────────
 
+    #include "coc7_sanity.inc"
+
     std::optional<std::string> tryHandleSC(Locale loc, const Message& msg,
                                            const std::string& cmd) {
         if (toLower(cmd).rfind("sc", 0) != 0) return std::nullopt;
@@ -4608,6 +4610,9 @@ private:
             catch (const Coc7rRollError& e) { return i18n_.tr(loc,"dice.error.roll",{{"error",e.what()}}); }
         }
         std::string rest = trim(cmd.substr(2));
+        const auto subcommand = toLower(rest);
+        if (subcommand == "day" || subcommand == "day off" || subcommand == "show")
+            return coc7DayCommand(loc, msg, subcommand);
 
         // Bonus/penalty sanity (青果/海豹 ".sc b ..." / ".scb ..."): leading b/p[count].
         int scBp = 0; char scBpType = 0;
@@ -4639,10 +4644,12 @@ private:
         const std::string user = msg.senderId;
         const std::string group = cardScope(msg);
         const std::string nick = displayName(msg);
+        const auto before = cards_.snapshot(user, cards_.boundCard(user, group));
 
         int san; bool fromCard = false, fromPow = false;
+        if (!sanArg.empty() && !isAllDigits(sanArg)) return i18n_.tr(loc, "card.sc.usage");
         if (!sanArg.empty() && isAllDigits(sanArg)) {
-            san = parseIntOr(sanArg, 0);
+            san = parseIntOr(sanArg, -1);
         } else {
             auto v = cards_.getAttr(user, group, "理智");
             // 卡上没录理智时按意志计（原版 mVariableCOC7「理智=&意志」），检定后落地。
@@ -4650,7 +4657,10 @@ private:
             if (!v) return i18n_.tr(loc, "card.sc.no_san");
             san = *v; fromCard = true;
         }
-        if (san <= 0 || san > 99) return i18n_.tr(loc, "card.sc.invalid_san");
+        if (san == 0) return coc7SanityText(loc, "permanent");
+        if (san < 0 || san > 99) return i18n_.tr(loc, "card.sc.invalid_san");
+        if (fromCard && cards_.cardLocked(user, group, "w")) return i18n_.tr(loc, "card.locked_w");
+        if (fromCard && !before) return coc7SanityText(loc, "conflict");
 
         int res; std::string bpDetail;
         if (scBpType) {
@@ -4668,19 +4678,29 @@ private:
             // Fumble = maximum possible loss of the failure expression.
             auto m = maxOfSimpleExpr(failExpr);
             const auto fallback = m ? DiceResult{} : engine_.roll(failExpr);
+            if (!m && !fallback.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", fallback.error}});
             loss = m ? *m : fallback.modifiedTotal;
             legacyChange = "Max{" + failExpr + "}=" + std::to_string(loss);
         } else if (lv == SuccessLevel::kFailure) {
-            const auto cost = engine_.roll(failExpr); loss = cost.modifiedTotal;
+            const auto cost = engine_.roll(failExpr);
+            if (!cost.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", cost.error}});
+            loss = cost.modifiedTotal;
             legacyChange = cost.formattedOutput;
         } else {
-            const auto cost = engine_.roll(sucExpr); loss = cost.modifiedTotal;
+            const auto cost = engine_.roll(sucExpr);
+            if (!cost.ok()) return i18n_.tr(loc, "dice.error.roll", {{"error", cost.error}});
+            loss = cost.modifiedTotal;
             legacyChange = cost.formattedOutput;
         }
 
-        int finalSan = san - loss;
-        if (finalSan < 0) finalSan = 0;
-        if (fromCard && (loss != 0 || fromPow)) cards_.setAttr(user, group, "理智", finalSan);
+        if (loss < 0) return coc7SanityText(loc, "invalid_loss");
+        loss = (std::min)(loss, san);
+        const int finalSan = san - loss;
+        auto day = fromCard ? coc7Day(msg, before->data) : json::object();
+        if (!day.empty()) day["loss"] = (std::min)(1000000, day["loss"].get<int>() + loss);
+        const auto notice = coc7InsanityNotice(loc, msg, finalSan, loss, fromCard, day);
+        if (fromCard && (loss != 0 || fromPow) && !coc7SaveDay(msg, *before, day, finalSan))
+            return coc7SanityText(loc, "conflict");
 
         const char* gradeKey =
             (lv == SuccessLevel::kFumble) ? "dice.level.fumble" :
@@ -4692,16 +4712,16 @@ private:
         args.insert({{"san", std::to_string(san)},
             {"loss", std::to_string(loss)}, {"final", std::to_string(finalSan)}});
         I18n::putFragment(args, "grade", i18n_.trFragment(loc, gradeKey));
-        if (auto reply = outcomeCandidates(loc, "sanity", replyGrade(lv), args, loss == 0 ? "noloss" : "")) return *reply;
+        if (auto reply = outcomeCandidates(loc, "sanity", replyGrade(lv), args, loss == 0 ? "noloss" : "")) return *reply + notice;
         const std::string nativeKey = loss == 0 ? "card.sc.result_noloss" : "card.sc.result";
         if (!i18n_.hasConfigured(loc, nativeKey) && i18n_.hasConfigured(loc, "dice.compat.sanity.result")) {
             auto legacyArgs = args;
             legacyArgs["res"] = args["roll"] + "/" + std::to_string(san);
             legacyArgs["rank"] = std::to_string(static_cast<int>(lv));
             legacyArgs["change"] = legacyChange;
-            return i18n_.tr(loc, "dice.compat.sanity.result", legacyArgs);
+            return i18n_.tr(loc, "dice.compat.sanity.result", legacyArgs) + notice;
         }
-        return i18n_.tr(loc, nativeKey, args);
+        return i18n_.tr(loc, nativeKey, args) + notice;
     }
 
     /// Maximum value of a simple expression ("N", "NdM", "NdM±K"); nullopt otherwise.
@@ -4709,13 +4729,19 @@ private:
         std::smatch m;
         static const std::regex reDice(R"(^(\d*)[dD](\d+)([+-]\d+)?$)");
         if (std::regex_match(e, m, reDice)) {
-            int n = m[1].str().empty() ? 1 : std::stoi(m[1].str());
-            int s = std::stoi(m[2].str());
-            int mod = m[3].matched ? std::stoi(m[3].str()) : 0;
-            return n * s + mod;
+            const int n = m[1].str().empty() ? 1 : parseIntOr(m[1].str(), -1);
+            const int s = parseIntOr(m[2].str(), -1);
+            const int mod = m[3].matched ? parseIntOr(m[3].str(), (std::numeric_limits<int>::min)()) : 0;
+            if (n < 1 || s < 1 || mod == (std::numeric_limits<int>::min)()) return std::nullopt;
+            const auto total = int64_t(n) * s + mod;
+            if (total < 0 || total > (std::numeric_limits<int>::max)()) return std::nullopt;
+            return static_cast<int>(total);
         }
         static const std::regex reNum(R"(^\d+$)");
-        if (std::regex_match(e, reNum)) return std::stoi(e);
+        if (std::regex_match(e, reNum)) {
+            const int value = parseIntOr(e, -1);
+            if (value >= 0) return value;
+        }
         return std::nullopt;
     }
 

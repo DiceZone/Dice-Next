@@ -499,6 +499,30 @@ PreviewContext templatePreviewContext(const json &request, const I18n *i18n) {
                 a["res"] += "/60";
             c.command = std::string(".sc ") + (noLoss ? "0" : "1") + "/1d6 60";
             c.facts["lossExpression"] = noLoss ? "0" : failed ? "1d6" : "1";
+            if (starts(sourceKey, "card.sc.")) {
+                ex.number("int", 60);
+                ex.number("hours", ex.die(10));
+                ex.number("threshold", 12);
+                if (sourceKey == "card.sc.temporary" || sourceKey == "card.sc.temporary_duration_pending" ||
+                    sourceKey == "card.sc.int_failed" || sourceKey == "card.sc.int_needed" || sourceKey == "card.sc.int_error") {
+                    ex.number("loss", 5);
+                    ex.number("final", 55);
+                    ex.number("res", sourceKey == "card.sc.int_failed" ? ex.between(61, 100) : ex.between(1, 60));
+                    c.command = ".sc 5/5";
+                    c.facts["lossExpression"] = "5";
+                } else if (sourceKey == "card.sc.permanent") {
+                    ex.number("loss", 60);
+                    ex.number("final", 0);
+                    c.command = ".sc 60/60";
+                    c.facts["lossExpression"] = "60";
+                } else if (sourceKey == "card.sc.indefinite" || sourceKey == "card.sc.day_status" ||
+                           sourceKey == "card.sc.day_started") {
+                    const int accumulated = sourceKey == "card.sc.indefinite" ? 12 : sourceKey == "card.sc.day_status" ? 8 : 0;
+                    ex.number("loss", accumulated);
+                    ex.number("final", 60 - accumulated);
+                    c.command = sourceKey == "card.sc.day_started" ? ".sc day" : ".sc show";
+                }
+            }
         } else if (family == "psychology") {
             a["attr"] = ex.word("心理学", "Psychology");
             a["roll"] = a["result"];

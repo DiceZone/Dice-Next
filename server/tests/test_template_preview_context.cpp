@@ -135,6 +135,25 @@ TEST(TemplateSimulation, OriginalSanGrowthAndDeathSaveBranchesHaveRealValues) {
     }
 }
 
+TEST(TemplateSimulation, SanityNoticesHaveConsistentPreviewValues) {
+    auto &i18n = previewTranslations();
+    for (const auto* key : {"card.sc.temporary", "card.sc.int_failed", "card.sc.indefinite",
+                           "card.sc.permanent", "card.sc.day_started", "card.sc.day_status"}) {
+        const auto rendered = outbound::templatePreview(
+            {{"text", i18n.getDefault(Locale::kZhHans, key)}, {"simulation", example(key)}}, &i18n);
+        ASSERT_TRUE(rendered["simulation"]["unresolved"].empty());
+        const auto args = rendered["simulation"]["args"].get<I18n::Args>();
+        const std::string name(key);
+        if (name == "card.sc.temporary") {
+            ASSERT_TRUE(number(args, "res") <= number(args, "int"));
+            ASSERT_TRUE(number(args, "hours") >= 1 && number(args, "hours") <= 10);
+        } else if (name == "card.sc.int_failed") ASSERT_TRUE(number(args, "res") > number(args, "int"));
+        else if (name == "card.sc.indefinite") ASSERT_EQ(number(args, "loss"), number(args, "threshold"));
+        else if (name == "card.sc.permanent") ASSERT_EQ(number(args, "final"), 0);
+        else if (name == "card.sc.day_started") ASSERT_EQ(number(args, "loss"), 0);
+    }
+}
+
 TEST(TemplateSimulation, InheritedStandardTextKeepsTheOriginalCommandContext) {
     auto &i18n = previewTranslations();
     auto request = example("dice.outcome.sanity.fumble", 5, "dice.outcome.standard.fumble");

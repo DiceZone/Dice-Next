@@ -44,6 +44,118 @@ struct CocFixture {
     }
 };
 }
+TEST(Coc7Sanity, LossBoundariesAndCustomReplies) {
+    CocFixture f; f.setting("ruleSystem", "coc7"); f.set("SAN", 60);
+    f.i18n.setOverride(Locale::kZhHans, "card.sc.result", "CUSTOM:{loss}/{final}");
+    const auto four = f.run(".sc 4/4");
+    ASSERT_TRUE(four.find("CUSTOM:4/56") != std::string::npos);
+    ASSERT_TRUE(four.find("智力检定") == std::string::npos);
+    const auto five = f.run(".sc 5/5");
+    ASSERT_TRUE(five.find("CUSTOM:5/51") != std::string::npos);
+    ASSERT_TRUE(five.find("需要智力检定") != std::string::npos);
+    ASSERT_EQ(f.get("SAN"), 51);
+    ASSERT_TRUE(f.run(".sc show").find("未开启") != std::string::npos);
+    f.set("SAN", 3);
+    const auto zero = f.run(".sc 10/10");
+    ASSERT_TRUE(zero.find("CUSTOM:3/0") != std::string::npos);
+    ASSERT_TRUE(zero.find("永久疯狂") != std::string::npos);
+    ASSERT_TRUE(zero.find("智力检定") == std::string::npos);
+    ASSERT_EQ(f.get("SAN"), 0);
+    ASSERT_TRUE(f.run(".sc 1/1").find("永久疯狂") != std::string::npos);
+}
+TEST(Coc7Sanity, IntRollMatchesPrintedResultAndIgnoresHouseRule) {
+    CocFixture f; f.setting("ruleSystem", "coc7"); f.run(".setcoc 3"); f.set("INT", 50);
+    for (int i = 0; i < 12; ++i) {
+        f.set("SAN", 90);
+        const auto reply = f.run(".sc 5/5");
+        std::smatch match;
+        ASSERT_TRUE(std::regex_search(reply, match, std::regex("智力检定：1D100=([0-9]+)/50")));
+        const int rolled = std::stoi(match[1].str());
+        if (rolled <= 50) {
+            ASSERT_TRUE(std::regex_search(reply, match, std::regex("成功，临时疯狂 ([0-9]+) 小时")));
+            const int hours = std::stoi(match[1].str());
+            ASSERT_TRUE(hours >= 1 && hours <= 10);
+        } else ASSERT_TRUE(reply.find("失败，本次未陷入临时疯狂") != std::string::npos);
+        ASSERT_EQ(f.get("SAN"), 85);
+    }
+}
+TEST(Coc7Sanity, ExplicitSanAndInvalidLossDoNotChangeCard) {
+    CocFixture f; f.setting("ruleSystem", "coc7"); f.stats(); f.run(".sc day");
+    const auto before = f.data();
+    const auto calc = f.run(".sc 5/5 70");
+    ASSERT_TRUE(calc.find("需要智力检定") != std::string::npos);
+    ASSERT_TRUE(f.data() == before);
+    ASSERT_TRUE(f.run(".sc 50/50 50").find("永久疯狂") != std::string::npos);
+    ASSERT_TRUE(f.data() == before);
+    for (const auto* command : {".sc -1/-1", ".sc nonsense/nonsense", ".sc 1/1 rubbish",
+                               ".sc 1/1 99999999999999999999"}) {
+        f.run(command);
+        ASSERT_TRUE(f.data() == before);
+    }
+    f.cards.lockCardByName(f.msg.senderId, f.cards.boundCard(f.msg.senderId, f.msg.targetId), "w");
+    const auto locked = f.data();
+    f.run(".sc 5/5"); f.run(".sc day"); f.run(".sc day off");
+    ASSERT_TRUE(f.data() == locked);
+}
+TEST(Coc7Sanity, GameDayAccumulatesAcrossChecksAndManualRecovery) {
+    CocFixture f; f.setting("ruleSystem", "coc7"); f.set("SAN", 51);
+    ASSERT_TRUE(f.run(".sc day").find("10 点") != std::string::npos);
+    for (int i = 0; i < 2; ++i) ASSERT_TRUE(f.run(".sc 4/4").find("不定性疯狂") == std::string::npos);
+    f.set("SAN", 60); // Recovery does not subtract from the day's gross losses.
+    ASSERT_TRUE(f.run(".sc 1/1").find("不定性疯狂") == std::string::npos);
+    const auto result = f.run(".sc 1/1");
+    ASSERT_TRUE(result.find("累计损失 10") != std::string::npos);
+    ASSERT_TRUE(result.find("不定性疯狂") != std::string::npos);
+    ASSERT_TRUE(result.find("智力检定：") == std::string::npos);
+    ASSERT_TRUE(f.run(".sc show").find("累计 .sc 损失 10") != std::string::npos);
+    // The stored baseline, not the current SAN or POW, determines the threshold.
+    ASSERT_TRUE(f.run(".sc show").find("日初 SAN 51") != std::string::npos);
+    f.run(".sc day");
+    ASSERT_TRUE(f.run(".sc show").find("累计 .sc 损失 0") != std::string::npos);
+    f.run(".sc day off");
+    ASSERT_TRUE(f.run(".sc show").find("未开启") != std::string::npos);
+}
+TEST(Coc7Sanity, StateIsIsolatedAndPersistsWithTheCard) {
+    CocFixture f; f.setting("ruleSystem", "coc7"); f.set("POW", 50);
+    f.run(".sc day"); f.run(".sc 2/2");
+    ASSERT_EQ(f.get("SAN"), 48); // POW fallback materializes SAN atomically.
+    const auto scope = json::array({f.msg.platform, f.msg.adapterId, f.msg.targetId}).dump();
+    ASSERT_EQ(f.data()["__meta"]["coc7SanityDays"][scope]["loss"].get<int>(), 2);
+    const auto originalAdapter = f.msg.adapterId;
+    f.msg.adapterId = "other-account"; f.setting("ruleSystem", "coc7");
+    ASSERT_TRUE(f.run(".sc show").find("未开启") != std::string::npos);
+    f.msg.adapterId = originalAdapter;
+    ASSERT_TRUE(f.run(".sc show").find("累计 .sc 损失 2") != std::string::npos);
+    f.cards.createCard(f.msg.senderId, "other-card");
+    f.cards.bindCard(f.msg.senderId, f.msg.targetId, "other-card"); f.set("SAN", 70);
+    ASSERT_TRUE(f.run(".sc show").find("未开启") != std::string::npos);
+    f.cards.bindCard(f.msg.senderId, f.msg.targetId, "");
+    CharacterCardStore reopened(f.db);
+    const auto snapshot = reopened.snapshot(f.msg.senderId, "");
+    ASSERT_TRUE(snapshot.has_value());
+    ASSERT_EQ(snapshot->data["__meta"]["coc7SanityDays"][scope]["loss"].get<int>(), 2);
+    f.setting("ruleSystem", "coc7r");
+    ASSERT_TRUE(f.run(".sc day").find("coc7r") != std::string::npos);
+    ASSERT_TRUE(f.state().empty());
+}
+TEST(Coc7Sanity, LowSanAndLegacyRepliesKeepWarnings) {
+    CocFixture f; f.setting("ruleSystem", "coc7"); f.set("SAN", 4);
+    ASSERT_TRUE(f.run(".sc day").find("1 点") != std::string::npos);
+    ASSERT_TRUE(f.run(".sc 0/0").find("不定性疯狂") == std::string::npos);
+    ASSERT_TRUE(f.run(".sc 1/1").find("不定性疯狂") != std::string::npos);
+    f.i18n.setOverride(Locale::kZhHans, "dice.compat.sanity.result", "LEGACY:{final}");
+    auto result = f.run(".sc 3/3");
+    ASSERT_TRUE(result.find("LEGACY:0") != std::string::npos);
+    ASSERT_TRUE(result.find("永久疯狂") != std::string::npos);
+    ASSERT_TRUE(result.find("不定性疯狂") == std::string::npos);
+    ASSERT_TRUE(result.find("智力检定") == std::string::npos);
+    f.set("SAN", 60); f.run(".sc day off");
+    for (const auto* grade : {"critical", "extreme", "hard", "regular", "failure", "fumble"})
+        f.i18n.setOverride(Locale::kZhHans, std::string("dice.outcome.sanity.") + grade, "GRADED:{final}");
+    result = f.run(".sc 5/5");
+    ASSERT_TRUE(result.find("GRADED:55") != std::string::npos);
+    ASSERT_TRUE(result.find("需要智力检定") != std::string::npos);
+}
 TEST(Coc7r, AttributeArraysAndMovementBoundaries) {
     for (const auto& a:coc7r::arrays()) {
         ASSERT_EQ(std::accumulate(a.begin(),a.end(),0),480);
