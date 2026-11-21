@@ -1153,6 +1153,7 @@ private:
         if (!cached.is_object()) cached = json::object();
         cached["member_openid"] = user;
         if (role == "member" || role == "admin" || role == "owner") { meta.roles[user] = role; cached["member_role"] = role; }
+        if (const auto card = QQOfficialNameCache::text(entry, "member_nickname"); !card.empty()) cached["member_nickname"] = card;
         if (entry.contains("bot") && entry["bot"].is_boolean()) cached["bot"] = entry["bot"];
         return nickname;
     }
@@ -1354,6 +1355,10 @@ private:
             rememberNameGroup(m.targetId);
             auto member=e.author;member["member_openid"]=m.senderId;m.senderName=rememberMember(m.targetId,member);
             if(!e.role.empty())m.extra["role"]=e.role;
+            // 官方 2026-11-16 起：群消息带发送者群昵称 member_nickname 与 union_group_openid。
+            if(!e.memberNickname.empty())m.extra["card"]=e.memberNickname;
+            if(!e.unionGroupOpenId.empty())m.extra["union_group_openid"]=e.unionGroupOpenId;
+            rememberGroupSender(m.senderId,m.id);
             names_.rememberGroup(appId_,m.targetId,e.groupName);
             // GROUP_AT_MESSAGE_CREATE 只投递给被 @ 的机器人，事件本身就算一次 @，@ 也能唤醒已关闭的机器人。
             if(e.atSelf&&!loginId_.empty())m.atList.push_back(loginId_);
@@ -1457,6 +1462,27 @@ private:
     void rememberPassiveEvent(MessageType type,const std::string& target,const std::string& eventId){ if(!target.empty()) passive_.rememberEvent(eventKey(type,target),eventId); }
     std::string takePassiveEvent(MessageType type,const std::string& target){ return passive_.takeEvent(eventKey(type,target)); }
     int nextReplySeq(const std::string& messageId){ return passive_.nextSeq(messageId); }
+    // 官方 2026-11-17 起：群消息的 msg_id 在 60 分钟内可回复 5 次，也可用来私聊回复发送者（须是机器人好友），
+    // 与群回复共用次数。暗骰等「群里触发、私聊回结果」的场景因此能走被动回复，不占主动消息额度。
+    static constexpr std::time_t kGroupReplyWindowSeconds = 60 * 60;
+    static constexpr int kGroupReplyLimit = 5;
+    struct GroupSenderMessage { std::string messageId; std::time_t at = 0; };
+    void rememberGroupSender(const std::string& user, const std::string& messageId){
+        if(user.empty()||messageId.empty())return;
+        const auto now=std::time(nullptr);
+        std::lock_guard lock(groupSenderMu_);
+        groupSenders_[user]=GroupSenderMessage{messageId,now};
+        if(groupSenders_.size()>4096)
+            for(auto it=groupSenders_.begin();it!=groupSenders_.end();) if(now-it->second.at>kGroupReplyWindowSeconds) it=groupSenders_.erase(it); else ++it;
+    }
+    /// 对方最近一条仍可被动回复的群消息；用掉一次（按 msg_seq 计数，与群回复共用）。
+    std::string groupMessageForPrivateReply(const std::string& user){
+        std::lock_guard lock(groupSenderMu_);
+        auto it=groupSenders_.find(user);
+        if(it==groupSenders_.end()||std::time(nullptr)-it->second.at>kGroupReplyWindowSeconds)return {};
+        if(passive_.peekSeq(it->second.messageId)>kGroupReplyLimit)return {};
+        return it->second.messageId;
+    }
 
     // ── 富媒体（图片/文件/视频/语音）─────────────────────────────
     // QQ Bot 2.0 富媒体两条路：
@@ -2220,9 +2246,16 @@ private:
         request->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         request->addHeader("Host", "api.bot.qq.com");
         request->addHeader("Authorization", "QQBot " + token());
-        if (!m.id.empty()) {
-            body["msg_id"] = m.id;
-            const int seq = nextReplySeq(m.id);
+        std::string replyId = m.id;
+        bool viaGroup = false;
+        if (replyId.empty() && m.type == MessageType::kPrivate
+            && !(m.extra.is_object() && m.extra.value("__qq_group_private_retry", false))) {
+            replyId = groupMessageForPrivateReply(target);
+            viaGroup = !replyId.empty();
+        }
+        if (!replyId.empty()) {
+            body["msg_id"] = replyId;
+            const int seq = nextReplySeq(replyId);
             if (seq > 0 && m.type != MessageType::kChannel) body["msg_seq"] = seq;
         } else if (m.type != MessageType::kChannel) {
             const auto eventId = takePassiveEvent(m.type, target);
@@ -2230,8 +2263,16 @@ private:
         }
         request->setBody(dumpJsonUtf8Safe(body));
         outgoing.submitted();
-        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, format, useMarkdown, fallbackLevel, outgoing](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
+        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, format, useMarkdown, fallbackLevel, outgoing, viaGroup](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
             const bool httpRejected = response && response->statusCode() >= 300;
+            if (viaGroup && httpRejected) {
+                // 借用群消息私聊要求对方是机器人好友；被拒时改按主动消息再发一次。
+                Message retry = message;
+                if (!retry.extra.is_object()) retry.extra = json::object();
+                retry.extra["__qq_group_private_retry"] = true;
+                self->sendTextTo(retry, text, format, fallbackLevel);
+                return;
+            }
             if (useMarkdown && !httpRejected && result == drogon::ReqResult::Ok && response)
                 self->markdownRejectStreak_.store(0);
             // Only explicit validation/permission rejection is safe to retry.
@@ -2283,7 +2324,7 @@ private:
     }
     std::string richStyle_ = "off", interactions_ = "links";
     inline static std::function<std::string(const std::string&)> imagePublisher_;   // 本地图 → 公网 URL（图床）
-    std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,loginId_,loginName_,loginAvatar_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{nullptr}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; mutable std::mutex metaMu_; mutable std::unordered_map<std::string,GroupMeta> groupMeta_;
+    std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,loginId_,loginName_,loginAvatar_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{nullptr}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::mutex groupSenderMu_; std::unordered_map<std::string, GroupSenderMessage> groupSenders_; mutable std::mutex metaMu_; mutable std::unordered_map<std::string,GroupMeta> groupMeta_;
     QQOfficialNameCache names_;
     mutable std::mutex sessionMu_;
     std::shared_ptr<catofficial::Session> session_;
