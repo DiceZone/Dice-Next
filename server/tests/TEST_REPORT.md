@@ -90,8 +90,8 @@ targeted checks must not be presented as a fresh full-suite or live-platform run
 - Tests used isolated files, local renderers and in-memory adapters. They did not
   start a real bot/server, send a platform message, contact SMTP/Webhook, or prove
   cross-platform CI success. Notification and preview boundaries are documented in
-  [notification rules](../../docs/notification-rules.md) and
-  [reply previews](../../docs/reply-previews.md).
+  notification rules and
+  reply previews.
 
 ## 2026-10-21: Command-aware reply previews (local)
 
@@ -122,7 +122,7 @@ targeted checks must not be presented as a fresh full-suite or live-platform run
 - No real cards, statistics, bot RNG state, plugin execution, platform delivery,
   SMTP/Webhook or cloud authorization were used. Cross-platform CI and actual
   platform presentation remain separate acceptance steps. See
-  [reply preview boundaries](../../docs/reply-previews.md).
+  reply preview boundaries.
 
 ## 2026-10-21: Notification content and diagnostic context (local)
 
@@ -760,7 +760,7 @@ targeted checks must not be presented as a fresh full-suite or live-platform run
   Old JS/Python/bytecode, arbitrary XML code, unsafe policy hooks and remote
   auto-install remain excluded. Next's single-selected-reply dispatch and
   synchronous decision hooks are retained; see
-  [the compatibility scope](../../docs/legacy-mod-compatibility.md).
+  the compatibility scope.
 
 ## 2026-10-12: Release Linux timeout and updater shutdown race
 
@@ -950,7 +950,7 @@ targeted checks must not be presented as a fresh full-suite or live-platform run
   No bot account, QQ UI or external service was used.
 - One lightweight logger test compilation unit was added to the existing core
   test executable. No extra CI job, build matrix, dependency or heavy router
-  compilation unit was introduced. See [runtime logging](../../docs/runtime-logging.md)
+  compilation unit was introduced. See runtime logging
   for format, levels, privacy limitations and troubleshooting.
 
 ## 2026-10-11: Plugin deletion/upload rule-reload deadlock
@@ -1095,7 +1095,7 @@ Local implementation, not committed or published. Scope is deliberately split:
   GitHub because these changes have not been pushed.
 - Existing native updater regression: 22 cases / 169 assertions passed again.
   This is not Windows package acceptance. The Windows checklist remains pending:
-  [windows-update-acceptance.md](../../docs/windows-update-acceptance.md).
+  windows-update-acceptance.md.
 - The local machine lacks the full Drogon/CMake dependency environment. The
   complete backend executable and cloud-service integration suite were not built
   in this round; targeted standalone suites do not substitute for that check.
@@ -1181,7 +1181,7 @@ Scope/remaining integration checks:
 - Separately stored local formula/weapon shortcuts are outside BDC schema v1;
   unknown fields in the card document are retained, not executed as commands.
 
-Usage and compatibility boundaries: [cloud-cards.md](../../docs/cloud-cards.md).
+Usage and compatibility boundaries: cloud-cards.md.
 
 ## 2026-09-07: bot-off logging and operational command regression
 

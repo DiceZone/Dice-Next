@@ -41,3 +41,6 @@ Thumbs.db
 /restore-rollbacks/
 /config/server.json
 /config/webui_sessions.json
+
+# Local-only notes (internal design, acceptance records)
+/private/
