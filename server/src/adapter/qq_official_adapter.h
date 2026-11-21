@@ -10,6 +10,9 @@
 #include "../message/qq_official_message.h"
 #include "qq_official_name_cache.h"
 #include "qq_official_protocol.h"
+#include <catofficial/api.h>
+#include <catofficial/reply_state.h>
+#include <catofficial/session.h>
 #include "qq_gateway_socket.h"
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
@@ -503,7 +506,8 @@ public:
             nameWarmGroups_.clear(); nameRemovedGroups_.clear(); nameWarmCursor_.clear(); nameDiscoveryAt_ = nameNextWorkAt_ = 0;
             nameGroupEpochs_.clear();
             lastNameActivity_ = 0;
-            nameClient_.reset();             accessToken_.clear();
+            nameClient_.reset();
+            if (auto current = currentSession()) current->clearAccessToken();
             mediaIndex_.reset();
         }
         appId_ = newApp;
@@ -516,6 +520,7 @@ public:
         richStyle_ = qq_rich::style(cfg.value("qqRichReplies", std::string("off")));
         interactions_ = qq_rich::interaction(cfg.value("qqInteractions", std::string("links")));
         setMessageFormatOverride(parseFormatOverride(cfg.value("message_format", std::string())));
+        if (auto current = currentSession()) current->configure(sessionOptions());
         if (appId_.empty() || appSecret_.empty()) { lastError_ = "QQ 官方机器人需要 AppID 和 AppSecret"; return false; }
         return true;
     }
@@ -526,7 +531,9 @@ public:
         stopping_ = false;
         connecting_ = true;
         if (webhookMode_) retainWebhook();
-        fetchAccessToken();
+        auto current = session();
+        current->configure(sessionOptions());
+        current->start();
         return true;
     }
 
@@ -534,8 +541,7 @@ public:
         stopping_ = true; connecting_ = false; connected_ = false;
         releaseWebhook();
         ++nameGeneration_;
-        if (heartbeatTimer_) { drogon::app().getLoop()->invalidateTimer(*heartbeatTimer_); heartbeatTimer_.reset(); }
-        if (accessTokenTimer_) { drogon::app().getLoop()->invalidateTimer(*accessTokenTimer_); accessTokenTimer_.reset(); }
+        if (auto current = currentSession()) current->stop();
         if (nameMaintenanceTimer_) { drogon::app().getLoop()->invalidateTimer(*nameMaintenanceTimer_); nameMaintenanceTimer_.reset(); }
         {
             std::lock_guard lock(metaMu_);
@@ -546,8 +552,6 @@ public:
             }
             nameQueries_.clear(); nameDiscoveryAt_ = 0;
         }
-        if (gateway_) gateway_->stop();
-        gateway_.reset();
     }
 
     bool webhookMode() const { return webhookMode_; }
@@ -765,15 +769,8 @@ private:
     struct QrSession { std::string taskId, key; std::time_t createdAt{}; };
     inline static std::mutex qrMutex_;
     inline static std::unordered_map<std::string,QrSession> qrSessions_;
-    static std::string resolveIpv4(const std::string& host) {
-        addrinfo hints{}; hints.ai_family=AF_INET; hints.ai_socktype=SOCK_STREAM;
-        addrinfo* results=nullptr; if(getaddrinfo(host.c_str(),nullptr,&hints,&results)!=0 || !results) return {};
-        char text[INET_ADDRSTRLEN]{}; auto* addr=reinterpret_cast<sockaddr_in*>(results->ai_addr);
-        const char* result=inet_ntop(AF_INET,&addr->sin_addr,text,sizeof(text)); freeaddrinfo(results); return result?std::string(result):std::string();
-    }
-    static drogon::HttpClientPtr httpsClient(const std::string& host) {
-        const auto ip=resolveIpv4(host); return ip.empty()?nullptr:drogon::HttpClient::newHttpClient(ip,443,true);
-    }
+    static std::string resolveIpv4(const std::string& host) { return catofficial::api::resolveIpv4(host); }
+    static drogon::HttpClientPtr httpsClient(const std::string& host) { return catofficial::api::httpsClient(host); }
     // 会话号会放进 URL 路径段。标准 Base64 约一半概率带 '/' 或 '+'，drogon 解码后
     // 不再匹配 /qr/{1}，表现为二维码偶发 404 加载不出来；改用十六进制，只含 [0-9a-f]。
     static std::string randomSessionId() {
@@ -795,35 +792,12 @@ private:
         total=len; ok=ok && EVP_CIPHER_CTX_ctrl(c,EVP_CTRL_GCM_SET_TAG,16,const_cast<unsigned char*>(tag))==1 && EVP_DecryptFinal_ex(c,reinterpret_cast<unsigned char*>(out.data())+total,&len)==1; EVP_CIPHER_CTX_free(c); if(!ok)return {}; out.resize(total+len); return out;
     }
     static json apiResult(bool ok, int status, const std::string& message = {}, json data = json::object()) {
-        return json{{"ok", ok}, {"httpStatus", status}, {"message", message}, {"data", std::move(data)}};
+        return catofficial::api::result(ok, status, message, std::move(data));
     }
-    // 平台返回的「无权限」类错误：未开通 / 内邀 / 白名单接口。只按平台给出的错误码
-    // 与文案识别，不把网络、限流、参数错误当成权限问题。
     static bool isPermissionDenied(int status, int64_t code, const std::string& message) {
-        // 40012010：应用无接口访问权限；11253/11254：成员等接口未授权（名称查询已按此退避）。
-        if (code == 40012010 || code == 11253 || code == 11254) return true;
-        if (status == 401 || status == 429 || status >= 500) return false;
-        for (const char* marker : {"无接口访问权限", "无权限", "没有权限", "权限不足", "未授权", "未开通", "no permission", "permission denied"})
-            if (message.find(marker) != std::string::npos) return true;
-        return false;
+        return catofficial::api::isPermissionDenied(status, code, message);
     }
-    static json checkedApiResponse(int status, const json& data) {
-        int64_t code = 0;
-        if (data.is_object()) {
-            for (const char* field : {"err_code", "code"}) {
-                if (!data.contains(field)) continue;
-                const auto current = qqprotocol::asInteger(data[field]);
-                if (!current) { code = -1; break; }
-                if (*current != 0) { code = *current; break; }
-            }
-        }
-        const bool ok = status >= 200 && status < 300 && code == 0 && !data.is_discarded();
-        auto message = ok ? std::string() : QQOfficialNameCache::text(data, "message");
-        if (!ok && message.empty()) message = "QQ 官方接口未成功（HTTP " + std::to_string(status) + "，错误码 " + std::to_string(code) + "）";
-        auto result = apiResult(ok, status, message, data.is_discarded() ? json::object() : data);
-        result["error_code"] = code;
-        return result;
-    }
+    static json checkedApiResponse(int status, const json& data) { return catofficial::api::checkedResponse(status, data); }
     static std::vector<std::string> splitFlag(const std::string& flag) {
         std::vector<std::string> out; size_t start = 0;
         while (start <= flag.size()) {
@@ -933,7 +907,7 @@ private:
         } catch (...) { DICE_LOG_DEBUG("QQOfficial '{}': 暂未读取到后台名称刷新所需的群资料。", name_); }
     }
     void maintainNameCache() {
-        if (stopping_ || !connected_ || (accessToken_.empty() && !testApi_)) return;
+        if (stopping_ || !connected_ || (token().empty() && !testApi_)) return;
         const auto now = nameNow();
         const auto lastActivity = lastNameActivity_.load();
         if (lastActivity && (now < lastActivity || now - lastActivity < 3)) return;
@@ -1001,7 +975,7 @@ private:
     }
 
     void refreshBotState(const std::string& group) const {
-        if (stopping_ || group.empty() || (accessToken_.empty() && !testApi_)) return;
+        if (stopping_ || group.empty() || (token().empty() && !testApi_)) return;
         {
             std::lock_guard lock(metaMu_); if (nameRemovedGroups_.count(group)) return;
             auto& meta = groupMeta_[group]; const auto now = nameNow();
@@ -1021,7 +995,7 @@ private:
     }
 
     bool refreshGroupMeta(const std::string& groupId, int ttl = kGroupMetaTtlSeconds) const {
-        if (stopping_ || groupId.empty() || (accessToken_.empty() && !testApi_)) return false;
+        if (stopping_ || groupId.empty() || (token().empty() && !testApi_)) return false;
         {
             std::lock_guard lock(metaMu_);
             if (nameRemovedGroups_.count(groupId)) return false;
@@ -1048,7 +1022,7 @@ private:
     }
 
     bool refreshGroupMembersIfNeeded(const std::string& groupId, int ttl = kGroupMetaTtlSeconds, size_t batch = kMemberPageBatch) const {
-        if (stopping_ || groupId.empty() || (accessToken_.empty() && !testApi_)) return false;
+        if (stopping_ || groupId.empty() || (token().empty() && !testApi_)) return false;
         std::string cursor;
         std::vector<std::pair<std::string, std::string>> collected;
         {
@@ -1079,7 +1053,7 @@ private:
         else if (result.value("httpStatus", 0) == 429) blockedUntil = nameNow() + 60;
     }
     void refreshUserName(const std::string& groupId, const std::string& user) const {
-        if (stopping_ || groupId.empty() || user.empty() || (accessToken_.empty() && !testApi_)) return;
+        if (stopping_ || groupId.empty() || user.empty() || (token().empty() && !testApi_)) return;
         const auto key = groupId + '\x1f' + user;
         {
             std::lock_guard lock(metaMu_);
@@ -1248,32 +1222,8 @@ private:
         }
     }
 
-    static std::string urlEncode(const std::string& value) {
-        static const char* kHex = "0123456789ABCDEF";
-        std::string out;
-        for (unsigned char c : value) {
-            if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += static_cast<char>(c);
-            else { out += '%'; out += kHex[c >> 4]; out += kHex[c & 0x0F]; }
-        }
-        return out;
-    }
-
-    /// 平铺 JSON 对象 → 查询串。官方 GET 接口的分页游标等参数走 query，读不到请求体。
-    static std::string queryString(const json& params) {
-        if (!params.is_object()) return {};
-        std::string out;
-        for (const auto& item : params.items()) {
-            const json& value = item.value();
-            std::string text;
-            if (value.is_string()) text = value.get<std::string>();
-            else if (value.is_boolean()) text = value.get<bool>() ? "true" : "false";
-            else if (value.is_number()) text = value.dump();
-            else continue;   // 对象/数组无法出现在查询串里
-            if (!out.empty()) out += "&";
-            out += urlEncode(item.key()) + "=" + urlEncode(text);
-        }
-        return out;
-    }
+    static std::string urlEncode(const std::string& value) { return catofficial::api::urlEncode(value); }
+    static std::string queryString(const json& params) { return catofficial::api::queryString(params); }
 
     void officialApi(drogon::HttpMethod method, const std::string& path, const json& body, ActionCallback cb) {
         std::optional<OutboundAttempt> outgoing;
@@ -1293,7 +1243,7 @@ private:
                 original(std::move(result));
             };
         }
-        if (accessToken_.empty() && !testApi_) { cb(apiResult(false, 0, "QQ 官方机器人尚未取得 AccessToken")); return; }
+        if (token().empty() && !testApi_) { cb(apiResult(false, 0, "QQ 官方机器人尚未取得 AccessToken")); return; }
         const auto revision = names_.revision();
         const auto app = appId_;
         const auto generation = nameGeneration_.load();
@@ -1337,7 +1287,7 @@ private:
         }
         request->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         request->addHeader("Host", "api.bot.qq.com");
-        request->addHeader("Authorization", "QQBot " + accessToken_);
+        request->addHeader("Authorization", "QQBot " + token());
         client->sendRequest(request, [self = shared_from_this(), method, path, cb = std::move(cb)](
             drogon::ReqResult result, const drogon::HttpResponsePtr& response) mutable {
             if (result != drogon::ReqResult::Ok || !response) {
@@ -1364,16 +1314,59 @@ private:
             cb(std::move(checked));
         }, nameRequest ? 10.0 : 0.0);
     }
-    void fetchAccessToken() {
-        auto self=shared_from_this(); auto c=httpsClient("api.bot.qq.com"); if(!c){fail("无法解析 api.bot.qq.com");return;} auto r=drogon::HttpRequest::newHttpRequest(); r->setMethod(drogon::Post); r->setPath("/app/getAppAccessToken"); r->setContentTypeCode(drogon::CT_APPLICATION_JSON); r->addHeader("Host","api.bot.qq.com"); r->setBody(json{{"appId",appId_},{"clientSecret",appSecret_}}.dump());
-        // Resolve once during connection setup. Name refreshes reuse this
-        // asynchronous client, so they do not repeat blocking DNS in a reply.
-        { std::lock_guard lock(metaMu_); nameClient_ = c; }
-        c->sendRequest(r,[self](drogon::ReqResult rr,const drogon::HttpResponsePtr& resp){ try { if(self->stopping_) return; if(rr!=drogon::ReqResult::Ok||!resp||resp->statusCode()>=300) throw std::runtime_error("获取 AccessToken 失败"); auto j=json::parse(resp->body()); self->accessToken_=j.at("access_token").get<std::string>(); int expiresIn=7200; if(j.contains("expires_in")){const auto& v=j["expires_in"]; if(v.is_number_integer()||v.is_number_unsigned()) expiresIn=v.get<int>(); else if(v.is_string()) try{expiresIn=std::stoi(v.get<std::string>());}catch(...){}} self->scheduleTokenRefresh(expiresIn); if(!self->connected_) self->fetchBotProfile(); } catch(const std::exception& e){ self->fail(e.what()); }});
+    // 连接会话（AccessToken、Gateway、鉴权、心跳、重连）由 CatOfficial 维护；
+    // 这里按会话回调更新在线状态、机器人资料与名称缓存，时机与原先一致。
+    catofficial::Session::Options sessionOptions() const {
+        catofficial::Session::Options options;
+        options.appId = appId_; options.appSecret = appSecret_;
+        options.subscribeGroupMemberEvents = subscribeGroupMemberEvents_;
+        options.clientName = "DiceNext";
+        return options;
     }
-    static std::string queryValue(const std::string& url,const std::string& name){const std::string key=name+"="; auto p=url.find(key); if(p==std::string::npos)return {}; p+=key.size(); auto e=url.find('&',p); return url.substr(p,e==std::string::npos?std::string::npos:e-p);}
+    std::shared_ptr<catofficial::Session> currentSession() const { std::lock_guard lock(sessionMu_); return session_; }
+    std::string token() const { const auto s = currentSession(); return s ? s->accessToken() : std::string(); }
+    std::shared_ptr<catofficial::Session> session() {
+        std::lock_guard lock(sessionMu_);
+        if (session_) return session_;
+        std::weak_ptr<QQOfficialAdapter> weak = weak_from_this();
+        catofficial::Session::Hooks hooks;
+        hooks.token = [weak](const drogon::HttpClientPtr& client) {
+            auto self = weak.lock(); if (!self || self->stopping_) return;
+            // Name refreshes reuse this resolved asynchronous client, so they do
+            // not repeat blocking DNS in a reply.
+            { std::lock_guard lock(self->metaMu_); self->nameClient_ = client; }
+            if (!self->connected_) self->fetchBotProfile();
+        };
+        hooks.ready = [weak](const json& d) {
+            auto self = weak.lock(); if (!self) return;
+            auto u = d.value("user", json::object());
+            self->loginId_ = qqprotocol::text(u, "id"); self->loginName_ = qqprotocol::text(u, "username");
+            self->loginAvatar_ = QQOfficialNameCache::avatarUrl(qqprotocol::text(u, "avatar"));
+            self->connected_ = true; self->connecting_ = false;
+            self->beginNameMaintenance();
+        };
+        hooks.resumed = [weak] {
+            auto self = weak.lock(); if (!self) return;
+            self->connected_ = true; self->connecting_ = false; self->beginNameMaintenance();
+        };
+        hooks.dispatch = [weak](const std::string& type, const json& d, const std::string& eventId) {
+            if (auto self = weak.lock()) self->dispatch(type, d, eventId);
+        };
+        hooks.closed = [weak] { if (auto self = weak.lock()) { self->connected_ = false; self->connecting_ = false; } };
+        hooks.reconnecting = [weak] { if (auto self = weak.lock()) { self->connected_ = false; self->connecting_ = true; } };
+        hooks.failed = [weak](const std::string& error) { if (auto self = weak.lock()) self->fail(error); };
+        hooks.log = [](catofficial::Session::LogLevel level, const std::string& message) {
+            if (level == catofficial::Session::LogLevel::error) DICE_LOG_ERROR("{}", message);
+            else if (level == catofficial::Session::LogLevel::warn) DICE_LOG_WARN("{}", message);
+            else if (level == catofficial::Session::LogLevel::info) DICE_LOG_INFO("{}", message);
+            else DICE_LOG_DEBUG("{}", message);
+        };
+        session_ = std::make_shared<catofficial::Session>(sessionOptions(), std::move(hooks));
+        return session_;
+    }
+    static std::string queryValue(const std::string& url,const std::string& name){ return catofficial::api::queryValue(url, name); }
     void fetchBotProfile(){
-        auto self=shared_from_this(); auto c=httpsClient("api.bot.qq.com"); if(!c){finishConnect();return;} auto r=drogon::HttpRequest::newHttpRequest(); r->setPath("/users/@me"); r->addHeader("Host","api.bot.qq.com"); r->addHeader("Authorization","QQBot "+accessToken_);
+        auto self=shared_from_this(); auto c=httpsClient("api.bot.qq.com"); if(!c){finishConnect();return;} auto r=drogon::HttpRequest::newHttpRequest(); r->setPath("/users/@me"); r->addHeader("Host","api.bot.qq.com"); r->addHeader("Authorization","QQBot "+token());
         c->sendRequest(r,[self](drogon::ReqResult rr,const drogon::HttpResponsePtr& resp){
             try{
                 if(rr==drogon::ReqResult::Ok&&resp&&resp->statusCode()<300){auto j=json::parse(resp->body()); self->loginId_=qqprotocol::text(j,"id"); if(self->loginId_.empty()){if(const auto id=qqprotocol::asInteger(j.contains("id")?j["id"]:json()); id) self->loginId_=std::to_string(*id);} self->loginName_=qqprotocol::text(j,"username"); self->loginAvatar_=QQOfficialNameCache::avatarUrl(qqprotocol::text(j,"avatar")); self->shareUrl_=qqprotocol::text(j,"share_url"); const std::string realQQ=queryValue(self->shareUrl_,"robot_uin"); if(!realQQ.empty()) self->displayQQ_=realQQ;}
@@ -1384,7 +1377,7 @@ private:
         });
     }
     void fetchShareUrl(){
-        auto self=shared_from_this(); auto c=httpsClient("api.bot.qq.com"); if(!c){finishConnect();return;} auto r=drogon::HttpRequest::newHttpRequest(); r->setMethod(drogon::Post); r->setPath("/v2/generate_url_link"); r->setContentTypeCode(drogon::CT_APPLICATION_JSON); r->addHeader("Host","api.bot.qq.com"); r->addHeader("Authorization","QQBot "+accessToken_); r->setBody(json{{"callback_data","dicenext"}}.dump());
+        auto self=shared_from_this(); auto c=httpsClient("api.bot.qq.com"); if(!c){finishConnect();return;} auto r=drogon::HttpRequest::newHttpRequest(); r->setMethod(drogon::Post); r->setPath("/v2/generate_url_link"); r->setContentTypeCode(drogon::CT_APPLICATION_JSON); r->addHeader("Host","api.bot.qq.com"); r->addHeader("Authorization","QQBot "+token()); r->setBody(json{{"callback_data","dicenext"}}.dump());
         c->sendRequest(r,[self](drogon::ReqResult rr,const drogon::HttpResponsePtr& resp){
             try{if(rr==drogon::ReqResult::Ok&&resp&&resp->statusCode()<300){auto j=json::parse(resp->body());const auto checked=checkedApiResponse(static_cast<int>(resp->statusCode()),j);if(!checked.value("ok",false))throw std::runtime_error(checked.value("message",std::string("分享链接接口未成功")));const auto url=qqprotocol::shareUrl(j);if(url.empty())throw std::runtime_error("响应缺少有效的 data.url");self->shareUrl_=url; const std::string realQQ=queryValue(self->shareUrl_,"robot_uin"); if(!realQQ.empty()) self->displayQQ_=realQQ;} else DICE_LOG_WARN("QQOfficial '{}': 生成机器人分享链接失败，将继续连接 Gateway",self->name_);}catch(const std::exception&e){DICE_LOG_WARN("QQOfficial '{}': 解析机器人分享链接失败：{}",self->name_,e.what());}
             if(!self->stopping_&&!self->connected_) self->finishConnect();
@@ -1399,34 +1392,8 @@ private:
             beginNameMaintenance();
             return;
         }
-        openGateway();
+        session()->openGateway();
     }
-    void openGateway() {
-        auto self=shared_from_this(); auto c=httpsClient("api.bot.qq.com"); if(!c){fail("无法解析 api.bot.qq.com");return;} auto r=drogon::HttpRequest::newHttpRequest(); r->setPath("/gateway/bot"); r->addHeader("Host","api.bot.qq.com"); r->addHeader("Authorization","QQBot "+accessToken_);
-        c->sendRequest(r,[self](drogon::ReqResult rr,const drogon::HttpResponsePtr& resp){ try { if(rr!=drogon::ReqResult::Ok||!resp) throw std::runtime_error("获取 Gateway 地址失败（网络请求未完成）"); const auto body=resp->body(); auto j=json::parse(body); if(resp->statusCode()>=300||!j.contains("url")||!j["url"].is_string()){DICE_LOG_WARN("QQOfficial Gateway response: HTTP {} {}",static_cast<int>(resp->statusCode()),body); throw std::runtime_error("获取 Gateway 地址失败（请查看后台日志中的 Gateway 响应）");} self->connectGateway(j["url"].get<std::string>()); } catch(const std::exception&e){self->fail(e.what());} });
-    }
-    void connectGateway(const std::string& url) {
-        gatewayUrl_=url;
-        const std::string prefix="wss://"; if(url.rfind(prefix,0)!=0){fail("QQ Gateway 地址格式无效");return;} const auto slash=url.find('/',prefix.size()); const std::string authority=url.substr(prefix.size(),slash==std::string::npos?std::string::npos:slash-prefix.size()); const auto colon=authority.rfind(':'); const std::string host=colon==std::string::npos?authority:authority.substr(0,colon); uint16_t port=443; try{if(colon!=std::string::npos)port=static_cast<uint16_t>(std::stoi(authority.substr(colon+1)));}catch(...){fail("QQ Gateway 端口无效");return;} const std::string path=slash==std::string::npos?"/":url.substr(slash);
-        auto self=shared_from_this();
-        // QQ's Gateway CDN requires the hostname in TLS SNI.  This transport
-        // resolves through the OS, avoiding c-ares VPN/CNAME failures without
-        // sacrificing SNI by connecting to a bare IP address.
-        if (gateway_) gateway_->stop();
-        gateway_=std::make_shared<QQGatewaySocket>(host,port,path,
-            [self](std::string raw){ if(!self->stopping_) self->onGateway(raw); },
-            [self](const std::string& error){ if(!self->stopping_) self->fail("连接 QQ Gateway 失败："+error); },
-            [self]{ if(!self->stopping_){ self->connected_=false; self->connecting_=false; self->scheduleGatewayReconnect(); }});
-        gateway_->start();
-    }
-    void onGateway(const std::string& raw) {
-            try { auto p=json::parse(raw); if(p.contains("s")&&!p["s"].is_null()) seq_=qqprotocol::asInteger(p["s"]).value_or(seq_); int op=qqprotocol::integer(p,"op",-1); if(op==10){ if(!sessionId_.empty() && seq_>=0) resume(); else identify(); return; } if(op==7){ scheduleGatewayReconnect(); return; } if(op==0){ auto t=p.value("t",std::string()); auto d=p.value("d",json::object()); if(t=="READY"){sessionId_=d.value("session_id",std::string()); auto u=d.value("user",json::object()); loginId_=qqprotocol::text(u,"id"); loginName_=qqprotocol::text(u,"username"); loginAvatar_=QQOfficialNameCache::avatarUrl(qqprotocol::text(u,"avatar")); connected_=true; connecting_=false; beginHeartbeat(qqprotocol::integer(d,"heartbeat_interval",45000)); beginNameMaintenance();} else if(t=="RESUMED"){connected_=true; connecting_=false; beginNameMaintenance();} else dispatch(t,d,p.value("id",std::string())); }} catch(const std::exception&e){DICE_LOG_WARN("QQOfficial parse: {}",e.what());}
-    }
-    void identify(){ if(gateway_) gateway_->sendText(json{{"op",2},{"d",{{"token","QQBot "+accessToken_},{"intents",qqprotocol::intents(subscribeGroupMemberEvents_)},{"shard",json::array({0,1})},{"properties",{{"$os","DiceNext"},{"$browser","DiceNext"},{"$device","DiceNext"}}}}}}.dump()); }
-    void resume(){ if(gateway_) gateway_->sendText(json{{"op",6},{"d",{{"token","QQBot "+accessToken_},{"session_id",sessionId_},{"seq",seq_}}}}.dump()); }
-    void scheduleGatewayReconnect(){ if(stopping_||gatewayUrl_.empty()) return; connected_=false; connecting_=true; auto self=shared_from_this(); drogon::app().getLoop()->runAfter(5.0,[self]{ if(!self->stopping_) self->connectGateway(self->gatewayUrl_); }); }
-    void scheduleTokenRefresh(int expiresIn){ if(accessTokenTimer_) drogon::app().getLoop()->invalidateTimer(*accessTokenTimer_); const int refreshIn=expiresIn>300?expiresIn-300:60; auto self=shared_from_this(); accessTokenTimer_=drogon::app().getLoop()->runAfter(static_cast<double>(refreshIn),[self]{ if(!self->stopping_) self->fetchAccessToken(); }); }
-    void beginHeartbeat(int ms){ if(heartbeatTimer_)drogon::app().getLoop()->invalidateTimer(*heartbeatTimer_); auto self=shared_from_this(); const int intervalMs=ms>0?ms:1000; heartbeatTimer_=drogon::app().getLoop()->runEvery(static_cast<double>(intervalMs)/1000.0,[self]{if(self->gateway_)self->gateway_->sendText(json{{"op",1},{"d",self->seq_>=0?json(self->seq_):json(nullptr)}}.dump());}); }
     void dispatch(const std::string&t,const json&d,const std::string&eventId){
         markNameActivity();
         if(!d.is_object())return;
@@ -1595,24 +1562,11 @@ private:
         if(!ev.operatorId.empty()&&(!ev.extra.contains("operator_name")||ev.extra["operator_name"]==""))ev.extra["operator_name"]=type=="GROUP_DEL_ROBOT"?cachedUserName(ev.operatorId,ev.groupId):getUserName(ev.operatorId,ev.groupId);
         if(eventCb_)eventCb_(ev);
     }
-    bool acceptOfficialOnce(const std::string& key) {
-        std::lock_guard lock(replyMu_); const auto now = std::time(nullptr);
-        if (now - seenMessageSweepAt_ >= 30) {
-            for (auto it = seenMessages_.begin(); it != seenMessages_.end(); ) if (now - it->second > 600) it = seenMessages_.erase(it); else ++it;
-            seenMessageSweepAt_ = now;
-        }
-        if (seenMessages_.count(key)) return false;
-        if (seenMessages_.size() >= 16384) {
-            auto oldest = seenMessages_.begin();
-            for (auto it = seenMessages_.begin(); it != seenMessages_.end(); ++it) if (it->second < oldest->second) oldest = it;
-            seenMessages_.erase(oldest);
-        }
-        seenMessages_[key] = now; return true;
-    }
+    bool acceptOfficialOnce(const std::string& key) { return dedup_.acceptOnce(key); }
     static std::string eventKey(MessageType type,const std::string& target){return std::to_string(static_cast<int>(type))+":"+target;}
-    void rememberPassiveEvent(MessageType type,const std::string& target,const std::string& eventId){if(target.empty()||eventId.empty())return;std::lock_guard lock(replyMu_);pendingEvents_[eventKey(type,target)]={eventId,std::time(nullptr)};}
-    std::string takePassiveEvent(MessageType type,const std::string& target){std::lock_guard lock(replyMu_);auto it=pendingEvents_.find(eventKey(type,target));if(it==pendingEvents_.end()||std::time(nullptr)-it->second.second>300)return {};auto id=it->second.first;pendingEvents_.erase(it);return id;}
-    int nextReplySeq(const std::string& messageId){if(messageId.empty())return 0;std::lock_guard lock(replyMu_);auto& seq=replySeq_[messageId];if(seq<=0)seq=1;return seq++;}
+    void rememberPassiveEvent(MessageType type,const std::string& target,const std::string& eventId){ if(!target.empty()) passive_.rememberEvent(eventKey(type,target),eventId); }
+    std::string takePassiveEvent(MessageType type,const std::string& target){ return passive_.takeEvent(eventKey(type,target)); }
+    int nextReplySeq(const std::string& messageId){ return passive_.nextSeq(messageId); }
 
     // ── 富媒体（图片/文件/视频/语音）─────────────────────────────
     // QQ Bot 2.0 富媒体两条路：
@@ -2063,7 +2017,7 @@ private:
             sendCaptionFallback(m, "富媒体上传未返回 file_info");
             return;
         }
-        if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; outgoing.failed(lastError_); sendCaptionFallback(m, lastError_); return; }
+        if (token().empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; outgoing.failed(lastError_); sendCaptionFallback(m, lastError_); return; }
         const bool priv = m.type == MessageType::kPrivate;
         const std::string msgPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/messages";
         const bool tryMix = allowMixed && canMixCaption(fileType);
@@ -2081,7 +2035,7 @@ private:
         r2->setMethod(drogon::Post); r2->setPath(msgPath);
         r2->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         r2->addHeader("Host", "api.bot.qq.com");
-        r2->addHeader("Authorization", "QQBot " + accessToken_);
+        r2->addHeader("Authorization", "QQBot " + token());
         r2->setBody(body.dump());
         auto self = shared_from_this();
         outgoing.submitted();
@@ -2111,7 +2065,7 @@ private:
     /// 公网 URL 直传：POST /files 换 file_info → 发消息。
     void uploadRemoteTo(const Message& m, const std::string& target, const MediaItem& item, const std::string& url) {
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
-        if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; sendCaptionFallback(m, lastError_); return; }
+        if (token().empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; sendCaptionFallback(m, lastError_); return; }
         const bool priv = m.type == MessageType::kPrivate;
         const int ftype = fileTypeFor(item.kind, item.name.empty() ? url : item.name);
         const std::string filesPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/files";
@@ -2121,7 +2075,7 @@ private:
         r->setMethod(drogon::Post); r->setPath(filesPath);
         r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         r->addHeader("Host", "api.bot.qq.com");
-        r->addHeader("Authorization", "QQBot " + accessToken_);
+        r->addHeader("Authorization", "QQBot " + token());
         r->setBody(json{{"file_type", ftype}, {"url", url}, {"srv_send_msg", false}}.dump());
         auto self = shared_from_this();
         c->sendRequest(r, [self, m, target, ftype, filesPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
@@ -2149,7 +2103,7 @@ private:
     void uploadLocalTo(const Message& m, const std::string& target, const MediaItem& item, const std::string& localPath) {
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         safeMediaStep("uploadLocalTo 入口", [&] {
-            if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; sendCaptionFallback(m, lastError_); return; }
+            if (token().empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; sendCaptionFallback(m, lastError_); return; }
             const auto prepared = item.kind == 1
                 ? image_transcode::prepareForQq(image_resources::fromUtf8(localPath))
                 : std::nullopt;
@@ -2192,7 +2146,7 @@ private:
             r->setMethod(drogon::Post); r->setPath(prepPath);
             r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
             r->addHeader("Host", "api.bot.qq.com");
-            r->addHeader("Authorization", "QQBot " + accessToken_);
+            r->addHeader("Authorization", "QQBot " + token());
             // file_size / block_size 在官方规格里是字符串，不是数字。
             r->setBody(json{{"file_type", ftype}, {"file_size", std::to_string(data.size())}, {"file_name", fname},
                             {"md5", md5}, {"sha1", sha1}, {"md5_10m", md5_10m}}.dump());
@@ -2279,7 +2233,7 @@ private:
                     r2->setMethod(drogon::Post); r2->setPath(finishPath);
                     r2->setContentTypeCode(drogon::CT_APPLICATION_JSON);
                     r2->addHeader("Host", "api.bot.qq.com");
-                    r2->addHeader("Authorization", "QQBot " + self->accessToken_);
+                    r2->addHeader("Authorization", "QQBot " + self->token());
                     r2->setBody(json{{"upload_id", uploadId}, {"part_index", p.index},
                                      {"block_size", std::to_string(p.size)}, {"md5", partMd5}}.dump());
                     c2->sendRequest(r2, [self, m, target, priv, data, uploadId, fname, ftype, parts, idx, p, finishPath](drogon::ReqResult rr2, const drogon::HttpResponsePtr& resp2) {
@@ -2312,7 +2266,7 @@ private:
         r->setMethod(drogon::Post); r->setPath(filesPath);
         r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         r->addHeader("Host", "api.bot.qq.com");
-        r->addHeader("Authorization", "QQBot " + accessToken_);
+        r->addHeader("Authorization", "QQBot " + token());
         r->setBody(json{{"file_type", ftype}, {"file_name", fname}, {"upload_id", uploadId}, {"srv_send_msg", false}}.dump());
         auto self = shared_from_this();
         c->sendRequest(r, [self, m, target, ftype, filesPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
@@ -2462,7 +2416,7 @@ private:
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         try {
             if (m.type == MessageType::kChannel) { DICE_LOG_WARN("QQOfficial '{}': 频道富媒体暂未接入，跳过", name_); sendCaptionFallback(m, "频道富媒体暂未接入"); return; }
-            if (accessToken_.empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; sendCaptionFallback(m, lastError_); return; }
+            if (token().empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; sendCaptionFallback(m, lastError_); return; }
             const std::string target = resolveTarget(m);
             if (target.empty()) { DICE_LOG_WARN("QQOfficial '{}': 无法解析发送目标，跳过媒体", name_); sendCaptionFallback(m, "无法解析发送目标"); return; }
             std::string localPath;
@@ -2554,7 +2508,7 @@ private:
                     int fallbackLevel = 0) {
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         const std::string destination = (m.type == MessageType::kPrivate ? "私聊 " : m.type == MessageType::kChannel ? "频道 " : "群 ") + m.targetId;
-        if (accessToken_.empty()) {
+        if (token().empty()) {
             lastError_ = "QQ 官方机器人尚未取得 AccessToken";
             OutboundAttempt::prepare("QQ 官方「" + name_ + "」", destination, text).failed(lastError_); return;
         }
@@ -2583,7 +2537,7 @@ private:
         request->setMethod(drogon::Post); request->setPath(path);
         request->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         request->addHeader("Host", "api.bot.qq.com");
-        request->addHeader("Authorization", "QQBot " + accessToken_);
+        request->addHeader("Authorization", "QQBot " + token());
         if (!m.id.empty()) {
             body["msg_id"] = m.id;
             const int seq = nextReplySeq(m.id);
@@ -2653,14 +2607,17 @@ private:
     }
     std::string richStyle_ = "off", interactions_ = "links";
     inline static std::function<std::string(const std::string&)> imagePublisher_;   // 本地图 → 公网 URL（图床）
-    std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,accessToken_,loginId_,loginName_,loginAvatar_,sessionId_,gatewayUrl_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{nullptr}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; int64_t seq_=-1; std::shared_ptr<QQGatewaySocket> gateway_; std::optional<trantor::TimerId> heartbeatTimer_,accessTokenTimer_; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::unordered_map<std::string,int> replySeq_; std::unordered_map<std::string,std::pair<std::string,std::time_t>> pendingEvents_; mutable std::mutex metaMu_; mutable std::unordered_map<std::string,GroupMeta> groupMeta_;
+    std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,loginId_,loginName_,loginAvatar_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{nullptr}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; mutable std::mutex metaMu_; mutable std::unordered_map<std::string,GroupMeta> groupMeta_;
     QQOfficialNameCache names_;
+    mutable std::mutex sessionMu_;
+    std::shared_ptr<catofficial::Session> session_;
     bool subscribeGroupMemberEvents_ = false, autoAcknowledgeInteractions_ = true, webhookMode_ = false;
     struct WebhookSlot { std::string adapterId; std::weak_ptr<QQOfficialAdapter> adapter; };
     inline static std::mutex webhookMu_;
     inline static std::unordered_map<std::string, WebhookSlot> webhooks_;
-    std::unordered_map<std::string,std::time_t> seenMessages_, interactionResponses_;
-    std::time_t seenMessageSweepAt_ = 0;
+    std::unordered_map<std::string,std::time_t> interactionResponses_;
+    catofficial::PassiveReplies passive_;
+    catofficial::EventDeduplicator dedup_;
     ApiTransport testApi_;
     MaterialTransport testMaterial_;
     std::unique_ptr<qq_media::Index> mediaIndex_;
