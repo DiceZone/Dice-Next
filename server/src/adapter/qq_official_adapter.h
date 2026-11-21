@@ -11,6 +11,8 @@
 #include "qq_official_name_cache.h"
 #include "qq_official_protocol.h"
 #include <catofficial/api.h>
+#include <catofficial/event.h>
+#include <catofficial/media.h>
 #include <catofficial/reply_state.h>
 #include <catofficial/session.h>
 #include "qq_gateway_socket.h"
@@ -555,53 +557,18 @@ public:
     }
 
     bool webhookMode() const { return webhookMode_; }
-    struct WebhookReply { int status = 401; std::string body; };
-    // 回调地址验证（op 13）在官方示例里不带签名，允许放行；其余事件必须验过 Ed25519。
-    // 带了签名头的请求，包括地址验证，签名不对一律拒绝。
+    // 验签、地址验证与事件分派由 CatOfficial 处理。
+    using WebhookReply = qqwebhook::Reply;
     WebhookReply acceptWebhook(const std::string& timestamp, const std::string& signature, const std::string& raw) {
-        json payload = json::parse(raw, nullptr, false);
-        if (!payload.is_object()) return {400, {}};
-        const int op = payload.value("op", -1);
-        const bool signedRequest = !timestamp.empty() || !signature.empty();
-        if (signedRequest) {
-            if (!qqwebhook::verify(appSecret_, timestamp, raw, signature)) {
-                DICE_LOG_WARN("QQOfficial '{}': Webhook 签名校验失败", name_);
-                return {401, {}};
-            }
-        } else if (op != 13) {
-            return {401, {}};
-        }
-        if (op == 13) {
-            const json data = payload.value("d", json::object());
-            if (!data.is_object()) return {400, {}};
-            const auto token = data.value("plain_token", std::string());
-            const auto eventTs = data.value("event_ts", std::string());
-            if (token.empty() || eventTs.empty()) return {400, {}};
-            const auto signedToken = qqwebhook::validationSignature(appSecret_, eventTs, token);
-            if (signedToken.empty()) return {500, {}};
-            return {200, json{{"plain_token", token}, {"signature", signedToken}}.dump()};
-        }
-        if (op == 0) {
-            try {
-                dispatch(payload.value("t", std::string()),
-                    payload.contains("d") && payload["d"].is_object() ? payload["d"] : json::object(),
-                    payload.value("id", std::string()));
-            } catch (const std::exception& e) {
-                DICE_LOG_WARN("QQOfficial '{}': Webhook 事件处理失败：{}", name_, e.what());
-                return {500, {}};
-            }
-        }
-        return {200, json{{"op", 12}}.dump()};
+        auto reply = qqwebhook::handle(appSecret_, timestamp, signature, raw,
+            [this](const std::string& type, const json& d, const std::string& eventId) { dispatch(type, d, eventId); });
+        if (!reply.error.empty()) DICE_LOG_WARN("QQOfficial '{}': {}", name_, reply.error);
+        return reply;
     }
     void bindWebhookForTest() { retainWebhook(); }
     void unbindWebhookForTest() { releaseWebhook(); }
     static std::shared_ptr<QQOfficialAdapter> findWebhook(const std::string& appId) {
-        std::lock_guard lock(webhookMu_);
-        auto it = webhooks_.find(appId);
-        if (it == webhooks_.end()) return nullptr;
-        auto adapter = it->second.adapter.lock();
-        if (!adapter || !adapter->webhookMode_) { webhooks_.erase(it); return nullptr; }
-        return adapter;
+        return webhooks_.find(appId, [](const QQOfficialAdapter& adapter) { return adapter.webhookMode_; });
     }
 
     void sendMessage(const Message& msg) override { sendTo(msg, msg.content, ContentFormat::kPlainText); }
@@ -1272,47 +1239,16 @@ private:
         cb = std::move(finish);
         drogon::HttpClientPtr client;
         if (nameRequest) { std::lock_guard lock(metaMu_); client = nameClient_; }
-        if (!client) client = httpsClient("api.bot.qq.com");
-        if (!client) { cb(apiResult(false, 0, "无法解析 api.bot.qq.com")); return; }
-        auto request = drogon::HttpRequest::newHttpRequest();
-        request->setMethod(method);
-        if (method == drogon::Get) {
-            // 查询串已逐段编码，关掉 drogon 的整体编码，否则 ? 与 & 会被转义。
-            const std::string query = queryString(body);
-            request->setPathEncode(false);
-            request->setPath(query.empty() ? path : path + "?" + query);
-        } else {
-            request->setPath(path);
-            if (!body.is_null() && !body.empty()) request->setBody(body.dump());
-        }
-        request->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-        request->addHeader("Host", "api.bot.qq.com");
-        request->addHeader("Authorization", "QQBot " + token());
-        client->sendRequest(request, [self = shared_from_this(), method, path, cb = std::move(cb)](
-            drogon::ReqResult result, const drogon::HttpResponsePtr& response) mutable {
-            if (result != drogon::ReqResult::Ok || !response) {
-                const std::string message = "QQ 官方接口请求未完成: " + path;
-                DICE_LOG_WARN("QQOfficial '{}': {} ({})", self->name_, message, drogon::to_string(result));
-                cb(apiResult(false, 0, message));
-                return;
-            }
-            const int status = static_cast<int>(response->statusCode());
-            const auto raw = response->body();
-            json data = raw.empty() ? json::object() : json::parse(raw, nullptr, false);
-            auto checked = checkedApiResponse(status, data);
-            if (!checked.value("ok", false)) {
-                const char* verb = method == drogon::Get ? "GET" : method == drogon::Post ? "POST" : method == drogon::Patch ? "PATCH" : method == drogon::Delete ? "DELETE" : "HTTP";
-                const auto code = checked.value("error_code", int64_t(0));
-                const auto message = checked.value("message", std::string());
-                // 官方 v2 不少接口只对内邀或白名单应用开放，普通应用每次调用都会稳定返回
-                // 「应用无接口访问权限」。这是平台权限而非故障，降为 DEBUG，避免刷屏。
-                if (isPermissionDenied(status, code, message))
-                    DICE_LOG_DEBUG("QQOfficial '{}': {} {} 无接口访问权限：HTTP {}，错误码 {}，{}", self->name_, verb, path, status, code, message);
-                else
-                    DICE_LOG_WARN("QQOfficial '{}': {} {} 失败：HTTP {}，错误码 {}，{}", self->name_, verb, path, status, code, message);
-            }
-            cb(std::move(checked));
-        }, nameRequest ? 10.0 : 0.0);
+        if (!client) client = httpsClient(catofficial::api::kHost);
+        catofficial::api::call(client, method, path, body, token(), std::move(cb), nameRequest ? 10.0 : 0.0, logger());
+    }
+    catofficial::Logger logger() const {
+        return [name = name_](catofficial::LogLevel level, const std::string& message) {
+            if (level == catofficial::LogLevel::error) DICE_LOG_ERROR("QQOfficial '{}': {}", name, message);
+            else if (level == catofficial::LogLevel::warn) DICE_LOG_WARN("QQOfficial '{}': {}", name, message);
+            else if (level == catofficial::LogLevel::info) DICE_LOG_INFO("QQOfficial '{}': {}", name, message);
+            else DICE_LOG_DEBUG("QQOfficial '{}': {}", name, message);
+        };
     }
     // 连接会话（AccessToken、Gateway、鉴权、心跳、重连）由 CatOfficial 维护；
     // 这里按会话回调更新在线状态、机器人资料与名称缓存，时机与原先一致。
@@ -1366,20 +1302,25 @@ private:
     }
     static std::string queryValue(const std::string& url,const std::string& name){ return catofficial::api::queryValue(url, name); }
     void fetchBotProfile(){
-        auto self=shared_from_this(); auto c=httpsClient("api.bot.qq.com"); if(!c){finishConnect();return;} auto r=drogon::HttpRequest::newHttpRequest(); r->setPath("/users/@me"); r->addHeader("Host","api.bot.qq.com"); r->addHeader("Authorization","QQBot "+token());
-        c->sendRequest(r,[self](drogon::ReqResult rr,const drogon::HttpResponsePtr& resp){
-            try{
-                if(rr==drogon::ReqResult::Ok&&resp&&resp->statusCode()<300){auto j=json::parse(resp->body()); self->loginId_=qqprotocol::text(j,"id"); if(self->loginId_.empty()){if(const auto id=qqprotocol::asInteger(j.contains("id")?j["id"]:json()); id) self->loginId_=std::to_string(*id);} self->loginName_=qqprotocol::text(j,"username"); self->loginAvatar_=QQOfficialNameCache::avatarUrl(qqprotocol::text(j,"avatar")); self->shareUrl_=qqprotocol::text(j,"share_url"); const std::string realQQ=queryValue(self->shareUrl_,"robot_uin"); if(!realQQ.empty()) self->displayQQ_=realQQ;}
-                else DICE_LOG_WARN("QQOfficial '{}': 获取机器人资料失败，将尝试生成分享链接",self->name_);
-            }catch(const std::exception&e){DICE_LOG_WARN("QQOfficial '{}': 解析机器人资料失败：{}",self->name_,e.what());}
+        auto self=shared_from_this(); auto c=httpsClient(catofficial::api::kHost); if(!c){finishConnect();return;}
+        catofficial::api::fetchProfile(c, token(), [self](std::optional<catofficial::api::BotProfile> profile, std::string error){
+            if(profile){
+                self->loginId_=profile->id; self->loginName_=profile->username;
+                self->loginAvatar_=QQOfficialNameCache::avatarUrl(profile->avatar); self->shareUrl_=profile->shareUrl;
+                const std::string realQQ=catofficial::api::robotUin(self->shareUrl_); if(!realQQ.empty()) self->displayQQ_=realQQ;
+            }
+            else if(error.empty()) DICE_LOG_WARN("QQOfficial '{}': 获取机器人资料失败，将尝试生成分享链接",self->name_);
+            else DICE_LOG_WARN("QQOfficial '{}': 解析机器人资料失败：{}",self->name_,error);
             if(self->stopping_||self->connected_) return;
             if(self->displayQQ_.empty()||self->shareUrl_.empty()) self->fetchShareUrl(); else self->finishConnect();
         });
     }
     void fetchShareUrl(){
-        auto self=shared_from_this(); auto c=httpsClient("api.bot.qq.com"); if(!c){finishConnect();return;} auto r=drogon::HttpRequest::newHttpRequest(); r->setMethod(drogon::Post); r->setPath("/v2/generate_url_link"); r->setContentTypeCode(drogon::CT_APPLICATION_JSON); r->addHeader("Host","api.bot.qq.com"); r->addHeader("Authorization","QQBot "+token()); r->setBody(json{{"callback_data","dicenext"}}.dump());
-        c->sendRequest(r,[self](drogon::ReqResult rr,const drogon::HttpResponsePtr& resp){
-            try{if(rr==drogon::ReqResult::Ok&&resp&&resp->statusCode()<300){auto j=json::parse(resp->body());const auto checked=checkedApiResponse(static_cast<int>(resp->statusCode()),j);if(!checked.value("ok",false))throw std::runtime_error(checked.value("message",std::string("分享链接接口未成功")));const auto url=qqprotocol::shareUrl(j);if(url.empty())throw std::runtime_error("响应缺少有效的 data.url");self->shareUrl_=url; const std::string realQQ=queryValue(self->shareUrl_,"robot_uin"); if(!realQQ.empty()) self->displayQQ_=realQQ;} else DICE_LOG_WARN("QQOfficial '{}': 生成机器人分享链接失败，将继续连接 Gateway",self->name_);}catch(const std::exception&e){DICE_LOG_WARN("QQOfficial '{}': 解析机器人分享链接失败：{}",self->name_,e.what());}
+        auto self=shared_from_this(); auto c=httpsClient(catofficial::api::kHost); if(!c){finishConnect();return;}
+        catofficial::api::generateShareUrl(c, token(), "dicenext", [self](std::string url, std::string error){
+            if(!url.empty()){ self->shareUrl_=url; const std::string realQQ=catofficial::api::robotUin(url); if(!realQQ.empty()) self->displayQQ_=realQQ; }
+            else if(error.empty()) DICE_LOG_WARN("QQOfficial '{}': 生成机器人分享链接失败，将继续连接 Gateway",self->name_);
+            else DICE_LOG_WARN("QQOfficial '{}': 解析机器人分享链接失败：{}",self->name_,error);
             if(!self->stopping_&&!self->connected_) self->finishConnect();
         });
     }
@@ -1394,145 +1335,97 @@ private:
         }
         session()->openGateway();
     }
+    // 事件的协议层解析（场景、发送者、@ 标记、去重键、被动回复会话）由 CatOfficial 完成；
+    // 这里把结果映射成 Dice!Next 的 Message / BotEvent，并维护名称缓存与群资料。
     void dispatch(const std::string&t,const json&d,const std::string&eventId){
         markNameActivity();
         if(!d.is_object())return;
-        Message m; m.platform=platform();m.adapterId=id_;m.selfId=loginId_;m.id=qqprotocol::text(d,"id");if(m.id.empty())m.id=eventId;
-        m.content=qqprotocol::text(d,"content");m.rawContent=m.content;m.displayContent=m.content;m.timestamp=qqprotocol::eventTime(d,std::time(nullptr));m.extra={{"event_id",eventId},{"event_type",t},{"official_bot_id",appId_},{"official_bot_uin",displayQQ_}};
-        const auto author=qqprotocol::object(d,"author");
-        const auto providerId=qqprotocol::text(d,"id");
-        if(!providerId.empty()&&(t=="C2C_MESSAGE_CREATE"||t=="GROUP_AT_MESSAGE_CREATE"||t=="GROUP_MESSAGE_CREATE"||t=="AT_MESSAGE_CREATE")){
-            auto target=qqprotocol::text(d,t=="AT_MESSAGE_CREATE"?"channel_id":"group_openid");
-            if(t=="C2C_MESSAGE_CREATE"){target=qqprotocol::text(author,"user_openid");if(target.empty())target=qqprotocol::text(author,"id");}
-            const auto key=appId_+'\x1f'+t+'\x1f'+target+'\x1f'+providerId+'\x1f'+qqprotocol::sceneValue(d,"msg_idx");
-            if(!acceptOfficialOnce(key))return;
-        }
-        if(t=="C2C_MESSAGE_CREATE"){
-            m.type=MessageType::kPrivate; m.senderId=QQOfficialNameCache::text(author,"user_openid");
-            if(m.senderId.empty())m.senderId=QQOfficialNameCache::text(author,"id");
-            m.senderName=rememberAuthor(author,false);m.targetId=m.senderId;
-        }
-        else if(t=="GROUP_AT_MESSAGE_CREATE"||t=="GROUP_MESSAGE_CREATE"){
-            m.type=MessageType::kGroup;m.senderId=QQOfficialNameCache::text(author,"member_openid");
-            if(m.senderId.empty())m.senderId=QQOfficialNameCache::text(author,"id");
-            m.targetId=d.value("group_openid",std::string());m.extra["group_id"]=d.value("group_id",std::string());
+        using catofficial::event::Scene;
+        const auto parsed=catofficial::event::parseMessage(t,d,eventId,loginId_,appId_);
+        if(!parsed){ dispatchEvent(t,d,eventId); return; }
+        const auto& e=*parsed;
+        if(!e.dedupKey.empty()&&!acceptOfficialOnce(e.dedupKey))return;
+        Message m; m.platform=platform();m.adapterId=id_;m.selfId=loginId_;m.id=e.id;m.timestamp=e.time;
+        m.extra={{"event_id",eventId},{"event_type",t},{"official_bot_id",appId_},{"official_bot_uin",displayQQ_}};
+        m.senderId=e.senderId;m.targetId=e.targetId;
+        if(e.scene==Scene::direct){ m.type=MessageType::kPrivate; m.senderName=rememberAuthor(e.author,false); }
+        else if(e.scene==Scene::group){
+            m.type=MessageType::kGroup;m.extra["group_id"]=e.groupId;
             rememberNameGroup(m.targetId);
-            auto member=author.is_object()?author:json::object();member["member_openid"]=m.senderId;m.senderName=rememberMember(m.targetId,member);
-            const auto role=QQOfficialNameCache::text(author,"member_role");
-            if(role=="member"||role=="admin"||role=="owner")m.extra["role"]=role;
-            names_.rememberGroup(appId_,m.targetId,QQOfficialNameCache::text(d,"group_name"));
-            // GROUP_AT_MESSAGE_CREATE is delivered only to the bot which was @ed.
-            // Its payload is allowed to omit mentions, so the event itself must be
-            // treated as an explicit mention; this also lets @ wake a disabled bot.
-            if(t=="GROUP_AT_MESSAGE_CREATE"&&!loginId_.empty())m.atList.push_back(loginId_);
-            // 官方正文会保留 <@OpenID>；若不移除，Dice! 的命令前缀不在首位，
-            // 例如「@机器人 .r」会被当作普通文本。仅剥离明确指向本机器人的标记。
-            auto eraseMention = [&m](const std::string& who) {
-                if (who.empty()) return;
-                for (const std::string& token : {"<@" + who + ">", "<@!" + who + ">"}) {
-                    size_t pos = 0;
-                    while ((pos = m.content.find(token, pos)) != std::string::npos) m.content.erase(pos, token.size());
-                }
-            };
-            if(d.contains("mentions")&&d["mentions"].is_array()){m.extra["mentions"]=d["mentions"];for(const auto& mention:d["mentions"]){if(!mention.is_object())continue;const auto id=mention.value("member_openid",mention.value("user_openid",mention.value("id",std::string()))); const bool mine=mention.value("is_you",false)||id==loginId_||id==appId_||mention.value("bot_appid",mention.value("bot_app_id",std::string()))==appId_; if(mine){m.atList.push_back(loginId_); eraseMention(id); eraseMention(loginId_); eraseMention(appId_);}else if(!id.empty()){m.atList.push_back(id);rememberAuthor(mention,true);}}}
-            // 有些 GROUP_AT_MESSAGE_CREATE 载荷不会带 mentions，只能安全地移除正文最前
-            // 的一个 @ 标记；事件类型本身已证明它指向当前机器人。
-            if(t=="GROUP_AT_MESSAGE_CREATE"){
-                const auto begin=m.content.find_first_not_of(" \t\r\n");
-                if(begin!=std::string::npos && m.content.compare(begin,2,"<@") == 0){
-                    const auto end=m.content.find('>',begin+2);
-                    if(end!=std::string::npos) m.content.erase(begin,end-begin+1);
-                }
+            auto member=e.author;member["member_openid"]=m.senderId;m.senderName=rememberMember(m.targetId,member);
+            if(!e.role.empty())m.extra["role"]=e.role;
+            names_.rememberGroup(appId_,m.targetId,e.groupName);
+            // GROUP_AT_MESSAGE_CREATE 只投递给被 @ 的机器人，事件本身就算一次 @，@ 也能唤醒已关闭的机器人。
+            if(e.atSelf&&!loginId_.empty())m.atList.push_back(loginId_);
+            if(d.contains("mentions")&&d["mentions"].is_array())m.extra["mentions"]=d["mentions"];
+            for(const auto& mention:e.mentions){
+                if(mention.self)m.atList.push_back(loginId_);
+                else if(!mention.id.empty()){m.atList.push_back(mention.id);rememberAuthor(mention.raw,true);}
             }
-            const auto first=m.content.find_first_not_of(" \t\r\n");
-            if(first==std::string::npos)m.content.clear();
-            else { const auto last=m.content.find_last_not_of(" \t\r\n"); m.content=m.content.substr(first,last-first+1); }
-            m.rawContent=m.content;m.displayContent=m.content;
             // Receipt logging happens after public-ID/nickname normalization.
         }
-        else if(t=="AT_MESSAGE_CREATE"){m.extra["guild_id"]=qqprotocol::text(d,"guild_id");m.extra["channel_id"]=qqprotocol::text(d,"channel_id");m.type=MessageType::kChannel;m.senderId=QQOfficialNameCache::text(author,"id");m.senderName=rememberAuthor(author,false);m.targetId=d.value("channel_id",std::string());}
-        else { dispatchEvent(t,d,eventId); return; }
-        m.extra["__sender_name_source"] = !QQOfficialNameCache::name(QQOfficialNameCache::text(author,"username"),m.senderId).empty()
+        else{m.extra["guild_id"]=e.guildId;m.extra["channel_id"]=e.channelId;m.type=MessageType::kChannel;m.senderName=rememberAuthor(e.author,false);}
+        m.extra["__sender_name_source"] = !QQOfficialNameCache::name(QQOfficialNameCache::text(e.author,"username"),m.senderId).empty()
             ? "platform" : !m.senderName.empty() ? "cache" : "missing";
         if(d.contains("attachments"))m.extra["attachments"]=d["attachments"];
         if(d.contains("msg_elements"))m.extra["msg_elements"]=d["msg_elements"];
         for(const char* field:{"message_scene","message_type","ark_data"})if(d.contains(field))m.extra[field]=d[field];
         if (d.contains("message_reference") && d["message_reference"].is_object())
-            m.extra["quoted_message_id"] = qqprotocol::text(d["message_reference"], "message_id");
-        const auto messageIndex=qqprotocol::sceneValue(d,"msg_idx");
-        if(!messageIndex.empty())m.extra["message_reference_id"]=messageIndex;
-        const auto normalized = qqmsg::normalizeIncoming(m.content, d.value("attachments", json::array()));
+            m.extra["quoted_message_id"] = e.quotedMessageId;
+        if(!e.messageIndex.empty())m.extra["message_reference_id"]=e.messageIndex;
+        const auto normalized = qqmsg::normalizeIncoming(e.content, d.value("attachments", json::array()));
         m.content = normalized.command;
         m.rawContent = normalized.raw;
         m.displayContent = normalized.display;
         if(messageCb_)messageCb_(m);
     }
     void dispatchEvent(const std::string& type,const json& data,const std::string& eventId){
-        BotEvent ev; ev.platform=platform(); ev.adapterId=id_; ev.selfId=loginId_; ev.timestamp=qqprotocol::eventTime(data,std::time(nullptr)); ev.extra={{"event_id",eventId},{"event_type",type},{"data",data}};
+        using catofficial::event::Scene;
+        const auto n=catofficial::event::parseNotice(type,data,eventId,loginId_,appId_);
+        if(!n.dedupKey.empty()&&!acceptOfficialOnce(n.dedupKey))return;
+        if(!n.replyTarget.empty())rememberPassiveEvent(n.replyScene==Scene::group?MessageType::kGroup:MessageType::kPrivate,n.replyTarget,eventId);
+        BotEvent ev; ev.platform=platform(); ev.adapterId=id_; ev.selfId=loginId_; ev.timestamp=n.time; ev.extra={{"event_id",eventId},{"event_type",type},{"data",data}};
         ev.extra["official_bot_uin"] = displayQQ_;
         ev.extra["official_bot_id"] = appId_;   // 供事件层按 bot 映射 OpenID → 公共号
-        if(type=="GROUP_ADD_ROBOT"||type=="GROUP_DEL_ROBOT"){ev.type=type=="GROUP_ADD_ROBOT"?EventType::kGroupIncrease:EventType::kGroupDecrease;ev.subType=type=="GROUP_DEL_ROBOT"?"removed":"invite";ev.groupId=data.value("group_openid",std::string());ev.userId=loginId_;ev.operatorId=data.value("op_member_openid",std::string());rememberPassiveEvent(MessageType::kGroup,ev.groupId,eventId);}
-        else if(type=="FRIEND_ADD"||type=="FRIEND_DEL"){ev.type=type=="FRIEND_ADD"?EventType::kFriendAdd:EventType::kOther;ev.userId=data.value("openid",std::string());if(type=="FRIEND_ADD")rememberPassiveEvent(MessageType::kPrivate,ev.userId,eventId);}
+        ev.groupId=n.groupId; ev.userId=n.userId; ev.operatorId=n.operatorId;
+        if(type=="GROUP_ADD_ROBOT"||type=="GROUP_DEL_ROBOT"){ev.type=type=="GROUP_ADD_ROBOT"?EventType::kGroupIncrease:EventType::kGroupDecrease;ev.subType=type=="GROUP_DEL_ROBOT"?"removed":"invite";}
+        else if(type=="FRIEND_ADD"||type=="FRIEND_DEL"){ev.type=type=="FRIEND_ADD"?EventType::kFriendAdd:EventType::kOther;}
         else if(type=="GROUP_MEMBER_ADD"||type=="GROUP_MEMBER_REMOVE"){
             ev.type=type=="GROUP_MEMBER_ADD"?EventType::kGroupIncrease:EventType::kGroupDecrease;
-            ev.groupId=QQOfficialNameCache::text(data,"group_openid");ev.userId=QQOfficialNameCache::text(data,"member_openid");
             if(type=="GROUP_MEMBER_REMOVE"){
                 std::lock_guard lock(metaMu_);auto it=groupMeta_.find(ev.groupId);
                 if(it!=groupMeta_.end()){auto& meta=it->second;meta.members.erase(ev.userId);meta.roles.erase(ev.userId);
                     meta.memberIds.erase(std::remove(meta.memberIds.begin(),meta.memberIds.end(),ev.userId),meta.memberIds.end());meta.refreshedAt=0;}
             }
         }
-        else if(type=="GROUP_MSG_RECEIVE"||type=="GROUP_MSG_REJECT"){ev.groupId=data.value("group_openid",std::string());ev.operatorId=data.value("op_member_openid",std::string());if(type=="GROUP_MSG_RECEIVE")rememberPassiveEvent(MessageType::kGroup,ev.groupId,eventId);}
         else if(type=="GROUP_JOIN_REQUEST"){
             ev.type=EventType::kGroupRequest;
-            ev.groupId=data.value("group_openid",std::string());
-            ev.userId=data.value("member_openid",std::string());
-            ev.operatorId=data.value("invited_by",std::string());
             ev.subType="add";
-            const std::string requestId=data.value("join_request_id",std::string());
-            ev.flag=ev.groupId+'\x1f'+ev.userId+'\x1f'+requestId;
-            const auto verify=data.value("verify_info",json::object());
-            ev.comment=verify.value("verify_message",std::string());
-            if(ev.comment.empty()&&verify.contains("review_qa_list")&&verify["review_qa_list"].is_array()){
-                for(const auto& qa:verify["review_qa_list"]){
-                    if(!ev.comment.empty())ev.comment+='\n';
-                    ev.comment+=qa.value("question",std::string())+"："+qa.value("answer",std::string());
-                }
-            }
+            ev.flag=ev.groupId+'\x1f'+ev.userId+'\x1f'+n.joinRequestId;
+            ev.comment=n.comment;
             ev.extra["qq_official_join_request"]=true;
-            DICE_LOG_INFO("QQOfficial '{}': group join request group={} member={} request={}",name_,ev.groupId,ev.userId,requestId);
+            DICE_LOG_INFO("QQOfficial '{}': group join request group={} member={} request={}",name_,ev.groupId,ev.userId,n.joinRequestId);
         }
-        else if(type=="C2C_MSG_RECEIVE"||type=="C2C_MSG_REJECT"){ev.userId=data.value("openid",std::string());if(type=="C2C_MSG_RECEIVE")rememberPassiveEvent(MessageType::kPrivate,ev.userId,eventId);}
         else if(type=="INTERACTION_CREATE"){
-            ev.subType="interaction";ev.groupId=qqprotocol::text(data,"group_openid");
-            ev.userId=qqprotocol::text(data,ev.groupId.empty()?"user_openid":"group_member_openid");
-            const auto details=qqprotocol::object(data,"data"), resolved=qqprotocol::object(details,"resolved");
-            if(ev.userId.empty())ev.userId=qqprotocol::text(resolved,"user_id");
-            const int interactionType=qqprotocol::integer(data,"type",qqprotocol::integer(details,"type"));
-            const auto id=qqprotocol::text(data,"id");
-            if(!id.empty()&&!acceptOfficialOnce(appId_+'\x1f'+type+'\x1f'+id))return;
+            ev.subType="interaction";
+            const auto& id=n.interactionId; const int interactionType=n.interactionType;
             ev.extra["interaction_id"]=id;ev.extra["interaction_type"]=interactionType;
-            ev.extra["interaction_data"]=details;ev.extra["scene"]=qqprotocol::text(data,"scene");
+            ev.extra["interaction_data"]=n.interactionData;ev.extra["scene"]=n.interactionScene;
             for(const char* field:{"guild_id","channel_id"})if(data.contains(field))ev.extra[field]=data[field];
             ev.extra["interaction_ack_automatic"]=autoAcknowledgeInteractions_&&(interactionType==11||interactionType==12);
-            if(!id.empty()&&(interactionType==11||interactionType==12)){
-                // Passive message replies use the OUTER event ID, never d.id
-                // (the interaction callback ID) or opaque button_data.
-                const auto target=ev.groupId.empty()?ev.userId:ev.groupId;
-                if(!target.empty())rememberPassiveEvent(ev.groupId.empty()?MessageType::kPrivate:MessageType::kGroup,target,eventId);
-                if(autoAcknowledgeInteractions_)invokeActionAsync("qq_interaction",{{"interactionId",id},{"body",{{"code",0}}}},[self=shared_from_this()](json result){
+            if(!id.empty()&&(interactionType==11||interactionType==12)&&autoAcknowledgeInteractions_)
+                invokeActionAsync("qq_interaction",{{"interactionId",id},{"body",{{"code",0}}}},[self=shared_from_this()](json result){
                     if(!result.value("ok",false))DICE_LOG_DEBUG("QQOfficial '{}': 互动回应未完成：{}",self->name_,result.value("message",std::string()));
                 });
-            }
         }
         else if(type=="SUBSCRIBE_MESSAGE_STATUS"){
-            ev.subType="subscription_status";ev.groupId=qqprotocol::text(data,"group_openid");ev.userId=qqprotocol::text(data,"openid");
+            ev.subType="subscription_status";
             if(data.contains("result")&&data["result"].is_array())ev.extra["subscription_results"]=data["result"];
         }
         else if(type.rfind("GUILD_",0)==0||type.rfind("CHANNEL_",0)==0){
-            ev.subType="channel_event";ev.userId=qqprotocol::text(data,"op_user_id");
-            ev.extra["guild_id"]=type.rfind("GUILD_",0)==0?qqprotocol::text(data,"id"):qqprotocol::text(data,"guild_id");
-            if(type.rfind("CHANNEL_",0)==0)ev.extra["channel_id"]=qqprotocol::text(data,"id");
+            ev.subType="channel_event";
+            ev.extra["guild_id"]=n.guildId;
+            if(type.rfind("CHANNEL_",0)==0)ev.extra["channel_id"]=n.channelId;
         }
         if(!ev.groupId.empty()) {
             if(type=="GROUP_DEL_ROBOT") {
@@ -1549,14 +1442,11 @@ private:
             }
         }
         if(!ev.userId.empty() && ev.userId!=loginId_){
-            const auto author=data.value("author",json::object());
-            auto username=QQOfficialNameCache::text(author,"username");
-            if(username.empty())username=QQOfficialNameCache::text(data,"username");
-            ev.extra["user_name"]=names_.rememberUser(appId_,ev.userId,username,QQOfficialNameCache::text(author,"union_openid"));
+            ev.extra["user_name"]=names_.rememberUser(appId_,ev.userId,n.username,n.unionOpenId);
             if(ev.extra["user_name"]=="" && !ev.groupId.empty())ev.extra["user_name"]=getUserName(ev.userId,ev.groupId);
         }
         if(!ev.groupId.empty()){
-            names_.rememberGroup(appId_,ev.groupId,QQOfficialNameCache::text(data,"group_name"));
+            names_.rememberGroup(appId_,ev.groupId,n.groupName);
             if(!ev.extra.contains("group_name")||ev.extra["group_name"]=="")ev.extra["group_name"]=type=="GROUP_DEL_ROBOT"?cachedGroupName(ev.groupId):getGroupName(ev.groupId);
         }
         if(!ev.operatorId.empty()&&(!ev.extra.contains("operator_name")||ev.extra["operator_name"]==""))ev.extra["operator_name"]=type=="GROUP_DEL_ROBOT"?cachedUserName(ev.operatorId,ev.groupId):getUserName(ev.operatorId,ev.groupId);
@@ -1575,7 +1465,7 @@ private:
     // 本地图片不再依赖图床，直接走官方分片上传。
     // 官方硬上限：任何类型超过 200MB 直接报 850031。软上限（图 20MB / 视频 30MB /
     // 语音 20MB）只是被降级成文件类型上传，不必我们拦。
-    static constexpr size_t kMediaHardLimitBytes = 200ull * 1024 * 1024;
+    static constexpr size_t kMediaHardLimitBytes = catofficial::media::kHardLimitBytes;
     // QQ 拒绝空 content；纯空格会被改写成可见的「0」，牌堆就会变成「大吉0」。
     static constexpr const char* kMediaPlaceholder = "\xE2\x80\x8B";
 
@@ -1824,49 +1714,10 @@ private:
         return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     }
 
-    static std::string hexDigest(const std::string& data, const EVP_MD* md) {
-        EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-        if (!ctx) return {};
-        unsigned char buf[EVP_MAX_MD_SIZE]; unsigned int len = 0;
-        const bool ok = EVP_DigestInit_ex(ctx, md, nullptr) == 1
-            && EVP_DigestUpdate(ctx, data.data(), data.size()) == 1
-            && EVP_DigestFinal_ex(ctx, buf, &len) == 1;
-        EVP_MD_CTX_free(ctx);
-        if (!ok) return {};
-        static const char kHex[] = "0123456789abcdef";
-        std::string out; out.reserve(len * 2);
-        for (unsigned int i = 0; i < len; ++i) { out += kHex[buf[i] >> 4]; out += kHex[buf[i] & 0xF]; }
-        return out;
-    }
-
-    struct ParsedUrl { std::string scheme, host, path, query; uint16_t port = 443; };
-    static bool parseUrl(const std::string& url, ParsedUrl& out) {
-        const size_t schemeEnd = url.find("://");
-        if (schemeEnd == std::string::npos) return false;
-        out.scheme = url.substr(0, schemeEnd);
-        if (out.scheme != "http" && out.scheme != "https") return false;
-        const size_t hostStart = schemeEnd + 3;
-        const size_t pathStart = url.find('/', hostStart);
-        std::string authority = url.substr(hostStart, pathStart == std::string::npos ? std::string::npos : pathStart - hostStart);
-        const size_t colon = authority.rfind(':');
-        if (colon == std::string::npos) { out.host = authority; out.port = out.scheme == "https" ? 443 : 80; }
-        else {
-            out.host = authority.substr(0, colon);
-            try { out.port = static_cast<uint16_t>(std::stoi(authority.substr(colon + 1))); }
-            catch (...) { return false; }
-        }
-        if (out.host.empty()) return false;
-        const std::string rest = pathStart == std::string::npos ? "/" : url.substr(pathStart);
-        const size_t q = rest.find('?');
-        out.path = q == std::string::npos ? rest : rest.substr(0, q);
-        out.query = q == std::string::npos ? std::string() : rest.substr(q + 1);
-        return true;
-    }
-
-    static drogon::HttpClientPtr clientFor(const std::string& host, uint16_t port, bool tls) {
-        const auto ip = resolveIpv4(host);
-        return ip.empty() ? nullptr : drogon::HttpClient::newHttpClient(ip, port, tls);
-    }
+    static std::string hexDigest(const std::string& data, const EVP_MD* md) { return catofficial::media::hexDigest(data, md); }
+    using ParsedUrl = catofficial::media::ParsedUrl;
+    static bool parseUrl(const std::string& url, ParsedUrl& out) { return catofficial::media::parseUrl(url, out); }
+    static drogon::HttpClientPtr clientFor(const std::string& host, uint16_t port, bool tls) { return catofficial::media::clientFor(host, port, tls); }
 
     void uploadMaterial(const json& params, ActionCallback cb) {
         std::string bytes, mime, file;
@@ -1951,30 +1802,10 @@ private:
         return target;
     }
 
-    /// 兼容腾讯两种响应形态：{code,message,data:{...}} 或直接 {...}。
-    static const json* dataObj(const json& j) {
-        if (!j.is_object()) return nullptr;
-        if (j.contains("data") && j["data"].is_object()) return &j["data"];
-        return &j;
-    }
-    static std::string field(const json& j, const char* key) {
-        const json* d = dataObj(j);
-        return d ? d->value(key, std::string()) : std::string();
-    }
-
-    /// 腾讯接口部分数字字段以字符串返回（如 "1048576"），这里数字/字符串都接受。
-    static size_t jsonSize(const json& v, size_t fallback) {
-        if (v.is_number_unsigned()) return v.get<size_t>();
-        if (v.is_number_integer()) { const long long x = v.get<long long>(); return x > 0 ? static_cast<size_t>(x) : 0; }
-        if (v.is_string()) { try { return static_cast<size_t>(std::stoull(v.get_ref<const std::string&>())); } catch (...) {} }
-        return fallback;
-    }
-    static int jsonInt(const json& v, int fallback) {
-        if (v.is_number_integer()) return v.get<int>();
-        if (v.is_number_unsigned()) { const auto x = v.get<unsigned long long>(); return x <= static_cast<unsigned long long>(INT_MAX) ? static_cast<int>(x) : fallback; }
-        if (v.is_string()) { try { return std::stoi(v.get_ref<const std::string&>()); } catch (...) {} }
-        return fallback;
-    }
+    static const json* dataObj(const json& j) { return catofficial::media::dataObject(j); }
+    static std::string field(const json& j, const char* key) { return catofficial::media::field(j, key); }
+    static size_t jsonSize(const json& v, size_t fallback) { return catofficial::media::jsonSize(v, fallback); }
+    static int jsonInt(const json& v, int fallback) { return catofficial::media::jsonInt(v, fallback); }
 
     /// drogon 事件循环不会捕获回调异常，任何 std::exception 都会直接 terminate
     /// （表现为闪退且无日志）。所有富媒体异步回调统一经此兜底，把异常记进日志。
@@ -2062,42 +1893,42 @@ private:
         });
     }
 
+    // 上传本身（URL 直传、分片上传、合并换 file_info）由 CatOfficial 完成；日志与失败降级
+    // 仍按这条消息的发送上下文记录。
+    catofficial::Logger mediaLogger(const Message& m) const {
+        return [name = name_, m](catofficial::LogLevel level, const std::string& message) {
+            OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
+            if (level == catofficial::LogLevel::error) DICE_LOG_ERROR("QQOfficial '{}': {}", name, message);
+            else if (level == catofficial::LogLevel::warn) DICE_LOG_WARN("QQOfficial '{}': {}", name, message);
+            else if (level == catofficial::LogLevel::info) DICE_LOG_INFO("QQOfficial '{}': {}", name, message);
+            else DICE_LOG_DEBUG("QQOfficial '{}': {}", name, message);
+        };
+    }
+    catofficial::media::TokenSource tokenSource() {
+        return [weak = weak_from_this()] { auto self = weak.lock(); return self ? self->token() : std::string(); };
+    }
+    catofficial::media::Done uploadDone(const Message& m, const std::string& target, int fileType) {
+        return [self = shared_from_this(), m, target, fileType](catofficial::media::Upload upload) {
+            OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
+            self->safeMediaStep("富媒体上传回调", [&] {
+                if (upload.fileInfo.empty()) {
+                    if (!upload.error.empty()) self->lastError_ = upload.error;
+                    if (!upload.reason.empty()) self->sendCaptionFallback(m, upload.reason);
+                    return;
+                }
+                self->sendFileInfoTo(m, target, upload.fileInfo, fileType);
+            });
+        };
+    }
+
     /// 公网 URL 直传：POST /files 换 file_info → 发消息。
     void uploadRemoteTo(const Message& m, const std::string& target, const MediaItem& item, const std::string& url) {
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         if (token().empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; sendCaptionFallback(m, lastError_); return; }
         const bool priv = m.type == MessageType::kPrivate;
         const int ftype = fileTypeFor(item.kind, item.name.empty() ? url : item.name);
-        const std::string filesPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/files";
-        auto c = httpsClient("api.bot.qq.com");
-        if (!c) { lastError_ = "无法解析 api.bot.qq.com"; sendCaptionFallback(m, lastError_); return; }
-        auto r = drogon::HttpRequest::newHttpRequest();
-        r->setMethod(drogon::Post); r->setPath(filesPath);
-        r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-        r->addHeader("Host", "api.bot.qq.com");
-        r->addHeader("Authorization", "QQBot " + token());
-        r->setBody(json{{"file_type", ftype}, {"url", url}, {"srv_send_msg", false}}.dump());
-        auto self = shared_from_this();
-        c->sendRequest(r, [self, m, target, ftype, filesPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
-            OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
-            self->safeMediaStep("URL 直传回调", [&] {
-                if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
-                    self->lastError_ = "QQ 官方富媒体上传失败";
-                    DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, filesPath,
-                                  resp ? static_cast<int>(resp->statusCode()) : 0, resp ? std::string(resp->body()) : std::string("网络请求未完成"));
-                    self->sendCaptionFallback(m, "富媒体 URL 直传失败");
-                    return;
-                }
-                auto j = json::parse(resp->body(), nullptr, false);
-                const std::string fileInfo = field(j, "file_info");
-                if (fileInfo.empty()) { DICE_LOG_WARN("QQOfficial '{}': /files 未返回 file_info: {}", self->name_, std::string(resp->body())); self->sendCaptionFallback(m, "富媒体上传未返回 file_info"); return; }
-                DICE_LOG_INFO("QQOfficial '{}': URL 直传成功，获得 file_info，开始发送", self->name_);
-                self->sendFileInfoTo(m, target, fileInfo, ftype);
-            });
-        });
+        catofficial::media::uploadUrl(tokenSource(), priv, target, ftype, url, uploadDone(m, target, ftype), mediaLogger(m));
     }
-
-    struct UploadPart { int index = 0; std::string presignedUrl; size_t offset = 0; size_t size = 0; };
 
     /// 本地文件官方分片上传：prepare → 顺序 PUT 分片 → part_finish → /files 合并。
     void uploadLocalTo(const Message& m, const std::string& target, const MediaItem& item, const std::string& localPath) {
@@ -2113,7 +1944,7 @@ private:
                 return;
             }
             const std::string sendPath = prepared ? image_resources::utf8(prepared->path) : localPath;
-            const std::string data = readLocalFile(sendPath);
+            std::string data = readLocalFile(sendPath);
             if (data.empty()) { DICE_LOG_WARN("QQOfficial '{}': 本地媒体文件不存在或为空，跳过: {}", name_, localPath); sendCaptionFallback(m, "本地媒体文件不存在或为空"); return; }
             // 先量大小再上传：超过硬上限的文件官方会在最后一步才报 850031，
             // 此前的分片全部白传。
@@ -2134,157 +1965,8 @@ private:
                 fname = (dot == std::string::npos ? fname : fname.substr(0, dot)) + ".jpg";
             }
             const int ftype = fileTypeFor(item.kind, fname);
-            const std::string md5 = hexDigest(data, EVP_md5());
-            const std::string sha1 = hexDigest(data, EVP_sha1());
-            const size_t k10m = 10002432;   // 官方要求前 10,002,432 字节的 MD5
-            const std::string md5_10m = hexDigest(data.substr(0, data.size() < k10m ? data.size() : k10m), EVP_md5());
-            if (md5.empty() || sha1.empty() || md5_10m.empty()) { DICE_LOG_WARN("QQOfficial '{}': 计算本地媒体摘要失败，跳过: {}", name_, localPath); sendCaptionFallback(m, "计算本地媒体摘要失败"); return; }
-            const std::string prepPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/upload_prepare";
-            auto c = httpsClient("api.bot.qq.com");
-            if (!c) { lastError_ = "无法解析 api.bot.qq.com"; sendCaptionFallback(m, lastError_); return; }
-            auto r = drogon::HttpRequest::newHttpRequest();
-            r->setMethod(drogon::Post); r->setPath(prepPath);
-            r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-            r->addHeader("Host", "api.bot.qq.com");
-            r->addHeader("Authorization", "QQBot " + token());
-            // file_size / block_size 在官方规格里是字符串，不是数字。
-            r->setBody(json{{"file_type", ftype}, {"file_size", std::to_string(data.size())}, {"file_name", fname},
-                            {"md5", md5}, {"sha1", sha1}, {"md5_10m", md5_10m}}.dump());
-            DICE_LOG_INFO("QQOfficial '{}': 发起 upload_prepare {} file_type={} file_name={}", name_, prepPath, ftype, fname);
-            auto self = shared_from_this();
-            c->sendRequest(r, [self, m, target, priv, data, fname, ftype, prepPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
-                OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
-                self->safeMediaStep("upload_prepare 回调", [&] {
-                    if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
-                        self->lastError_ = "QQ 官方分片上传准备失败";
-                        DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, prepPath,
-                                      resp ? static_cast<int>(resp->statusCode()) : 0, resp ? std::string(resp->body()) : std::string("网络请求未完成"));
-                        self->sendCaptionFallback(m, "分片上传准备失败");
-                        return;
-                    }
-                    auto j = json::parse(resp->body(), nullptr, false);
-                    const json* d = dataObj(j);
-                    if (!d) { DICE_LOG_WARN("QQOfficial '{}': upload_prepare 响应无效: {}", self->name_, std::string(resp->body())); self->sendCaptionFallback(m, "upload_prepare 响应无效"); return; }
-                    const std::string uploadId = d->value("upload_id", std::string());
-                    const size_t blockSize = d->contains("block_size") ? jsonSize((*d)["block_size"], size_t(1024 * 1024)) : size_t(1024 * 1024);
-                    if (uploadId.empty() || !d->contains("parts") || !(*d)["parts"].is_array()) {
-                        DICE_LOG_WARN("QQOfficial '{}': upload_prepare 缺少 upload_id/parts: {}", self->name_, std::string(resp->body())); self->sendCaptionFallback(m, "upload_prepare 缺少分片信息"); return;
-                    }
-                    std::vector<UploadPart> parts;
-                    size_t offset = 0;
-                    for (const auto& pj : (*d)["parts"]) {
-                        if (!pj.is_object()) continue;
-                        UploadPart p;
-                        p.index = pj.contains("index") ? jsonInt(pj["index"], 0) : 0;
-                        p.presignedUrl = pj.value("presigned_url", std::string());
-                        if (p.presignedUrl.empty() || offset >= data.size()) { parts.clear(); break; }
-                        const size_t bs = pj.contains("block_size") ? jsonSize(pj["block_size"], blockSize) : blockSize;
-                        p.offset = offset;
-                        p.size = bs < data.size() - offset ? bs : data.size() - offset;
-                        offset += p.size;
-                        parts.push_back(std::move(p));
-                    }
-                    if (parts.empty()) { DICE_LOG_WARN("QQOfficial '{}': upload_prepare 返回的分片列表无效", self->name_); self->sendCaptionFallback(m, "upload_prepare 分片列表无效"); return; }
-                    DICE_LOG_INFO("QQOfficial '{}': upload_prepare 成功 upload_id={} block_size={} parts={}", self->name_, uploadId, blockSize, parts.size());
-                    self->uploadPartLoop(m, target, priv, data, uploadId, fname, ftype, std::move(parts), 0);
-                });
-            });
-        });
-    }
-
-    void uploadPartLoop(const Message& m, const std::string& target, bool priv, const std::string& data,
-                        const std::string& uploadId, const std::string& fname, int ftype,
-                        std::vector<UploadPart> parts, size_t idx) {
-        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
-        if (idx >= parts.size()) { finalizeUpload(m, target, priv, uploadId, fname, ftype); return; }
-        DICE_LOG_INFO("QQOfficial '{}': 开始上传分片 {}/{} (index={})", name_, idx + 1, parts.size(), parts[idx].index);
-        safeMediaStep("uploadPartLoop 入口", [&] {
-            const UploadPart p = parts[idx];
-            const std::string chunk = data.substr(p.offset, p.size);
-            ParsedUrl pu;
-            if (!parseUrl(p.presignedUrl, pu)) { DICE_LOG_WARN("QQOfficial '{}': 分片预签名地址无效，上传中止", name_); sendCaptionFallback(m, "分片预签名地址无效"); return; }
-            auto c = clientFor(pu.host, pu.port, pu.scheme == "https");
-            if (!c) { lastError_ = "无法解析分片上传域名 " + pu.host; sendCaptionFallback(m, lastError_); return; }
-            auto r = drogon::HttpRequest::newHttpRequest();
-            r->setMethod(drogon::Put);
-            r->setPathEncode(false);
-            r->setPath(pu.query.empty() ? pu.path : pu.path + "?" + pu.query);
-            r->setContentTypeCode(drogon::CT_APPLICATION_OCTET_STREAM);
-            r->addHeader("Host", pu.host);
-            r->setBody(chunk);
-            auto self = shared_from_this();
-            c->sendRequest(r, [self, m, target, priv, data, uploadId, fname, ftype, parts, idx, p](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
-                OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
-                self->safeMediaStep("PUT 分片回调", [&] {
-                    if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
-                        self->lastError_ = "QQ 官方分片上传失败";
-                        DICE_LOG_WARN("QQOfficial '{}': PUT 分片 {} 失败: HTTP {} {}", self->name_, p.index,
-                                      resp ? static_cast<int>(resp->statusCode()) : 0, resp ? std::string(resp->body()) : std::string("网络请求未完成"));
-                        self->sendCaptionFallback(m, "分片上传失败");
-                        return;
-                    }
-                    DICE_LOG_INFO("QQOfficial '{}': PUT 分片 {} 成功 ({} bytes)，确认分片", self->name_, p.index, p.size);
-                    const std::string partMd5 = self->hexDigest(data.substr(p.offset, p.size), EVP_md5());
-                    if (partMd5.empty()) { DICE_LOG_WARN("QQOfficial '{}': 分片摘要计算失败，上传中止", self->name_); self->sendCaptionFallback(m, "分片摘要计算失败"); return; }
-                    const std::string finishPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/upload_part_finish";
-                    auto c2 = httpsClient("api.bot.qq.com");
-                    if (!c2) { self->lastError_ = "无法解析 api.bot.qq.com"; self->sendCaptionFallback(m, self->lastError_); return; }
-                    auto r2 = drogon::HttpRequest::newHttpRequest();
-                    r2->setMethod(drogon::Post); r2->setPath(finishPath);
-                    r2->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-                    r2->addHeader("Host", "api.bot.qq.com");
-                    r2->addHeader("Authorization", "QQBot " + self->token());
-                    r2->setBody(json{{"upload_id", uploadId}, {"part_index", p.index},
-                                     {"block_size", std::to_string(p.size)}, {"md5", partMd5}}.dump());
-                    c2->sendRequest(r2, [self, m, target, priv, data, uploadId, fname, ftype, parts, idx, p, finishPath](drogon::ReqResult rr2, const drogon::HttpResponsePtr& resp2) {
-                        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
-                        self->safeMediaStep("upload_part_finish 回调", [&] {
-                            if (rr2 != drogon::ReqResult::Ok || !resp2 || resp2->statusCode() >= 300) {
-                                self->lastError_ = "QQ 官方分片确认失败";
-                                DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, finishPath,
-                                              resp2 ? static_cast<int>(resp2->statusCode()) : 0, resp2 ? std::string(resp2->body()) : std::string("网络请求未完成"));
-                                self->sendCaptionFallback(m, "分片确认失败");
-                                return;
-                            }
-                            DICE_LOG_INFO("QQOfficial '{}': 分片 {} 确认完成", self->name_, p.index);
-                            self->uploadPartLoop(m, target, priv, data, uploadId, fname, ftype, std::move(parts), idx + 1);
-                        });
-                    });
-                });
-            });
-        });
-    }
-
-    /// 全部分片就绪后合并：POST /files 换 file_info → 发消息。
-    void finalizeUpload(const Message& m, const std::string& target, bool priv, const std::string& uploadId,
-                        const std::string& fname, int ftype) {
-        OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
-        const std::string filesPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/files";
-        auto c = httpsClient("api.bot.qq.com");
-        if (!c) { lastError_ = "无法解析 api.bot.qq.com"; sendCaptionFallback(m, lastError_); return; }
-        auto r = drogon::HttpRequest::newHttpRequest();
-        r->setMethod(drogon::Post); r->setPath(filesPath);
-        r->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-        r->addHeader("Host", "api.bot.qq.com");
-        r->addHeader("Authorization", "QQBot " + token());
-        r->setBody(json{{"file_type", ftype}, {"file_name", fname}, {"upload_id", uploadId}, {"srv_send_msg", false}}.dump());
-        auto self = shared_from_this();
-        c->sendRequest(r, [self, m, target, ftype, filesPath](drogon::ReqResult rr, const drogon::HttpResponsePtr& resp) {
-            OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
-            self->safeMediaStep("分片合并回调", [&] {
-                if (rr != drogon::ReqResult::Ok || !resp || resp->statusCode() >= 300) {
-                    self->lastError_ = "QQ 官方分片合并失败";
-                    DICE_LOG_WARN("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, filesPath,
-                                  resp ? static_cast<int>(resp->statusCode()) : 0, resp ? std::string(resp->body()) : std::string("网络请求未完成"));
-                    self->sendCaptionFallback(m, "分片合并失败");
-                    return;
-                }
-                auto j = json::parse(resp->body(), nullptr, false);
-                const std::string fileInfo = field(j, "file_info");
-                if (fileInfo.empty()) { DICE_LOG_WARN("QQOfficial '{}': /files 未返回 file_info: {}", self->name_, std::string(resp->body())); self->sendCaptionFallback(m, "分片合并未返回 file_info"); return; }
-                DICE_LOG_INFO("QQOfficial '{}': 分片合并成功，获得 file_info，开始发送", self->name_);
-                self->sendFileInfoTo(m, target, fileInfo, ftype);
-            });
+            catofficial::media::uploadBytes(tokenSource(), priv, target, ftype, fname, std::move(data),
+                uploadDone(m, target, ftype), mediaLogger(m));
         });
     }
 
@@ -2593,17 +2275,11 @@ private:
     void fail(const std::string&e){lastError_=e;connecting_=false;connected_=false;DICE_LOG_ERROR("QQOfficial '{}': {}",name_,e);}
     void retainWebhook() {
         if (!webhookMode_ || appId_.empty()) return;
-        std::lock_guard lock(webhookMu_);
-        auto existing = webhooks_.find(appId_);
-        if (existing != webhooks_.end() && existing->second.adapterId != id_)
+        if (webhooks_.bind(appId_, id_, weak_from_this()))
             DICE_LOG_WARN("QQOfficial '{}': AppID {} 的 Webhook 回调改由本适配器接收", name_, appId_);
-        webhooks_[appId_] = WebhookSlot{id_, weak_from_this()};
     }
     void releaseWebhook() {
-        if (appId_.empty()) return;
-        std::lock_guard lock(webhookMu_);
-        auto it = webhooks_.find(appId_);
-        if (it != webhooks_.end() && it->second.adapterId == id_) webhooks_.erase(it);
+        webhooks_.unbind(appId_, id_);
     }
     std::string richStyle_ = "off", interactions_ = "links";
     inline static std::function<std::string(const std::string&)> imagePublisher_;   // 本地图 → 公网 URL（图床）
@@ -2612,9 +2288,7 @@ private:
     mutable std::mutex sessionMu_;
     std::shared_ptr<catofficial::Session> session_;
     bool subscribeGroupMemberEvents_ = false, autoAcknowledgeInteractions_ = true, webhookMode_ = false;
-    struct WebhookSlot { std::string adapterId; std::weak_ptr<QQOfficialAdapter> adapter; };
-    inline static std::mutex webhookMu_;
-    inline static std::unordered_map<std::string, WebhookSlot> webhooks_;
+    inline static qqwebhook::Registry<QQOfficialAdapter> webhooks_;
     std::unordered_map<std::string,std::time_t> interactionResponses_;
     catofficial::PassiveReplies passive_;
     catofficial::EventDeduplicator dedup_;
