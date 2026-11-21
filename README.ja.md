@@ -98,6 +98,7 @@ Dice!Next 自体は QQ のプロトコルのクライアントではありませ
 | [Dice-Next-Docker](https://github.com/DiceZone/Dice-Next-Docker) | コンテナーでの導入（任意） |
 | [onedice-cpp-lib](https://github.com/DiceZone/onedice-cpp-lib) | OneDice の式のエンジン（バックエンドのビルドに必須） |
 | [dicescript-c-lib](https://github.com/DiceZone/dicescript-c-lib) | DiceScript の式のエンジン（バックエンドのビルドに必須） |
+| [CatOfficial](https://github.com/DiceZone/CatOfficial) | QQ 公式ボットのプロトコル層（バックエンドのビルドに必須） |
 
 貢献の約束は [CONTRIBUTING.md](CONTRIBUTING.md)、公開のビルドの説明は [docs/ci-release-build.md](docs/ci-release-build.md) を参照してください。
 

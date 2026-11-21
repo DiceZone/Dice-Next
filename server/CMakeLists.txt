@@ -108,7 +108,8 @@ add_library(dice-image-resources STATIC
 )
 target_include_directories(dice-image-resources PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dice-image-resources PUBLIC nlohmann_json::nlohmann_json
-    yaml-cpp::yaml-cpp OpenSSL::Crypto Drogon::Drogon miniz::miniz unofficial::sqlite3::sqlite3)
+    yaml-cpp::yaml-cpp OpenSSL::Crypto Drogon::Drogon miniz::miniz unofficial::sqlite3::sqlite3
+    catofficial::core)
 if(MSVC)
     target_compile_options(dice-image-resources PRIVATE /utf-8 /bigobj)
     target_compile_definitions(dice-image-resources PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -140,6 +141,11 @@ set(DICESCRIPT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(DICESCRIPT_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../dicescript-c-lib
                  ${CMAKE_BINARY_DIR}/dicescript-c-lib)
+
+# CatOfficial — sibling QQ official bot protocol layer (Gateway / Webhook / message format).
+# Linked PUBLIC through dice-image-resources so every target including the adapters sees it.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../CatOfficial
+                 ${CMAKE_BINARY_DIR}/CatOfficial)
 
 # ─── Source Files ────────────────────────────────────────────
 

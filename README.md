@@ -98,6 +98,7 @@ The build scripts look for dependencies and resources in sibling directories; yo
 | [Dice-Next-Docker](https://github.com/DiceZone/Dice-Next-Docker) | Container deployment (optional) |
 | [onedice-cpp-lib](https://github.com/DiceZone/onedice-cpp-lib) | OneDice expression engine (required for backend builds) |
 | [dicescript-c-lib](https://github.com/DiceZone/dicescript-c-lib) | DiceScript expression engine (required for backend builds) |
+| [CatOfficial](https://github.com/DiceZone/CatOfficial) | QQ official bot protocol layer (required for backend builds) |
 
 For contribution conventions see [CONTRIBUTING.md](CONTRIBUTING.md), and for release builds [docs/ci-release-build.md](docs/ci-release-build.md).
 

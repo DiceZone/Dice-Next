@@ -53,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
-          for repo in onedice-cpp-lib dicescript-c-lib; do
+          for repo in onedice-cpp-lib dicescript-c-lib CatOfficial; do
             for attempt in 1 2 3; do
               if git clone --depth 1 "https://github.com/DiceZone/${repo}.git" "$repo"; then break; fi
               if [ "$attempt" = 3 ]; then exit 1; fi
@@ -237,6 +237,20 @@ jobs:
             sleep 15
           done
           [ -d dicescript-c-lib/.git ] || { echo "dicescript-c-lib clone failed after 3 attempts" >&2; exit 1; }
+      - name: Checkout CatOfficial (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf CatOfficial
+            if git clone --depth 1 https://github.com/DiceZone/CatOfficial.git CatOfficial; then
+              break
+            fi
+            echo "CatOfficial clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d CatOfficial/.git ] || { echo "CatOfficial clone failed after 3 attempts" >&2; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           name: webui-dist
@@ -366,6 +380,20 @@ jobs:
             sleep 15
           done
           [ -d dicescript-c-lib/.git ] || { echo "dicescript-c-lib clone failed after 3 attempts" >&2; exit 1; }
+      - name: Checkout CatOfficial (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf CatOfficial
+            if git clone --depth 1 https://github.com/DiceZone/CatOfficial.git CatOfficial; then
+              break
+            fi
+            echo "CatOfficial clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d CatOfficial/.git ] || { echo "CatOfficial clone failed after 3 attempts" >&2; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           name: webui-dist
@@ -475,6 +503,20 @@ jobs:
             sleep 15
           done
           [ -d dicescript-c-lib/.git ] || { echo "dicescript-c-lib clone failed after 3 attempts" >&2; exit 1; }
+      - name: Checkout CatOfficial (retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          for attempt in 1 2 3; do
+            rm -rf CatOfficial
+            if git clone --depth 1 https://github.com/DiceZone/CatOfficial.git CatOfficial; then
+              break
+            fi
+            echo "CatOfficial clone failed (attempt $attempt), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -d CatOfficial/.git ] || { echo "CatOfficial clone failed after 3 attempts" >&2; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           name: webui-dist

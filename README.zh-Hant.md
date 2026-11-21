@@ -98,6 +98,7 @@ Dice!Next 本身不是 QQ 協議端；使用 OneBot / Milky 時，需要另行�
 | [Dice-Next-Docker](https://github.com/DiceZone/Dice-Next-Docker) | 容器化部署（可選） |
 | [onedice-cpp-lib](https://github.com/DiceZone/onedice-cpp-lib) | OneDice 表示式引擎（後端構建必需） |
 | [dicescript-c-lib](https://github.com/DiceZone/dicescript-c-lib) | DiceScript 表示式引擎（後端構建必需） |
+| [CatOfficial](https://github.com/DiceZone/CatOfficial) | QQ 官方機器人協議層（後端構建必需） |
 
 貢獻約定見 [CONTRIBUTING.md](CONTRIBUTING.md)，釋出構建說明見 [docs/ci-release-build.md](docs/ci-release-build.md)。
 
