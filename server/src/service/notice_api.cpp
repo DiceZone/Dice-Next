@@ -1,4 +1,5 @@
 #include "notice_api.h"
+#include "notice_accounts.h"
 #include "../storage/database.h"
 #include "identity_email_service.h"
 #include "notice_manager.h"
@@ -96,8 +97,7 @@ void validateDestination(ConfigManager& cfg, AdapterManager& adapters, const Jso
             const auto account = id.get<std::string>(); const auto live = adapters.getAdapter(account);
             bool found = live && live->platform() == platform;
             for (const auto& configured : cfg.getAll().value("adapters", Json::array())) {
-                const auto value = configured.value("id", Json());
-                if ((value.is_string() ? value.get<std::string>() : value.dump()) == account && configured.value("type", std::string()) == platform) found = true;
+                if (notice_accounts::matches(configured, account, platform)) found = true;
             }
             if (!found) throw std::invalid_argument("请选择属于通知窗口平台的有效发送帐号");
         }
@@ -264,14 +264,11 @@ void registerNoticeRuleRoutes(Database &db, ConfigManager &cfg, AdapterManager &
                 for (const auto &[op, area] : notice_rules::catalog())
                     events.push_back({{"op", op}, {"area", area}, {"default", !notice_rules::optInOnly(op)}});
                 for (const auto &a : cfg.getAll().value("adapters", Json::array())) {
-                    const auto id =
-                        a["id"].is_string() ? a["id"].get<std::string>() : std::to_string(a["id"].get<int>());
+                    const auto id = notice_accounts::id(a);
                     const auto live = adapters.getAdapter(id);
-                    accounts.push_back({{"id", id},
-                                        {"platform", a.value("type", std::string("onebot_v11"))},
-                                        {"name", a.value("name", std::string())},
-                                        {"login_id", live ? live->getLoginId() : std::string()},
-                                        {"login_name", live ? live->getLoginName() : std::string()}});
+                    accounts.push_back(notice_accounts::describe(a,
+                        live ? live->getLoginId() : std::string(),
+                        live ? live->getLoginName() : std::string()));
                 }
                 auto transport =
                     notice_rules::smtpTransport(cfg.getAll(), notice::conf(cfg), {{"kind", "smtp"}});
