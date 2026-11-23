@@ -848,10 +848,14 @@ TEST(NoticeEvents, ModerationDistinguishesDurationUnmuteWholeGroupAndAdminChange
     ASSERT_TRUE(dice::notice::groupModeration(e, "未归星璇", "小明").body.find("全体禁言") != std::string::npos);
     e.type = dice::EventType::kGroupAdmin; e.subType = "set";
     ASSERT_EQ(dice::notice::groupModeration(e, "未归星璇", "小明").title, std::string("骰娘获得群管理权限"));
+    ASSERT_TRUE(dice::notice::groupModeration(e, "未归星璇", "小明").body.find("被小明(3569827618)设为管理员") != std::string::npos);
+    e.operatorId = "0";
+    ASSERT_TRUE(dice::notice::groupModeration(e, "未归星璇", "").body.find("被群主设为管理员。") != std::string::npos);
     e.subType = "unset"; e.operatorId.clear();
     text = dice::notice::groupModeration(e, "未归星璇", "");
     ASSERT_TRUE(text.body.find("取消了管理员权限") != std::string::npos);
-    ASSERT_TRUE(text.body.find("平台未提供操作者") != std::string::npos);
+    ASSERT_TRUE(text.body.find("被群主取消了管理员权限。") != std::string::npos);
+    ASSERT_TRUE(text.body.find("平台未提供操作者") == std::string::npos);
     e.subType = "unknown";
     ASSERT_TRUE(dice::notice::groupModeration(e, "未归星璇", "").body.find("未提供设置或取消") != std::string::npos);
 }

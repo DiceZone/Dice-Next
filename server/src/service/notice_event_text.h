@@ -163,8 +163,9 @@ inline EventText groupModeration(const BotEvent& event, const std::string& group
         if (event.subType != "set" && event.subType != "unset")
             return {"group_admin", "骰娘群管理权限变更", "骰娘在" + group + "中的管理员权限发生变化；平台未提供设置或取消的明确类型。", 2};
         const bool set = event.subType == "set";
+        const auto adminBy = actorKnown ? by : "被群主";
         return {"group_admin", set ? "骰娘获得群管理权限" : "骰娘群管理权限被取消",
-            "骰娘在" + group + "中" + by + (set ? "设为管理员" : "取消了管理员权限") + unknown + "。", 2};
+            "骰娘在" + group + "中" + adminBy + (set ? "设为管理员" : "取消了管理员权限") + "。", 2};
     }
     if (event.subType != "ban" && event.subType != "lift_ban" && event.subType != "whole_ban" && event.subType != "whole_lift_ban")
         return {"group_ban", "群禁言状态变更", group + "的禁言状态发生变化；平台未提供禁言或解除禁言的明确类型。", 2};
