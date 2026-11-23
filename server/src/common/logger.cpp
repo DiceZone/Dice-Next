@@ -349,6 +349,23 @@ nlohmann::json recentLogRecords(size_t limit) {
     for (size_t i = start; i < records.size(); ++i) out.push_back(records[i]);
     return out;
 }
+nlohmann::json dashboardLogBatch(const std::string& after) {
+    auto entries = nlohmann::json::array();
+    bool reset;
+    {
+        std::lock_guard lock(recordsMutex);
+        // IDs include a process nonce. Never compare them numerically: records
+        // from concurrent writers are ordered by insertion, not ID allocation.
+        auto it = std::find_if(records.rbegin(), records.rend(), [&](const auto& r) {
+            return !after.empty() && r.at("id") == after;
+        });
+        reset = it == records.rend();
+        auto begin = reset ? records.end() - (std::min)(records.size(), size_t(500)) : it.base();
+        for (; begin != records.end() && entries.size() < 500; ++begin) entries.push_back(*begin);
+    }
+    return {{"reset", reset}, {"entries", std::move(entries)}};
+}
+
 std::string newLogCorrelationId() {
     static const auto session = [] {
         std::random_device random;

@@ -54,6 +54,8 @@ inline void installHttpDiagnostics(drogon::HttpAppFramework& app) {
             const auto result = httpLogResult(static_cast<int>(response->statusCode()), response->body());
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - trace.start).count();
             const auto status = static_cast<int>(response->statusCode());
+            // Observing logs must not generate a new log on each successful poll.
+            if (req->path() == "/api/dashboard/logs" && status == 200 && !result.failed && ms < 2000) return;
             const bool denied = status == 401 || status == 403;
             auto severity = status >= 500 ? LogLevel::Error : result.failed && !denied ? LogLevel::Info
                 : logManagementRequest(req->path(), req->methodString()) ? LogLevel::Info : LogLevel::Debug;

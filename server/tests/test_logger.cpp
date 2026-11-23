@@ -12,6 +12,21 @@
 
 using namespace dice;
 
+TEST(Logger, DashboardCursorReturnsOnlyNewRowsAndResetsExpiredCursors) {
+    writeLog(DICE_LOG_SOURCE, LogLevel::Error, "测试", "dashboard-cursor-a");
+    const auto before = recentLogRecords(1).back().at("id").get<std::string>();
+    writeLog(DICE_LOG_SOURCE, LogLevel::Error, "测试", "dashboard-cursor-b");
+    const auto next = dashboardLogBatch(before);
+    ASSERT_FALSE(next.at("reset").get<bool>());
+    ASSERT_EQ(next.at("entries").size(), size_t(1));
+    const auto last = next.at("entries").back().at("id").get<std::string>();
+    ASSERT_TRUE(dashboardLogBatch(last).at("entries").empty());
+    const auto reset = dashboardLogBatch("previous-process-cursor");
+    ASSERT_TRUE(reset.at("reset").get<bool>());
+    ASSERT_TRUE(reset.at("entries").size() <= 500);
+    ASSERT_EQ(reset.at("entries").back().at("id").get<std::string>(), last);
+}
+
 TEST(Logger, RedactsJsonQueriesHeadersAndUrlCredentials) {
     const std::string input = R"({"password":"secret-pass","access_token":"secret-token","count":12})"
         "\nAUTHORIZATION: Bearer secret-auth\nCookie: session=secret-cookie; login=second-cookie\nhttps://alice:secret-smtp@example.org/path?api_key=secret-key&count=12";

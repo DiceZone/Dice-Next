@@ -41,6 +41,7 @@
 #include "../core/identity/identity_binding.h"
 #include "../platform/system_info.h"
 #include "sysinfo_history.h"
+#include "dashboard_log_stream.h"
 #include "../i18n/i18n.h"
 #include "../common/types.h"
 #include "group_chat_buffer.h"
@@ -2752,7 +2753,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
         jsonReply(ok(caps), std::move(cb));
     }, {drogon::Get});
 
-    app.registerHandler("/api/dashboard/stats", [st, lst, &adapterMgr, &db](Req, CB&& cb) {
+    app.registerHandler("/api/dashboard/logs", [](Req req, CB&& cb) {
+        cb(dashboardLogsResponse(req));
+    }, {drogon::Get});
+
+    app.registerHandler("/api/dashboard/stats", [st, lst, &adapterMgr, &db](Req req, CB&& cb) {
         // 与跑团记录页一致：status 0 为进行中，总量包含暂停和已结束。
         int activeLogs = 0, totalLogs = 0;
         try {
@@ -2873,7 +2878,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 {"total_rules", rules},
                 {"active_sessions", totalLogs},
                 {"system", sysInfoJson(db.path())},
-                {"recent_logs", readRecentLogs()}
+                {"recent_logs", req->getParameter("logs") == "0" ? J::array() : readRecentLogs()}
             }), std::move(cb));
         } catch (const std::exception&) {
             // Fallback: return stats without logs if log parsing fails
