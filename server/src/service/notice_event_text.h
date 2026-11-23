@@ -19,7 +19,7 @@ inline std::string groupIdentity(const std::string& name, const std::string& id)
 inline std::string operatorIdentity(const ProcessingOrigin& origin) {
     if (!origin.userId.empty()) return identity(origin.userName, origin.userId);
     return origin.entry.find("网页") != std::string::npos || origin.entry.find("Web") != std::string::npos
-        ? "面板操作人（未提供可核实的昵称和帐号）" : "操作人（未提供可核实的昵称和帐号）";
+        ? "面板管理员" : "操作人（未提供可核实的昵称和帐号）";
 }
 inline std::string durationText(const nlohmann::json& value) {
     if (!value.is_number_integer() || value < 0 || value > (std::numeric_limits<int64_t>::max)()) return "（平台未提供有效时长）";

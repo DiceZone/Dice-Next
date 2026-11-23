@@ -135,7 +135,7 @@ inline std::string operationActor(const ProcessingContext& processing) {
     const auto& origin = processing.origin;
     if (!origin.userId.empty()) return identity(origin.userName, origin.userId);
     if (origin.entry.find("网页") != std::string::npos || origin.entry.find("Web") != std::string::npos)
-        return "面板操作人（未提供可核实的昵称和帐号）";
+        return "面板管理员";
     return "系统";
 }
 inline std::string levelNames(int mask) {

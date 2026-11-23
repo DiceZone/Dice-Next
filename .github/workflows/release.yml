@@ -814,3 +814,13 @@ jobs:
             artifacts/DiceNext-macos-arm64/*.tar.gz
             update-manifest.json
             release-sources.json
+      - name: Refresh documentation release feed
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.DICEZONE_CI_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo '::warning::DICEZONE_CI_TOKEN is unavailable; the documentation schedule will refresh the release feed.'
+            exit 0
+          fi
+          gh api --method POST repos/DiceZone/Dice-Next-Doc/dispatches -f event_type=release-published

@@ -13,7 +13,7 @@ inline ProcessingContext webContext(const drogon::HttpRequestPtr &req, AdapterMa
         o.userId = req->attributes()->get<std::string>("dn_qq");
     } catch (...) {
     }
-    o.entry = o.userId.empty() ? "网页后台（密码／API 授权，未提供可识别的 QQ 身份）"
+    o.entry = o.userId.empty() ? "网页后台"
                                : "网页后台（已验证的第三方登录身份）";
     if (!o.userId.empty()) {
         o.platform = "onebot_v11";

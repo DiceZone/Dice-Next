@@ -910,6 +910,15 @@ TEST(NoticeEvents, RequestDecisionIncludesOutcomeReasonAndCommentWithoutClaiming
     ASSERT_EQ(dice::notice::requestDecision(e, "希亚", "未归星璇", "等待人工处理", "").operation, std::string("group_request"));
 }
 TEST(NoticeEvents, ManagementTitlesRemainSpecificAndPluginActorIsPreserved) {
+    dice::ProcessingContext panel;
+    panel.origin.entry = "网页后台";
+    ASSERT_EQ(dice::notice::operationActor(panel), std::string("面板管理员"));
+    ASSERT_EQ(dice::notice::operatorIdentity(panel.origin), std::string("面板管理员"));
+    ASSERT_EQ(dice::notice::notificationText(2, "global", "已修改设置。", panel, ""),
+              std::string("[全局设置变更] 面板管理员：已修改设置。"));
+    panel.origin.userId = "1707642"; panel.origin.userName = "希亚";
+    ASSERT_EQ(dice::notice::operationActor(panel), std::string("希亚(1707642)"));
+    ASSERT_EQ(dice::notice::operatorIdentity(panel.origin), std::string("希亚(1707642)"));
     const dice::ProcessingContext plugin{{{"JS 插件", "群管助手", "helper.js", ""}}, "", ""};
     for (int list = 0; list != 3; ++list) {
         const auto event = dice::notice::listChanged(1, list, "792364383", "未归星璇", true, "骰主操作");
