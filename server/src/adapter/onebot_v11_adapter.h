@@ -3,6 +3,7 @@
 #include "outbound_logging.h"
 #include "onebot_account_identity.h"
 #include "onebot_member_snapshot.h"
+#include "onebot_login_wait.h"
 
 #include "../core/identity/identity_binding.h"
 // ─── Dice!Next v3.0.0 — OneBot v11 Adapter ───────────────────
@@ -125,7 +126,7 @@ public:
     /// fine-grained link state. "connected" / "timeout"（重连20次失败已暂停）/ "disconnected".
     /// "timeout" 用来和「已禁用」区分开：适配器仍是 enabled，只是暂停自动重连，可手动重连。
     std::string connectionStatus() const override {
-        if (connected_ && managedPeer_ && !peerOnline_) return "disconnected";
+        if (connected_ && managedPeer_ && !peerOnline_) return peerStarting_ ? "connecting" : "disconnected";
         if (connected_) return "connected";
         if (timedOut_)  return "timeout";
         return "disconnected";
@@ -304,6 +305,8 @@ public:
 
     // ─── Joined-group / member caches (web group-management) ──
     void refreshGroupList() override {
+        // Cached/configured identity is not proof that the protocol has logged in.
+        if (managedPeer_ && !peerOnline_) return;
         sendOneBotAction("get_group_list", json::object(), "glist");
         sendOneBotAction("get_friend_list", json::object(), "flist");   // 好友数量
     }
@@ -561,7 +564,7 @@ private:
             DICE_LOG_INFO("OneBotV11「{}」开始连接协议端 {}{}。", name_, endpoint_, wsPath_);
         wsClient_->connectToServer(req, [self](drogon::ReqResult r, const drogon::HttpResponsePtr&, const drogon::WebSocketClientPtr&) {
             if (r != drogon::ReqResult::Ok) { self->connected_=false; self->lastError_="WS connect failed"; self->scheduleReconnect(); }
-            else { self->connected_=true; self->lastError_.clear();  self->timedOut_=false; DICE_LOG_INFO("OneBotV11「{}」WebSocket 连接已建立，正在读取登录资料。", self->name_); self->sendOneBotAction("get_login_info", json::object(), "login_info"); self->refreshGroupList(); self->startGroupRefreshTimer(); self->startPeerStatusPolling(); }
+            else { self->connected_=true; self->lastError_.clear(); self->timedOut_=false; self->synchronizePeer(); }
                     // after stable connection, reset reconnect counter
                     if (self->stabilityTimer_) self->stabilityTimer_.reset();
                     self->stabilityTimer_ = std::make_shared<trantor::TimerId>();
@@ -736,10 +739,7 @@ private:
             DICE_LOG_INFO("OneBotV11「{}」反向 WS 握手完成，正在同步账号资料。", name_);
             connected_ = true;
             revBuffer_.erase(0, pos + 4);   // drop the handshake, keep any trailing frame bytes
-            sendOneBotAction("get_login_info", json::object(), "login_info");
-            refreshGroupList();
-            startGroupRefreshTimer();
-            startPeerStatusPolling();
+            synchronizePeer();
             // fall through to parse any frames that arrived glued to the handshake
         }
 
@@ -821,6 +821,20 @@ private:
 
     /// 托管协议端：定时问 get_status，QQ 是否在线以它为准。未在线 5 秒一次，在线后 15 秒一次。
     /// 每次连上换一代，旧连接上的轮询自己停下，不会叠成好几条。
+    void synchronizePeer() {
+        peerStarting_ = managedPeer_;
+        if (managedPeer_) {
+            peerOnline_ = false;
+            DICE_LOG_INFO("OneBotV11「{}」接口已连接，正在等待协议端完成登录。", name_);
+        } else {
+            DICE_LOG_INFO("OneBotV11「{}」接口已连接，正在读取登录资料。", name_);
+            sendOneBotAction("get_login_info", json::object(), "login_info");
+            refreshGroupList();
+        }
+        startGroupRefreshTimer();
+        startPeerStatusPolling();
+    }
+
     void startPeerStatusPolling() {
         if (!managedPeer_) return;
         const auto generation = ++peerPollGeneration_;
@@ -1209,9 +1223,9 @@ private:
                 // Surface FAILED API calls (e.g. set_group_ban/set_group_card rejected
                 // for lack of permission or bad params) — otherwise they fail silently.
                 // 成员与角色查询只用于刷新缓存，失败（如机器人已不在该群）按调试信息记录。
-                // 托管的协议端还没扫码登录时，取账号、群列表一律「not connected」，那是预期之内的，
-                // 每 5 秒重取一次账号资料，按警告记会在扫码前刷满日志。
-                const bool awaitingLogin = managedPeer_ && getLoginId().empty();
+                // 内置登录恢复期间只降低已知的“尚未登录”查询响应；不按缓存账号 ID
+                // 判断就绪，也不隐藏其他接口错误或发送失败。
+                const bool awaitingLogin = onebot_login::expectedWait(managedPeer_, peerOnline_, echo, j);
                 const bool cacheLookup = echo.rfind("role:", 0) == 0 || echo.rfind("members:", 0) == 0 || awaitingLogin;
                 if (failed && echo.rfind("role:", 0) == 0) {
                     const std::string tail = echo.substr(5);
@@ -1321,15 +1335,16 @@ private:
                     // 取到之后顺带刷新群列表——连上那一刻刷的那次是空的。
                     auto self = shared_from_this();
                     drogon::app().getLoop()->runAfter(kManagedLoginInfoRetrySec, [self]() {
-                        if (self->stopping_ || !self->connected_ || !self->getLoginId().empty()) return;
+                        if (self->stopping_ || !self->connected_ || !self->peerOnline_) return;
                         self->sendOneBotAction("get_login_info", json::object(), "login_info_retry");
                     });
                 } else if (echo == "peer_status") {
                     const bool online = !failed && d.is_object() && d.value("online", false);
+                    if (online || (failed && !awaitingLogin)) peerStarting_ = false;
                     const bool was = peerOnline_.exchange(online);
                     if (online && !was) {
                         DICE_LOG_SUCCESS("OneBotV11「{}」协议端账号已在线。", name_);
-                        if (getLoginId().empty()) sendOneBotAction("get_login_info", json::object(), "login_info_retry");
+                        sendOneBotAction("get_login_info", json::object(), "login_info_retry");
                         refreshGroupList();
                     } else if (!online && was) {
                         DICE_LOG_WARN("OneBotV11「{}」协议端账号已离线，需要重新扫码登录。", name_);
@@ -1342,7 +1357,7 @@ private:
                     } else if (managedPeer_) {
                         auto self = shared_from_this();
                         drogon::app().getLoop()->runAfter(kManagedLoginInfoRetrySec, [self]() {
-                            if (self->stopping_ || !self->connected_ || !self->getLoginId().empty()) return;
+                            if (self->stopping_ || !self->connected_ || !self->peerOnline_) return;
                             self->sendOneBotAction("get_login_info", json::object(), "login_info_retry");
                         });
                     }
@@ -1363,6 +1378,8 @@ private:
                         name_, online, healthy, j.value("interval", 0));
                     if ((status.contains("online") && status["online"].is_boolean() && !status["online"].get<bool>())
                         || (status.contains("good") && status["good"].is_boolean() && !status["good"].get<bool>())) {
+                        if (managedPeer_ && peerStarting_ && !peerOnline_
+                            && status.contains("online") && status["online"].is_boolean() && !status["online"].get<bool>()) return;
                         if (!heartbeatUnhealthy_.exchange(true)) DICE_LOG_WARN("OneBotV11「{}」协议心跳状态异常：账号 {}，协议端 {}；收发可能不可用，请检查协议端。", name_, online, healthy);
                     } else if (status.contains("online") && status["online"].is_boolean() && status["online"].get<bool>()
                         && status.value("good", true) && heartbeatUnhealthy_.exchange(false)) {
@@ -1816,6 +1833,7 @@ private:
     bool managedPeer_ = false;
     //: 托管协议端报告的 QQ 在线状态（get_status 的 online）
     std::atomic<bool> peerOnline_{false};
+    std::atomic<bool> peerStarting_{false};
     std::atomic<std::uint64_t> peerPollGeneration_{0};
     static constexpr double kManagedStatusOfflineSec = 5.0;
     static constexpr double kManagedStatusOnlineSec = 15.0;

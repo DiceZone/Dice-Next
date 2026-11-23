@@ -23,6 +23,7 @@ set(TEST_SOURCES
     test_sso_auth.cpp
     test_mcp.cpp
     test_notice_rules.cpp
+    test_onebot_login_wait.cpp
     test_game_session_list.cpp
     test_image_resources.cpp
     test_image_resource_documents.cpp
