@@ -6,8 +6,8 @@
 //
 // 配置 dice/ai.chat：
 //   { enabled, persona, prompt(系统提示词，空=内置默认),
-//     at_bot(被@时回复), keywords[](含则回复), standby_prob(0-100 非触发也按概率回),
-//     decision(待机搭话前先问「决策」用途的模型要不要插话),
+//     at_bot(被@时进入判断), keywords[](触发判断), standby_prob(0-100 其余发言进入判断的概率),
+//     decision(优先使用「决策」用途的模型判断是否接话),
 //     context_rounds(喂给AI的上下文轮数), max_chars(回复上限), cooldown_sec(每群冷却),
 //     reply_at(是否@发送者) }；模型由用途分配的「回复」「决策」决定。
 
@@ -88,7 +88,7 @@ inline std::string cleanForAi(ConfigManager& cfg, const std::string& raw) {
 
 inline std::string defaultPrompt() {
     return "你是这个跑团群的骰娘。按设定的人设和群友聊天，没设定时就像一个平实、熟悉的团友。"
-        "先接对方这句话想说的事：吐槽可以接一句，追问要承接前情，具体问题就给具体答案。"
+        "先接对方这句话想说的事：吐槽可以接一句，追问要承接前情，能确定的事再给具体答案。"
         "用聊天时会说出口的话，只发回复本身。别替别人编经历，也不用每次都追问。";
 }
 
@@ -127,8 +127,17 @@ inline std::string stripEmoji(const std::string& s) {
 }
 inline bool noEmoji(ConfigManager& cfg) { return conf(cfg).value("no_emoji", true); }
 
-// 触发种类 —— None(不回) / Strong(被@或命中关键词，进入对话、无视冷却) /
-// Standby(非@非关键词时，按 standby_prob 概率待机搭话，受冷却限制)。
+// An explicit mention of another member is stronger evidence than a keyword or a standby roll.
+inline bool mentionsOnlyOthers(const Message& msg) {
+    if (msg.type != MessageType::kGroup || msg.selfId.empty()) return false;
+    bool other = false;
+    for (const auto& id : msg.atList) {
+        if (id == msg.selfId) return false;
+        if (!id.empty() && id != "all") other = true;
+    }
+    return other;
+}
+// Strong candidates bypass cooldown; standby candidates are sampled and rate limited.
 enum class Trigger { None, Strong, Standby };
 inline Trigger triggerKind(ConfigManager& cfg, const std::string& text, bool atMe, bool allowStandby = true) {
     json c = conf(cfg);
@@ -319,7 +328,7 @@ inline std::string generate(ConfigManager& cfg, const History& contextBlock,
     }
     sys += "\n这一轮可以包含多位群友连续补充的发言，按先后顺序理解整段，针对仍未解决的话题只接一次。只输出要发给对方的话。有明确引用时先接被引用的发言；原消息缺失、或先前的识图观察没有所问细节时不要补写，必要时请对方重发。历史图片的观察只说明当时读到的内容。先辨认谁在对谁说话，接住当前发言。图片可以帮助理解玩笑、问题或场景；"
            "只有对方要你描述或读图时才逐项说明。需要看图才答得出、但看不清时，说清缺了什么；其余情况正常接话。"
-           "旧记忆和资料只在和本轮有关时使用，若玩家刚纠正过，以最新说法为准。";
+           "旧记忆和资料只在和本轮有关时使用，若玩家刚纠正过，以最新说法为准。涉及群规、现场情况、掉线原因或谁负责时，只有本轮消息、相关资料或工具结果提供依据才能断言。被直接问到却缺少依据，可以简短说不知道或问一个必要的澄清问题。不要自行指定骰主或管理员负责，也不要把闲聊变成客服工单。";
     if (isNpc) sys += "按角色知道的信息、与对方的关系及上一轮行动接戏，把玩家的行动和台词留给玩家。";
     std::string user;
     if (!background.empty()) user += "过往记忆（供参考）：\n" + background + "\n";
@@ -346,20 +355,31 @@ inline std::string generate(ConfigManager& cfg, const History& contextBlock,
     return out;
 }
 
-// 决策：待机搭话（非 @、非关键词）前，先用「决策」用途的模型判断此刻要不要插话。
-// 只输出很短的 JSON，比直接生成回复便宜。模型不可用或输出无法解析时视为「不插话」。
+// 群聊候选发言均先判断是否接话；此开关只决定是否使用独立决策模型。
 inline bool decisionEnabled(ConfigManager& cfg) { return conf(cfg).value("decision", false); }
 inline std::string defaultDecisionPrompt() {
-    return "判断这轮群聊适合现在接话、等等还是保持安静。多人补充同一个话题时一起理解。"
-        "有人还在列举、铺陈或明确说没说完，选择 wait；问题完整或玩家把行动交给角色，选择 reply。"
-        "群友在相互交谈、换了无关的话题或已经自行解决，选择 skip。图片本身不等于提问。"
-        "只输出 JSON，action 为 reply、wait 或 skip，reason 用一句短话说明。";
+    return "你是群聊中的一个参与者。先判断当前发言是对谁说的，再决定要不要接话。"
+        "只输出 JSON：audience 为 bot（找你或明确承接你的上句话）、room（向全群开放）、others（群友之间）或 unclear；"
+        "action 为 reply、wait 或 skip，reason 简述指向谁及依据。问号、你字、关键词和有知识可答都不能单独证明是在问你。"
+        "先看 @、引用的作者、谁在接谁的话。群友互答、话题已解决或对象不明就 skip。"
+        "向全群开放时，另填 room_relevance：和你的职责直接相关填 role，你已参与当前话题填 ongoing，两者都没有填 none 并 skip。"
+        "公寓群有人问为什么总掉线，未找你也未提骰娘，skip。"
+        "明确向你发问、接续你的话或把行动交给当前角色时可 reply；对方确实在跟你说但还没说完可 wait。";
 }
-inline TurnAction parseTurnAction(const std::string& text, TurnAction fallback) {
+inline TurnAction parseTurnAction(const std::string& text, TurnAction fallback, bool addressed = true) {
     const auto begin = text.find('{'), end = text.rfind('}');
     if (begin == std::string::npos || end == std::string::npos || end <= begin) return fallback;
     auto j = json::parse(text.substr(begin, end - begin + 1), nullptr, false);
     if (!j.is_object()) return fallback;
+    const auto audience = j.find("audience");
+    if (audience == j.end()) {
+        if (!addressed) return TurnAction::Skip;
+    } else if (*audience == "room") {
+        const auto relevance = j.find("room_relevance");
+        if (relevance == j.end() || (*relevance != "role" && *relevance != "ongoing")) return TurnAction::Skip;
+    } else if (*audience != "bot") {
+        return TurnAction::Skip;
+    }
     const auto a = j.find("action");
     if (a != j.end()) {
         if (*a == "reply") return TurnAction::Reply;
@@ -396,7 +416,7 @@ inline TurnAction planTurn(ConfigManager& cfg, const History& context, const std
                            const std::string& text, const std::string& image, const std::string& role,
                            bool canWait, bool addressed, const std::string& model = "", TurnFocus* focus = nullptr) {
     std::string sys = defaultDecisionPrompt() + "\n你代表：" + (role.empty() ? "骰娘" : role);
-    sys += addressed ? "。本轮有人主动找你。" : "。根据上下文判断是否还在和你对话。";
+    sys += addressed ? "。本轮有指向你的信号，仍须辨认群友之间的对话。" : "。没有直接点名证据，默认旁听。";
     if (!canWait) sys += " 等待窗口已结束，只能 reply 或 skip。";
     if (focus) sys += " JSON 同时给出 target：回答全群填0，首条发言填1，后续补充依次从2编号。"
         "memory_query 为需要检索的过往事实或约定，当前材料已够用、寒暄或只需接话时填空字符串。";
@@ -406,7 +426,7 @@ inline TurnAction planTurn(ConfigManager& cfg, const History& context, const std
         conversationTurn(context, sender, text, image), focus ? 220 : 120, 15, 0.1, dedicated ? "" : model);
     if (focus && r.ok) *focus = parseFocus(r.reply, 1 + std::count_if(context.begin(), context.end(),
         [](const auto& line) { return line.supplement; }));
-    auto action = r.ok ? parseTurnAction(r.reply, fallback) : fallback;
+    auto action = r.ok ? parseTurnAction(r.reply, fallback, addressed) : fallback;
     if (action == TurnAction::Wait && !canWait) action = TurnAction::Skip;
     DICE_LOG_INFO_M("AI 决策", "{} 本轮{}；{}", ai::traceContext(), action == TurnAction::Reply ? "接话" :
         action == TurnAction::Wait ? "等待补充" : "保持安静", r.ok ? r.reply : r.error);

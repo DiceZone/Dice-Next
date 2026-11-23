@@ -2081,7 +2081,7 @@ static int realMain(int argc, char* argv[]) {
         // 触发判定留在消息线程（廉价），上下文/记忆检索/图像识别/生成/工具调用整段
         // 投给 AI 后台线程 —— 大模型再慢也不影响其他指令；完成后经 finishReply 发送。
         if (reply.empty() && !cmdRouter.lastShortcutHandled() && !disabled && !replyOff && !msg.fromSelf
-            && msg.type == dice::MessageType::kGroup && !msg.targetId.empty()
+            && msg.type == dice::MessageType::kGroup && !msg.targetId.empty() && !dice::aichat::mentionsOnlyOthers(msg)
             && (dice::aichat::enabled(configMgr) || dice::ainpc::enabled(configMgr))
             && cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId, msg.adapterId)      // 本账号在本群的 AI 开关
             && cmdRouter.aiWhitelistOk(msg.platform, msg.targetId, true)) { // AI 白名单模式
@@ -2115,7 +2115,7 @@ static int realMain(int argc, char* argv[]) {
             bool defaultHit = !npcHit && tkind != dice::aichat::Trigger::None;
             // 语音消息：文字触发判断在转写之后进行（后台线程），这里只认出「带语音」。
             bool voiceCand = !continuation && !npcHit && !defaultHit && dice::aispeech::hasVoice(msg) && dice::aispeech::enabled(configMgr);
-            // 被@/命中关键词（Strong）或 NPC 命中 → 必回，无视冷却；待机搭话（Standby）受冷却。
+            // 被@、命中关键词或 NPC 时可以跳过冷却，是否接话仍由本轮决策判断。
             bool bypassCd = npcHit || tkind == dice::aichat::Trigger::Strong;
             bool cdOk = continuation || voiceCand || bypassCd;
             if (!cdOk && defaultHit) {
@@ -2189,7 +2189,8 @@ static int realMain(int argc, char* argv[]) {
                             dice::aichat::recentImages().remember({msgC.platform, msgC.adapterId, msgC.targetId, msgC.id}, *anchorImage);
                     }
                     const auto image = anchorImage.value_or(std::string());
-                    bool addressed = !continuation && (npcHit || tkind == dice::aichat::Trigger::Strong);
+                    bool addressed = (!continuation && npcHit) || dice::CommandRouter::isAtSelf(msgC)
+                        || std::any_of(ctx.begin(), ctx.end(), [](const auto& line) { return line.quoted && line.self; });
                     for (size_t i = 1; i < batch.size(); ++i) {
                         const auto& m = batch[i];
                         if (cmdRouter.isBlocked(m)) {
@@ -2197,8 +2198,7 @@ static int realMain(int argc, char* argv[]) {
                             continue;
                         }
                         if (m.senderId != msgC.senderId) toolExec = nullptr;
-                        if (dice::aichat::triggerKind(configMgr, m.content, dice::CommandRouter::isAtSelf(m), false)
-                            == dice::aichat::Trigger::Strong) addressed = true;
+                        if (dice::CommandRouter::isAtSelf(m)) addressed = true;
 
                         if (npcHit && !addressed) {
                             dice::ainpc::Npc named;
@@ -2230,9 +2230,7 @@ static int realMain(int argc, char* argv[]) {
                         ctx.push_back(line);
                         turnQuery += "\n" + dice::aichat::truncateChars(line.sender, 48) + "：" + dice::aichat::truncateChars(line.text, 200);
                     }
-                    // A first standby hit can still opt out of its admission check. Once a
-                    // conversation is underway every batch gets its own timing decision.
-                    if (continuation || npcHit || addressed || batch.size() > 1 || dice::aichat::decisionEnabled(configMgr)) {
+                    {
                         const auto plan = dice::aichat::planTurn(configMgr, ctx, senderNick, curText, image,
                             npcHit ? npc.name : std::string(), canWait, addressed, npcHit ? npc.modelId : std::string(), &focus);
                         if (newer()) return Action::Recheck;
@@ -4199,7 +4197,7 @@ static int realMain(int argc, char* argv[]) {
                     if (replySrc == "plugin_command") didCommand = true;
                     // 智能化阶段A：测试台也走 AI 对话（无其它回复+触发时），方便骰主预览。
                     // 测试台不读 chat.db 上下文（用空上下文），仅验证触发+生成+发送。
-                    if (reply.empty() && !cmdRouter.lastShortcutHandled() && !disabled && (dice::aichat::enabled(configMgr) || dice::ainpc::enabled(configMgr))
+                    if (reply.empty() && !cmdRouter.lastShortcutHandled() && !disabled && !dice::aichat::mentionsOnlyOthers(msg) && (dice::aichat::enabled(configMgr) || dice::ainpc::enabled(configMgr))
                         && (msg.targetId.empty() || (cmdRouter.aiEnabledForGroup(msg.platform, msg.targetId)
                             && cmdRouter.aiWhitelistOk(msg.platform, msg.targetId, true)))) {  // 开关 + AI 白名单
                         bool atMe = !msg.selfId.empty()
@@ -4216,10 +4214,10 @@ static int realMain(int argc, char* argv[]) {
                             image = dice::aivision::describe(configMgr, msg.rawContent, dice::aichat::truncateChars(dice::aichat::cleanForAi(configMgr, msg.content), 300));
                         dice::aichat::TurnFocus focus;
                         if ((pNpcHit || pKind == dice::aichat::Trigger::Strong ||
-                             (pDefaultHit && dice::aichat::decisionEnabled(configMgr))) &&
+                             (pDefaultHit && (msg.type == dice::MessageType::kGroup || dice::aichat::decisionEnabled(configMgr)))) &&
                             dice::aichat::planTurn(configMgr, {}, msg.senderName.empty() ? msg.senderId : msg.senderName,
                                 dice::aichat::cleanForAi(configMgr, msg.content), image, pNpcHit ? pnpc.name : std::string(),
-                                false, pNpcHit || pKind == dice::aichat::Trigger::Strong, pnpc.modelId, &focus) != dice::aichat::TurnAction::Reply)
+                                false, pNpcHit || atMe || msg.type != dice::MessageType::kGroup, pnpc.modelId, &focus) != dice::aichat::TurnAction::Reply)
                             pNpcHit = pDefaultHit = false;
                         if (pNpcHit || pDefaultHit) {
                             std::string sn = msg.senderName.empty() ? msg.senderId : msg.senderName;

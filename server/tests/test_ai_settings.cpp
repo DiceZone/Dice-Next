@@ -12,6 +12,24 @@
 
 using namespace dice;
 
+TEST(AiConversation, GroupAudienceIsIndependentOfAnIncomingQuestion) {
+    Message m; m.selfId = "dice"; m.content = "为什么总掉线？";
+    m.atList = {"member"}; ASSERT_TRUE(aichat::mentionsOnlyOthers(m));
+    m.atList.push_back("dice"); ASSERT_FALSE(aichat::mentionsOnlyOthers(m));
+    m.atList = {"all"}; ASSERT_FALSE(aichat::mentionsOnlyOthers(m));
+    using A = aichat::TurnAction;
+    for (auto audience : {"others", "unclear", "invalid"}) {
+        auto p = json{{"action", "reply"}, {"audience", audience}}.dump();
+        ASSERT_TRUE(aichat::parseTurnAction(p, A::Skip, false) == A::Skip);
+    }
+    ASSERT_TRUE(aichat::parseTurnAction(R"({"action":"reply"})", A::Skip, false) == A::Skip);
+    ASSERT_TRUE(aichat::parseTurnAction(R"({"audience":"bot","action":"wait"})", A::Reply, true) == A::Wait);
+    ASSERT_TRUE(aichat::parseTurnAction(R"({"audience":"room","action":"reply"})", A::Skip, false) == A::Skip);
+    ASSERT_TRUE(aichat::parseTurnAction(R"({"audience":"room","room_relevance":"none","action":"reply"})", A::Skip, false) == A::Skip);
+    ASSERT_TRUE(aichat::parseTurnAction(R"({"audience":"room","room_relevance":"role","action":"reply"})", A::Skip, false) == A::Reply);
+    ASSERT_TRUE(aichat::parseTurnAction(R"({"audience":"room","room_relevance":"ongoing","action":"reply"})", A::Skip, false) == A::Reply);
+}
+
 TEST(AiConversation, PlayerCaptionAndVisionStayDistinctFromEarlierSpeakers) {
     const aichat::History history{{"阿青", "你看一下版本号", false}, {"骰娘", "发我看看", true}};
     auto turn = json::parse(aichat::conversationTurn(history, "阿青", "怎么没更新？", "版本号是 581"));
