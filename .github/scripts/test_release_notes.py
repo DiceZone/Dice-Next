@@ -1,6 +1,7 @@
 """Offline regression fixtures; never publish a release or mutate real Git refs."""
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -383,7 +384,11 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn('split("## 源码与完整比较")[0] | .[0:16000]', workflow)
         self.assertLess(workflow.index("--sources-output release-sources.json"), workflow.index("jq --rawfile notes"))
         self.assertLess(workflow.index("jq --rawfile notes"), workflow.index("body_path: release-notes.md"))
-        self.assertTrue(workflow.rstrip().endswith("release-sources.json"))
+        publish = next(step for step in workflow.split("\n      - ")
+                       if "uses: softprops/action-gh-release@" in step)
+        files = re.search(r"^          files: \|\n((?:            [^\n]+(?:\n|$))+)", publish, re.MULTILINE)
+        self.assertIsNotNone(files, "GitHub Release must declare the files to upload")
+        self.assertIn("release-sources.json", [line.strip() for line in files[1].splitlines()])
         self.assertIn("Test Release automation", workflow)
 
     def test_release_notes_bash_step_has_valid_syntax(self):
