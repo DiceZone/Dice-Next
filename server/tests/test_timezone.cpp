@@ -3,6 +3,7 @@
 
 #include "test_framework.h"
 #include "../src/common/utils.h"
+#include "../src/service/statistics_range.h"
 
 #include <ctime>
 #include <limits>
@@ -48,4 +49,22 @@ TEST(Timezone, FormatsInNegativeOffset) {
     TZGuard guard(-300);  // UTC-5
     const std::time_t t = epochOf(2026, 8, 6, 4, 0, 0);
     ASSERT_EQ(utils::formatTimeInTimezone(t, "%Y-%m-%d %H:%M"), std::string("2026-08-05 23:00"));
+}
+
+TEST(StatisticsRange, ServerMidnightYesterdayAndLeapDay) {
+    const auto now = std::chrono::system_clock::from_time_t(epochOf(2024, 2, 29, 18, 0, 0));
+    const auto yesterday = statistics::dateRange("", "yesterday", "", "", now, 480);
+    ASSERT_EQ(yesterday.dates.size(), size_t(1));
+    ASSERT_EQ(yesterday.dates.front(), std::string("2024-02-29"));
+    ASSERT_EQ(yesterday.sampleFrom, std::string("2024-02-28T16:00:00Z"));
+    ASSERT_EQ(yesterday.sampleUntil, std::string("2024-02-29T16:00:00Z"));
+    const auto range = statistics::dateRange("", "", "2024-02-28", "2024-03-01", now, 480);
+    ASSERT_EQ(range.dates.size(), size_t(3));
+    ASSERT_TRUE(range.dates == statistics::dateRange("3", "", "", "", now, 480).dates);
+    for (const auto& start : {"2024-02-30", "2024-03-02", "2020-01-01", ""}) {
+        bool rejected = false;
+        try { statistics::dateRange("", "", start, "2024-03-01", now, 480); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        ASSERT_TRUE(rejected);
+    }
 }

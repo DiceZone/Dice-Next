@@ -349,6 +349,12 @@ struct OnlineSampleRow {
     int totalCount = 0;
 };
 
+struct PerformanceSampleRow {
+    int64_t sampledAt = 0;
+    double hostCpu = -1;
+    int64_t hostUsedMB = 0, processMB = 0;
+};
+
 /// 定时任务 (#48): a message pushed to a target group/user on a daily schedule.
 struct ScheduledTaskRow {
     int id = 0;
@@ -689,6 +695,12 @@ private:
             orm::make_column("sides", &DiceFaceStatRow::sides),
             orm::make_column("face", &DiceFaceStatRow::face),
             orm::make_column("count", &DiceFaceStatRow::count)
+        ),
+        orm::make_table("performance_samples",
+            orm::make_column("sampled_at", &PerformanceSampleRow::sampledAt, orm::primary_key()),
+            orm::make_column("host_cpu", &PerformanceSampleRow::hostCpu),
+            orm::make_column("host_used_mb", &PerformanceSampleRow::hostUsedMB),
+            orm::make_column("process_mb", &PerformanceSampleRow::processMB)
         ),
         orm::make_table("online_samples",
             orm::make_column("id", &OnlineSampleRow::id,

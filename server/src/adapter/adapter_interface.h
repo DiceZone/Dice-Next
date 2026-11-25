@@ -9,6 +9,7 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <utility>
 #include <atomic>
@@ -139,6 +140,7 @@ inline std::string eventInviterId(const BotEvent& event) {
 
 class IAdapter {
 public:
+    explicit IAdapter(std::string displayName = {}) : displayName_(std::move(displayName)) {}
     virtual ~IAdapter() = default;
     // Installed before registration; direct/plugin sends resolve their destination too.
     std::function<bool(const Message&)> plainTextResolver;
@@ -195,7 +197,14 @@ public:
     virtual std::string id() const = 0;
 
     /// Human-readable name (e.g. "我的QQ机器人")
-    virtual std::string name() const = 0;
+    virtual std::string name() const {
+        std::lock_guard lock(nameMutex_);
+        return displayName_;
+    }
+    void setDisplayName(std::string value) {
+        std::lock_guard lock(nameMutex_);
+        displayName_ = std::move(value);
+    }
 
     /// Platform name (e.g. "onebot_v11", "discord", "kook", "milky")
     virtual std::string platform() const = 0;
@@ -419,6 +428,8 @@ public:
     }
 
 private:
+    mutable std::mutex nameMutex_;
+    std::string displayName_;
     inline static std::atomic<int> presentationStyle_{static_cast<int>(PresentationStyle::kTraditional)};
     std::atomic<int> messageFormatOverride_{-1};
 };

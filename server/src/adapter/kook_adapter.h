@@ -36,7 +36,6 @@ class KookAdapter final : public IAdapter,
 public:
     explicit KookAdapter(std::string adapterId) : id_(std::move(adapterId)) {}
     std::string id() const override { return id_; }
-    std::string name() const override { return name_; }
     std::string platform() const override { return "kook"; }
     std::string version() const override { return "kook-v3"; }
     bool isConnected() const override { return connected_; }
@@ -72,7 +71,7 @@ public:
     void onEvent(EventCallback cb) override { eventCb_ = std::move(cb); }
 
     bool configure(const json& cfg) override {
-        name_ = cfg.value("name", std::string("KOOK Bot"));
+        setDisplayName(cfg.value("name", std::string("KOOK Bot")));
         token_ = cfg.value("token", std::string());
         setMessageFormatOverride(parseFormatOverride(cfg.value("message_format", std::string())));
         if (token_.empty()) { lastError_ = "KOOK Bot 需要 Bot Token"; return false; }
@@ -150,9 +149,9 @@ private:
                      std::function<void(const json&)> onOk) {
         std::optional<OutboundAttempt> outgoing;
         if (method == drogon::Post && (path == "/api/v3/message/create" || path == "/api/v3/direct-message/create"))
-            outgoing = OutboundAttempt::prepare("KOOK「" + name_ + "」", "目标 " + logJsonId(body, "target_id"), body.value("content", std::string()));
+            outgoing = OutboundAttempt::prepare("KOOK「" + this->name() + "」", "目标 " + logJsonId(body, "target_id"), body.value("content", std::string()));
         else if (method == drogon::Post)
-            outgoing = prepareRestEventLog("KOOK「" + name_ + "」", "POST", path, body);
+            outgoing = prepareRestEventLog("KOOK「" + this->name() + "」", "POST", path, body);
         const auto ip = resolveIpv4("www.kookapp.cn");
         if (ip.empty()) { if (outgoing) outgoing->failed("无法解析平台域名 www.kookapp.cn"); fail("无法解析 www.kookapp.cn"); return; }
         auto client = drogon::HttpClient::newHttpClient(ip, 443, true);
@@ -170,7 +169,7 @@ private:
                 self->connecting_ = false;
                 if (outgoing) outgoing->failed(fmt::format("平台请求未成功：HTTP {}；{}", resp ? static_cast<int>(resp->statusCode()) : 0,
                     resp ? std::string(resp->body()) : drogon::to_string(rr)));
-                else DICE_LOG_WARN("KOOK '{}': {} failed: HTTP {} {}", self->name_, path,
+                else DICE_LOG_WARN("KOOK '{}': {} failed: HTTP {} {}", self->name(), path,
                               resp ? static_cast<int>(resp->statusCode()) : 0,
                               resp ? std::string(resp->body()) : std::string("网络请求未完成"));
                 return;
@@ -180,7 +179,7 @@ private:
             if (j.value("code", -1) != 0) {
                 self->lastError_ = "KOOK: " + j.value("message", std::string("请求被拒绝"));
                 if (outgoing) outgoing->failed(j.value("message", std::string("平台拒绝本次消息")));
-                else DICE_LOG_WARN("KOOK '{}': {} code={} {}", self->name_, path, j.value("code", -1), j.value("message", std::string()));
+                else DICE_LOG_WARN("KOOK '{}': {} code={} {}", self->name(), path, j.value("code", -1), j.value("message", std::string()));
                 return;
             }
             if (onOk) onOk(j.value("data", json::object()));
@@ -251,7 +250,7 @@ private:
                 sessionId_ = d.value("session_id", std::string());
                 connected_ = true; connecting_ = false;
                 beginPing();
-                DICE_LOG_SUCCESS("KOOK「{}」连接就绪：账号「{}」（{}）。", name_, loginName_, loginId_);
+                DICE_LOG_SUCCESS("KOOK「{}」连接就绪：账号「{}」（{}）。", this->name(), loginName_, loginId_);
             } else if (s == 3) {   // pong
             } else if (s == 5) {   // reconnect 指令：按协议丢弃 sn 重新拉取网关
                 sn_ = 0; sessionId_.clear();
@@ -388,10 +387,10 @@ private:
 
     void fail(const std::string& e) {
         lastError_ = e; connecting_ = false; connected_ = false;
-        DICE_LOG_ERROR("KOOK '{}': {}", name_, e);
+        DICE_LOG_ERROR("KOOK '{}': {}", this->name(), e);
     }
 
-    std::string id_, name_, token_, loginId_, loginName_, clientId_, sessionId_, lastError_;
+    std::string id_,  token_, loginId_, loginName_, clientId_, sessionId_, lastError_;
     Database* db_{identity::BindingStore::instance().database()};
     std::mutex guildMutex_;
     std::unordered_map<std::string, std::string> channelGuild_;   // 频道 id → guild id

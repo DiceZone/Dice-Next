@@ -41,6 +41,7 @@
 #include "../core/identity/identity_binding.h"
 #include "../platform/system_info.h"
 #include "sysinfo_history.h"
+#include "statistics_range.h"
 #include "dashboard_log_stream.h"
 #include "../i18n/i18n.h"
 #include "../common/types.h"
@@ -3054,7 +3055,6 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 if (!adapterCfg.is_object()) adapterCfg = J::object();
                 bool runtimeConfigChanged = false;
                 if (j.contains("name") && j["name"].is_string()) {
-                    runtimeConfigChanged = a.name != j["name"].get<std::string>();
                     a.name = j["name"];
                 }
                 if (a.type == static_cast<int>(AdapterType::kQQOfficial)) {
@@ -3184,6 +3184,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 // Inject live connection status into response
                 auto jj = adapterToJson(a, adapterMgr.lastActiveAt(std::to_string(a.id)));
                 auto adapter = adapterMgr.getAdapter(std::to_string(a.id));
+                if (adapter && j.contains("name") && j["name"].is_string()) adapter->setDisplayName(a.name);
                 jj["status"] = adapter ? adapter->connectionStatus() : std::string("disconnected");
                 injectLiveAdapterFields(jj, adapter);
                 jsonReply(ok(jj), std::move(cb));
@@ -3341,6 +3342,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             {"image_send", J{{"mode", "base64"}, {"host", ""}}},
             {"image_host", J{{"mode", "qq"}}},
             {"chat_retention_days", 7}, {"chat_persist", false},
+            {"roll_stats_keep_days", 0}, {"performance_keep_days", 30},
             {"user_group", ""}, {"user_group_enforce", false}, {"user_group_invite", true},
         };
         auto platformForAccount = [st](const std::string& id) -> std::string {
@@ -3379,7 +3381,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             if (key == "bot_msg" || key == "bot_header")
                 return value.is_string() && value.get_ref<const std::string&>().size() <= 65536;
             if (key == "api_timeout") return value.is_number_integer() && value.get<int>() >= 1 && value.get<int>() <= 30;
-            if (key == "chat_retention_days") return value.is_number_integer() && value.get<int>() >= 0 && value.get<int>() <= 3650;
+            if (key == "chat_retention_days" || key == "roll_stats_keep_days" || key == "performance_keep_days") return value.is_number_integer() && value.get<int>() >= 0 && value.get<int>() <= 3650;
             if (kDefaults.contains(key) && kDefaults[key].is_boolean()) return value.is_boolean();
             return false;
         };
@@ -3426,6 +3428,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 J filtered = J::object();
                 for (auto it = input.begin(); it != input.end(); ++it) {
                     if (!kDefaults.contains(it.key())) continue;
+                    if (scope != "global" && (it.key() == "roll_stats_keep_days" || it.key() == "performance_keep_days"))
+                        throw std::invalid_argument("Statistics retention is global");
                     if (!validateValue(it.key(), it.value())) { jsonReply(fail("无效的设置值: " + it.key()), std::move(cb)); return; }
                     filtered[it.key()] = it.value();
                 }
@@ -5372,12 +5376,13 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
     // ── Local aggregate statistics ─────────────────────────────
     app.registerHandler("/api/statistics/overview", [st, &adapterMgr](Req req, CB&& cb) {
         try {
-            int days = 30;
-            try {
-                const std::string raw = req->getParameter("days");
-                if (!raw.empty()) days = std::stoi(raw);
-            } catch (...) {}
-            if (days != 7 && days != 30 && days != 90) days = 30;
+            const auto range = statistics::dateRange(req->getParameter("days"), req->getParameter("period"),
+                req->getParameter("from"), req->getParameter("to"), std::chrono::system_clock::now(),
+                utils::effectiveTimezoneOffsetMinutes());
+            const auto& dates = range.dates;
+            const int days = static_cast<int>(dates.size());
+            const auto& firstDay = dates.front();
+            const auto& lastDay = dates.back();
             const std::string platformFilter = req->getParameter("platform");
             const std::string adapterFilter = req->getParameter("adapter");
             std::string onlineGranularity = req->getParameter("granularity");
@@ -5392,15 +5397,6 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 return (platformFilter.empty() || platform == platformFilter)
                     && (adapterFilter.empty() || adapterId == adapterFilter);
             };
-
-            std::vector<std::string> dates;
-            dates.reserve(static_cast<std::size_t>(days));
-            const std::time_t now = std::time(nullptr);
-            for (int offset = days - 1; offset >= 0; --offset)
-                dates.push_back(utils::formatTimeInTimezone(
-                    now - static_cast<std::time_t>(offset) * 24 * 60 * 60, "%Y-%m-%d"));
-            const std::string firstDay = dates.front();
-            const std::string sampleCutoff = firstDay + "T00:00:00Z";
 
             struct DailyCount { long long commands = 0; long long rolls = 0; };
             std::map<std::string, DailyCount> daily;
@@ -5435,9 +5431,8 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                            {"regular", 0LL}, {"fail", 0LL}, {"fumble", 0LL}};
 
             auto scopedRows = st->get_all<UsageScopeRow>(orm::where(
-                orm::c(&UsageScopeRow::day) >= firstDay));
+                orm::c(&UsageScopeRow::day) >= firstDay and orm::c(&UsageScopeRow::day) <= lastDay));
             const bool scopedCollectionStarted = st->count<UsageScopeRow>() > 0;
-            const bool scopedFaceCollectionStarted = st->count<ScopedDiceFaceStatRow>() > 0;
             std::set<std::string> knownPlatforms;
             for (const auto& row : scopedRows) {
                 if (!row.platform.empty()) knownPlatforms.insert(row.platform);
@@ -5489,7 +5484,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             // view, avoiding double-counting the new scoped rows.
             if (!scopedFilter) {
                 for (const auto& row : st->get_all<UsageHourRow>(orm::where(
-                         orm::c(&UsageHourRow::day) >= firstDay))) {
+                         orm::c(&UsageHourRow::day) >= firstDay and orm::c(&UsageHourRow::day) <= lastDay))) {
                     if (!daily.count(row.day) || row.hour < 0 || row.hour > 23) continue;
                     daily[row.day].commands += row.commandCount;
                     daily[row.day].rolls += row.rollCount;
@@ -5499,30 +5494,11 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             }
 
             auto scopedFaces = st->get_all<ScopedDiceFaceStatRow>(orm::where(
-                orm::c(&ScopedDiceFaceStatRow::day) >= firstDay));
+                orm::c(&ScopedDiceFaceStatRow::day) >= firstDay and orm::c(&ScopedDiceFaceStatRow::day) <= lastDay));
             for (const auto& row : scopedFaces)
                 if (matchesScope(row.platform, row.adapterId) && row.sides >= 2
                     && row.face >= 1 && row.face <= row.sides)
                     faceCounts[row.sides][row.face] += row.count;
-            if (faceCounts.empty() && !scopedFilter && !scopedFaceCollectionStarted) {
-                for (const auto& row : st->get_all<DiceFaceStatRow>())
-                    if (row.sides >= 2 && row.face >= 1 && row.face <= row.sides)
-                        faceCounts[row.sides][row.face] += row.count;
-            }
-
-            // Legacy check totals are cumulative and unscoped. Keep them as the
-            // all-platform fallback until scoped rows have accumulated.
-            if (!scopedCollectionStarted && !scopedFilter) {
-                for (const auto& row : st->get_all<RollStatRow>()) {
-                    checkResults["crit"] = checkResults["crit"].get<long long>() + row.crit;
-                    checkResults["extreme"] = checkResults["extreme"].get<long long>() + row.extreme;
-                    checkResults["hard"] = checkResults["hard"].get<long long>() + row.hard;
-                    checkResults["regular"] = checkResults["regular"].get<long long>() + row.regular;
-                    checkResults["fail"] = checkResults["fail"].get<long long>() + row.fail;
-                    checkResults["fumble"] = checkResults["fumble"].get<long long>() + row.fumble;
-                }
-            }
-
             std::map<std::string, std::string> groupNames;
             for (const auto& row : st->get_all<GroupSettingRow>())
                 if (row.key == "name" && !row.value.empty())
@@ -5530,18 +5506,6 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
 
             std::vector<UserAggregate> rankedUsers;
             for (const auto& [_, user] : userAggregates) rankedUsers.push_back(user);
-            if (rankedUsers.empty() && !scopedFilter && !scopedCollectionStarted) {
-                std::map<std::string, UserAggregate> legacyUsers;
-                for (const auto& row : st->get_all<PlayerProfileRow>()) {
-                    auto& user = legacyUsers[row.platform + "\x1f" + row.userId];
-                    user.userId = row.userId; user.platform = row.platform;
-                    if (!row.nickname.empty()) user.nickname = row.nickname;
-                    user.commands += row.cmdCount;
-                    if (row.lastCmdAt > user.lastDay) user.lastDay = row.lastCmdAt;
-                }
-                for (const auto& [_, user] : legacyUsers)
-                    if (user.commands > 0) rankedUsers.push_back(user);
-            }
             std::sort(rankedUsers.begin(), rankedUsers.end(), [](const auto& a, const auto& b) {
                 return a.commands > b.commands;
             });
@@ -5648,7 +5612,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             std::map<std::string, std::pair<long long, long long>> adapterSamples;
             std::map<std::string, std::pair<int, int>> scopedOnlineSamples;
             for (const auto& row : st->get_all<AdapterOnlineSampleRow>(orm::where(
-                     orm::c(&AdapterOnlineSampleRow::sampledAt) >= sampleCutoff))) {
+                     orm::c(&AdapterOnlineSampleRow::sampledAt) >= range.sampleFrom and orm::c(&AdapterOnlineSampleRow::sampledAt) < range.sampleUntil))) {
                 if (!matchesScope(row.platform, row.adapterId)) continue;
                 auto& aggregate = adapterSamples[row.adapterId];
                 aggregate.first += row.connected ? 1 : 0;
@@ -5717,7 +5681,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     addOnlineSample(sampledAt, value.first, value.second);
             } else {
                 auto samples = st->get_all<OnlineSampleRow>(
-                    orm::where(orm::c(&OnlineSampleRow::sampledAt) >= sampleCutoff),
+                    orm::where(orm::c(&OnlineSampleRow::sampledAt) >= range.sampleFrom and orm::c(&OnlineSampleRow::sampledAt) < range.sampleUntil),
                     orm::order_by(&OnlineSampleRow::sampledAt).desc());
                 std::reverse(samples.begin(), samples.end());
                 for (const auto& row : samples) {

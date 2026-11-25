@@ -39,10 +39,9 @@ class MilkyAdapter final : public IAdapter,
     struct MediaFile { std::string name, content, path, literal; };
     struct ParsedOutgoing { json segments = json::array(); std::vector<MediaFile> files; };
 public:
-    explicit MilkyAdapter(const std::string& adapterId) : id_(adapterId), name_(adapterId) {}
+    explicit MilkyAdapter(const std::string& adapterId) : IAdapter(adapterId), id_(adapterId) {}
 
     std::string id() const override { return id_; }
-    std::string name() const override { return name_; }
     std::string platform() const override { return "milky"; }
     std::string version() const override { return "1.0.0"; }
 
@@ -54,7 +53,7 @@ public:
 
     bool configure(const json& cfg) override {
         configured_ = false;
-        name_ = cfg.value("name", id_);
+        setDisplayName(cfg.value("name", id_));
         endpoint_ = cfg.value("endpoint", cfg.value("apiEndpoint", std::string()));
         while (!endpoint_.empty() && endpoint_.back() == '/') endpoint_.pop_back();
         const bool legacyWsEndpoint = endpoint_.rfind("ws://", 0) == 0 || endpoint_.rfind("wss://", 0) == 0;
@@ -368,7 +367,7 @@ public:
         try { return future.get(); } catch (...) { return json(); }
     }
     void invokeActionAsync(const std::string& action, const json& params, ActionCallback cb) override {
-        auto outgoing = prepareActionLog("Milky「" + name_ + "」", action, params);
+        auto outgoing = prepareActionLog("Milky「" + this->name() + "」", action, params);
         auto context = activeProcessingContext;
         std::thread([self = shared_from_this(), action, params, outgoing, context, cb = std::move(cb)]() mutable {
             ProcessingScope scope(context);
@@ -458,13 +457,13 @@ private:
             if (type != drogon::WebSocketMessageType::Text && type != drogon::WebSocketMessageType::Binary) return;
             auto event = json::parse(raw, nullptr, false);
             if (event.is_discarded() || !self->handleEventPayload(event))
-                DICE_LOG_WARN("Milky「{}」收到无效事件数据，已忽略该条事件。", self->name_);
+                DICE_LOG_WARN("Milky「{}」收到无效事件数据，已忽略该条事件。", self->name());
         });
         wsClient_->setConnectionClosedHandler([self](const drogon::WebSocketClientPtr&) {
             self->wsConnecting_ = false;
             self->connected_ = false;
             if (!self->stopping_) {
-                DICE_LOG_WARN("Milky「{}」事件连接断开，将按当前重连策略处理。", self->name_);
+                DICE_LOG_WARN("Milky「{}」事件连接断开，将按当前重连策略处理。", self->name());
                 self->scheduleEventReconnect();
             }
         });
@@ -472,7 +471,7 @@ private:
         auto request = drogon::HttpRequest::newHttpRequest();
         request->setPath(eventPath);
         if (!accessToken_.empty()) request->addHeader("Authorization", "Bearer " + accessToken_);
-        DICE_LOG_INFO("Milky「{}」正在连接事件 WebSocket：{}。", name_, eventEndpoint_);
+        DICE_LOG_INFO("Milky「{}」正在连接事件 WebSocket：{}。", this->name(), eventEndpoint_);
         wsClient_->connectToServer(request,
             [self](drogon::ReqResult result, const drogon::HttpResponsePtr& response,
                    const drogon::WebSocketClientPtr&) {
@@ -492,7 +491,7 @@ private:
                     std::lock_guard<std::mutex> lk(self->stateMutex_);
                     self->lastError_.clear();
                 }
-                DICE_LOG_SUCCESS("Milky「{}」事件连接已建立，可以接收平台事件。", self->name_);
+                DICE_LOG_SUCCESS("Milky「{}」事件连接已建立，可以接收平台事件。", self->name());
             });
     }
 
@@ -777,7 +776,7 @@ private:
         m.rawContent = raw.empty() ? clean : raw; m.content = clean;
     }
 
-    std::string id_, name_, endpoint_, eventEndpoint_, accessToken_;
+    std::string id_,  endpoint_, eventEndpoint_, accessToken_;
     std::string loginId_, loginName_;
     bool configured_{false};
     std::atomic<bool> connected_{false}, stopping_{false};

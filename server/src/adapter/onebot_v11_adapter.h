@@ -44,13 +44,12 @@ class OneBotV11Adapter : public IAdapter,
                          public std::enable_shared_from_this<OneBotV11Adapter> {
 public:
     OneBotV11Adapter(const std::string& adapterId)
-        : id_(adapterId), name_(adapterId)
+        : IAdapter(adapterId), id_(adapterId)
     {}
 
     // ─── IAdapter Interface ──────────────────────────────────
 
     std::string id() const override { return id_; }
-    std::string name() const override { return name_; }
     std::string platform() const override { return "onebot_v11"; }
     std::string version() const override { return "1.0.0"; }
 
@@ -63,7 +62,7 @@ public:
     }
 
     bool configure(const json& config) override {
-        name_   = config.value("name", id_);
+        setDisplayName(config.value("name", id_));
         endpoint_ = config.value("endpoint", "ws://localhost:6700");
         // Strip a trailing slash so newWebSocketClient gets a clean scheme://host:port.
         while (!endpoint_.empty() && endpoint_.back() == '/') endpoint_.pop_back();
@@ -81,7 +80,7 @@ public:
         // 重连不该退避到一分钟一次、更不该二十次后暂停；登录资料也要等扫完码再取。
         managedPeer_ = config.value("managedPeer", false);
         setMessageFormatOverride(parseFormatOverride(config.value("message_format", std::string())));
-        DICE_LOG_INFO("OneBotV11「{}」配置已读取：端点 {}，连接模式 {}。", name_, endpoint_, mode_);
+        DICE_LOG_INFO("OneBotV11「{}」配置已读取：端点 {}，连接模式 {}。", this->name(), endpoint_, mode_);
         return true;
     }
 
@@ -100,7 +99,7 @@ public:
         }
 
         lastError_ = "connection mode '" + mode_ + "' not implemented yet (use forward_ws or reverse_ws)";
-        DICE_LOG_ERROR("OneBotV11 '{}': {}", name_, lastError_);
+        DICE_LOG_ERROR("OneBotV11 '{}': {}", this->name(), lastError_);
         return false;
     }
 
@@ -116,7 +115,7 @@ public:
         if (wsClient_) { wsClient_->stop(); wsClient_.reset(); }
         connected_ = false;
         peerOnline_ = false;
-        DICE_LOG_INFO("OneBotV11「{}」已停止。", name_);
+        DICE_LOG_INFO("OneBotV11「{}」已停止。", this->name());
     }
 
     // 托管的协议端（内置登录）：WS 连上只说明进程在，QQ 扫码登录、在线才算连上。
@@ -289,12 +288,12 @@ public:
             "role:" + groupId + ":" + userId);
     }
     void setGroupKick(const std::string& groupId, const std::string& userId) override {
-        DICE_LOG_INFO("OneBotV11「{}」请求移出群 {} 的成员 {}，等待平台结果。", name_, groupId, userId);
+        DICE_LOG_INFO("OneBotV11「{}」请求移出群 {} 的成员 {}，等待平台结果。", this->name(), groupId, userId);
         sendOneBotAction("set_group_kick", {{"group_id", parseId(groupId)}, {"user_id", parseId(userId)}});
     }
     void setGroupBan(const std::string& groupId, const std::string& userId, int durationSec) override {
         DICE_LOG_INFO("OneBotV11 '{}': set_group_ban group={} user={} duration={}s{}",
-                      name_, groupId, userId, durationSec, durationSec == 0 ? " (解禁)" : "");
+                      this->name(), groupId, userId, durationSec, durationSec == 0 ? " (解禁)" : "");
         sendOneBotAction("set_group_ban", {{"group_id", parseId(groupId)}, {"user_id", parseId(userId)}, {"duration", durationSec}});
     }
     void setGroupSpecialTitle(const std::string& groupId, const std::string& userId,
@@ -336,7 +335,7 @@ public:
     /// 删除好友（NapCat delete_friend）。
     void deleteFriend(const std::string& userId) override {
         sendOneBotAction("delete_friend", {{"user_id", parseId(userId)}});
-        DICE_LOG_INFO("OneBotV11「{}」请求删除好友 {}，等待平台结果。", name_, userId);
+        DICE_LOG_INFO("OneBotV11「{}」请求删除好友 {}，等待平台结果。", this->name(), userId);
     }
 
     /// 同步调用 OneBot API，等待 echo 响应（群文件列表/下载链等）。
@@ -357,7 +356,7 @@ public:
         if (fut.wait_for(std::chrono::milliseconds(timeoutMs)) == std::future_status::ready) {
             try { out = fut.get(); } catch (...) {}
         } else {
-            DICE_LOG_WARN("OneBotV11「{}」接口「{}」等待 {} 毫秒后仍未取得响应。", name_, action, timeoutMs);
+            DICE_LOG_WARN("OneBotV11「{}」接口「{}」等待 {} 毫秒后仍未取得响应。", this->name(), action, timeoutMs);
         }
         {
             std::lock_guard<std::mutex> lk(invokeMutex_);
@@ -418,15 +417,15 @@ public:
     void setGroupCard(const std::string& groupId, const std::string& userId,
                       const std::string& card) override {
         if (parseId(userId) == 0) {
-            DICE_LOG_WARN("OneBotV11 '{}': set_group_card skipped — empty/invalid user_id (login not ready?)", name_);
+            DICE_LOG_WARN("OneBotV11 '{}': set_group_card skipped — empty/invalid user_id (login not ready?)", this->name());
             return;
         }
-        DICE_LOG_INFO("OneBotV11 '{}': set_group_card group={} user={} card='{}'", name_, groupId, userId, card);
+        DICE_LOG_INFO("OneBotV11 '{}': set_group_card group={} user={} card='{}'", this->name(), groupId, userId, card);
         sendOneBotAction("set_group_card", {{"group_id", parseId(groupId)},
             {"user_id", parseId(userId)}, {"card", card}});
     }
     void setGroupName(const std::string& groupId, const std::string& name) override {
-        DICE_LOG_INFO("OneBotV11 '{}': set_group_name group={} name='{}'", name_, groupId, name);
+        DICE_LOG_INFO("OneBotV11 '{}': set_group_name group={} name='{}'", this->name(), groupId, name);
         sendOneBotAction("set_group_name", {{"group_id", parseId(groupId)}, {"group_name", name}});
     }
     void sendGroupMessage(const std::string& groupId, const std::string& text) override {
@@ -531,12 +530,12 @@ public:
             if (self->stopping_ || generation != self->groupLeaveGeneration_) return;
             try {
                 if (self->sendOneBotAction("set_group_leave", {{"group_id", gid}}, "leave:" + std::to_string(gid))) {
-                    DICE_LOG_INFO("OneBotV11「{}」已提交群 {} 的退群请求，等待平台确认。", self->name_, gid);
+                    DICE_LOG_INFO("OneBotV11「{}」已提交群 {} 的退群请求，等待平台确认。", self->name(), gid);
                 } else {
-                    DICE_LOG_WARN("OneBotV11「{}」未能向平台提交群 {} 的退群请求，请检查连接。", self->name_, gid);
+                    DICE_LOG_WARN("OneBotV11「{}」未能向平台提交群 {} 的退群请求，请检查连接。", self->name(), gid);
                 }
             } catch (const std::exception& e) {
-                DICE_LOG_WARN("OneBotV11「{}」提交群 {} 的退群请求时发生错误：{}", self->name_, gid, e.what());
+                DICE_LOG_WARN("OneBotV11「{}」提交群 {} 的退群请求时发生错误：{}", self->name(), gid, e.what());
             }
         });
     }
@@ -554,14 +553,14 @@ private:
         wsClient_->setConnectionClosedHandler([self](const drogon::WebSocketClientPtr&) {
             self->connected_ = false;
             self->peerOnline_ = false;
-            DICE_LOG_WARN("OneBotV11「{}」连接已断开，将按重连策略处理。", self->name_);
+            DICE_LOG_WARN("OneBotV11「{}」连接已断开，将按重连策略处理。", self->name());
             self->scheduleReconnect();
         });
         auto req = drogon::HttpRequest::newHttpRequest();
         req->setPath(wsPath_);
         if (!accessToken_.empty()) req->addHeader("Authorization", "Bearer " + accessToken_);
         if (!managedPeer_ || reconnectAttempts_ <= 1 || reconnectAttempts_ % 20 == 0)
-            DICE_LOG_INFO("OneBotV11「{}」开始连接协议端 {}{}。", name_, endpoint_, wsPath_);
+            DICE_LOG_INFO("OneBotV11「{}」开始连接协议端 {}{}。", this->name(), endpoint_, wsPath_);
         wsClient_->connectToServer(req, [self](drogon::ReqResult r, const drogon::HttpResponsePtr&, const drogon::WebSocketClientPtr&) {
             if (r != drogon::ReqResult::Ok) { self->connected_=false; self->lastError_="WS connect failed"; self->scheduleReconnect(); }
             else { self->connected_=true; self->lastError_.clear(); self->timedOut_=false; self->synchronizePeer(); }
@@ -607,7 +606,7 @@ private:
                     else { self->revConn_ = conn; self->revBuffer_.clear(); self->revFrag_.clear(); }
                 }
                 if (reject) {
-                    DICE_LOG_WARN("OneBotV11「{}」反向 WS 已有客户端，拒绝额外连接。", self->name_);
+                    DICE_LOG_WARN("OneBotV11「{}」反向 WS 已有客户端，拒绝额外连接。", self->name());
                     conn->forceClose();
                 }
             } else {
@@ -618,7 +617,7 @@ private:
                     self->peerOnline_ = false;
                     if (self->connected_) {
                         self->connected_ = false;
-                        DICE_LOG_WARN("OneBotV11「{}」反向 WS 客户端已断开。", self->name_);
+                        DICE_LOG_WARN("OneBotV11「{}」反向 WS 客户端已断开。", self->name());
                     }
                 }
             }
@@ -627,7 +626,7 @@ private:
         // trantor aborts ("forbidden to run loop on threads other than event-loop
         // thread"). startAll() runs on the main loop, so dispatch into revLoop_.
         revLoop_->getLoop()->runInLoop([self]() { self->tcpServer_->start(); });
-        DICE_LOG_INFO("OneBotV11「{}」反向 WS 正在监听端口 {}，等待协议端连接。", name_, port);
+        DICE_LOG_INFO("OneBotV11「{}」反向 WS 正在监听端口 {}，等待协议端连接。", this->name(), port);
         return true;
     }
 
@@ -726,7 +725,7 @@ private:
                 return;
             }
             if (requireToken_ && (accessToken_.empty() || authorization != "Bearer " + accessToken_)) {
-                DICE_LOG_WARN("OneBotV11「{}」反向 WS 握手令牌不符，已拒绝。", name_);
+                DICE_LOG_WARN("OneBotV11「{}」反向 WS 握手令牌不符，已拒绝。", this->name());
                 conn->send("HTTP/1.1 401 Unauthorized\r\n"
                            "Connection: close\r\nContent-Length: 0\r\n\r\n");
                 conn->forceClose();
@@ -736,7 +735,7 @@ private:
             conn->send("HTTP/1.1 101 Switching Protocols\r\n"
                        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
                        "Sec-WebSocket-Accept: " + wsAcceptKey(wsKey) + "\r\n\r\n");
-            DICE_LOG_INFO("OneBotV11「{}」反向 WS 握手完成，正在同步账号资料。", name_);
+            DICE_LOG_INFO("OneBotV11「{}」反向 WS 握手完成，正在同步账号资料。", this->name());
             connected_ = true;
             revBuffer_.erase(0, pos + 4);   // drop the handshake, keep any trailing frame bytes
             synchronizePeer();
@@ -825,9 +824,9 @@ private:
         peerStarting_ = managedPeer_;
         if (managedPeer_) {
             peerOnline_ = false;
-            DICE_LOG_INFO("OneBotV11「{}」接口已连接，正在等待协议端完成登录。", name_);
+            DICE_LOG_INFO("OneBotV11「{}」接口已连接，正在等待协议端完成登录。", this->name());
         } else {
-            DICE_LOG_INFO("OneBotV11「{}」接口已连接，正在读取登录资料。", name_);
+            DICE_LOG_INFO("OneBotV11「{}」接口已连接，正在读取登录资料。", this->name());
             sendOneBotAction("get_login_info", json::object(), "login_info");
             refreshGroupList();
         }
@@ -868,12 +867,12 @@ private:
             timedOut_ = true;
             lastError_ = "\xe8\xbf\x9e\xe6\x8e\xa5\xe8\xb6\x85\xe6\x97\xb6";  // 连接超时
             DICE_LOG_WARN("OneBotV11「{}」连续 {} 次连接失败，已暂停自动重连；请在面板手动重新连接。",
-                          name_, kPauseAfterAttempts);
+                          this->name(), kPauseAfterAttempts);
             return;
         }
         double delay = (attempt > kFastRetryAttempts) ? kSlowReconnectDelaySec : kReconnectDelaySec;
         auto self = shared_from_this();
-        DICE_LOG_INFO("OneBotV11「{}」将在 {} 次重连时等待 {} 秒后尝试。", name_, attempt, delay);
+        DICE_LOG_INFO("OneBotV11「{}」将在 {} 次重连时等待 {} 秒后尝试。", this->name(), attempt, delay);
         drogon::app().getLoop()->runAfter(delay, [self]() {
             if (!self->stopping_ && !self->connected_) self->start();
         });
@@ -885,13 +884,13 @@ private:
                           const std::string& echo = "") {
         if ((action == "send_private_msg" && (!params.contains("user_id") || !OneBotAccountIdentity::validId(params["user_id"])))
             || (action == "send_group_msg" && (!params.contains("group_id") || !OneBotAccountIdentity::validId(params["group_id"])))) {
-            DICE_LOG_WARN("OneBotV11「{}」发送目标无效，未提交平台请求 {}。", name_, action);
+            DICE_LOG_WARN("OneBotV11「{}」发送目标无效，未提交平台请求 {}。", this->name(), action);
             return false;
         }
-        auto outgoing = prepareActionLog("OneBotV11「" + name_ + "」", action, params);
+        auto outgoing = prepareActionLog("OneBotV11「" + this->name() + "」", action, params);
         if (!connected_) {
             if (outgoing) outgoing->failed("适配器尚未连接，没有提交平台");
-            else DICE_LOG_DEBUG("OneBotV11「{}」未连接，跳过接口请求 {}。", name_, action);
+            else DICE_LOG_DEBUG("OneBotV11「{}」未连接，跳过接口请求 {}。", this->name(), action);
             return false;
         }
         json req{{"action", action}, {"params", params}};
@@ -958,7 +957,7 @@ private:
             // 仍由后面的 收↩/事件 行处理（且静音心跳与接口成功响应）。
             if (rawMode && j.value("post_type", std::string()) != "message" && j.value("post_type", std::string()) != "message_sent"
                 && !j.contains("echo") && j.value("meta_event_type", std::string()) != "heartbeat")
-                DICE_LOG_DEBUG("OneBotV11「{}」协议事件：{}", name_, interpretEvent(j));
+                DICE_LOG_DEBUG("OneBotV11「{}」协议事件：{}", this->name(), interpretEvent(j));
 
             // Handle post_type: message events. 自响应开启时，也把骰娘账号自身
             // 发出的消息（post_type=message_sent）当作消息处理，用于自控。
@@ -1176,7 +1175,7 @@ private:
                         if (it != pendingUploads_.end()) { pu = it->second; have = true; pendingUploads_.erase(it); }
                     }
                     if (failed && have) {
-                        DICE_LOG_INFO("OneBotV11 '{}': local group-file upload failed, retrying via base64", name_);
+                        DICE_LOG_INFO("OneBotV11 '{}': local group-file upload failed, retrying via base64", this->name());
                         uploadGroupFileBase64(pu.groupId, pu.name, pu.content);
                     }
                     return;  // handled (success → nothing more to do)
@@ -1190,7 +1189,7 @@ private:
                     }
                     if (failed && have && pending.params.contains("message")
                         && imgsend::rewriteLocalImagesToBase64(pending.params["message"])) {
-                        DICE_LOG_INFO("OneBotV11 '{}': local image send failed, retrying via base64", name_);
+                        DICE_LOG_INFO("OneBotV11 '{}': local image send failed, retrying via base64", this->name());
                         sendOneBotAction(pending.action, pending.params, "imgb64:" + std::to_string(++echoSeq_));
                     }
                     return;
@@ -1237,20 +1236,20 @@ private:
                     }
                 }
                 if (failed && !outgoing && cacheLookup) {
-                    DICE_LOG_DEBUG("OneBotV11「{}」缓存查询未成功（错误码 {}）：{}", name_,
+                    DICE_LOG_DEBUG("OneBotV11「{}」缓存查询未成功（错误码 {}）：{}", this->name(),
                                    j.contains("retcode") ? j["retcode"].dump() : std::string("?"),
                                    j.value("message", j.value("wording", std::string("平台未提供具体原因"))));
                 } else if (failed && !outgoing) {
-                    DICE_LOG_WARN("OneBotV11「{}」接口操作未成功（错误码 {}）：{}", name_,
+                    DICE_LOG_WARN("OneBotV11「{}」接口操作未成功（错误码 {}）：{}", this->name(),
                                   j.contains("retcode") ? j["retcode"].dump() : std::string("?"),
                                   j.value("message", j.value("wording", std::string("平台未提供具体原因"))));
                 }
                 if (echo == "glist") {
                     // Group-info pull: silent on success (per spec), log only failures.
                     if (!d.is_array() && awaitingLogin) {
-                        DICE_LOG_DEBUG("OneBotV11「{}」协议端尚未登录，群列表稍后再取。", name_);
+                        DICE_LOG_DEBUG("OneBotV11「{}」协议端尚未登录，群列表稍后再取。", this->name());
                     } else if (!d.is_array()) {
-                        DICE_LOG_ERROR("OneBotV11「{}」群列表刷新失败，保留已有缓存；平台状态 {}。", name_,
+                        DICE_LOG_ERROR("OneBotV11「{}」群列表刷新失败，保留已有缓存；平台状态 {}。", this->name(),
                                        j.value("status", std::string("?")));
                     } else {
                         std::vector<std::string> needName;   // 协议端没给名字、待 get_group_info 反查
@@ -1273,7 +1272,7 @@ private:
                         }
                         }   // 释放锁后再反查（requestGroupInfo 内部会再锁 dataMutex_）
                         for (auto& gid : needName) requestGroupInfo(gid);
-                        DICE_LOG_DEBUG("OneBotV11「{}」群列表刷新完成：返回 {} 个群聊，已更新本地缓存。", name_, d.size());
+                        DICE_LOG_DEBUG("OneBotV11「{}」群列表刷新完成：返回 {} 个群聊，已更新本地缓存。", this->name(), d.size());
                     }
                 } else if (echo == "flist") {
                     // friend-list pull — cache count + uid list (silent on success).
@@ -1288,7 +1287,7 @@ private:
                             if (!uid.empty() && f.contains("nickname") && f["nickname"].is_string())
                                 friendNames_[uid]=f["nickname"].get<std::string>();
                         }
-                        DICE_LOG_DEBUG("OneBotV11「{}」好友列表刷新完成：返回 {} 位好友，已更新本地缓存。", name_, d.size());
+                        DICE_LOG_DEBUG("OneBotV11「{}」好友列表刷新完成：返回 {} 位好友，已更新本地缓存。", this->name(), d.size());
                     }
                 } else if (echo.rfind("history:", 0) == 0) {
                     // 历史消息 → 打包成 kGroupHistory 事件回流给引擎入库。
@@ -1303,7 +1302,7 @@ private:
                         hv.groupId = echo.substr(8);
                         hv.extra = json{{"messages", *msgs}};
                         DICE_LOG_INFO("OneBotV11「{}」已取得群 {} 的历史消息，共 {} 条。",
-                                      name_, hv.groupId, msgs->size());
+                                      this->name(), hv.groupId, msgs->size());
                         for (auto& cb : eventCallbacks_) cb(hv);
                     }
                 } else if (echo.rfind("members:", 0) == 0 && d.is_array()) {
@@ -1343,16 +1342,16 @@ private:
                     if (online || (failed && !awaitingLogin)) peerStarting_ = false;
                     const bool was = peerOnline_.exchange(online);
                     if (online && !was) {
-                        DICE_LOG_SUCCESS("OneBotV11「{}」协议端账号已在线。", name_);
+                        DICE_LOG_SUCCESS("OneBotV11「{}」协议端账号已在线。", this->name());
                         sendOneBotAction("get_login_info", json::object(), "login_info_retry");
                         refreshGroupList();
                     } else if (!online && was) {
-                        DICE_LOG_WARN("OneBotV11「{}」协议端账号已离线，需要重新扫码登录。", name_);
+                        DICE_LOG_WARN("OneBotV11「{}」协议端账号已离线，需要重新扫码登录。", this->name());
                     }
                 } else if (echo == "login_info_retry") {
                     if (!failed && d.is_object()) {
                         identity_.observeLoginInfo(d);
-                        DICE_LOG_INFO("OneBotV11「{}」协议端已登录，账号 {}。", name_, getLoginId());
+                        DICE_LOG_INFO("OneBotV11「{}」协议端已登录，账号 {}。", this->name(), getLoginId());
                         refreshGroupList();
                     } else if (managedPeer_) {
                         auto self = shared_from_this();
@@ -1367,7 +1366,7 @@ private:
             else if (j.contains("meta_event_type")) {
                 auto meta = j["meta_event_type"].get<std::string>();
                 if (meta == "lifecycle") {
-                    DICE_LOG_DEBUG("OneBotV11「{}」收到生命周期事件：机器人账号 {}。", name_, getLoginId());
+                    DICE_LOG_DEBUG("OneBotV11「{}」收到生命周期事件：机器人账号 {}。", this->name(), getLoginId());
                 } else if (meta == "heartbeat") {
                     const auto status = j.value("status", json::object());
                     const auto online = status.contains("online") && status["online"].is_boolean()
@@ -1375,22 +1374,22 @@ private:
                     const auto healthy = status.contains("good") && status["good"].is_boolean()
                         ? status["good"].get<bool>() ? "正常" : "异常" : "未提供健康状态";
                     DICE_LOG_TRACE("OneBotV11「{}」收到协议心跳：账号 {}，协议端 {}；上报间隔 {} 毫秒（0 表示未提供）。",
-                        name_, online, healthy, j.value("interval", 0));
+                        this->name(), online, healthy, j.value("interval", 0));
                     if ((status.contains("online") && status["online"].is_boolean() && !status["online"].get<bool>())
                         || (status.contains("good") && status["good"].is_boolean() && !status["good"].get<bool>())) {
                         if (managedPeer_ && peerStarting_ && !peerOnline_
                             && status.contains("online") && status["online"].is_boolean() && !status["online"].get<bool>()) return;
-                        if (!heartbeatUnhealthy_.exchange(true)) DICE_LOG_WARN("OneBotV11「{}」协议心跳状态异常：账号 {}，协议端 {}；收发可能不可用，请检查协议端。", name_, online, healthy);
+                        if (!heartbeatUnhealthy_.exchange(true)) DICE_LOG_WARN("OneBotV11「{}」协议心跳状态异常：账号 {}，协议端 {}；收发可能不可用，请检查协议端。", this->name(), online, healthy);
                     } else if (status.contains("online") && status["online"].is_boolean() && status["online"].get<bool>()
                         && status.value("good", true) && heartbeatUnhealthy_.exchange(false)) {
-                        DICE_LOG_SUCCESS("OneBotV11「{}」协议心跳恢复正常，账号已在线。", name_);
+                        DICE_LOG_SUCCESS("OneBotV11「{}」协议心跳恢复正常，账号已在线。", this->name());
                     }
                 }
                 // Respond to heartbeat with .meta_event (some OneBot impls need this)
                 // Heartbeat just confirms connection is alive — no action needed
             }
         } catch (const std::exception& e) {
-            DICE_LOG_WARN("OneBotV11「{}」本次平台事件处理未完成：{}；连接服务仍继续处理后续事件。", name_, e.what());
+            DICE_LOG_WARN("OneBotV11「{}」本次平台事件处理未完成：{}；连接服务仍继续处理后续事件。", this->name(), e.what());
         }
     }
 
@@ -1823,7 +1822,6 @@ private:
     // ─── State ───────────────────────────────────────────────
 
     std::string id_;
-    std::string name_;
     std::string endpoint_;
     std::string accessToken_;
     std::string mode_{"forward_ws"};  // forward_ws | reverse_ws | http

@@ -66,7 +66,6 @@ class QQOfficialAdapter final : public IAdapter,
 public:
     explicit QQOfficialAdapter(std::string adapterId) : id_(std::move(adapterId)) {}
     std::string id() const override { return id_; }
-    std::string name() const override { return name_; }
     std::string platform() const override { return "qq_official"; }
     const std::string& appId() const noexcept { return appId_; }
     const std::string& displayQQ() const noexcept { return displayQQ_; }
@@ -195,7 +194,7 @@ public:
                 path.assign(u8.begin(), u8.end());
             } catch (const std::exception& e) {
                 lastError_ = "群文件落地失败";
-                DICE_LOG_WARN("QQOfficial '{}': 群文件落地失败，跳过 {}：{}", name_, name, e.what());
+                DICE_LOG_WARN("QQOfficial '{}': 群文件落地失败，跳过 {}：{}", this->name(), name, e.what());
                 return;
             }
         }
@@ -494,7 +493,7 @@ public:
     void onEvent(EventCallback cb) override { eventCb_ = std::move(cb); }
 
     bool configure(const json& cfg) override {
-        name_ = cfg.value("name", std::string("QQ 官方机器人"));
+        setDisplayName(cfg.value("name", std::string("QQ 官方机器人")));
         const auto newApp = cfg.value("appId", std::string());
         const bool nextWebhook = qqwebhook::isWebhook(cfg.value("receiveMode",
             cfg.value("qqReceiveMode", cfg.value("receive_mode", std::string("gateway")))));
@@ -562,7 +561,7 @@ public:
     WebhookReply acceptWebhook(const std::string& timestamp, const std::string& signature, const std::string& raw) {
         auto reply = qqwebhook::handle(appSecret_, timestamp, signature, raw,
             [this](const std::string& type, const json& d, const std::string& eventId) { dispatch(type, d, eventId); });
-        if (!reply.error.empty()) DICE_LOG_WARN("QQOfficial '{}': {}", name_, reply.error);
+        if (!reply.error.empty()) DICE_LOG_WARN("QQOfficial '{}': {}", this->name(), reply.error);
         return reply;
     }
     void bindWebhookForTest() { retainWebhook(); }
@@ -871,7 +870,7 @@ private:
                 }
                 else if (!nameRemovedGroups_.count(endpoint.endpointId)) nameWarmGroups_.insert(endpoint.endpointId);
             }
-        } catch (...) { DICE_LOG_DEBUG("QQOfficial '{}': 暂未读取到后台名称刷新所需的群资料。", name_); }
+        } catch (...) { DICE_LOG_DEBUG("QQOfficial '{}': 暂未读取到后台名称刷新所需的群资料。", this->name()); }
     }
     void maintainNameCache() {
         if (stopping_ || !connected_ || (token().empty() && !testApi_)) return;
@@ -917,7 +916,7 @@ private:
         nameMaintenanceTimer_ = drogon::app().getLoop()->runEvery(2.0, [weak] {
             if (const auto self = weak.lock()) {
                 try { self->maintainNameCache(); }
-                catch (...) { DICE_LOG_DEBUG("QQOfficial '{}': 后台名称刷新暂时失败，将稍后重试。", self->name_); }
+                catch (...) { DICE_LOG_DEBUG("QQOfficial '{}': 后台名称刷新暂时失败，将稍后重试。", self->name()); }
             }
         });
     }
@@ -1203,7 +1202,7 @@ private:
             if (actual.empty()) actual = qqprotocol::integer(body, "msg_type") == 6 ? "[输入中状态]" : body.contains("media") ? "[富媒体消息]" : "[平台消息]";
             const size_t begin = group ? 11 : 10;
             const auto end = path.find('/', begin);
-            outgoing = OutboundAttempt::prepare("QQ 官方「" + name_ + "」", (group ? "群 " : "私聊 ") + path.substr(begin, end - begin), actual);
+            outgoing = OutboundAttempt::prepare("QQ 官方「" + this->name() + "」", (group ? "群 " : "私聊 ") + path.substr(begin, end - begin), actual);
             outgoing->submitted();
             cb = [outgoing, original = std::move(cb)](json result) mutable {
                 if (result.value("ok", false)) outgoing->accepted(qqprotocol::text(qqprotocol::object(result, "data"), "id"));
@@ -1227,13 +1226,13 @@ private:
                 }
                 if (self->appId_ == app) {
                     try { self->observeApiNames(method, path, result, revision); }
-                    catch (...) { DICE_LOG_WARN("QQOfficial '{}': 名称缓存更新失败，保留原有名称。", self->name_); }
+                    catch (...) { DICE_LOG_WARN("QQOfficial '{}': 名称缓存更新失败，保留原有名称。", self->name()); }
                 }
                 cb(std::move(result));
             } catch (const std::exception& e) {
-                DICE_LOG_ERROR("QQOfficial '{}': {} 回调异常: {}", self->name_, path, e.what());
+                DICE_LOG_ERROR("QQOfficial '{}': {} 回调异常: {}", self->name(), path, e.what());
             } catch (...) {
-                DICE_LOG_ERROR("QQOfficial '{}': {} 回调未知异常", self->name_, path);
+                DICE_LOG_ERROR("QQOfficial '{}': {} 回调未知异常", self->name(), path);
             }
         };
         if (testApi_) { testApi_(method, path, body, std::move(finish)); return; }
@@ -1244,7 +1243,7 @@ private:
         catofficial::api::call(client, method, path, body, token(), std::move(cb), nameRequest ? 10.0 : 0.0, logger());
     }
     catofficial::Logger logger() const {
-        return [name = name_](catofficial::LogLevel level, const std::string& message) {
+        return [name = this->name()](catofficial::LogLevel level, const std::string& message) {
             if (level == catofficial::LogLevel::error) DICE_LOG_ERROR("QQOfficial '{}': {}", name, message);
             else if (level == catofficial::LogLevel::warn) DICE_LOG_WARN("QQOfficial '{}': {}", name, message);
             else if (level == catofficial::LogLevel::info) DICE_LOG_INFO("QQOfficial '{}': {}", name, message);
@@ -1310,8 +1309,8 @@ private:
                 self->loginAvatar_=QQOfficialNameCache::avatarUrl(profile->avatar); self->shareUrl_=profile->shareUrl;
                 const std::string realQQ=catofficial::api::robotUin(self->shareUrl_); if(!realQQ.empty()) self->displayQQ_=realQQ;
             }
-            else if(error.empty()) DICE_LOG_WARN("QQOfficial '{}': 获取机器人资料失败，将尝试生成分享链接",self->name_);
-            else DICE_LOG_WARN("QQOfficial '{}': 解析机器人资料失败：{}",self->name_,error);
+            else if(error.empty()) DICE_LOG_WARN("QQOfficial '{}': 获取机器人资料失败，将尝试生成分享链接",self->name());
+            else DICE_LOG_WARN("QQOfficial '{}': 解析机器人资料失败：{}",self->name(),error);
             if(self->stopping_||self->connected_) return;
             if(self->displayQQ_.empty()||self->shareUrl_.empty()) self->fetchShareUrl(); else self->finishConnect();
         });
@@ -1320,8 +1319,8 @@ private:
         auto self=shared_from_this(); auto c=httpsClient(catofficial::api::kHost); if(!c){finishConnect();return;}
         catofficial::api::generateShareUrl(c, token(), "dicenext", [self](std::string url, std::string error){
             if(!url.empty()){ self->shareUrl_=url; const std::string realQQ=catofficial::api::robotUin(url); if(!realQQ.empty()) self->displayQQ_=realQQ; }
-            else if(error.empty()) DICE_LOG_WARN("QQOfficial '{}': 生成机器人分享链接失败，将继续连接 Gateway",self->name_);
-            else DICE_LOG_WARN("QQOfficial '{}': 解析机器人分享链接失败：{}",self->name_,error);
+            else if(error.empty()) DICE_LOG_WARN("QQOfficial '{}': 生成机器人分享链接失败，将继续连接 Gateway",self->name());
+            else DICE_LOG_WARN("QQOfficial '{}': 解析机器人分享链接失败：{}",self->name(),error);
             if(!self->stopping_&&!self->connected_) self->finishConnect();
         });
     }
@@ -1409,7 +1408,7 @@ private:
             ev.flag=ev.groupId+'\x1f'+ev.userId+'\x1f'+n.joinRequestId;
             ev.comment=n.comment;
             ev.extra["qq_official_join_request"]=true;
-            DICE_LOG_INFO("QQOfficial '{}': group join request group={} member={} request={}",name_,ev.groupId,ev.userId,n.joinRequestId);
+            DICE_LOG_INFO("QQOfficial '{}': group join request group={} member={} request={}",this->name(),ev.groupId,ev.userId,n.joinRequestId);
         }
         else if(type=="INTERACTION_CREATE"){
             ev.subType="interaction";
@@ -1420,7 +1419,7 @@ private:
             ev.extra["interaction_ack_automatic"]=autoAcknowledgeInteractions_&&(interactionType==11||interactionType==12);
             if(!id.empty()&&(interactionType==11||interactionType==12)&&autoAcknowledgeInteractions_)
                 invokeActionAsync("qq_interaction",{{"interactionId",id},{"body",{{"code",0}}}},[self=shared_from_this()](json result){
-                    if(!result.value("ok",false))DICE_LOG_DEBUG("QQOfficial '{}': 互动回应未完成：{}",self->name_,result.value("message",std::string()));
+                    if(!result.value("ok",false))DICE_LOG_DEBUG("QQOfficial '{}': 互动回应未完成：{}",self->name(),result.value("message",std::string()));
                 });
         }
         else if(type=="SUBSCRIBE_MESSAGE_STATUS"){
@@ -1799,8 +1798,8 @@ private:
                         ? drogon::to_string(status)
                         : !response ? std::string("无响应")
                         : "HTTP " + std::to_string(static_cast<int>(response->statusCode()));
-                    if (response) DICE_LOG_WARN("QQOfficial '{}': 素材直传失败 {} {}", self->name_, detail, std::string(response->body()));
-                    else DICE_LOG_WARN("QQOfficial '{}': 素材直传失败 {}", self->name_, detail);
+                    if (response) DICE_LOG_WARN("QQOfficial '{}': 素材直传失败 {} {}", self->name(), detail, std::string(response->body()));
+                    else DICE_LOG_WARN("QQOfficial '{}': 素材直传失败 {}", self->name(), detail);
                     cb(apiResult(false, response ? static_cast<int>(response->statusCode()) : 0,
                         "图片直传失败（" + detail + "），请重新上传。"));
                     return;
@@ -1840,18 +1839,18 @@ private:
         try { fn(); }
         catch (const std::exception& e) {
             lastError_ = std::string("QQ 官方富媒体异常: ") + e.what();
-            DICE_LOG_ERROR("QQOfficial '{}': {} 抛出异常: {}", name_, step, e.what());
+            DICE_LOG_ERROR("QQOfficial '{}': {} 抛出异常: {}", this->name(), step, e.what());
         }
         catch (...) {
             lastError_ = "QQ 官方富媒体未知异常";
-            DICE_LOG_ERROR("QQOfficial '{}': {} 抛出未知异常", name_, step);
+            DICE_LOG_ERROR("QQOfficial '{}': {} 抛出未知异常", this->name(), step);
         }
     }
 
     /// 图片没发出去时，把原本要混排的文字单独发出去，避免牌堆只剩空白。
     void sendCaptionFallback(const Message& m, std::string_view reason) {
         if (!hasSplitCaption(m)) return;
-        DICE_LOG_WARN("QQOfficial '{}': {}，改为只发文字", name_, reason);
+        DICE_LOG_WARN("QQOfficial '{}': {}，改为只发文字", this->name(), reason);
         sendTextTo(m, m.mediaCaption, ContentFormat::kPlainText);
     }
 
@@ -1867,10 +1866,10 @@ private:
     void sendFileInfoTo(const Message& m, const std::string& target, const std::string& fileInfo,
                         int fileType, bool allowMixed = true, std::string eventId = {}) {
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
-        auto outgoing = OutboundAttempt::prepare("QQ 官方「" + name_ + "」", (m.type == MessageType::kPrivate ? "私聊 " : "群 ") + m.targetId,
+        auto outgoing = OutboundAttempt::prepare("QQ 官方「" + this->name() + "」", (m.type == MessageType::kPrivate ? "私聊 " : "群 ") + m.targetId,
             m.logMediaSummary.empty() ? "[富媒体消息]" : m.logMediaSummary);
         if (fileInfo.empty()) {
-            DICE_LOG_WARN("QQOfficial '{}': 富媒体上传未返回 file_info，跳过发送", name_);
+            DICE_LOG_WARN("QQOfficial '{}': 富媒体上传未返回 file_info，跳过发送", this->name());
             sendCaptionFallback(m, "富媒体上传未返回 file_info");
             return;
         }
@@ -1879,7 +1878,7 @@ private:
         const std::string msgPath = (priv ? "/v2/users/" : "/v2/groups/") + target + "/messages";
         const bool tryMix = allowMixed && canMixCaption(fileType);
         if (!tryMix && allowMixed && hasSplitCaption(m))
-            DICE_LOG_INFO("QQOfficial '{}': 该文件类型不支持图文混排，改为图文分离发送", name_);
+            DICE_LOG_INFO("QQOfficial '{}': 该文件类型不支持图文混排，改为图文分离发送", this->name());
         json body = {{"content", tryMix ? mixedMediaContent(m) : std::string(kMediaPlaceholder)},
                      {"msg_type", 7}, {"media", {{"file_info", fileInfo}}}};
         if (!m.id.empty()) { body["msg_id"] = m.id; const int seq = nextReplySeq(m.id); if (seq > 0) body["msg_seq"] = seq; }
@@ -1902,10 +1901,10 @@ private:
                     self->lastError_ = "QQ 官方富媒体消息发送失败";
                     outgoing.failed(fmt::format("平台请求未成功：HTTP {}；{}", resp2 ? static_cast<int>(resp2->statusCode()) : 0,
                         resp2 ? std::string(resp2->body()) : drogon::to_string(rr2)));
-                    DICE_LOG_DEBUG("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name_, msgPath,
+                    DICE_LOG_DEBUG("QQOfficial '{}': POST {} failed: HTTP {} {}", self->name(), msgPath,
                                   resp2 ? static_cast<int>(resp2->statusCode()) : 0, resp2 ? std::string(resp2->body()) : std::string("网络请求未完成"));
                     if (tryMix && hasSplitCaption(m)) {
-                        DICE_LOG_WARN("QQOfficial '{}': 图文混排失败，改为图文分离发送", self->name_);
+                        DICE_LOG_WARN("QQOfficial '{}': 图文混排失败，改为图文分离发送", self->name());
                         self->sendFileInfoTo(m, target, fileInfo, fileType, false, eventId);
                         return;
                     }
@@ -1922,7 +1921,7 @@ private:
     // 上传本身（URL 直传、分片上传、合并换 file_info）由 CatOfficial 完成；日志与失败降级
     // 仍按这条消息的发送上下文记录。
     catofficial::Logger mediaLogger(const Message& m) const {
-        return [name = name_, m](catofficial::LogLevel level, const std::string& message) {
+        return [name = this->name(), m](catofficial::LogLevel level, const std::string& message) {
             OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
             if (level == catofficial::LogLevel::error) DICE_LOG_ERROR("QQOfficial '{}': {}", name, message);
             else if (level == catofficial::LogLevel::warn) DICE_LOG_WARN("QQOfficial '{}': {}", name, message);
@@ -1965,25 +1964,25 @@ private:
                 ? image_transcode::prepareForQq(image_resources::fromUtf8(localPath))
                 : std::nullopt;
             if (item.kind == 1 && !prepared) {
-                DICE_LOG_WARN("QQOfficial '{}': 本地图片不是 png/jpeg 且无法转换，跳过: {}", name_, localPath);
+                DICE_LOG_WARN("QQOfficial '{}': 本地图片不是 png/jpeg 且无法转换，跳过: {}", this->name(), localPath);
                 sendCaptionFallback(m, "本地图片无法转为官方支持的 png/jpeg");
                 return;
             }
             const std::string sendPath = prepared ? image_resources::utf8(prepared->path) : localPath;
             std::string data = readLocalFile(sendPath);
-            if (data.empty()) { DICE_LOG_WARN("QQOfficial '{}': 本地媒体文件不存在或为空，跳过: {}", name_, localPath); sendCaptionFallback(m, "本地媒体文件不存在或为空"); return; }
+            if (data.empty()) { DICE_LOG_WARN("QQOfficial '{}': 本地媒体文件不存在或为空，跳过: {}", this->name(), localPath); sendCaptionFallback(m, "本地媒体文件不存在或为空"); return; }
             // 先量大小再上传：超过硬上限的文件官方会在最后一步才报 850031，
             // 此前的分片全部白传。
             if (data.size() > kMediaHardLimitBytes) {
                 lastError_ = "媒体文件超过官方 200MB 上限";
-                DICE_LOG_WARN("QQOfficial '{}': 本地媒体 {} 为 {} 字节，超过官方 200MB 硬上限，跳过", name_, localPath, data.size());
+                DICE_LOG_WARN("QQOfficial '{}': 本地媒体 {} 为 {} 字节，超过官方 200MB 硬上限，跳过", this->name(), localPath, data.size());
                 sendCaptionFallback(m, lastError_);
                 return;
             }
             if (prepared && prepared->transcoded)
                 DICE_LOG_INFO("QQOfficial '{}': 本地图片 {} 为 {}，已转成 JPEG 再上传",
-                    name_, localPath, image_transcode::kindName(prepared->kind));
-            DICE_LOG_INFO("QQOfficial '{}': 本地媒体 {} ({} bytes, kind={})，开始官方分片上传", name_, sendPath, data.size(), item.kind);
+                    this->name(), localPath, image_transcode::kindName(prepared->kind));
+            DICE_LOG_INFO("QQOfficial '{}': 本地媒体 {} ({} bytes, kind={})，开始官方分片上传", this->name(), sendPath, data.size(), item.kind);
             const bool priv = m.type == MessageType::kPrivate;
             std::string fname = mediaFileName(item, localPath);
             if (prepared && prepared->transcoded) {
@@ -2019,7 +2018,7 @@ private:
                     if (total < qq_media::kQuota) { done(true); return; }
                     self->evictOldestCache(std::move(done));
                 } catch (const std::exception& e) {
-                    DICE_LOG_ERROR("QQOfficial '{}': 查询素材额度异常: {}", self->name_, e.what());
+                    DICE_LOG_ERROR("QQOfficial '{}': 查询素材额度异常: {}", self->name(), e.what());
                     done(true);
                 }
             });
@@ -2087,12 +2086,12 @@ private:
         ensureMaterialUrl(item, [self = shared_from_this(), m, item](std::string url) mutable {
             self->safeMediaStep("素材混排发送", [&] {
                 if (url.empty()) {
-                    DICE_LOG_INFO("QQOfficial '{}': 素材图床不可用，图文混排改用 msg_type=7", self->name_);
+                    DICE_LOG_INFO("QQOfficial '{}': 素材图床不可用，图文混排改用 msg_type=7", self->name());
                     self->sendMediaTo(m, item);
                     return;
                 }
                 if (nativeMaterialUrl(url)) m.extra["__qq_native_media"] = true;
-                DICE_LOG_INFO("QQOfficial '{}': 图文混排走 Markdown 素材 {}", self->name_, url);
+                DICE_LOG_INFO("QQOfficial '{}': 图文混排走 Markdown 素材 {}", self->name(), url);
                 self->sendTextTo(m, mixedMarkdownBody(item.caption, url), ContentFormat::kMarkdown);
             });
         });
@@ -2109,7 +2108,7 @@ private:
             m.extra.erase("__qq_native_media");
         }
         item.caption = m.mediaCaption;
-        DICE_LOG_WARN("QQOfficial '{}': Markdown 图文混排被拒，改为 msg_type=7", name_);
+        DICE_LOG_WARN("QQOfficial '{}': Markdown 图文混排被拒，改为 msg_type=7", this->name());
         sendMediaTo(m, item);
     }
 
@@ -2123,23 +2122,23 @@ private:
         if (!item.caption.empty()) m.logMediaSummary = item.caption + " " + m.logMediaSummary;
         OutboundScope logScope(m.logOutput, m.logPart, m.logParts);
         try {
-            if (m.type == MessageType::kChannel) { DICE_LOG_WARN("QQOfficial '{}': 频道富媒体暂未接入，跳过", name_); sendCaptionFallback(m, "频道富媒体暂未接入"); return; }
+            if (m.type == MessageType::kChannel) { DICE_LOG_WARN("QQOfficial '{}': 频道富媒体暂未接入，跳过", this->name()); sendCaptionFallback(m, "频道富媒体暂未接入"); return; }
             if (token().empty()) { lastError_ = "QQ 官方机器人尚未取得 AccessToken"; sendCaptionFallback(m, lastError_); return; }
             const std::string target = resolveTarget(m);
-            if (target.empty()) { DICE_LOG_WARN("QQOfficial '{}': 无法解析发送目标，跳过媒体", name_); sendCaptionFallback(m, "无法解析发送目标"); return; }
+            if (target.empty()) { DICE_LOG_WARN("QQOfficial '{}': 无法解析发送目标，跳过媒体", this->name()); sendCaptionFallback(m, "无法解析发送目标"); return; }
             std::string localPath;
             const int loc = localFileKind(item.ref, localPath);
-            if (loc == 2) { DICE_LOG_WARN("QQOfficial '{}': 不支持的媒体引用（官方接口不接受 base64://），跳过: {}", name_, item.ref); sendCaptionFallback(m, "不支持的媒体引用"); return; }
-            DICE_LOG_INFO("QQOfficial '{}': 发送媒体 kind={} ref={} target={} 路由={}", name_, item.kind, item.ref, target, loc == 0 ? "URL直传" : "本地分片");
+            if (loc == 2) { DICE_LOG_WARN("QQOfficial '{}': 不支持的媒体引用（官方接口不接受 base64://），跳过: {}", this->name(), item.ref); sendCaptionFallback(m, "不支持的媒体引用"); return; }
+            DICE_LOG_INFO("QQOfficial '{}': 发送媒体 kind={} ref={} target={} 路由={}", this->name(), item.kind, item.ref, target, loc == 0 ? "URL直传" : "本地分片");
             if (loc == 0) uploadRemoteTo(m, target, item, item.ref);
             else uploadLocalTo(m, target, item, localPath);
         } catch (const std::exception& e) {
             lastError_ = std::string("QQ 官方富媒体异常: ") + e.what();
-            DICE_LOG_ERROR("QQOfficial '{}': sendMediaTo 异常: {}", name_, e.what());
+            DICE_LOG_ERROR("QQOfficial '{}': sendMediaTo 异常: {}", this->name(), e.what());
             sendCaptionFallback(m, lastError_);
         } catch (...) {
             lastError_ = "QQ 官方富媒体未知异常";
-            DICE_LOG_ERROR("QQOfficial '{}': sendMediaTo 未知异常", name_);
+            DICE_LOG_ERROR("QQOfficial '{}': sendMediaTo 未知异常", this->name());
             sendCaptionFallback(m, lastError_);
         }
     }
@@ -2218,7 +2217,7 @@ private:
         const std::string destination = (m.type == MessageType::kPrivate ? "私聊 " : m.type == MessageType::kChannel ? "频道 " : "群 ") + m.targetId;
         if (token().empty()) {
             lastError_ = "QQ 官方机器人尚未取得 AccessToken";
-            OutboundAttempt::prepare("QQ 官方「" + name_ + "」", destination, text).failed(lastError_); return;
+            OutboundAttempt::prepare("QQ 官方「" + this->name() + "」", destination, text).failed(lastError_); return;
         }
         std::string target;
         if (m.extra.is_object()) target = m.extra.value("__identity_native_target", std::string());
@@ -2233,13 +2232,13 @@ private:
         else path = "/channels/" + target + "/messages";
 
         auto client = httpsClient("api.bot.qq.com");
-        if (!client) { lastError_ = "无法解析 api.bot.qq.com"; OutboundAttempt::prepare("QQ 官方「" + name_ + "」", destination, text).failed(lastError_); return; }
+        if (!client) { lastError_ = "无法解析 api.bot.qq.com"; OutboundAttempt::prepare("QQ 官方「" + this->name() + "」", destination, text).failed(lastError_); return; }
         // Only explicit Markdown is rich text. Card mode can place literal text
         // in a Markdown container, but escapes it first so punctuation survives.
         json body = textPayload(m, text, format, fallbackLevel);
         const bool useMarkdown = body.contains("markdown");
         const auto actual = useMarkdown ? body["markdown"].value("content", body["markdown"].dump()) : body.value("content", std::string());
-        auto outgoing = OutboundAttempt::prepare("QQ 官方「" + name_ + "」", destination, actual);
+        auto outgoing = OutboundAttempt::prepare("QQ 官方「" + this->name() + "」", destination, actual);
 
         auto request = drogon::HttpRequest::newHttpRequest();
         request->setMethod(drogon::Post); request->setPath(path);
@@ -2286,7 +2285,7 @@ private:
                 }
                 if (fallbackLevel == 0 && ((message.qqRichReply && self->richStyle_ != "off")
                     || qq_sn::styled(message.snBanner, message.snBannerStyle))) {
-                    DICE_LOG_WARN_M("消息", "QQ 官方「{}」富文本请求被拒绝，移除公式与交互后重试。{}", self->name_, outgoing.suffix());
+                    DICE_LOG_WARN_M("消息", "QQ 官方「{}」富文本请求被拒绝，移除公式与交互后重试。{}", self->name(), outgoing.suffix());
                     self->sendTextTo(message, text, format, 1); // Drop TeX/interaction first, preserve the card.
                     return;
                 }
@@ -2295,9 +2294,9 @@ private:
                     self->markdownDisabledUntil_.store(
                         static_cast<int64_t>(std::time(nullptr)) + kMarkdownCooldownSeconds);
                     self->markdownRejectStreak_.store(0);
-                    DICE_LOG_WARN_M("消息", "QQ 官方「{}」连续 {} 次拒绝 Markdown／卡片，未来 10 分钟使用预渲染纯文本。{}", self->name_, streak, outgoing.suffix());
+                    DICE_LOG_WARN_M("消息", "QQ 官方「{}」连续 {} 次拒绝 Markdown／卡片，未来 10 分钟使用预渲染纯文本。{}", self->name(), streak, outgoing.suffix());
                 } else {
-                    DICE_LOG_WARN_M("消息", "QQ 官方「{}」拒绝 Markdown／卡片，本次改用纯文本重试。{}", self->name_, outgoing.suffix());
+                    DICE_LOG_WARN_M("消息", "QQ 官方「{}」拒绝 Markdown／卡片，本次改用纯文本重试。{}", self->name(), outgoing.suffix());
                 }
                 self->sendTextTo(message, text, format, 2);
                 return;
@@ -2313,18 +2312,18 @@ private:
             }
         });
     }
-    void fail(const std::string&e){lastError_=e;connecting_=false;connected_=false;DICE_LOG_ERROR("QQOfficial '{}': {}",name_,e);}
+    void fail(const std::string&e){lastError_=e;connecting_=false;connected_=false;DICE_LOG_ERROR("QQOfficial '{}': {}",this->name(),e);}
     void retainWebhook() {
         if (!webhookMode_ || appId_.empty()) return;
         if (webhooks_.bind(appId_, id_, weak_from_this()))
-            DICE_LOG_WARN("QQOfficial '{}': AppID {} 的 Webhook 回调改由本适配器接收", name_, appId_);
+            DICE_LOG_WARN("QQOfficial '{}': AppID {} 的 Webhook 回调改由本适配器接收", this->name(), appId_);
     }
     void releaseWebhook() {
         webhooks_.unbind(appId_, id_);
     }
     std::string richStyle_ = "off", interactions_ = "links";
     inline static std::function<std::string(const std::string&)> imagePublisher_;   // 本地图 → 公网 URL（图床）
-    std::string id_,name_,appId_,appSecret_,displayQQ_,shareUrl_,loginId_,loginName_,loginAvatar_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{nullptr}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::mutex groupSenderMu_; std::unordered_map<std::string, GroupSenderMessage> groupSenders_; mutable std::mutex metaMu_; mutable std::unordered_map<std::string,GroupMeta> groupMeta_;
+    std::string id_,appId_,appSecret_,displayQQ_,shareUrl_,loginId_,loginName_,loginAvatar_,lastError_; bool forceVerifyImageResource_{false}; Database* db_{nullptr}; std::atomic<bool> connected_{false},connecting_{false},stopping_{false}; std::atomic<int> markdownRejectStreak_{0}; std::atomic<int64_t> markdownDisabledUntil_{0}; MessageCallback messageCb_; EventCallback eventCb_; std::mutex replyMu_; std::mutex groupSenderMu_; std::unordered_map<std::string, GroupSenderMessage> groupSenders_; mutable std::mutex metaMu_; mutable std::unordered_map<std::string,GroupMeta> groupMeta_;
     QQOfficialNameCache names_;
     mutable std::mutex sessionMu_;
     std::shared_ptr<catofficial::Session> session_;

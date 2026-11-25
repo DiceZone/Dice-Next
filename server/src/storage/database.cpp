@@ -305,6 +305,12 @@ bool Database::open(const std::string& path) {
                     orm::make_column("face", &DiceFaceStatRow::face),
                     orm::make_column("count", &DiceFaceStatRow::count)
                 ),
+                orm::make_table("performance_samples",
+                    orm::make_column("sampled_at", &PerformanceSampleRow::sampledAt, orm::primary_key()),
+                    orm::make_column("host_cpu", &PerformanceSampleRow::hostCpu),
+                    orm::make_column("host_used_mb", &PerformanceSampleRow::hostUsedMB),
+                    orm::make_column("process_mb", &PerformanceSampleRow::processMB)
+                ),
                 orm::make_table("online_samples",
                     orm::make_column("id", &OnlineSampleRow::id,
                         orm::primary_key().autoincrement()),

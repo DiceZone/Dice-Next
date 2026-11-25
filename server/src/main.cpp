@@ -5492,7 +5492,7 @@ static int realMain(int argc, char* argv[]) {
 
     // Persist a lightweight adapter-availability sample every five minutes.
     // Only aggregate counts are stored; no message or account content is kept.
-    auto onlineSampleTick = [st, &adapterMgr]() {
+    auto onlineSampleTick = [st, &adapterMgr, &configMgr]() {
         try {
             dice::OnlineSampleRow sample;
             sample.sampledAt = dice::heart::nowUtcIso();
@@ -5507,6 +5507,34 @@ static int realMain(int argc, char* argv[]) {
                 st->insert(adapterSample);
             }
             st->insert(sample);
+            const auto now = std::time(nullptr);
+            const auto snapshot = dice::sysinfo::HistorySampler::instance().latest();
+            st->replace(dice::PerformanceSampleRow{now, snapshot.cpuLoadPct,
+                static_cast<int64_t>(snapshot.memUsedMB), static_cast<int64_t>(snapshot.procMemMB)});
+
+            // Expire dated aggregates once per server day, or on a retention change.
+            const int rolls = configMgr.get<int>("dice/roll_stats_keep_days", 0);
+            const int performance = configMgr.get<int>("dice/performance_keep_days", 30);
+            const auto policy = std::make_tuple(dice::utils::formatTimeInTimezone(now, "%Y-%m-%d"), rolls, performance);
+            static std::tuple<std::string, int, int> previousPolicy;
+            if (policy != previousPolicy) {
+                namespace orm = sqlite_orm;
+                st->transaction([&] {
+                    if (rolls > 0 && rolls <= 3650) {
+                        const auto day = dice::utils::formatTimeInTimezone(now - (rolls - 1) * 86400LL, "%Y-%m-%d");
+                        st->remove_all<dice::UsageHourRow>(orm::where(orm::c(&dice::UsageHourRow::day) < day));
+                        st->remove_all<dice::UsageScopeRow>(orm::where(orm::c(&dice::UsageScopeRow::day) < day));
+                        st->remove_all<dice::ScopedDiceFaceStatRow>(orm::where(orm::c(&dice::ScopedDiceFaceStatRow::day) < day));
+                    }
+                    if (performance > 0 && performance <= 3650) {
+                        const auto first = dice::utils::formatTimeInTimezone(now - (performance - 1) * 86400LL, "%Y-%m-%d");
+                        const auto cutoff = dice::utils::parseIsoUtcToEpoch(first + "T00:00:00") - dice::utils::effectiveTimezoneOffsetMinutes() * 60;
+                        st->remove_all<dice::PerformanceSampleRow>(orm::where(orm::c(&dice::PerformanceSampleRow::sampledAt) < cutoff));
+                    }
+                    return true;
+                });
+                previousPolicy = policy;
+            }
             const std::time_t cutoff = std::time(nullptr) - 90LL * 24 * 60 * 60;
             std::tm utc{};
 #if defined(_WIN32)

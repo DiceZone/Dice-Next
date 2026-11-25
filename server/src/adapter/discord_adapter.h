@@ -41,7 +41,6 @@ class DiscordAdapter final : public IAdapter,
 public:
     explicit DiscordAdapter(std::string adapterId) : id_(std::move(adapterId)) {}
     std::string id() const override { return id_; }
-    std::string name() const override { return name_; }
     std::string platform() const override { return "discord"; }
     std::string version() const override { return "gateway-v10"; }
     bool isConnected() const override { return connected_; }
@@ -97,7 +96,7 @@ public:
     void onEvent(EventCallback cb) override { eventCb_ = std::move(cb); }
 
     bool configure(const json& cfg) override {
-        name_ = cfg.value("name", std::string("Discord Bot"));
+        setDisplayName(cfg.value("name", std::string("Discord Bot")));
         token_ = cfg.value("token", std::string());
         setMessageFormatOverride(parseFormatOverride(cfg.value("message_format", std::string())));
         if (token_.empty()) { lastError_ = "Discord Bot 需要 Bot Token"; return false; }
@@ -184,9 +183,9 @@ private:
             std::string actual = body.value("content", std::string());
             if (body.contains("embeds")) for (const auto& embed : body["embeds"])
                 actual += embed.value("description", std::string());
-            outgoing = OutboundAttempt::prepare("Discord「" + name_ + "」", path, actual);
+            outgoing = OutboundAttempt::prepare("Discord「" + this->name() + "」", path, actual);
         }
-        else outgoing = prepareRestEventLog("Discord「" + name_ + "」", method, path, body);
+        else outgoing = prepareRestEventLog("Discord「" + this->name() + "」", method, path, body);
         auto self = shared_from_this();
         const std::string bodyStr = body.is_null() ? std::string() : body.dump();
         auto context = activeProcessingContext;
@@ -236,7 +235,7 @@ private:
                 self->connecting_ = false;
                 if (outgoing) outgoing->failed(fmt::format("平台请求未成功：HTTP {}；{}", status,
                     out.empty() ? std::string("未取得响应，请检查网络与 curl") : out.substr(0, 300)));
-                else DICE_LOG_WARN("Discord '{}': {} failed: HTTP {} {}", self->name_, path, status,
+                else DICE_LOG_WARN("Discord '{}': {} failed: HTTP {} {}", self->name(), path, status,
                               out.empty() ? std::string("(无响应，请检查网络与 curl)") : out.substr(0, 300));
                 return;
             }
@@ -315,7 +314,7 @@ private:
                     loginId_ = user.value("id", std::string());
                     loginName_ = user.value("username", std::string());
                     connected_ = true; connecting_ = false;
-                    DICE_LOG_SUCCESS("Discord「{}」连接就绪：账号「{}」（{}）。", name_, loginName_, loginId_);
+                    DICE_LOG_SUCCESS("Discord「{}」连接就绪：账号「{}」（{}）。", this->name(), loginName_, loginId_);
                 } else if (t == "RESUMED") {
                     connected_ = true; connecting_ = false;
                 } else if (t == "MESSAGE_CREATE") {
@@ -472,10 +471,10 @@ private:
 
     void fail(const std::string& e) {
         lastError_ = e; connecting_ = false; connected_ = false;
-        DICE_LOG_ERROR("Discord '{}': {}", name_, e);
+        DICE_LOG_ERROR("Discord '{}': {}", this->name(), e);
     }
 
-    std::string id_, name_, token_, loginId_, loginName_, sessionId_, gatewayUrl_, lastError_;
+    std::string id_,  token_, loginId_, loginName_, sessionId_, gatewayUrl_, lastError_;
     Database* db_{identity::BindingStore::instance().database()};
     std::atomic<bool> connected_{false}, connecting_{false}, stopping_{false};
     int64_t seq_ = -1;
