@@ -72,7 +72,10 @@ Response http(const Request& input) {
     if (!input.apiKey.empty()) req->addHeader("X-API-Key", input.apiKey);
     if (!input.accessToken.empty()) req->addHeader("Authorization", "Bearer " + input.accessToken);
     if (!input.body.empty()) {
-        req->addHeader("Content-Type", input.form ? "application/x-www-form-urlencoded" : "application/json");
+        // 用 setContentTypeCode，别用 addHeader：drogon 会另外按默认类型再写一行 text/plain，
+        // 一个请求里两个 Content-Type，服务端取到前一个——设备码授权的 scope 因此全丢，
+        // .cloud auth write 只拿到只读，写人物卡的 JSON 也被当成纯文本。
+        req->setContentTypeCode(input.form ? drogon::CT_APPLICATION_X_FORM : drogon::CT_APPLICATION_JSON);
         req->setBody(input.body);
     }
     const auto [result, response] = client->sendRequest(req, 8.0);
