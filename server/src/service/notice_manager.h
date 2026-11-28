@@ -298,8 +298,7 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
     const auto fromAdapter = originAdapterId.empty() ? processing.origin.adapterId : originAdapterId;
     const auto fromChat = originChat.empty() ? (!processing.origin.groupId.empty() ? processing.origin.groupId : processing.origin.userId) : originChat;
     const auto title = displayTitle.empty() ? eventTitle(op) : readable(displayTitle, 120);
-    auto content = notificationText(level, op, msg, processing,
-        utils::formatTimeInTimezone(std::time(nullptr), "%Y-%m-%d %H:%M:%S"), title);
+    std::string reminder;
     // 更新失败／退群失败：同一原因只在开始时推送，持续存在时每天提醒一次。
     // 运行错误在 ErrorNotifySink 里按更细的键合并，这里不再重复处理。
     bool deliver = true;
@@ -307,8 +306,13 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
         const auto d = faultGate().admit(json::array({op, fromAdapter, msg}).dump(-1, ' ', false, json::error_handler_t::replace),
                                          (long long)std::time(nullptr), faultResolvedAfter(op));
         deliver = d.send;
-        if (d.send && d.suppressed) content += "\n（过去 24 小时内相同问题另出现 " + std::to_string(d.suppressed) + " 次）";
+        if (d.send && d.suppressed) reminder = "\n（过去 24 小时内相同问题另出现 " + std::to_string(d.suppressed) + " 次）";
     }
+    auto render = [&](bool includeAdapter) {
+        return notificationText(level, op, msg, processing, "", title, includeAdapter) + reminder;
+    };
+    const auto content = render(true); // Audit, external channels and cross-account chat.
+    std::optional<std::string> sameAdapterContent;
     ProcessingScope source(ProcessingContext{
         {{"通知", title, "", ""}}, processing.trigger, "通知内容已生成", processing.origin});
     OutboundScope independentNotification(nullptr);
@@ -391,10 +395,13 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
                 const auto label =
                     std::string(platformName) +
                     (destination.accountId.empty() ? "「" + a->name() + "」" : ":" + destination.accountId);
+                const bool sameAdapter = !processing.origin.adapterId.empty() && processing.origin.adapterId == a->id();
+                if (sameAdapter && !sameAdapterContent) sameAdapterContent = render(false);
+                const auto& chatContent = sameAdapter ? *sameAdapterContent : content;
                 auto prepared =
-                    std::make_shared<PreparedOutput>(target, content, activeProcessingContext, label);
+                    std::make_shared<PreparedOutput>(target, chatContent, activeProcessingContext, label);
                 OutboundScope delivery(prepared);
-                auto failure = OutboundAttempt::prepare(label, target, content);
+                auto failure = OutboundAttempt::prepare(label, target, chatContent);
                 if (!a->isConnected()) {
                     failure.failed("适配器未连接");
                     return false;
@@ -403,7 +410,7 @@ inline void notify(ConfigManager &cfg, AdapterManager &adapters, int level, cons
                 m.platform = a->platform();
                 m.type = w.isGroup ? MessageType::kGroup : MessageType::kPrivate;
                 m.targetId = w.chatId;
-                m.content = content;
+                m.content = chatContent;
                 try {
                     a->sendMessage(m);
                     delivered.insert(key);
