@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Dice!Next</string>
+    <string name="notification_channel">Dice!Next</string>
+    <string name="notification_running">骰子服务正在运行</string>
+    <string name="download_started">正在下载 %1$s</string>
+    <string name="open_url_failed">无法打开链接，请先安装 QQ</string>
+    <string name="open_url_chooser">打开方式</string>
+</resources>

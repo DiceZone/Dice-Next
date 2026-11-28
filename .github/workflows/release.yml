@@ -147,7 +147,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: DiceZone/Dice-Next-WebUI
-          ref: main
+          # Pair the android branch with WebUI/android (safe-area, jump login, passwordless).
+          ref: ${{ github.ref_name == 'android' && 'android' || 'main' }}
           path: web
           token: ${{ secrets.DICEZONE_CI_TOKEN || github.token }}
       - name: Record WebUI build source
@@ -600,9 +601,146 @@ jobs:
             main/server/build/Testing/Temporary/
           if-no-files-found: ignore
 
+  android:
+    name: Android (arm64)
+    needs: webui
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      VCPKG_KEEP_ENV_VARS: ANDROID_NDK_HOME;ANDROID_SDK_ROOT;ANDROID_HOME;JAVA_HOME
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: main
+      - name: Checkout sibling libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+          clone_repo() {
+            local repo="$1" dest="$2" branch="${3:-}"
+            for attempt in 1 2 3; do
+              rm -rf "$dest"
+              local args=(clone --depth 1 "https://github.com/DiceZone/${repo}.git" "$dest")
+              if [ -n "$branch" ]; then args=(clone --depth 1 --branch "$branch" "https://github.com/DiceZone/${repo}.git" "$dest"); fi
+              if git "${args[@]}"; then return 0; fi
+              sleep 15
+            done
+            return 1
+          }
+          clone_repo onedice-cpp-lib onedice-cpp-lib
+          clone_repo dicescript-c-lib dicescript-c-lib
+          clone_repo CatOfficial CatOfficial
+          clone_repo Dice-Next-Doc docs
+      - uses: actions/download-artifact@v4
+        with:
+          name: webui-dist
+          path: web/dist
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+          link-to-sdk: true
+      - name: Export Android SDK/NDK
+        run: |
+          echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=${ANDROID_HOME:-$ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build git curl zip unzip tar pkg-config
+      - name: Prepare dependencies
+        uses: ./main/.github/actions/setup-vcpkg
+        with:
+          triplet: arm64-android
+          baseline: ${{ env.VCPKG_BASELINE }}
+      - name: Configure Android native library
+        working-directory: main
+        run: |
+          cmake -S server -B server/build-android -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DVCPKG_TARGET_TRIPLET=arm64-android \
+            -DVCPKG_OVERLAY_TRIPLETS="$GITHUB_WORKSPACE/main/server/vcpkg-overlays/triplets" \
+            -DVCPKG_MANIFEST_MODE=OFF \
+            -DVCPKG_INSTALLED_DIR="$VCPKG_ROOT/installed" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DANDROID_STL=c++_shared \
+            -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON
+      - name: Compile Android native library
+        working-directory: main
+        run: cmake --build server/build-android --target dice-next --parallel "$(nproc)"
+      - name: Stage JNI, assets and assemble APK
+        working-directory: main
+        env:
+          DICENEXT_WEB_ROOT: ${{ github.workspace }}/web
+          DICENEXT_DOC_ROOT: ${{ github.workspace }}/docs
+        run: |
+          set -euo pipefail
+          abi=arm64-v8a
+          jni="android/app/src/main/jniLibs/${abi}"
+          mkdir -p "$jni"
+          so="$(find server/build-android -name 'libdice-next.so' | head -n1)"
+          cp -f "$so" "$jni/libdice-next.so"
+          stl="$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -name 'libc++_shared.so' | grep aarch64-linux-android | head -n1 || true)"
+          [[ -n "$stl" ]] && cp -f "$stl" "$jni/libc++_shared.so"
+          strip="$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -name 'llvm-strip' | head -n1 || true)"
+          if [[ -n "$strip" ]]; then find "$jni" -name '*.so' -exec "$strip" --strip-unneeded {} \;; fi
+          export ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          chmod +x scripts/build-android.sh
+          # Native already built; skip vcpkg/cmake by assembling assets + APK only.
+          assets="android/app/src/main/assets"
+          rm -rf "$assets"
+          mkdir -p "$assets/web/dist"
+          cp -a "$DICENEXT_WEB_ROOT/dist/." "$assets/web/dist/"
+          cp -a server/i18n "$assets/i18n"
+          cp -a server/resources/default-data/decks "$assets/decks"
+          cp -a server/card-templates "$assets/card-templates"
+          mkdir -p "$assets/data"
+          cp -a server/resources/default-data/helpdoc "$assets/data/helpdoc"
+          cp -a server/resources/default-data/plugins "$assets/data/plugins"
+          if [[ -d server/resources/default-data/rules ]]; then
+            mkdir -p "$assets/i18n/rules"
+            cp -a server/resources/default-data/rules/. "$assets/i18n/rules/"
+          fi
+          cp -a server/resources/update-mirrors.json "$assets/update-mirrors.json"
+          mkdir -p "$assets/docs"
+          for doc in roadmap.md commands.json; do
+            [[ -f "$DICENEXT_DOC_ROOT/$doc" ]] && cp -a "$DICENEXT_DOC_ROOT/$doc" "$assets/docs/$doc"
+          done
+          curl -fsSL "https://curl.se/ca/cacert.pem" -o "$assets/cacert.pem"
+          printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > android/local.properties
+          chmod +x android/gradlew
+          (cd android && ./gradlew --no-daemon assembleRelease)
+          mkdir -p release
+          cp -f android/app/build/outputs/apk/release/app-release.apk release/DiceNext-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DiceNext-android-arm64
+          path: main/release/DiceNext-android.apk
+          if-no-files-found: error
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-android-arm64
+          path: |
+            vcpkg/buildtrees/**/*.log
+            main/server/build-android/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+
   release:
     name: Publish GitHub Release
-    needs: [webui, linux, windows, macos-arm64, backend-tests]
+    needs: [webui, linux, windows, macos-arm64, android, backend-tests]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -812,6 +950,7 @@ jobs:
             artifacts/DiceNext-windows-amd64/*.zip
             artifacts/DiceNext-windows-arm64/*.zip
             artifacts/DiceNext-macos-arm64/*.tar.gz
+            artifacts/DiceNext-android-arm64/*.apk
             update-manifest.json
             release-sources.json
       - name: Refresh documentation release feed

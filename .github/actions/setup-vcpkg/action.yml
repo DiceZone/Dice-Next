@@ -59,8 +59,12 @@ runs:
         export VCPKG_FORCE_SYSTEM_BINARIES=1
         mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
         "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+        extra=()
+        if [ -d "${{ github.workspace }}/main/server/vcpkg-overlays/triplets" ]; then
+          extra+=(--overlay-triplets="${{ github.workspace }}/main/server/vcpkg-overlays/triplets")
+        fi
         for attempt in 1 2 3; do
-          if "$VCPKG_ROOT/vcpkg" install --x-manifest-root="${{ github.workspace }}/main/server" --x-install-root="$VCPKG_ROOT/installed" --triplet=${{ inputs.triplet }}; then
+          if "$VCPKG_ROOT/vcpkg" install --x-manifest-root="${{ github.workspace }}/main/server" --x-install-root="$VCPKG_ROOT/installed" --triplet=${{ inputs.triplet }} "${extra[@]}"; then
             exit 0
           fi
           if [ "$attempt" -lt 3 ]; then sleep 15; fi

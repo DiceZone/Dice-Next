@@ -1,0 +1,3 @@
+## Copy to local.properties (do not commit that file).
+sdk.dir=C\:\\Users\\YOU\\AppData\\Local\\Android\\Sdk
+ndk.dir=C\:\\Users\\YOU\\AppData\\Local\\Android\\Sdk\\ndk\\27.2.12479018

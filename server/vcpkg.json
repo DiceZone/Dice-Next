@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "builtin-baseline": "44819aa2a6c10e56065e2b0330e7d6c89d1d2574",
   "dependencies": [
-    { "name": "curl", "features": ["tool", "non-http", "ssl"] },
+    { "name": "curl", "features": ["tool", "non-http", "ssl"], "platform": "!android" },
+    { "name": "curl", "features": ["non-http", "ssl"], "platform": "android" },
     "drogon",
     "brotli",
     "openssl",
@@ -14,7 +15,9 @@
     "quickjs-ng",
     "lua",
     "zstd",
-    "miniz"
+    "miniz",
+    { "name": "libiconv", "platform": "android" },
+    { "name": "c-ares", "platform": "android" }
   ],
   "overrides": [
     { "name": "lua", "version": "5.4.8" }

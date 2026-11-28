@@ -125,6 +125,17 @@ bool isLoopbackPeer(const drogon::HttpRequestPtr& req) {
            ip.rfind("::ffff:127.", 0) == 0;
 }
 
+/// Embedded WebView on the phone talks to loopback. Skip panel password there;
+/// Windows / Linux / macOS packages and any non-loopback client still require it.
+bool localAppSession(const drogon::HttpRequestPtr& req) {
+#ifdef __ANDROID__
+    return isLoopbackPeer(req);
+#else
+    (void)req;
+    return false;
+#endif
+}
+
 /// 按 UTF-8 构造文件系统路径：Windows 的 narrow ifstream/ofstream 把路径当系统码页
 /// (中文系统=GBK)，用它打开 UTF-8 的中文文件名会失败；用 u8string 构造的 path 才正确
 /// (Windows 内部转 wide)。用于一切「按用户给的名字开文件」的场景（文件名编码）。
@@ -3551,6 +3562,10 @@ static int realMain(int argc, char* argv[]) {
     // ── 9. Start drogon HTTP server ──────────────────────────
     int port = configMgr.get<int>("server/port", 18088);
     std::string host = configMgr.get<std::string>("server/host", "0.0.0.0");
+#ifdef __ANDROID__
+    // Phone WebView is local; do not expose the panel on the LAN.
+    host = "127.0.0.1";
+#endif
 
     DICE_LOG_INFO_M("管理面板", "正在启动管理面板，监听地址 {}，端口 {}。", host, port);
 
@@ -3569,6 +3584,12 @@ static int realMain(int argc, char* argv[]) {
     app.setLogLevel(trantor::Logger::kWarn);
     dice::installHttpDiagnostics(app);
     app.addListener(host, static_cast<uint16_t>(port));
+#ifdef __ANDROID__
+    {
+        std::ofstream panelUrl(".panel-url", std::ios::trunc);
+        panelUrl << "http://127.0.0.1:" << port << "/\n";
+    }
+#endif
     app.setThreadNum(4);
     // 上传体积上限：规则包(含 lua/js mod)、牌堆、图片都走 base64 塞进 JSON body，
     // drogon 默认 client_max_body_size 仅 1MB，稍大的规则包就会被拒（报 "string too long"）。
@@ -3604,6 +3625,13 @@ static int realMain(int argc, char* argv[]) {
             // the managed container. Host/remote requests never see this bypass.
             if (diceFlatsManaged && path == "/api/managed/bootstrap" &&
                 req->method() == drogon::Post && isLoopbackPeer(req)) { next(); return; }
+            if (localAppSession(req)) {
+                req->attributes()->insert("dn_api_authenticated", true);
+                req->attributes()->insert("dn_auth_type", std::string("local_app"));
+                req->attributes()->insert("dn_role", std::string("full"));
+                req->attributes()->insert("dn_trust", dice::sso::kTrustMaster);
+                next(); return;
+            }
             auto& auth = dice::WebAuth::instance();
             // 服务间调用不依赖 WebUI 是否已设置口令；否则全新实例虽然已经有
             // server/api_key，却会先被 need_setup 分支挡住，API Key 实际不可用。
@@ -3679,18 +3707,21 @@ static int realMain(int argc, char* argv[]) {
             [jResp, sessionCookieName, &configMgr, &cmdRouter](const drogon::HttpRequestPtr& req,
                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
                 auto& auth = dice::WebAuth::instance();
-                const bool required = auth.hasPassword();
-                const bool needSetup = !required;
+                const bool passwordless = localAppSession(req);
+                const bool required = !passwordless && auth.hasPassword();
+                const bool needSetup = !passwordless && !auth.hasPassword();
                 std::string token;
                 bool usedLegacyCookie = false;
-                bool authed = required && findValidWebSession(
-                    auth, req, sessionCookieName, &token, &usedLegacyCookie);
-                const auto identity = authed ? auth.identityOf(token) : nlohmann::json::object();
-                const auto role = authed ? dice::sso::roleOf(identity, configMgr, cmdRouter) : dice::sso::Role::None;
-                if (authed && role == dice::sso::Role::None) { auth.revoke(token); authed = false; }
+                bool authed = passwordless || (required && findValidWebSession(
+                    auth, req, sessionCookieName, &token, &usedLegacyCookie));
+                const auto identity = authed && !passwordless ? auth.identityOf(token) : nlohmann::json::object();
+                const auto role = passwordless ? dice::sso::Role::Full
+                    : authed ? dice::sso::roleOf(identity, configMgr, cmdRouter) : dice::sso::Role::None;
+                if (authed && !passwordless && role == dice::sso::Role::None) { auth.revoke(token); authed = false; }
                 auto resp = jResp({{"code", 0}, {"message", "ok"},
                     {"data", {{"required", required}, {"authed", authed},
                               {"need_setup", needSetup},
+                              {"passwordless", passwordless},
                               {"role", authed ? dice::sso::roleName(role) : "none"},
                               {"identity", authed && !identity.empty()
                                   ? nlohmann::json{{"kind", identity.value("kind", std::string())},
@@ -5718,6 +5749,11 @@ int main(int argc, char* argv[]) {
         const int result = realMain(argc, argv);
 #ifndef _WIN32
         if (result == 0 && g_restartRequested.load()) {
+#ifdef __ANDROID__
+            // Shared-library process cannot execv itself; the foreground service
+            // treats 42 as "kill and let Android restart the service".
+            return dice::update::posix::kRestartExitCode;
+#else
             if (dice::update::posix::managedLaunch(std::filesystem::current_path()))
                 return dice::update::posix::kRestartExitCode;
             // Source-build/direct-core restart: keep PID, CWD and all arguments;
@@ -5726,6 +5762,7 @@ int main(int argc, char* argv[]) {
             ::execv(originalExecutable.c_str(), argv);
             std::cerr << "Dice!Next restart failed: " << std::strerror(errno) << '\n';
             return 1;
+#endif
         }
 #endif
         return result;

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.DiceNext" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:statusBarColor">#FF4F46E5</item>
+        <item name="android:navigationBarColor">#FF111827</item>
+        <item name="android:windowBackground">#FF111827</item>
+    </style>
+</resources>

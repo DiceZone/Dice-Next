@@ -44,3 +44,15 @@ Thumbs.db
 
 # Local-only notes (internal design, acceptance records)
 /private/
+
+# Android local build (JNI, WebUI assets, Gradle, APK)
+/server/build-android/
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/app/.cxx/
+/android/local.properties
+/android/app/src/main/jniLibs/
+/android/app/src/main/assets/**
+!/android/app/src/main/assets/.gitkeep
+

@@ -1,0 +1,2 @@
+-keep class zone.dice.dicenext.Native { *; }
+-keepclasseswithmembernames class * { native <methods>; }

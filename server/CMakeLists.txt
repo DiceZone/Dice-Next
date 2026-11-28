@@ -144,6 +144,11 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../dicescript-c-lib
 
 # CatOfficial — sibling QQ official bot protocol layer (Gateway / Webhook / message format).
 # Linked PUBLIC through dice-image-resources so every target including the adapters sees it.
+# When CatOfficial is a subdirectory it must stay a header-only protocol layer, even if
+# CMAKE_SYSTEM_NAME is Android (the APK target lives in this repo).
+set(CATOFFICIAL_BUILD_APP OFF CACHE BOOL "" FORCE)
+set(CATOFFICIAL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(CATOFFICIAL_BUILD_ANDROID OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../CatOfficial
                  ${CMAKE_BINARY_DIR}/CatOfficial)
 
@@ -223,37 +228,53 @@ add_custom_target(prepare_version ALL
 # ─── Executable Target ───────────────────────────────────────
 
 # Stage the target triplet's curl CLI with its matching runtime dependencies.
-set(DICE_CURL_ROOT "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
-set(DICE_CURL_TOOLS "${DICE_CURL_ROOT}/tools/curl")
-set(DICE_CURL_FILES "${DICE_CURL_TOOLS}/curl${CMAKE_EXECUTABLE_SUFFIX}")
-if(NOT EXISTS "${DICE_CURL_FILES}")
-    message(FATAL_ERROR "Install the target vcpkg curl[tool,non-http,ssl] dependency before configuring.")
+# Android ships libcurl only; the CLI tool is a desktop packaging concern.
+if(NOT ANDROID)
+    set(DICE_CURL_ROOT "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+    set(DICE_CURL_TOOLS "${DICE_CURL_ROOT}/tools/curl")
+    set(DICE_CURL_FILES "${DICE_CURL_TOOLS}/curl${CMAKE_EXECUTABLE_SUFFIX}")
+    if(NOT EXISTS "${DICE_CURL_FILES}")
+        message(FATAL_ERROR "Install the target vcpkg curl[tool,non-http,ssl] dependency before configuring.")
+    endif()
+    if(WIN32)
+        file(GLOB curl_dlls "${DICE_CURL_TOOLS}/*.dll")
+        list(APPEND DICE_CURL_FILES ${curl_dlls})
+    endif()
+    list(APPEND DICE_CURL_FILES "${DICE_CURL_ROOT}/share/curl/copyright")
+    function(dicenext_stage_curl target)
+        set(dir "$<TARGET_FILE_DIR:${target}>/lib/curl")
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${dir}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DICE_CURL_FILES} "${dir}"
+            VERBATIM)
+    endfunction()
 endif()
-if(WIN32)
-    file(GLOB curl_dlls "${DICE_CURL_TOOLS}/*.dll")
-    list(APPEND DICE_CURL_FILES ${curl_dlls})
-endif()
-list(APPEND DICE_CURL_FILES "${DICE_CURL_ROOT}/share/curl/copyright")
-function(dicenext_stage_curl target)
-    set(dir "$<TARGET_FILE_DIR:${target}>/lib/curl")
-    add_custom_command(TARGET ${target} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${dir}"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DICE_CURL_FILES} "${dir}"
-        VERBATIM)
-endfunction()
 
-add_executable(dice-next-server ${SOURCES} ${VERSION_BUILD_SOURCE})
-if(NOT WIN32)
-    target_link_libraries(dice-next-server PRIVATE Iconv::Iconv)
+if(ANDROID)
+    add_library(dice-next SHARED ${SOURCES} src/android_jni.cpp ${VERSION_BUILD_SOURCE})
+    set(DICENEXT_CORE_TARGET dice-next)
+    target_compile_definitions(dice-next PRIVATE DICENEXT_ANDROID=1)
+    target_link_libraries(dice-next PRIVATE android log)
+    find_package(c-ares CONFIG REQUIRED)
+    target_link_libraries(dice-next PRIVATE c-ares::cares dl)
+    target_link_options(dice-next PRIVATE -Wl,-z,max-page-size=16384)
+else()
+    add_executable(dice-next-server ${SOURCES} ${VERSION_BUILD_SOURCE})
+    set(DICENEXT_CORE_TARGET dice-next-server)
 endif()
-dicenext_stage_curl(dice-next-server)
-dicenext_compile_parallelism(dice-next-server)
-add_dependencies(dice-next-server prepare_version)
+if(NOT WIN32)
+    target_link_libraries(${DICENEXT_CORE_TARGET} PRIVATE Iconv::Iconv)
+endif()
+if(NOT ANDROID)
+    dicenext_stage_curl(${DICENEXT_CORE_TARGET})
+endif()
+dicenext_compile_parallelism(${DICENEXT_CORE_TARGET})
+add_dependencies(${DICENEXT_CORE_TARGET} prepare_version)
 # Keep the build value in a generated .cpp rather than a generated header.
 # Visual Studio reliably recompiles a source file produced by a dependency
 # target, whereas its include scanner can miss generated headers.  This keeps
 # the exe's .bot banner in sync with the build number committed after linking.
-add_custom_command(TARGET dice-next-server POST_BUILD
+add_custom_command(TARGET ${DICENEXT_CORE_TARGET} POST_BUILD
     COMMAND ${CMAKE_COMMAND}
         -DMODE=COMMIT -DVERSION=${PROJECT_VERSION}
         -DCOUNTER=${VERSION_COUNTER_FILE} -DLOCAL_COUNTER=${VERSION_LOCAL_COUNTER}
@@ -261,17 +282,17 @@ add_custom_command(TARGET dice-next-server POST_BUILD
         -P ${BUMP_SCRIPT}
     COMMENT "Recording successful Dice!Next build number")
 
-target_include_directories(dice-next-server PRIVATE
+target_include_directories(${DICENEXT_CORE_TARGET} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_BINARY_DIR}/generated
 )
 
-target_compile_definitions(dice-next-server PRIVATE
+target_compile_definitions(${DICENEXT_CORE_TARGET} PRIVATE
     DICE_VERSION_STRING="${PROJECT_VERSION}"
     DICE_PRERELEASE=$<BOOL:${DICENEXT_PRERELEASE}>
 )
 
-target_link_libraries(dice-next-server PRIVATE
+target_link_libraries(${DICENEXT_CORE_TARGET} PRIVATE
     dice-secure-random
     Drogon::Drogon
     OpenSSL::Crypto
@@ -290,7 +311,7 @@ target_link_libraries(dice-next-server PRIVATE
     ${LUA_LIBRARIES}
 )
 
-target_include_directories(dice-next-server PRIVATE ${LUA_INCLUDE_DIR})
+target_include_directories(${DICENEXT_CORE_TARGET} PRIVATE ${LUA_INCLUDE_DIR})
 
 # ─── Platform-specific settings ──────────────────────────────
 
@@ -314,7 +335,7 @@ if(WIN32)
     target_include_directories(dice-next-launcher PRIVATE ${CMAKE_BINARY_DIR}/generated)
 
     # Windows: link additional system libraries for ReadDirectoryChangesW
-    target_link_libraries(dice-next-server PRIVATE
+    target_link_libraries(${DICENEXT_CORE_TARGET} PRIVATE
         ws2_32
         crypt32
         iphlpapi
@@ -330,12 +351,12 @@ if(WIN32)
     # re-copies when DICE_EDITION changes.
     configure_file("${_dice_ico}" "${CMAKE_CURRENT_SOURCE_DIR}/src/resources/app.ico" COPYONLY)
     message(STATUS "Dice!Next edition: ${DICE_EDITION} (icon: ${_dice_ico})")
-    target_sources(dice-next-server PRIVATE
+    target_sources(${DICENEXT_CORE_TARGET} PRIVATE
         src/resources/app.rc
         src/resources/version_core.rc)
 endif()
 
-if(UNIX)
+if(UNIX AND NOT ANDROID)
     add_executable(dice-next-launcher src/platform/launcher_posix.cpp)
     set_target_properties(dice-next-launcher PROPERTIES OUTPUT_NAME "dice-next")
     target_link_libraries(dice-next-launcher PRIVATE nlohmann_json::nlohmann_json)
@@ -353,14 +374,16 @@ endif()
 if(MSVC)
     # /bigobj: main.cpp pulls in many header-only units (drogon + quickjs + all api
     # handlers) and exceeds the default object section limit (C1128).
-    target_compile_options(dice-next-server PRIVATE /W4 /utf-8 /bigobj)
+    target_compile_options(${DICENEXT_CORE_TARGET} PRIVATE /W4 /utf-8 /bigobj)
 else()
-    target_compile_options(dice-next-server PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(${DICENEXT_CORE_TARGET} PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # ─── Install ─────────────────────────────────────────────────
-install(TARGETS dice-next-server DESTINATION bin)
-install(PROGRAMS ${DICE_CURL_FILES} DESTINATION bin/lib/curl)
+install(TARGETS ${DICENEXT_CORE_TARGET} DESTINATION bin)
+if(NOT ANDROID)
+    install(PROGRAMS ${DICE_CURL_FILES} DESTINATION bin/lib/curl)
+endif()
 
 # ─── Tests ───────────────────────────────────────────────────
 include(CTest)
