@@ -1,6 +1,7 @@
 #include "update_service.h"
 
 #include "../common/logger.h"
+#include "../common/libcurl_http.h"
 #include "../common/subprocess.h"
 #include "../common/version.h"
 #include "../common/utils.h"
@@ -9,6 +10,9 @@
 #include "update_notes.h"
 #ifndef _WIN32
 #include "../platform/posix_update.h"
+#endif
+#if defined(__ANDROID__)
+#include "../platform/android_host.h"
 #endif
 
 #include <openssl/evp.h>
@@ -163,16 +167,6 @@ bool safeHttpsUrl(const std::string& value) {
     return true;
 }
 
-std::string curlEscape(const std::string& value) {
-    std::string out;
-    out.reserve(value.size() + 8);
-    for (char ch : value) {
-        if (ch == '\\' || ch == '"') out.push_back('\\');
-        out.push_back(ch);
-    }
-    return out;
-}
-
 bool parseVersion(const std::string& value, std::array<int, 3>& parts) {
     static const std::regex pattern(R"(^([0-9]+)\.([0-9]+)\.([0-9]+)$)");
     std::smatch match;
@@ -286,7 +280,16 @@ bool parseReleaseManifest(const std::string& text, ReleaseManifest& manifest, st
             return false;
         }
 
-        for (const auto& item : root["assets"]) {
+        auto assets = root["assets"];
+        if (auto mobile = root.find("android_assets"); mobile != root.end()) {
+            if (!mobile->is_array() || mobile->size() > 1 ||
+                (!mobile->empty() && (!(*mobile)[0].is_object() || (*mobile)[0].value("os", std::string()) != "android"))) {
+                error = "release manifest contains invalid Android assets";
+                return false;
+            }
+            for (const auto& item : *mobile) assets.push_back(item);
+        }
+        for (const auto& item : assets) {
             if (!item.is_object()) continue;
             ReleaseAsset asset;
             asset.os = item.value("os", std::string());
@@ -298,8 +301,12 @@ bool parseReleaseManifest(const std::string& text, ReleaseManifest& manifest, st
                 std::all_of(asset.sha256.begin(), asset.sha256.end(), [](unsigned char ch) {
                     return std::isxdigit(ch) != 0;
                 });
-            if ((asset.os != "windows" && asset.os != "linux" && asset.os != "macos") ||
-                (asset.arch != "amd64" && asset.arch != "arm64") ||
+            // Unknown future platforms are ignored so a desktop client can still
+            // parse a manifest that also lists the Android APK.
+            if (asset.os != "windows" && asset.os != "linux" && asset.os != "macos" &&
+                asset.os != "android")
+                continue;
+            if ((asset.arch != "amd64" && asset.arch != "arm64") ||
                 !safeFilename(asset.name) || !digestOk || asset.size == 0 ||
                 asset.size > kMaximumAssetSize) {
                 error = "release manifest contains an invalid asset";
@@ -413,6 +420,8 @@ std::string currentOs() {
     return "windows";
 #elif defined(__APPLE__)
     return "macos";
+#elif defined(__ANDROID__)
+    return "android";
 #else
     return "linux";
 #endif
@@ -424,6 +433,92 @@ std::string currentArch() {
 #else
     return "amd64";
 #endif
+}
+
+bool looksLikeAndroidApk(const fs::path& path) {
+    const std::string name = lower(path.filename().string());
+    return name.size() >= 4 && name.compare(name.size() - 4, 4, ".apk") == 0;
+}
+
+bool prepareApkUpdateStage(const fs::path& archive, const ReleaseManifest& manifest,
+                           std::string& error) {
+    std::error_code ec;
+    if (!fs::is_regular_file(archive, ec) || fs::file_size(archive, ec) == 0) {
+        error = "downloaded Android package is missing";
+        return false;
+    }
+    const std::string fileName = archive.filename().string();
+    if (!safeFilename(fileName) || !looksLikeAndroidApk(archive)) {
+        error = "downloaded Android package has an unsafe name";
+        return false;
+    }
+
+    const auto sequence = updaterTemporarySuffix();
+    const fs::path updates = fs::path("updates");
+    const fs::path pendingNew = updates / ("pending-new-" + sequence);
+    const fs::path pending = updates / "pending";
+    const fs::path pendingOld = updates / ("pending-old-" + sequence);
+    fs::remove_all(pendingNew, ec);
+    fs::remove_all(pendingOld, ec);
+    fs::create_directories(pendingNew, ec);
+    if (ec) {
+        error = "cannot create staged Android update directory: " + ec.message();
+        return false;
+    }
+
+    fs::copy_file(archive, pendingNew / fileName, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        error = "cannot stage the Android APK: " + ec.message();
+        fs::remove_all(pendingNew, ec);
+        return false;
+    }
+
+    nlohmann::json metadata{
+        {"schema", 1},
+        {"tag", manifest.tag},
+        {"version", manifest.version},
+        {"build", manifest.build},
+        {"release_notes", releaseNotesPreview(manifest.releaseNotes)},
+        {"staged_at", epochSeconds()},
+        {"install_plan_enabled", false},
+        {"auto_install_authorized", false},
+        {"kind", "android-apk"}
+    };
+    std::ofstream output(pendingNew / "update.json", std::ios::binary | std::ios::trunc);
+    output << metadata.dump(2) << '\n';
+    if (!output) {
+        error = "cannot write staged update metadata";
+        fs::remove_all(pendingNew, ec);
+        return false;
+    }
+    std::ofstream hold(pendingNew / kUpdateHoldFile, std::ios::binary | std::ios::trunc);
+    hold << "Android APK installation requires the system package installer.\n";
+    hold.close();
+    if (!hold) {
+        error = "cannot hold staged update for installation";
+        fs::remove_all(pendingNew, ec);
+        return false;
+    }
+
+    bool hadPending = fs::exists(pending, ec);
+    if (hadPending) {
+        fs::rename(pending, pendingOld, ec);
+        if (ec) {
+            error = "cannot rotate previous staged update: " + ec.message();
+            fs::remove_all(pendingNew, ec);
+            return false;
+        }
+    }
+    fs::rename(pendingNew, pending, ec);
+    if (ec) {
+        std::error_code restoreError;
+        if (hadPending) fs::rename(pendingOld, pending, restoreError);
+        fs::remove_all(pendingNew, restoreError);
+        error = "cannot activate staged update: " + ec.message();
+        return false;
+    }
+    fs::remove_all(pendingOld, ec);
+    return true;
 }
 
 ContainerEnvironment detectContainerEnvironment(const ContainerDetectionInput& input) {
@@ -519,6 +614,10 @@ ContainerEnvironment detectContainerEnvironment(const ContainerDetectionInput& i
 }
 
 ContainerEnvironment detectContainerEnvironment() {
+#if defined(__ANDROID__)
+    // The phone app is not a Docker/K8s container; APK updates are allowed.
+    return {};
+#else
     ContainerDetectionInput input;
     input.diceNextMarker = environmentValue("DICENEXT_CONTAINER");
     input.standardMarker = environmentValue("container");
@@ -536,6 +635,7 @@ ContainerEnvironment detectContainerEnvironment() {
     input.mountInfo = readRuntimeProbeFile("/proc/self/mountinfo");
 #endif
     return detectContainerEnvironment(input);
+#endif
 }
 
 UpdateService::UpdateService(ConfigManager& config, std::function<void()> restart,
@@ -639,7 +739,7 @@ UpdateService::Settings UpdateService::settings() const {
     result.intervalHours = std::clamp(config_.get<int>("update/check_interval_hours", 6), 1, 168);
     result.action = config_.get<std::string>("update/auto_action", "notify");
     result.scheduledInstall = config_.get<bool>("update/scheduled_install", false);
-    if (!installSupported()) result.scheduledInstall = false;
+    if (!scheduledInstallSupported()) result.scheduledInstall = false;
     result.installTime = config_.get<std::string>("update/install_time", "04:00");
     if (!validInstallTime(result.installTime)) result.installTime = "04:00";
     result.source = config_.get<std::string>("update/source", "auto");
@@ -661,7 +761,7 @@ bool UpdateService::reconcilePendingLocked(const Settings& current, std::string&
     pendingTag_.clear();
     if (!fs::is_directory(stage)) return true;
     if (!pendingUpdateHeld(stage)) {
-        if (!arm || current.action != "install" || !current.scheduledInstall || !installSupported()) return true;
+        if (!arm || current.action != "install" || !current.scheduledInstall || !scheduledInstallSupported()) return true;
         // Explicitly enabling scheduling also holds a package staged by an older core.
         std::ofstream hold(stage / kUpdateHoldFile, std::ios::binary | std::ios::trunc);
         hold << "Scheduled installation requires core authorization.\n";
@@ -684,9 +784,14 @@ bool UpdateService::reconcilePendingLocked(const Settings& current, std::string&
         const int timezone = utils::effectiveTimezoneOffsetMinutes();
         const bool previouslyArmed = metadata.value("install_plan_enabled", false);
         const bool previouslyAutoArmed = metadata.value("auto_install_authorized", previouslyArmed);
+#if defined(__ANDROID__)
+        const bool autoArmed = false;
+        const bool enabled = false;
+#else
         const bool autoArmed = current.action == "install" && installSupported() && (arm || previouslyAutoArmed);
         const bool enabled = current.action == "install" && current.scheduledInstall && installSupported() &&
             (arm || previouslyArmed);
+#endif
         const fs::path restartPermission = stage / kUpdateInstallOnRestartFile;
         if (!autoArmed) {
             std::error_code ec;
@@ -729,7 +834,9 @@ bool UpdateService::downloadSupported() const {
 
 bool UpdateService::installSupported() const {
     if (!downloadSupported()) return false;
-#if defined(_WIN32)
+#if defined(__ANDROID__)
+    return true;
+#elif defined(_WIN32)
     wchar_t managed[8]{};
     const DWORD length = GetEnvironmentVariableW(
         L"DICENEXT_MANAGED", managed, static_cast<DWORD>(std::size(managed)));
@@ -739,6 +846,14 @@ bool UpdateService::installSupported() const {
         fs::is_regular_file(fs::path("app") / "dice-next-core.exe", ec);
 #else
     return posix::managedLaunch(fs::current_path()) && ::access(".", W_OK) == 0;
+#endif
+}
+
+bool UpdateService::scheduledInstallSupported() const {
+#if defined(__ANDROID__)
+    return false;
+#else
+    return installSupported();
 #endif
 }
 
@@ -800,7 +915,7 @@ UpdateService::Json UpdateService::status() const {
         {"checkedAt", checkedAt_},
         {"downloadSupported", downloadSupported()},
         {"installSupported", installSupported()},
-        {"scheduledInstallSupported", installSupported()},
+        {"scheduledInstallSupported", scheduledInstallSupported()},
         {"scheduledInstallAt", scheduledInstallAt_},
         {"pendingTag", pendingTag_},
         {"timezoneMinutes", utils::effectiveTimezoneOffsetMinutes()},
@@ -838,7 +953,7 @@ bool UpdateService::updateSettings(const Json& values, std::string& error) {
                 return false;
             }
             next.scheduledInstall = values["scheduledInstall"].get<bool>();
-            if (next.scheduledInstall && !installSupported()) {
+            if (next.scheduledInstall && !scheduledInstallSupported()) {
                 error = "scheduled installation requires the Dice!Next package manager (dice-next.exe or start.sh)";
                 return false;
             }
@@ -1162,57 +1277,27 @@ bool UpdateService::fetchToFile(const std::string& url, const fs::path& output,
         error = "update operation cancelled";
         return false;
     }
-    const fs::path configPath = output.string() + "." + updaterTemporarySuffix() + ".curlcfg";
-    const std::string outputText = fs::absolute(output).string();
-    const std::string configText = fs::absolute(configPath).string();
-    if (outputText.find('"') != std::string::npos || configText.find('"') != std::string::npos) {
-        error = "update path contains unsupported quote characters";
-        return false;
-    }
 
-    {
-        std::ofstream config(configPath, std::ios::binary | std::ios::trunc);
-        if (!config) {
-            error = "cannot create curl configuration";
-            return false;
-        }
-        config << "url = \"" << curlEscape(url) << "\"\n"
-               << "output = \"" << curlEscape(outputText) << "\"\n"
-               << "connect-timeout = 5\n"
-               << "max-time = " << (std::max)(timeoutSeconds, 6) << "\n"
-               << "max-filesize = " << maxBytes << "\n"
-               << "retry = 1\n"
-               << "retry-delay = 1\n"
-               << "location\nfail\nsilent\n"
-               << "proto = \"=https\"\n"
-               << "proto-redir = \"=https\"\n"
-               << "tlsv1.2\n"
-               << "header = \"User-Agent: DiceNext-Updater/3\"\n"
-               << "header = \"Accept: application/octet-stream\"\n"
-               << "write-out = \"%{http_code}\"\n";
-    }
-
-    const dice::proc::Result probe =
-        dice::proc::curlConfigCancellable(configPath, cancelled, 64);
-    const int result = probe.exitCode;
-    const std::string& curlStatus = probe.output;
-    fs::remove(configPath, ec);
+    dice::http::Fetch req;
+    req.url = url;
+    req.output = output;
+    req.maxBytes = maxBytes;
+    req.connectTimeoutSec = 5;
+    req.timeoutSec = (std::max)(timeoutSeconds, 6);
+    req.userAgent = "DiceNext-Updater/3";
+    req.headers.emplace_back("Accept", "application/octet-stream");
+    req.cancelled = cancelled;
+    const auto probe = dice::http::fetch(req);
     if (probe.cancelled) {
         fs::remove(output, ec);
         error = "update operation cancelled";
         return false;
     }
-    if (result != 0 || !fs::is_regular_file(output, ec)) {
+    if (!probe.ok() || !fs::is_regular_file(output, ec)) {
         fs::remove(output, ec);
-        std::smatch status;
-        static const std::regex httpCode(R"(([0-9]{3})\s*$)");
         error = "download failed";
-        if (std::regex_search(curlStatus, status, httpCode) && status[1].str() != "000") {
-            error += " (HTTP " + status[1].str() + "; curl exit " +
-                std::to_string(result) + ")";
-        } else {
-            error += " (curl exit " + std::to_string(result) + ")";
-        }
+        if (probe.http > 0) error += " (HTTP " + std::to_string(probe.http) + ")";
+        else if (!probe.error.empty()) error += " (" + probe.error + ")";
         return false;
     }
     const auto size = fs::file_size(output, ec);
@@ -1721,6 +1806,9 @@ bool UpdateService::downloadAsset(const ReleaseManifest& manifest, const Release
 bool UpdateService::prepareStage(const fs::path& archive,
                                  const ReleaseManifest& manifest,
                                  std::string& error) {
+    if (looksLikeAndroidApk(archive))
+        return prepareApkUpdateStage(archive, manifest, error);
+
     const auto sequence = updaterTemporarySuffix();
     const fs::path updates = fs::path("updates");
     const fs::path extractRoot = updates / ("extract-" + sequence);
@@ -2103,6 +2191,37 @@ void UpdateService::doInstall() {
         fail("staged update cannot be installed in the current launch mode");
         return;
     }
+
+#if defined(__ANDROID__)
+    {
+        const fs::path stage = fs::path("updates") / "pending";
+        std::error_code ec;
+        fs::path apk;
+        for (const auto& entry : fs::directory_iterator(stage, ec)) {
+            if (ec) break;
+            if (entry.is_regular_file(ec) && looksLikeAndroidApk(entry.path())) {
+                apk = entry.path();
+                break;
+            }
+        }
+        if (apk.empty()) {
+            fail("staged update has no Android APK");
+            return;
+        }
+        std::string installError;
+        if (!androidInstallApk(fs::absolute(apk).string(), installError)) {
+            fail(installError.empty() ? "cannot open the Android package installer" : installError);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            phase_ = "staged";
+            error_.clear();
+        }
+        DICE_LOG_INFO("已打开系统安装器安装 {}；用户确认后才会替换当前应用。", apk.filename().string());
+        return;
+    }
+#endif
 
     DICE_LOG_INFO("已向程序管理器提交待更新包，开始安装与重启；此时尚不能确认更新完成。");
     {

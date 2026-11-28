@@ -9,7 +9,7 @@
 #include "self_echo_filter.h"
 #include "onebot_member_snapshot.h" // Shared QQ member_id/nickname/card snapshot format.
 #include "../common/logger.h"
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 #include "../core/identity/identity_binding.h"
 #include "../service/image_send.h"
 
@@ -653,29 +653,28 @@ private:
     static std::string jsonBody(const json& j) { return j.dump(-1, ' ', false, json::error_handler_t::replace); }
     json httpPost(const std::string& path, const json& body,
                   const std::optional<OutboundAttempt>& outgoing = std::nullopt) const {
-        namespace fs = std::filesystem;
-        static std::atomic<uint64_t> requestSeq{0};
-        const auto tag = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(++requestSeq);
-        const fs::path bodyFile = fs::temp_directory_path() / ("dice-milky-body-" + tag + ".json");
-        const fs::path cfgFile = fs::temp_directory_path() / ("dice-milky-curl-" + tag + ".conf");
-        { std::ofstream out(bodyFile, std::ios::binary); out << jsonBody(body); }
-        auto esc = [](const std::string& s) { std::string out; out.reserve(s.size() + 8); for (char c : s) { if (c == '\\' || c == '"') out += '\\'; out += c; } return out; };
-        { std::ofstream out(cfgFile, std::ios::binary);
-          out << "url = \"" << esc(endpoint_ + path) << "\"\nrequest = POST\nsilent\nshow-error\nconnect-timeout = 5\nmax-time = 20\nproto = \"=http,https\"\nheader = \"Content-Type: application/json\"\n";
-          if (!accessToken_.empty()) out << "header = \"Authorization: Bearer " << esc(accessToken_) << "\"\n";
-          out << "data-binary = \"@" << esc(bodyFile.string()) << "\"\nwrite-out = \"\\n__DICE_STATUS__%{http_code}\"\n";
-        }
         if (outgoing) outgoing->submitted();
-        auto r = proc::curlConfig(cfgFile, 4 * 1024 * 1024); std::error_code ec; fs::remove(bodyFile, ec); fs::remove(cfgFile, ec);
-        const std::string marker = "__DICE_STATUS__"; size_t at = r.output.rfind(marker); int status = 0; std::string content = r.output;
-        if (at != std::string::npos) { try { status = std::stoi(r.output.substr(at + marker.size())); } catch (...) {} content.resize(at > 0 && r.output[at - 1] == '\n' ? at - 1 : at); }
-        if (!r.ok() || status >= 400 || content.empty()) {
-            const std::string message = content.empty()
-                ? "Milky API request got no HTTP response from " + endpoint_ + path + " (curl status " + std::to_string(status) + ")"
+        dice::http::Fetch req;
+        req.url = endpoint_ + path;
+        req.method = "POST";
+        req.body = jsonBody(body);
+        req.connectTimeoutSec = 5;
+        req.timeoutSec = 20;
+        req.maxBytes = 4 * 1024 * 1024;
+        req.allowHttp = true;
+        req.headers.emplace_back("Content-Type", "application/json");
+        if (!accessToken_.empty()) req.headers.emplace_back("Authorization", "Bearer " + accessToken_);
+        const auto r = dice::http::fetch(req);
+        const int status = r.http;
+        const std::string content = r.body.empty() ? r.error : r.body;
+        if (!r.ok() || status >= 400 || r.body.empty()) {
+            const std::string message = r.body.empty()
+                ? "Milky API request got no HTTP response from " + endpoint_ + path +
+                    (r.error.empty() ? "" : (" (" + r.error + ")"))
                 : content;
             return json{{"status", "failed"}, {"retcode", status ? status : -1}, {"message", message}};
         }
-        auto j = json::parse(content, nullptr, false); return j.is_discarded() ? json{{"status", "failed"}, {"retcode", status}, {"message", "invalid Milky JSON response"}} : j;
+        auto j = json::parse(r.body, nullptr, false); return j.is_discarded() ? json{{"status", "failed"}, {"retcode", status}, {"message", "invalid Milky JSON response"}} : j;
     }
 
     void cacheGroupList(const json& r) {

@@ -601,9 +601,24 @@ jobs:
             main/server/build/Testing/Temporary/
           if-no-files-found: ignore
 
+  android-signing:
+    name: Check Android signing configuration
+    runs-on: ubuntu-24.04
+    permissions: {}
+    outputs:
+      enabled: ${{ steps.config.outputs.enabled }}
+    steps:
+      - id: config
+        env:
+          HAS_SIGNING: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.ANDROID_KEYSTORE_PASSWORD != '' && secrets.ANDROID_KEY_ALIAS != '' && secrets.ANDROID_KEY_PASSWORD != '' }}
+        run: echo "enabled=$HAS_SIGNING" >> "$GITHUB_OUTPUT"
+
   android:
     name: Android (arm64)
-    needs: webui
+    needs: [webui, android-signing]
+    if: needs.android-signing.outputs.enabled == 'true'
+    permissions:
+      contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -720,6 +735,22 @@ jobs:
           curl -fsSL "https://curl.se/ca/cacert.pem" -o "$assets/cacert.pem"
           printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > android/local.properties
           chmod +x android/gradlew
+      - name: Sign the release APK
+        working-directory: main
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_VERSION_CODE: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/dice-next-android.keystore"
+          trap 'rm -f -- "$ANDROID_KEYSTORE_PATH"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$ANDROID_KEYSTORE_PATH"
+          unset ANDROID_KEYSTORE_BASE64
+          export ANDROID_VERSION_NAME="$(sed -nE 's/project\(dice-next-server VERSION ([0-9.]+).*/\1/p' server/CMakeLists.txt)-beta.$(sed -nE 's/^int buildNumber\(\) \{ return ([0-9]+); \}/\1/p' server/build-android/generated/version_build.cpp)"
           (cd android && ./gradlew --no-daemon assembleRelease)
           mkdir -p release
           cp -f android/app/build/outputs/apk/release/app-release.apk release/DiceNext-android.apk
@@ -740,7 +771,13 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [webui, linux, windows, macos-arm64, android, backend-tests]
+    needs: [webui, linux, windows, macos-arm64, android-signing, android, backend-tests]
+    if: >-
+      always() && !cancelled() && needs.webui.result == 'success' && needs.linux.result == 'success' &&
+      needs.windows.result == 'success' && needs.macos-arm64.result == 'success' &&
+      needs.backend-tests.result == 'success' && needs.android-signing.result == 'success' &&
+      (needs.android.result == 'success' ||
+      (needs.android.result == 'skipped' && needs.android-signing.outputs.enabled == 'false'))
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -781,10 +818,12 @@ jobs:
             [DiceNext-windows-arm64]='*.zip'
             [DiceNext-macos-arm64]='*.tar.gz'
           )
+          if [[ '${{ needs.android.result }}' == success ]]; then expected[DiceNext-android-arm64]='*.apk'; fi
           for artifact in "${!expected[@]}"; do
             pattern="artifacts/${artifact}/${expected[$artifact]}"
             if ! compgen -G "$pattern" > /dev/null; then
-              echo "::warning::Missing release asset from ${artifact}: ${pattern}"
+              echo "::error::Missing release asset from ${artifact}: ${pattern}"
+              exit 1
             fi
           done
           find artifacts -maxdepth 2 -type f -print
@@ -828,6 +867,9 @@ jobs:
           add_asset linux amd64 DiceNext-linux-amd64 '*.tar.gz'
           add_asset linux arm64 DiceNext-linux-arm64 '*.tar.gz'
           add_asset macos arm64 DiceNext-macos-arm64 '*.tar.gz'
+          if compgen -G 'artifacts/DiceNext-android-arm64/*.apk' > /dev/null; then
+            add_asset android arm64 DiceNext-android-arm64 '*.apk'
+          fi
 
           jq -n \
             --arg repository 'DiceZone/Dice-Next' \
@@ -839,8 +881,8 @@ jobs:
             --argjson assets "$assets" \
             '{schema:1, repository:$repository, tag:$tag, version:$version, build:$build,
               prerelease:true, published_at:$published_at, release_url:$release_url,
-              assets:$assets}' > update-manifest.json
-          jq -e '.schema == 1 and (.assets | length) == 5' update-manifest.json >/dev/null
+              assets:($assets | map(select(.os != "android"))), android_assets:($assets | map(select(.os == "android")))}' > update-manifest.json
+          jq -e '.schema == 1 and (.assets | length) == 5 and (.android_assets | length) <= 1' update-manifest.json >/dev/null
           cat update-manifest.json
       - name: Checkout the actual WebUI build source for release notes
         uses: actions/checkout@v4

@@ -23,7 +23,7 @@
 #include "../common/check_reply.h"
 #include "../common/check_rules.h"
 #include "../common/legacy_check_replies.h"
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 #include "../common/bounded_regex.h"
 #include "../adapter/adapter_manager.h"
 #include "../core/dice/dice_engine.h"
@@ -11151,9 +11151,12 @@ private:
     }
     std::string fetchApi(const std::string& url) {
         if (!apiEnabled() || !isApiUrlAllowed(url)) return "";
-        std::string out = trim(dice::proc::curl({"-s", "--max-time", std::to_string(apiTimeout()),
-                                                 "--max-filesize", "65536",
-                                                 "--proto", "=http,https", url}, 65536).output);
+        dice::http::Fetch req;
+        req.url = url;
+        req.timeoutSec = apiTimeout();
+        req.maxBytes = 65536;
+        req.allowHttp = true;
+        std::string out = trim(dice::http::fetch(req).body);
         // 裁剪：按码点近似截断到 ~600 字（避免刷屏）。
         if (out.size() > 600) { size_t cut = 600; while (cut < out.size() && (out[cut] & 0xC0) == 0x80) ++cut; out = out.substr(0, cut) + "\xe2\x80\xa6"; }
         return out;
@@ -11253,54 +11256,34 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
         } else {
             if (!apiEnabled() || !isApiUrlAllowed(url)) return "";
         }
-        namespace fs = std::filesystem;
-        auto esc = [](const std::string& s) {            // escape for curl config "..." values
-            std::string o; o.reserve(s.size() + 8);
-            for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; }
-            return o;
-        };
-        std::string m;                                   // uppercase method
+        std::string m;
         for (char c : method) m += (char)std::toupper((unsigned char)c);
         if (m.empty()) m = "GET";
 
-        static std::atomic<long long> seq{0};            // JS and Lua can fetch concurrently
-        long long id = ++seq;
-        fs::path tmp = fs::temp_directory_path();
-        fs::path cfgF  = tmp / ("dnfetch_" + std::to_string(id) + ".cfg");
-        fs::path bodyF = tmp / ("dnfetch_" + std::to_string(id) + ".body");
-        std::error_code ec;
-        try {
-            std::ofstream cf(cfgF, std::ios::binary);
-            cf << "url = \"" << esc(url) << "\"\n";
-            cf << "request = \"" << esc(m) << "\"\n";
-            cf << "max-time = " << apiTimeout() << "\n";
-            cf << "silent\nshow-error\nlocation\n";       // -sS -L
-            cf << "max-filesize = 2097152\n";             // 2 MB cap
-            cf << "proto = \"=http,https\"\n";
-            cf << "write-out = \"\\n%{http_code}\"\n";     // append status on a new line
-            std::istringstream hs(headerLines); std::string line;
-            while (std::getline(hs, line)) {
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                if (!line.empty()) cf << "header = \"" << esc(line) << "\"\n";
-            }
-            if (!body.empty()) {
-                std::ofstream bf(bodyF, std::ios::binary); bf << body;
-                cf << "data-binary = \"@" << esc(bodyF.string()) << "\"\n";
-            }
-        } catch (...) { fs::remove(cfgF, ec); fs::remove(bodyF, ec); return ""; }
-
-        auto fetched = dice::proc::curlConfigCancellable(cfgF,
-            [] { return ScriptExecution::expired(); }, 2 * 1024 * 1024);
-        fs::remove(cfgF, ec); fs::remove(bodyF, ec);
-        if (fetched.cancelled || !fetched.ok()) return "";
-        std::string out = std::move(fetched.output);
-
-        auto nl = out.find_last_of('\n');                // split off the trailing status line
-        if (nl != std::string::npos) {
-            status = std::atoi(out.c_str() + nl + 1);
-            out.erase(nl);
+        dice::http::Fetch req;
+        req.url = url;
+        req.method = m;
+        req.body = body;
+        req.timeoutSec = apiTimeout();
+        req.maxBytes = 2097152;
+        req.allowHttp = true;
+        req.cancelled = [] { return ScriptExecution::expired(); };
+        std::istringstream hs(headerLines);
+        std::string line;
+        while (std::getline(hs, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const auto colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::string name = line.substr(0, colon);
+            std::string value = line.substr(colon + 1);
+            while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.erase(value.begin());
+            req.headers.emplace_back(std::move(name), std::move(value));
         }
-        return out;
+        const auto fetched = dice::http::fetch(req);
+        if (fetched.cancelled || !fetched.transportOk()) return "";
+        status = fetched.http;
+        return fetched.body;
     }
 
     /// Gate-free GET for plugin update checks/downloads (admin-initiated from the
@@ -11309,14 +11292,15 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     std::string fetchPluginUrl(const std::string& url, int& status) {
         status = 0;
         if (!isHostSafe(url)) return "";
-        std::string out = dice::proc::curl({"-sSL", "--max-time", "15",
-                                            "--max-filesize", "2097152",
-                                            "--proto", "=http,https",
-                                            "-w", "\\n%{http_code}", url},
-                                           2 * 1024 * 1024).output;
-        auto nl = out.find_last_of('\n');
-        if (nl != std::string::npos) { status = std::atoi(out.c_str() + nl + 1); out.erase(nl); }
-        return out;
+        dice::http::Fetch req;
+        req.url = url;
+        req.timeoutSec = 15;
+        req.maxBytes = 2097152;
+        req.allowHttp = true;
+        const auto fetched = dice::http::fetch(req);
+        if (!fetched.transportOk()) return "";
+        status = fetched.http;
+        return fetched.body;
     }
 
     /// Append a transcript line for every message while a group log is recording.
@@ -11328,21 +11312,19 @@ public:   // 以下方法供 main.cpp / api_service 调用（GLM 误插的 priva
     // 从原始消息提取图片引用（[CQ:image,url=/file=..] 与 海豹 [图片:..]/[图:..]）→ JSON 数组串。
     std::string extractImageRefs(const std::string& raw) const { return logimages::refs(raw); }
     static std::string imageCodesToLabel(const std::string& text) { return logimages::labels(text); }
-    /// curl -K 配置文件值转义（与 jsHttpFetch 的 esc 一致）：防配置注入。
-    static std::string curlCfgEscape(const std::string& s) {
-        std::string o; o.reserve(s.size() + 8);
-        for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; }
-        return o;
-    }
-    // 用 curl 把 url 下到 outPath（-K 配置文件传参，防 shell 注入）。返回是否成功。
     static bool curlDownload(const std::string& url, const std::string& outPath) {
-        std::string cfgPath = outPath + ".curlcfg";
-        { std::ofstream cf(image_resources::fromUtf8(cfgPath), std::ios::binary);
-          cf << "url = \"" << curlCfgEscape(url) << "\"\noutput = \"" << curlCfgEscape(outPath) << "\"\n"
-             << "--max-time 8\n--connect-timeout 4\n--silent\n--fail\n--location\n"; }
-        const int rc = dice::proc::curlConfig(cfgPath).exitCode;
-        std::error_code ec; std::filesystem::remove(image_resources::fromUtf8(cfgPath), ec);
-        if (rc != 0) { std::filesystem::remove(image_resources::fromUtf8(outPath), ec); return false; }
+        dice::http::Fetch req;
+        req.url = url;
+        req.output = image_resources::fromUtf8(outPath);
+        req.connectTimeoutSec = 4;
+        req.timeoutSec = 8;
+        req.allowHttp = true;
+        const auto run = dice::http::fetch(req);
+        std::error_code ec;
+        if (!run.ok()) {
+            std::filesystem::remove(image_resources::fromUtf8(outPath), ec);
+            return false;
+        }
         return std::filesystem::exists(image_resources::fromUtf8(outPath), ec);
     }
     // 把图片数组里的远端 url 落地到 data/logs/images/，成功的替换为本地文件名。

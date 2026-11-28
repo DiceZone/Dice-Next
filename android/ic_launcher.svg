@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" role="img" aria-labelledby="title">
+  <title id="title">Dice!Next</title>
+  <rect width="108" height="108" fill="none"/>
+  <g transform="translate(54 54) scale(0.33086) translate(-81.605 -72.305)">
+    <polygon fill="#d8d8d8" points="21.88,58.14 0.22,68.50 33.30,11.46 21.88,58.14"/>
+    <polygon fill="#efefef" points="96.13,18.98 29.85,55.37 42.19,4.90 42.20,4.88 96.13,18.98"/>
+    <polygon fill="#262626" points="124.91,142.31 111.83,109.43 162.74,75.88 163.21,76.37 124.91,142.31"/>
+    <polygon fill="#515151" points="118.19,144.61 44.09,144.59 105.61,113.00 118.19,144.61"/>
+    <polygon fill="#828282" points="100.25,107.78 40.41,138.51 30.27,68.98 100.25,107.78"/>
+    <polygon fill="#a0a0a0" points="32.22,131.37 0.00,75.62 22.52,64.87 32.22,131.37"/>
+    <polygon fill="#bcbcbc" points="102.41,100.81 32.74,62.19 104.07,23.00 102.41,100.81"/>
+    <polygon fill="#6b6b6b" points="157.64,70.73 109.45,102.50 111.15,23.82 157.64,70.73"/>
+    <polygon fill="#cccccc" points="160.16,63.09 111.14,13.64 125.06,2.43 160.16,63.09"/>
+    <polygon fill="#ededed" points="118.38,0.06 102.14,13.15 102.12,13.14 51.83,0.00 118.38,0.06"/>
+  </g>
+</svg>

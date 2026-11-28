@@ -17,7 +17,7 @@
 #include "../config/config_manager.h"
 #include "../common/logger.h"
 #include "../common/utils.h"
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 #include "image_host.h"   // 图片占位符替换为稳定图床 URL
 #include "parquet_writer.h"   // 日志导出为 Parquet（zstd）
 
@@ -235,34 +235,20 @@ inline std::string zlibCompress(const std::string& in) {
     return out;
 }
 
-// Keep the transport result separate from a valid but empty HTTP response.
-inline std::string uploadResponse(std::vector<std::string> args) {
-    args.insert(args.begin(), {"--connect-timeout", "15", "--max-time", "180",
-                               "--write-out", "\n%{http_code}"});
-    auto response = proc::curl(args);
-    if (!response.ok()) {
-        const char* reason = nullptr;
-        switch (response.exitCode) {
-        case 127:
-        case -1: reason = "无法启动随程序提供的网络组件，请检查安装包是否完整"; break;
-        case 6: reason = "无法解析日志站域名"; break;
-        case 7: reason = "无法连接日志站"; break;
-        case 26: reason = "无法读取待上传文件"; break;
-        case 28: reason = "连接或上传超时"; break;
-        case 35: reason = "与日志站的 TLS 握手失败"; break;
-        case 60: reason = "日志站证书验证失败"; break;
-        default: reason = "网络请求失败";
-        }
-        throw std::runtime_error(std::string(reason) + "（错误码 " + std::to_string(response.exitCode) + "）");
+inline std::string uploadLogSite(dice::http::Fetch req) {
+    req.connectTimeoutSec = 15;
+    req.timeoutSec = 180;
+    req.allowHttp = true;
+    req.maxBytes = 4 * 1024 * 1024;
+    const auto response = dice::http::fetch(req);
+    if (!response.transportOk()) {
+        throw std::runtime_error(response.error.empty() ? std::string("网络请求失败") : response.error);
     }
-    const auto split = response.output.rfind('\n');
-    if (split == std::string::npos) throw std::runtime_error("未取得日志站 HTTP 状态");
-    const auto status = response.output.substr(split + 1);
-    if (status.size() != 3 || status.front() != '2')
-        throw std::runtime_error("日志站返回 HTTP " + status);
-    response.output.resize(split);
-    if (response.output.empty()) throw std::runtime_error("日志站返回 HTTP " + status + "，但响应正文为空");
-    return response.output;
+    if (response.http < 200 || response.http >= 300)
+        throw std::runtime_error("日志站返回 HTTP " + std::to_string(response.http));
+    if (response.body.empty())
+        throw std::runtime_error("日志站返回 HTTP " + std::to_string(response.http) + "，但响应正文为空");
+    return response.body;
 }
 
 /// SealDice V1 协议上传（与海豹核心 storylog/upload_v1.go 对齐）：
@@ -278,21 +264,20 @@ inline void uploadSeal(const std::string& fullUrl, const std::string& name,
         std::string tag;
         { std::random_device rd; std::mt19937 g(rd()); tag = std::to_string(g()); }
         fs::path binPath  = fs::temp_directory_path() / ("dnseal_" + tag + ".bin");
-        fs::path namePath = fs::temp_directory_path() / ("dnname_" + tag + ".txt");
         try {
             json payload{{"items", std::move(items)}, {"version", 101}};
             std::string z = zlibCompress(payload.dump());
             if (z.empty()) throw std::runtime_error("zlib compress failed");
             { std::ofstream f(binPath, std::ios::binary); f.write(z.data(), (std::streamsize)z.size()); }
-            { std::ofstream f(namePath, std::ios::binary); f << name; }   // value-from-file 免转义
-            std::string out = uploadResponse({
-                "-s", "-S", "-X", "PUT",
-                "-F", "name=<" + namePath.string(),
-                "-F", "uniform_id=QQ-Group:" + groupId,
-                "-F", "client=SealDice",
-                "-F", "version=101",
-                "-F", "file=@" + binPath.string() + ";filename=log-zlib-compressed",
-                fullUrl});
+            dice::http::Fetch req;
+            req.url = fullUrl;
+            req.method = "PUT";
+            req.form.push_back({"name", name, {}, {}, {}});
+            req.form.push_back({"uniform_id", "QQ-Group:" + groupId, {}, {}, {}});
+            req.form.push_back({"client", "SealDice", {}, {}, {}});
+            req.form.push_back({"version", "101", {}, {}, {}});
+            req.form.push_back({"file", {}, binPath, "log-zlib-compressed", {}});
+            std::string out = uploadLogSite(req);
             try {
                 auto j = json::parse(out);
                 std::string url = j.value("url", std::string());
@@ -300,7 +285,7 @@ inline void uploadSeal(const std::string& fullUrl, const std::string& name,
                 else res = j.value("message", out.substr(0, 200));
             } catch (...) { res = "日志站响应格式无效，请检查上传地址和协议"; }
         } catch (const std::exception& e) { res = std::string("日志上传失败：") + e.what(); }
-        std::error_code ec; fs::remove(binPath, ec); fs::remove(namePath, ec);
+        std::error_code ec; fs::remove(binPath, ec);
         drogon::app().getLoop()->queueInLoop([cb, ok, res]() { cb(ok, res); });
     }).detach();
 }
@@ -355,19 +340,18 @@ inline void uploadSealV105(const std::string& fullUrl, const std::string& name,
         std::string tag;
         { std::random_device rd; std::mt19937 g(rd()); tag = std::to_string(g()); }
         fs::path binPath  = fs::temp_directory_path() / ("dnpq_" + tag + ".parquet");
-        fs::path namePath = fs::temp_directory_path() / ("dnname_" + tag + ".txt");
         try {
             if (parquetBytes.empty()) throw std::runtime_error("empty parquet");
             { std::ofstream f(binPath, std::ios::binary); f.write(parquetBytes.data(), (std::streamsize)parquetBytes.size()); }
-            { std::ofstream f(namePath, std::ios::binary); f << name; }   // value-from-file 免转义
-            std::string out = uploadResponse({
-                "-s", "-S", "-X", "PUT",
-                "-F", "name=<" + namePath.string(),
-                "-F", "uniform_id=QQ-Group:" + groupId,
-                "-F", "client=Parquet",
-                "-F", "version=105",
-                "-F", "file=@" + binPath.string() + ";filename=log-zlib-compressed",
-                fullUrl});
+            dice::http::Fetch req;
+            req.url = fullUrl;
+            req.method = "PUT";
+            req.form.push_back({"name", name, {}, {}, {}});
+            req.form.push_back({"uniform_id", "QQ-Group:" + groupId, {}, {}, {}});
+            req.form.push_back({"client", "Parquet", {}, {}, {}});
+            req.form.push_back({"version", "105", {}, {}, {}});
+            req.form.push_back({"file", {}, binPath, "log-zlib-compressed", {}});
+            std::string out = uploadLogSite(req);
             try {
                 auto j = json::parse(out);
                 std::string url = j.value("url", std::string());
@@ -375,7 +359,7 @@ inline void uploadSealV105(const std::string& fullUrl, const std::string& name,
                 else res = j.value("message", out.substr(0, 200));
             } catch (...) { res = "日志站响应格式无效，请检查上传地址和协议"; }
         } catch (const std::exception& e) { res = std::string("日志上传失败：") + e.what(); }
-        std::error_code ec; fs::remove(binPath, ec); fs::remove(namePath, ec);
+        std::error_code ec; fs::remove(binPath, ec);
         drogon::app().getLoop()->queueInLoop([cb, ok, res]() { cb(ok, res); });
     }).detach();
 }
@@ -411,18 +395,17 @@ inline void uploadDiceNext(const std::string& fullUrl, const std::string& name,
         std::string tag;
         { std::random_device rd; std::mt19937 g(rd()); tag = std::to_string(g()); }
         fs::path binPath  = fs::temp_directory_path() / ("dndn_" + tag + ".zst");
-        fs::path namePath = fs::temp_directory_path() / ("dnname_" + tag + ".txt");
         try {
             if (zdata.empty()) throw std::runtime_error("empty data");
             { std::ofstream f(binPath, std::ios::binary); f.write(zdata.data(), (std::streamsize)zdata.size()); }
-            { std::ofstream f(namePath, std::ios::binary); f << name; }
-            std::string out = uploadResponse({
-                "-s", "-S", "-X", "PUT",
-                "-F", "name=<" + namePath.string(),
-                "-F", "uniform_id=QQ-Group:" + groupId,
-                "-F", "client=DiceNext",
-                "-F", "file=@" + binPath.string() + ";filename=log-zstd-json",
-                fullUrl});
+            dice::http::Fetch req;
+            req.url = fullUrl;
+            req.method = "PUT";
+            req.form.push_back({"name", name, {}, {}, {}});
+            req.form.push_back({"uniform_id", "QQ-Group:" + groupId, {}, {}, {}});
+            req.form.push_back({"client", "DiceNext", {}, {}, {}});
+            req.form.push_back({"file", {}, binPath, "log-zstd-json", {}});
+            std::string out = uploadLogSite(req);
             try {
                 auto j = json::parse(out);
                 std::string url = j.value("url", std::string());
@@ -430,7 +413,7 @@ inline void uploadDiceNext(const std::string& fullUrl, const std::string& name,
                 else res = j.value("message", out.substr(0, 200));
             } catch (...) { res = "日志站响应格式无效，请检查上传地址和协议"; }
         } catch (const std::exception& e) { res = std::string("日志上传失败：") + e.what(); }
-        std::error_code ec; fs::remove(binPath, ec); fs::remove(namePath, ec);
+        std::error_code ec; fs::remove(binPath, ec);
         drogon::app().getLoop()->queueInLoop([cb, ok, res]() { cb(ok, res); });
     }).detach();
 }
@@ -447,18 +430,15 @@ inline void upload(const std::string& fullUrl, const std::string& name,
         std::string tag;
         { std::random_device rd; std::mt19937 g(rd()); tag = std::to_string(g()); }
         fs::path txtPath  = fs::temp_directory_path() / ("dnlog_" + tag + ".txt");
-        fs::path namePath = fs::temp_directory_path() / ("dnname_" + tag + ".txt");
         try {
             { std::ofstream f(txtPath, std::ios::binary);  f << txt; }
-            { std::ofstream f(namePath, std::ios::binary); f << name; }   // value-from-file avoids quoting issues
-            // curl reads the `name` field value from a file (-F "name=<path"),
-            // so arbitrary names (Chinese/spaces) need no shell escaping.
-            std::string out = uploadResponse({
-                "-s", "-S", "-X", "POST",
-                "-F", "name=<" + namePath.string(),
-                "-F", "uniform_id=" + uniformId,
-                "-F", "file=@" + txtPath.string() + ";type=text/plain",
-                fullUrl});
+            dice::http::Fetch req;
+            req.url = fullUrl;
+            req.method = "POST";
+            req.form.push_back({"name", name, {}, {}, {}});
+            req.form.push_back({"uniform_id", uniformId, {}, {}, {}});
+            req.form.push_back({"file", {}, txtPath, {}, "text/plain"});
+            std::string out = uploadLogSite(req);
             try {
                 auto j = json::parse(out);
                 if (j.value("success", true) != false && j.contains("url")) {
@@ -468,7 +448,7 @@ inline void upload(const std::string& fullUrl, const std::string& name,
                 }
             } catch (...) { res = "日志站响应格式无效，请检查上传地址和协议"; }
         } catch (const std::exception& e) { res = std::string("日志上传失败：") + e.what(); }
-        std::error_code ec; fs::remove(txtPath, ec); fs::remove(namePath, ec);
+        std::error_code ec; fs::remove(txtPath, ec);
         drogon::app().getLoop()->queueInLoop([cb, ok, res]() { cb(ok, res); });
     }).detach();
 }

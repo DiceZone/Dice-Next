@@ -13,6 +13,7 @@ import android.os.PowerManager
 import android.os.Process
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import java.io.File
 import kotlin.concurrent.thread
 
 /**
@@ -55,6 +56,7 @@ class CoreService : Service() {
         if (worker?.isAlive != true && !Native.isRunning()) {
             worker = thread(name = "dice-next-core", isDaemon = false) {
                 val code = try {
+                    File(filesDir, ".panel-url").delete()
                     Native.initDns(getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
                     Native.run(filesDir.absolutePath)
                 } catch (e: UnsatisfiedLinkError) {

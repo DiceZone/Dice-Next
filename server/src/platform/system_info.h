@@ -24,7 +24,7 @@ struct DiskInfo {
 
 struct SysInfo {
     std::string os          = "Unknown";   // pretty display name, e.g. "Ubuntu 22.04 LTS"
-    std::string osId        = "unknown";    // logo key: windows/ubuntu/debian/centos/rocky/linux/macos
+    std::string osId        = "unknown";    // logo key: windows/ubuntu/debian/centos/rocky/linux/macos/android
     // CPU
     std::string cpuModel;                 // e.g. "AMD Ryzen 7 5800X"
     int      cpuCores    = 0;             // logical processors

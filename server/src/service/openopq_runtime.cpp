@@ -11,6 +11,7 @@
 
 #include "openopq_runtime.h"
 
+#include "../common/libcurl_http.h"
 #include "../common/logger.h"
 #include "../common/subprocess.h"
 
@@ -77,16 +78,6 @@ bool safeToken(const std::string& value, std::size_t maxLength) {
         std::all_of(value.begin(), value.end(), [](unsigned char c) {
             return std::isalnum(c) || c == '.' || c == '-' || c == '_';
         });
-}
-
-std::string curlEscape(const std::string& value) {
-    std::string out;
-    out.reserve(value.size() + 8);
-    for (char ch : value) {
-        if (ch == '\\' || ch == '"') out.push_back('\\');
-        out.push_back(ch);
-    }
-    return out;
 }
 
 bool base64Decode(const std::string& text, std::string& out) {
@@ -163,11 +154,39 @@ std::string pathText(const fs::path& path) {
     try { return fs::absolute(path).string(); } catch (...) { return {}; }
 }
 
+#if defined(__ANDROID__)
+std::string androidGnuLinuxBinary(const fs::path& binary) {
+    std::ifstream in(binary, std::ios::binary);
+    if (!in) return {};
+    std::string carry;
+    char buf[8192];
+    const char* needles[] = {"libstdc++.so.6", "libc.so.6", "ld-linux-aarch64.so.1", "ld-linux-armhf.so.3"};
+    std::size_t maxn = 0;
+    for (const char* n : needles) maxn = (std::max)(maxn, std::char_traits<char>::length(n));
+    while (in) {
+        in.read(buf, sizeof(buf));
+        const auto got = static_cast<std::size_t>(in.gcount());
+        if (!got) break;
+        const std::string window = carry + std::string(buf, got);
+        for (const char* n : needles) {
+            if (window.find(n) != std::string::npos) {
+                return "这份 openopq 是 GNU/Linux 动态链接（glibc），Android 无法运行。"
+                       "请改用中心的 android-arm64 包（NDK / bionic）。";
+            }
+        }
+        carry = window.size() > maxn ? window.substr(window.size() - maxn) : window;
+    }
+    return {};
+}
+#endif
+
 std::string currentOs() {
 #if defined(_WIN32)
     return "windows";
 #elif defined(__APPLE__)
     return "macos";
+#elif defined(__ANDROID__)
+    return "android";
 #else
     return "linux";
 #endif
@@ -188,7 +207,7 @@ struct Fetched {
     std::string error;
 };
 
-/// 带 Key 下载到文件。Key 写在 curl 配置文件里，不出现在进程列表上。
+/// 带 Key 下载到文件。走进程内 libcurl（Android 没有 curl CLI）。
 Fetched fetchWithKey(const std::string& url, const std::string& apiKey, const fs::path& output,
                      std::uint64_t maxBytes, int timeoutSeconds, bool loopbackHttp,
                      const dice::proc::CancellationCheck& cancelled) {
@@ -200,39 +219,24 @@ Fetched fetchWithKey(const std::string& url, const std::string& apiKey, const fs
     std::error_code ec;
     fs::create_directories(output.parent_path(), ec);
     fs::remove(output, ec);
-    const fs::path config = output.string() + "." + std::to_string(++sequence) + ".curlcfg";
-    const std::string outputText = pathText(output);
-    if (outputText.empty() || outputText.find('"') != std::string::npos) {
-        result.error = "下载目录路径无法使用";
-        return result;
-    }
-    {
-        std::ofstream file(config, std::ios::binary | std::ios::trunc);
-        if (!file) {
-            result.error = "无法写入下载配置";
-            return result;
-        }
-        file << "url = \"" << curlEscape(url) << "\"\n"
-             << "output = \"" << curlEscape(outputText) << "\"\n"
-             << "connect-timeout = 8\n"
-             << "max-time = " << (std::max)(timeoutSeconds, 10) << "\n"
-             << "max-filesize = " << maxBytes << "\n"
-             << "location\nfail\nsilent\n"
-             << "proto = \"" << (loopbackHttp ? "=http,https" : "=https") << "\"\n"
-             << "proto-redir = \"" << (loopbackHttp ? "=http,https" : "=https") << "\"\n"
-             << "header = \"User-Agent: DiceNext-OpenOPQ/1\"\n"
-             << "header = \"Authorization: Bearer " << curlEscape(apiKey) << "\"\n"
-             << "write-out = \"%{http_code}\"\n";
-    }
-    const auto run = dice::proc::curlConfigCancellable(config, cancelled, 64);
-    fs::remove(config, ec);
+    dice::http::Fetch req;
+    req.url = url;
+    req.output = output;
+    req.maxBytes = maxBytes;
+    req.connectTimeoutSec = 8;
+    req.timeoutSec = (std::max)(timeoutSeconds, 10);
+    req.allowHttp = loopbackHttp;
+    req.cancelled = cancelled;
+    req.userAgent = "DiceNext-OpenOPQ/1";
+    req.headers.emplace_back("Authorization", "Bearer " + apiKey);
+    const auto run = dice::http::fetchToFile(req);
     result.cancelled = run.cancelled;
-    result.http = std::atoi(run.output.c_str());
-    result.ok = run.exitCode == 0 && result.http >= 200 && result.http < 300 && fs::is_regular_file(output, ec);
+    result.http = run.http;
+    result.ok = run.ok() && fs::is_regular_file(output, ec);
     if (!result.ok) {
         fs::remove(output, ec);
         result.error = result.http > 0 ? "中心返回 HTTP " + std::to_string(result.http)
-                                       : "无法连接中心（curl " + std::to_string(run.exitCode) + "）";
+                                       : "无法连接中心（" + (run.error.empty() ? "libcurl" : run.error) + "）";
     }
     return result;
 }
@@ -362,6 +366,12 @@ bool parseSignedManifest(const std::string& body, const std::string& publicKeyBa
 const Asset* assetFor(const Manifest& manifest, const std::string& os, const std::string& arch) {
     for (const auto& asset : manifest.assets)
         if (asset.os == os && asset.arch == arch) return &asset;
+    return nullptr;
+}
+
+const Asset* assetForBest(const Manifest& manifest, const std::string& os, const std::string& arch) {
+    if (const Asset* exact = assetFor(manifest, os, arch)) return exact;
+    if (os == "android") return assetFor(manifest, "linux", arch);
     return nullptr;
 }
 
@@ -543,44 +553,33 @@ public:
 private:
     bool consoleRaw(const std::string& method, const std::string& path, const std::string& body,
                     int& http, std::string& text, std::string& failure) {
-        const auto id = std::to_string(++sequence);
-        const fs::path config = dir / ("console-" + id + ".curlcfg");
-        const fs::path response = dir / ("console-" + id + ".out");
-        const std::string jar = pathText(dir / "console.cookies");
-        const std::string responseText = pathText(response);
-        if (jar.empty() || responseText.empty() || jar.find('"') != std::string::npos) {
-            failure = "账号目录路径无法使用";
+        if (path.find_first_of(" \t\r\n\"\\") != std::string::npos) {
+            failure = "管理接口路径不正确";
             return false;
         }
-        {
-            std::ofstream file(config, std::ios::binary | std::ios::trunc);
-            if (!file) {
-                failure = "无法写入请求配置";
-                return false;
-            }
-            file << "url = \"http://127.0.0.1:" << params.consolePort << "/console/api/" << curlEscape(path) << "\"\n"
-                 << "proto = \"=http\"\n"
-                 << "noproxy = \"*\"\n"
-                 << "connect-timeout = 2\nmax-time = 8\nsilent\n"
-                 << "max-filesize = 4194304\n"
-                 << "cookie = \"" << curlEscape(jar) << "\"\n"
-                 << "cookie-jar = \"" << curlEscape(jar) << "\"\n"
-                 << "output = \"" << curlEscape(responseText) << "\"\n"
-                 << "write-out = \"%{http_code}\"\n";
-            if (method == "POST") {
-                file << "request = \"POST\"\n"
-                     << "header = \"Content-Type: application/json\"\n"
-                     << "data-raw = \"" << curlEscape(body.empty() ? std::string("{}") : body) << "\"\n";
-            }
+        const auto id = std::to_string(++sequence);
+        const fs::path response = dir / ("console-" + id + ".out");
+        dice::http::Fetch req;
+        req.url = "http://127.0.0.1:" + std::to_string(params.consolePort) + "/console/api/" + path;
+        req.method = method;
+        req.output = response;
+        req.cookieFile = dir / "console.cookies";
+        req.connectTimeoutSec = 2;
+        req.timeoutSec = 8;
+        req.maxBytes = 4 * 1024 * 1024;
+        req.allowHttp = true;
+        req.noProxy = true;
+        if (method == "POST") {
+            req.body = body.empty() ? std::string("{}") : body;
+            req.headers.emplace_back("Content-Type", "application/json");
         }
-        const auto run = dice::proc::curlConfig(config, 64);
+        const auto run = dice::http::fetchToFile(req);
         std::error_code ec;
-        fs::remove(config, ec);
         text = readFile(response, 4 * 1024 * 1024);
         fs::remove(response, ec);
-        http = std::atoi(run.output.c_str());
+        http = run.http;
         if (http == 0) {
-            failure = "openopq 管理接口没有响应";
+            failure = run.error.empty() ? "openopq 管理接口没有响应" : run.error;
             return false;
         }
         return true;
@@ -630,7 +629,7 @@ private:
     }
 
     bool ensureBinary(const Manifest& manifest, fs::path& binary, int& http, std::string& failure) {
-        const Asset* asset = assetFor(manifest, currentOs(), currentArch());
+        const Asset* asset = assetForBest(manifest, currentOs(), currentArch());
         if (!asset) {
             failure = "中心没有提供本系统（" + currentOs() + "-" + currentArch() + "）的 openopq";
             return false;
@@ -764,6 +763,13 @@ private:
             }
             DICE_LOG_INFO_M("内置登录", "账号 {}：启动 openopq {}（管理端口 {}）。",
                             params.adapterId, manifest.version, params.consolePort);
+#if defined(__ANDROID__)
+            if (const std::string problem = androidGnuLinuxBinary(binary); !problem.empty()) {
+                setStage("failed", problem);
+                DICE_LOG_ERROR_M("内置登录", "账号 {}：{}。", params.adapterId, problem);
+                break;
+            }
+#endif
             const auto startedAt = std::chrono::steady_clock::now();
             const auto result = dice::proc::runPathsCancellable(
                 fs::absolute(binary),

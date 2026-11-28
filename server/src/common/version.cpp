@@ -25,7 +25,10 @@ std::string compilerString() {
     if (minor.size() < 2) minor = "0" + minor;
     return "MSVC " + std::to_string(v / 100) + "." + minor;
 #elif defined(__clang__)
-    return std::string("Clang ") + __clang_version__;
+    // __clang_version__ on NDK/Apple includes a git URL or (clang-xxxx) suffix;
+    // .bot would then leak a link plus a hash. Same major.minor.patch as GNUC.
+    return "Clang " + std::to_string(__clang_major__) + "." +
+           std::to_string(__clang_minor__) + "." + std::to_string(__clang_patchlevel__);
 #elif defined(__GNUC__)
     return "GNUC " + std::to_string(__GNUC__) + "." +
            std::to_string(__GNUC_MINOR__) + "." + std::to_string(__GNUC_PATCHLEVEL__);

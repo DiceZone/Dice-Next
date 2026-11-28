@@ -93,6 +93,7 @@ TEST(BotInfo, CompilerVersionTimestampAndAdapterAreFromRunningProgram) {
     const auto lines = botInfoLines(f.run());
     ASSERT_EQ(lines.size(), size_t(6));
     ASSERT_TRUE(lines[0].find(" Ver " + versionString() + "(") != std::string::npos);
+    ASSERT_TRUE(compilerString().find("http") == std::string::npos);
     ASSERT_EQ(lines[1], "[" + compilerString() + " " + buildTime() + " For Adapter/qq_official]");
     f.message.platform = "onebot_v11";
     ASSERT_EQ(botInfoLines(f.run())[1], "[" + compilerString() + " " + buildTime() + " For Adapter/OnebotV11]");

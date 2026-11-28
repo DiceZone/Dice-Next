@@ -108,8 +108,10 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/hot_reload.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/version.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/subprocess.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/libcurl_http.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/update_archive.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/backup_archive.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/openopq_runtime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/network_info_service.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/service/mcp_service.cpp
@@ -156,6 +158,7 @@ target_include_directories(dice-next-tests PRIVATE
 
 # Link against the same dependencies as the main server
 target_link_libraries(dice-next-tests PRIVATE
+    CURL::libcurl
     dice-secure-random
     OpenSSL::Crypto
     # qq_gateway_socket.h 是 header-only 的 TLS 客户端，直接用 libssl。测试一旦

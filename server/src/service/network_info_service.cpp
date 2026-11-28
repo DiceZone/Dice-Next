@@ -11,7 +11,7 @@
 #endif
 #include "network_info_service.h"
 #include "../common/logger.h"
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 #include <algorithm>
 #include <array>
 #include <set>
@@ -151,11 +151,17 @@ std::vector<std::string> NetworkInfoService::publicAddress(const Cancelled& canc
     const auto stop = [&] { return cancelled() || std::chrono::steady_clock::now() >= deadline; };
     for (const auto* url : {"https://api.ipify.org", "https://checkip.amazonaws.com"}) {
         if (stop()) break;
-        const auto result = proc::curlCancellable(
-            {"--disable", "--ipv4", "--silent", "--fail", "--proto", "=https", "--noproxy", "*",
-             "--connect-timeout", "2", "--max-time", "3", url}, stop, 128);
-        if (!result.ok() || result.truncated || result.cancelled) continue;
-        auto addresses = normalize({result.output}, true);
+        dice::http::Fetch req;
+        req.url = url;
+        req.connectTimeoutSec = 2;
+        req.timeoutSec = 3;
+        req.maxBytes = 128;
+        req.ipv4Only = true;
+        req.noProxy = true;
+        req.cancelled = stop;
+        const auto result = dice::http::fetch(req);
+        if (!result.ok() || result.cancelled) continue;
+        auto addresses = normalize({result.body}, true);
         if (!addresses.empty()) return addresses;
     }
     return {};

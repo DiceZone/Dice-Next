@@ -1,5 +1,5 @@
 #include "identity_email_service.h"
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 #include <openssl/crypto.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
@@ -28,11 +28,6 @@ bool mailbox(const std::string& s) {
     return at != std::string::npos && at > 0 && at + 1 < s.size()
         && s.find('@', at + 1) == std::string::npos
         && s.find_first_of(" <>\"\\,;:") == std::string::npos;
-}
-std::string quoted(const std::string& s) {
-    std::string out = "\"";
-    for (char c : s) { if (c == '\\' || c == '"') out += '\\'; out += c; }
-    return out + "\"";
 }
 std::string base64Body(const std::string& body) {
     std::string encoded(4 * ((body.size() + 2) / 3) + 1, '\0');
@@ -72,7 +67,7 @@ bool smtpSend(const Json& s, const std::string& to, const std::string& body) {
         if (!fs::create_directory(path)) return false;
         tmp.dir = path;
         fs::permissions(path, fs::perms::owner_all, fs::perm_options::replace);
-        const auto eml = path / "mail.eml", config = path / "curl.cfg";
+        const auto eml = path / "mail.eml";
         const auto from = s.at("from").get<std::string>();
         {
             std::ofstream out(eml, std::ios::binary);
@@ -81,21 +76,20 @@ bool smtpSend(const Json& s, const std::string& to, const std::string& body) {
                 << "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n" << base64Body(body);
             out.close(); if (!out) return false;
         }
-        {
-            std::ofstream out(config, std::ios::binary);
-            const bool ssl = s.value("ssl", true);
-            out << "url = " << quoted(std::string(ssl ? "smtps://" : "smtp://") + s.at("host").get<std::string>()
-                + ":" + std::to_string(s.at("port").get<int>())) << "\n"
-                << "mail-from = " << quoted(from) << "\nmail-rcpt = " << quoted(to) << "\n"
-                << "user = " << quoted(s.at("user").get<std::string>() + ":" + s.at("pass").get<std::string>()) << "\n"
-                << "upload-file = " << quoted(eml.generic_string()) << "\n"
-                << "proto = \"=smtp,smtps\"\nmax-time = 15\nconnect-timeout = 5\nsilent\n";
-            if (!ssl) out << "ssl-reqd\n"; // STARTTLS is mandatory; never send credentials in plaintext.
-            out.close(); if (!out) return false;
-        }
-        for (const auto& p : {eml, config}) fs::permissions(p, fs::perms::owner_read | fs::perms::owner_write,
-                                                          fs::perm_options::replace);
-        return proc::curlConfig(config, 1024).ok();
+        fs::permissions(eml, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
+        const bool ssl = s.value("ssl", true);
+        dice::http::Fetch req;
+        req.url = std::string(ssl ? "smtps://" : "smtp://") + s.at("host").get<std::string>()
+            + ":" + std::to_string(s.at("port").get<int>());
+        req.mailFrom = from;
+        req.mailRcpt = to;
+        req.username = s.at("user").get<std::string>();
+        req.password = s.at("pass").get<std::string>();
+        req.smtpStartTls = !ssl;
+        req.uploadFile = eml;
+        req.connectTimeoutSec = 5;
+        req.timeoutSec = 15;
+        return dice::http::fetch(req).ok();
     } catch (...) { return false; }
 }
 } // namespace

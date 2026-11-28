@@ -13,7 +13,7 @@
 #include "../core/identity/identity_binding.h"
 #include "../common/logger.h"
 #include "../common/markdown.h"
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 
 #include <drogon/HttpClient.h>
 
@@ -204,50 +204,33 @@ private:
         std::thread([self, method, path, bodyStr, outgoing, context, outbound, onOk = std::move(onOk)] {
             ProcessingScope processingScope(context);
             OutboundScope outputScope(outbound.output, outbound.part, outbound.parts);
-            namespace fs = std::filesystem;
-            auto esc = [](const std::string& s) {
-                std::string o; o.reserve(s.size() + 8);
-                for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; }
-                return o;
-            };
-            static std::atomic<long long> seq{0};
-            const long long id = ++seq;
-            std::error_code ec;
-            fs::path tmp = fs::temp_directory_path(ec);
-            fs::path cfgF = tmp / ("dndc_" + std::to_string(id) + ".cfg");
-            fs::path bodyF = tmp / ("dndc_" + std::to_string(id) + ".body");
             std::string out;
+            int status = 0;
             try {
-                {
-                    std::ofstream cf(cfgF, std::ios::binary);
-                    cf << "url = \"https://discord.com" << esc(path) << "\"\n";
-                    cf << "request = \"" << esc(method) << "\"\n";
-                    cf << "max-time = 15\nsilent\nshow-error\n";
-                    cf << "proto = \"=https\"\n";
-                    cf << "write-out = \"\\n%{http_code}\"\n";
-                    cf << "header = \"Authorization: Bot " << esc(self->token_) << "\"\n";
-                    cf << "header = \"User-Agent: DiceNext (https://github.com/DiceZone/Dice-Next, 3.0)\"\n";
-                    if (!bodyStr.empty()) {
-                        cf << "header = \"Content-Type: application/json\"\n";
-                        std::ofstream bf(bodyF, std::ios::binary); bf << bodyStr;
-                        cf << "data-binary = \"@" << esc(bodyF.string()) << "\"\n";
-                    }
+                dice::http::Fetch req;
+                req.url = "https://discord.com" + path;
+                req.method = method;
+                req.timeoutSec = 15;
+                req.maxBytes = 2 * 1024 * 1024;
+                req.userAgent = "DiceNext (https://github.com/DiceZone/Dice-Next, 3.0)";
+                req.headers.emplace_back("Authorization", "Bot " + self->token_);
+                if (!bodyStr.empty()) {
+                    req.body = bodyStr;
+                    req.headers.emplace_back("Content-Type", "application/json");
                 }
                 if (outgoing) outgoing->submitted();
-                out = dice::proc::curlConfig(cfgF, 2 * 1024 * 1024).output;
+                const auto run = dice::http::fetch(req);
+                status = run.http;
+                out = run.body;
+                if (!run.transportOk() && out.empty()) out = run.error;
             } catch (...) {}
-            fs::remove(cfgF, ec); fs::remove(bodyF, ec);
-
-            int status = 0;
-            const auto nl = out.find_last_of('\n');
-            if (nl != std::string::npos) { status = std::atoi(out.c_str() + nl + 1); out.erase(nl); }
             if (status < 200 || status >= 300) {
                 self->lastError_ = "Discord 请求失败: " + path;
                 self->connecting_ = false;
                 if (outgoing) outgoing->failed(fmt::format("平台请求未成功：HTTP {}；{}", status,
-                    out.empty() ? std::string("未取得响应，请检查网络与 curl") : out.substr(0, 300)));
+                    out.empty() ? std::string("未取得响应，请检查网络") : out.substr(0, 300)));
                 else DICE_LOG_WARN("Discord '{}': {} failed: HTTP {} {}", self->name(), path, status,
-                              out.empty() ? std::string("(无响应，请检查网络与 curl)") : out.substr(0, 300));
+                              out.empty() ? std::string("(无响应，请检查网络)") : out.substr(0, 300));
                 return;
             }
             auto j = json::parse(out, nullptr, false);

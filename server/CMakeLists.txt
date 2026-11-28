@@ -58,6 +58,7 @@ function(dicenext_require_secure_brotli)
 endfunction()
 dicenext_require_secure_brotli()
 find_package(OpenSSL REQUIRED)
+find_package(CURL REQUIRED)
 
 # nlohmann/json — JSON parsing
 find_package(nlohmann_json REQUIRED)
@@ -162,8 +163,10 @@ set(SOURCES
     src/common/markdown_md4c.cpp
     src/common/hot_reload.cpp
     src/common/subprocess.cpp
+    src/common/libcurl_http.cpp
     src/service/update_service.cpp
     src/service/update_archive.cpp
+    src/service/backup_archive.cpp
     src/service/openopq_runtime.cpp
     src/service/network_info_service.cpp
     src/service/cloud_card_service.cpp
@@ -298,6 +301,7 @@ target_link_libraries(${DICENEXT_CORE_TARGET} PRIVATE
     OpenSSL::Crypto
     OpenSSL::SSL
     nlohmann_json::nlohmann_json
+    CURL::libcurl
     sqlite_orm::sqlite_orm
     spdlog::spdlog
     yaml-cpp

@@ -3,7 +3,13 @@
     <string name="app_name">Dice!Next</string>
     <string name="notification_channel">Dice!Next</string>
     <string name="notification_running">骰子服务正在运行</string>
+    <string name="splash_starting">Dice!Next\n正在启动…</string>
+    <string name="splash_timeout">核心仍在初始化，请稍候…</string>
+    <string name="splash_missing_lib">缺少 libdice-next.so。请重新安装完整 APK。</string>
+    <string name="splash_load_failed">无法加载本地核心库。</string>
     <string name="download_started">正在下载 %1$s</string>
     <string name="open_url_failed">无法打开链接，请先安装 QQ</string>
     <string name="open_url_chooser">打开方式</string>
+    <string name="install_unknown_apps">请先允许 Dice!Next 安装应用，然后再点安装</string>
+    <string name="install_apk_missing">找不到已下载的 APK，请重新下载更新</string>
 </resources>

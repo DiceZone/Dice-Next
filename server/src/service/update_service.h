@@ -50,6 +50,9 @@ std::string buildMirroredUrl(const std::string& originalUrl, const std::string& 
 std::vector<std::string> githubAssetNameCandidates(const std::string& manifestName);
 std::string currentOs();
 std::string currentArch();
+bool looksLikeAndroidApk(const std::filesystem::path& path);
+bool prepareApkUpdateStage(const std::filesystem::path& archive,
+                           const ReleaseManifest& manifest, std::string& error);
 
 struct ContainerDetectionInput {
     std::string diceNextMarker;
@@ -137,6 +140,7 @@ private:
     Settings settings() const;
     bool downloadSupported() const;
     bool installSupported() const;
+    bool scheduledInstallSupported() const;
     std::string containerUpdateError() const;
     bool isBusyLocked() const;
     bool queueJobLocked(Job job, const std::string& phase, std::string& error);

@@ -153,6 +153,28 @@ TEST(OpenOpqRuntime, ReverseTransportWritesBackConnection) {
     ASSERT_FALSE(validTransport("http"));
 }
 
+TEST(OpenOpqRuntime, AndroidFallsBackToLinuxAsset) {
+    auto doc = nlohmann::json::parse(kPayload);
+    doc["assets"] = nlohmann::json::array({
+        {{"os", "windows"}, {"arch", "amd64"},
+         {"url", "https://cloud.dice.zone/openopq/v1.3.0-rc.1/windows-amd64/openopq.exe"},
+         {"sha256", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+         {"size", 3627896}},
+        {{"os", "linux"}, {"arch", "arm64"},
+         {"url", "https://cloud.dice.zone/openopq/v1.3.0-rc.1/linux-arm64/openopq"},
+         {"sha256", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+         {"size", 4000000}},
+    });
+    Manifest manifest;
+    std::string error;
+    ASSERT_TRUE(parseSignedManifest(signedFixture(doc), kTestPublicKey, manifest, error));
+    ASSERT_TRUE(assetFor(manifest, "android", "arm64") == nullptr);
+    const Asset* asset = assetForBest(manifest, "android", "arm64");
+    ASSERT_TRUE(asset != nullptr);
+    ASSERT_EQ(asset->os, std::string("linux"));
+    ASSERT_EQ(asset->arch, std::string("arm64"));
+}
+
 TEST(OpenOpqRuntime, PicksDistinctLoopbackPortAndToken) {
     const int port = pickFreeLoopbackPort();
     ASSERT_TRUE(port > 0 && port < 65536);

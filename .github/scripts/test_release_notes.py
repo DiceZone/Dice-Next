@@ -373,7 +373,7 @@ class WorkflowWiringTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[1] / "workflows/release.yml").read_text(encoding="utf-8")
         self.assertIn("source_sha: ${{ steps.source.outputs.sha }}", workflow)
         self.assertIn("ref: ${{ needs.webui.outputs.source_sha }}", workflow)
-        self.assertIn("needs: [webui, linux, windows, macos-arm64, backend-tests]", workflow)
+        self.assertIn("needs: [webui, linux, windows, macos-arm64, android-signing, android, backend-tests]", workflow)
         self.assertIn("CORE_SHA: ${{ github.sha }}", workflow)
         self.assertIn('git show "$CORE_SHA":.github/scripts/release-notes.py', workflow)
         self.assertIn("actions: read", workflow)

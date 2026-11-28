@@ -507,7 +507,6 @@ public:
             nameWarmGroups_.clear(); nameRemovedGroups_.clear(); nameWarmCursor_.clear(); nameDiscoveryAt_ = nameNextWorkAt_ = 0;
             nameGroupEpochs_.clear();
             lastNameActivity_ = 0;
-            nameClient_.reset();
             if (auto current = currentSession()) current->clearAccessToken();
             mediaIndex_.reset();
         }
@@ -603,7 +602,6 @@ public:
     static void beginQrLogin(QrCallback cb) {
         std::string key(32, '\0');
         if (RAND_bytes(reinterpret_cast<unsigned char*>(key.data()), 32) != 1) { cb({false,{},"无法生成扫码密钥"}); return; }
-        auto client = httpsClient("q.qq.com"); if(!client){cb({false,{},"无法解析 q.qq.com"});return;}
         auto req = drogon::HttpRequest::newHttpRequest();
         req->setMethod(drogon::Post); req->setPath("/lite/create_bind_task");
         req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
@@ -611,11 +609,11 @@ public:
         req->addHeader("User-Agent", "DiceNext-QQBot/3.0");
         req->addHeader("Host", "q.qq.com");
         req->setBody(json{{"key", drogon::utils::base64Encode(key)}}.dump());
-        client->sendRequest(req, [key=std::move(key), cb=std::move(cb)](drogon::ReqResult r, const drogon::HttpResponsePtr& resp) mutable {
+        catofficial::api::httpsSend("q.qq.com", req, [key=std::move(key), cb=std::move(cb)](drogon::ReqResult r, const drogon::HttpResponsePtr& resp) mutable {
             try {
                 if (r != drogon::ReqResult::Ok || !resp) {
                     DICE_LOG_WARN("QQOfficial QR task request failed: result={}", static_cast<int>(r));
-                    throw std::runtime_error("创建扫码任务失败（网络请求未完成）");
+                    throw std::runtime_error("创建扫码任务失败（" + catofficial::api::httpsFailure(r) + "）");
                 }
                 if (resp->statusCode() >= 300) {
                     DICE_LOG_WARN("QQOfficial QR task request failed: HTTP {}", static_cast<int>(resp->statusCode()));
@@ -637,13 +635,13 @@ public:
     static void pollQrLogin(const std::string& sid, QrCallback cb) {
         QrSession session;
         { std::lock_guard lock(qrMutex_); auto it=qrSessions_.find(sid); if(it==qrSessions_.end()) { cb({false,{},"扫码会话不存在或已过期"}); return; } session=it->second; }
-        auto client=httpsClient("q.qq.com"); if(!client){cb({false,{},"无法解析 q.qq.com"});return;} auto req=drogon::HttpRequest::newHttpRequest();
+        auto req=drogon::HttpRequest::newHttpRequest();
         req->setMethod(drogon::Post); req->setPath("/lite/poll_bind_result"); req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         req->addHeader("Accept", "application/json"); req->addHeader("User-Agent", "DiceNext-QQBot/3.0"); req->addHeader("Host", "q.qq.com");
         req->setBody(json{{"task_id",session.taskId}}.dump());
-        client->sendRequest(req, [sid,session=std::move(session),cb=std::move(cb)](drogon::ReqResult r,const drogon::HttpResponsePtr& resp) mutable {
+        catofficial::api::httpsSend("q.qq.com", req, [sid,session=std::move(session),cb=std::move(cb)](drogon::ReqResult r,const drogon::HttpResponsePtr& resp) mutable {
             try {
-                if(r!=drogon::ReqResult::Ok||!resp) { DICE_LOG_WARN("QQOfficial QR poll failed: result={}", static_cast<int>(r)); throw std::runtime_error("查询扫码状态失败（网络请求未完成）"); }
+                if(r!=drogon::ReqResult::Ok||!resp) { DICE_LOG_WARN("QQOfficial QR poll failed: result={}", static_cast<int>(r)); throw std::runtime_error("查询扫码状态失败（" + catofficial::api::httpsFailure(r) + "）"); }
                 if(resp->statusCode()>=300) throw std::runtime_error("查询扫码状态失败（QQ 服务返回 HTTP "+std::to_string(static_cast<int>(resp->statusCode()))+"）"); auto j=json::parse(resp->body());
                 if(j.value("retcode",-1)!=0) throw std::runtime_error(j.value("msg",std::string("查询扫码状态失败")));
                 auto d=j.value("data",json::object()); int status=d.value("status",0);
@@ -652,8 +650,17 @@ public:
                 if(status!=2) { cb({true,{{"status","pending"}}, {}}); return; }
                 std::string secret=decryptSecret(d.value("bot_encrypt_secret",std::string()),session.key);
                 if(secret.empty()) throw std::runtime_error("扫码凭据解密失败");
+                std::string userOpenId;
+                for (const char* key : {"user_openid", "userOpenid", "openid"}) {
+                    if (!d.contains(key)) continue;
+                    if (d[key].is_string()) userOpenId = d[key].get<std::string>();
+                    else if (d[key].is_number_integer() || d[key].is_number_unsigned()) userOpenId = d[key].dump();
+                    if (!userOpenId.empty()) break;
+                }
+                const auto appId = d.value("bot_appid", std::string());
+                rememberBinderGreet(appId, userOpenId);
                 { std::lock_guard lock(qrMutex_); qrSessions_.erase(sid); }
-                cb({true,{{"status","completed"},{"appId",d.value("bot_appid",std::string())},{"appSecret",secret}}, {}});
+                cb({true,{{"status","completed"},{"appId",appId},{"appSecret",secret},{"userOpenId",userOpenId}}, {}});
             } catch(const std::exception& e){ cb({false,{},e.what()}); }
         });
     }
@@ -735,8 +742,39 @@ private:
     struct QrSession { std::string taskId, key; std::time_t createdAt{}; };
     inline static std::mutex qrMutex_;
     inline static std::unordered_map<std::string,QrSession> qrSessions_;
-    static std::string resolveIpv4(const std::string& host) { return catofficial::api::resolveIpv4(host); }
-    static drogon::HttpClientPtr httpsClient(const std::string& host) { return catofficial::api::httpsClient(host); }
+    inline static std::mutex greetMu_;
+    inline static std::unordered_map<std::string, std::string> pendingGreets_;
+    static void rememberBinderGreet(const std::string& appId, const std::string& openId) {
+        if (appId.empty() || openId.empty()) return;
+        std::lock_guard lock(greetMu_);
+        pendingGreets_[appId] = openId;
+    }
+    void applyOfficialPortrait() {
+        if (loginAvatar_.empty() && !displayQQ_.empty())
+            loginAvatar_ = catofficial::api::qqPortrait(displayQQ_);
+    }
+    void scheduleBinderGreet() {
+        std::weak_ptr<QQOfficialAdapter> weak = weak_from_this();
+        drogon::app().getLoop()->runAfter(2.0, [weak] {
+            if (auto self = weak.lock()) self->flushBinderGreet();
+        });
+    }
+    void flushBinderGreet() {
+        std::string openId;
+        {
+            std::lock_guard lock(greetMu_);
+            auto it = pendingGreets_.find(appId_);
+            if (it == pendingGreets_.end()) return;
+            openId = std::move(it->second);
+            pendingGreets_.erase(it);
+        }
+        if (openId.empty()) return;
+        if (stopping_ || !connected_) {
+            rememberBinderGreet(appId_, openId);
+            return;
+        }
+        sendPrivateMessage(openId, "Dice!Next：机器人已创建成功。请返回 App 或网页继续操作。");
+    }
     // 会话号会放进 URL 路径段。标准 Base64 约一半概率带 '/' 或 '+'，drogon 解码后
     // 不再匹配 /qr/{1}，表现为二维码偶发 404 加载不出来；改用十六进制，只含 [0-9a-f]。
     static std::string randomSessionId() {
@@ -1237,10 +1275,7 @@ private:
         };
         if (testApi_) { testApi_(method, path, body, std::move(finish)); return; }
         cb = std::move(finish);
-        drogon::HttpClientPtr client;
-        if (nameRequest) { std::lock_guard lock(metaMu_); client = nameClient_; }
-        if (!client) client = httpsClient(catofficial::api::kHost);
-        catofficial::api::call(client, method, path, body, token(), std::move(cb), nameRequest ? 10.0 : 0.0, logger());
+        catofficial::api::call(method, path, body, token(), std::move(cb), nameRequest ? 10.0 : 0.0, logger());
     }
     catofficial::Logger logger() const {
         return [name = this->name()](catofficial::LogLevel level, const std::string& message) {
@@ -1266,11 +1301,8 @@ private:
         if (session_) return session_;
         std::weak_ptr<QQOfficialAdapter> weak = weak_from_this();
         catofficial::Session::Hooks hooks;
-        hooks.token = [weak](const drogon::HttpClientPtr& client) {
+        hooks.token = [weak](const drogon::HttpClientPtr&) {
             auto self = weak.lock(); if (!self || self->stopping_) return;
-            // Name refreshes reuse this resolved asynchronous client, so they do
-            // not repeat blocking DNS in a reply.
-            { std::lock_guard lock(self->metaMu_); self->nameClient_ = client; }
             if (!self->connected_) self->fetchBotProfile();
         };
         hooks.ready = [weak](const json& d) {
@@ -1278,12 +1310,15 @@ private:
             auto u = d.value("user", json::object());
             self->loginId_ = qqprotocol::text(u, "id"); self->loginName_ = qqprotocol::text(u, "username");
             self->loginAvatar_ = QQOfficialNameCache::avatarUrl(qqprotocol::text(u, "avatar"));
+            self->applyOfficialPortrait();
             self->connected_ = true; self->connecting_ = false;
             self->beginNameMaintenance();
+            self->scheduleBinderGreet();
         };
         hooks.resumed = [weak] {
             auto self = weak.lock(); if (!self) return;
             self->connected_ = true; self->connecting_ = false; self->beginNameMaintenance();
+            self->scheduleBinderGreet();
         };
         hooks.dispatch = [weak](const std::string& type, const json& d, const std::string& eventId) {
             if (auto self = weak.lock()) self->dispatch(type, d, eventId);
@@ -1302,12 +1337,13 @@ private:
     }
     static std::string queryValue(const std::string& url,const std::string& name){ return catofficial::api::queryValue(url, name); }
     void fetchBotProfile(){
-        auto self=shared_from_this(); auto c=httpsClient(catofficial::api::kHost); if(!c){finishConnect();return;}
-        catofficial::api::fetchProfile(c, token(), [self](std::optional<catofficial::api::BotProfile> profile, std::string error){
+        auto self=shared_from_this();
+        catofficial::api::fetchProfile({}, token(), [self](std::optional<catofficial::api::BotProfile> profile, std::string error){
             if(profile){
                 self->loginId_=profile->id; self->loginName_=profile->username;
                 self->loginAvatar_=QQOfficialNameCache::avatarUrl(profile->avatar); self->shareUrl_=profile->shareUrl;
                 const std::string realQQ=catofficial::api::robotUin(self->shareUrl_); if(!realQQ.empty()) self->displayQQ_=realQQ;
+                self->applyOfficialPortrait();
             }
             else if(error.empty()) DICE_LOG_WARN("QQOfficial '{}': 获取机器人资料失败，将尝试生成分享链接",self->name());
             else DICE_LOG_WARN("QQOfficial '{}': 解析机器人资料失败：{}",self->name(),error);
@@ -1316,9 +1352,14 @@ private:
         });
     }
     void fetchShareUrl(){
-        auto self=shared_from_this(); auto c=httpsClient(catofficial::api::kHost); if(!c){finishConnect();return;}
-        catofficial::api::generateShareUrl(c, token(), "dicenext", [self](std::string url, std::string error){
-            if(!url.empty()){ self->shareUrl_=url; const std::string realQQ=catofficial::api::robotUin(url); if(!realQQ.empty()) self->displayQQ_=realQQ; }
+        auto self=shared_from_this();
+        catofficial::api::generateShareUrl({}, token(), "dicenext", [self](std::string url, std::string error){
+            if(!url.empty()){
+                self->shareUrl_=url;
+                const std::string realQQ=catofficial::api::robotUin(url);
+                if(!realQQ.empty()) self->displayQQ_=realQQ;
+                self->applyOfficialPortrait();
+            }
             else if(error.empty()) DICE_LOG_WARN("QQOfficial '{}': 生成机器人分享链接失败，将继续连接 Gateway",self->name());
             else DICE_LOG_WARN("QQOfficial '{}': 解析机器人分享链接失败：{}",self->name(),error);
             if(!self->stopping_&&!self->connected_) self->finishConnect();
@@ -1331,6 +1372,7 @@ private:
             connecting_ = false;
             lastError_.clear();
             beginNameMaintenance();
+            scheduleBinderGreet();
             return;
         }
         session()->openGateway();
@@ -1783,7 +1825,6 @@ private:
                 cb(apiResult(false, 0, "平台返回了无效的素材上传地址。")); return;
             }
             // 预签名 URL 的 query 不能被 drogon 再编码，否则 COS 验签失败。
-            auto client = self->testMaterial_ ? nullptr : drogon::HttpClient::newHttpClient("https://" + url.host);
             auto request = drogon::HttpRequest::newHttpRequest();
             request->setMethod(drogon::Put);
             request->setPathEncode(false);
@@ -1791,7 +1832,7 @@ private:
             request->setContentTypeString(mime);
             request->addHeader("Host", url.host);
             request->setBody(std::move(bytes));
-            auto finish = [self, client, uploadId, md5, generation, cb = std::move(cb)](
+            auto finish = [self, uploadId, md5, generation, cb = std::move(cb)](
                 drogon::ReqResult status, const drogon::HttpResponsePtr& response) mutable {
                 if (status != drogon::ReqResult::Ok || !response || response->statusCode() < 200 || response->statusCode() >= 300) {
                     const std::string detail = status != drogon::ReqResult::Ok
@@ -1812,8 +1853,7 @@ private:
                 self->officialApi(drogon::Post, "/v2/media-images/complete", {{"upload_id", uploadId}, {"md5", etag}}, std::move(cb));
             };
             if (self->testMaterial_) self->testMaterial_(request, std::move(finish));
-            else if (!client) cb(apiResult(false, 0, "无法连接素材存储。"));
-            else client->sendRequest(request, std::move(finish), 60.0);
+            else catofficial::api::httpsSend(url.host, request, std::move(finish), 60.0, url.port);
         });
     }
 
@@ -1886,7 +1926,6 @@ private:
             if (eventId.empty()) eventId = takePassiveEvent(m.type, target);
             if (!eventId.empty()) body["event_id"] = eventId;
         }
-        auto c2 = httpsClient("api.bot.qq.com"); if (!c2) { outgoing.failed("无法解析 api.bot.qq.com，没有提交发送"); sendCaptionFallback(m, "无法解析 api.bot.qq.com"); return; }
         auto r2 = drogon::HttpRequest::newHttpRequest();
         r2->setMethod(drogon::Post); r2->setPath(msgPath);
         r2->setContentTypeCode(drogon::CT_APPLICATION_JSON);
@@ -1895,7 +1934,7 @@ private:
         r2->setBody(body.dump());
         auto self = shared_from_this();
         outgoing.submitted();
-        c2->sendRequest(r2, [self, m, target, fileInfo, fileType, tryMix, eventId, msgPath, outgoing](drogon::ReqResult rr2, const drogon::HttpResponsePtr& resp2) {
+        catofficial::api::httpsSend(catofficial::api::kHost, r2, [self, m, target, fileInfo, fileType, tryMix, eventId, msgPath, outgoing](drogon::ReqResult rr2, const drogon::HttpResponsePtr& resp2) {
             self->safeMediaStep("发送富媒体消息回调", [&] {
                 if (rr2 != drogon::ReqResult::Ok || !resp2 || resp2->statusCode() >= 300) {
                     self->lastError_ = "QQ 官方富媒体消息发送失败";
@@ -2231,8 +2270,6 @@ private:
         else if (m.type == MessageType::kGroup) path = "/v2/groups/" + target + "/messages";
         else path = "/channels/" + target + "/messages";
 
-        auto client = httpsClient("api.bot.qq.com");
-        if (!client) { lastError_ = "无法解析 api.bot.qq.com"; OutboundAttempt::prepare("QQ 官方「" + this->name() + "」", destination, text).failed(lastError_); return; }
         // Only explicit Markdown is rich text. Card mode can place literal text
         // in a Markdown container, but escapes it first so punctuation survives.
         json body = textPayload(m, text, format, fallbackLevel);
@@ -2262,7 +2299,7 @@ private:
         }
         request->setBody(dumpJsonUtf8Safe(body));
         outgoing.submitted();
-        client->sendRequest(request, [self = shared_from_this(), path, message = m, text, format, useMarkdown, fallbackLevel, outgoing, viaGroup](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
+        catofficial::api::httpsSend(catofficial::api::kHost, request, [self = shared_from_this(), path, message = m, text, format, useMarkdown, fallbackLevel, outgoing, viaGroup](drogon::ReqResult result, const drogon::HttpResponsePtr& response) {
             const bool httpRejected = response && response->statusCode() >= 300;
             if (viaGroup && httpRejected) {
                 // 借用群消息私聊要求对方是机器人好友；被拒时改按主动消息再发一次。
@@ -2336,7 +2373,6 @@ private:
     MaterialTransport testMaterial_;
     std::unique_ptr<qq_media::Index> mediaIndex_;
     std::filesystem::path mediaIndexDirOverride_;
-    drogon::HttpClientPtr nameClient_;
     std::optional<trantor::TimerId> nameMaintenanceTimer_;
     std::optional<std::time_t> nameTimeForTest_;
     std::atomic<uint64_t> nameGeneration_{0};

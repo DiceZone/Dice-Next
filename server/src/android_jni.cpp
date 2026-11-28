@@ -5,6 +5,7 @@
 #include <jni.h>
 #include <ares.h>
 #include <android/log.h>
+#include <dlfcn.h>
 
 #include <atomic>
 #include <csignal>
@@ -13,12 +14,17 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "platform/android_host.h"
+
 int main(int argc, char* argv[]);
 
 namespace {
 
 constexpr const char* kTag = "DiceNext";
 std::atomic<bool> g_running{false};
+JavaVM* g_jvm = nullptr;
+jclass g_nativeClass = nullptr;
+jmethodID g_installApk = nullptr;
 
 void prependPath(const std::string& dir) {
     const char* old = std::getenv("PATH");
@@ -31,6 +37,70 @@ void prependPath(const std::string& dir) {
 }
 
 }  // namespace
+
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
+    g_jvm = vm;
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || !env)
+        return JNI_ERR;
+    const jclass local = env->FindClass("zone/dice/dicenext/Native");
+    if (!local) return JNI_ERR;
+    g_nativeClass = static_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+    if (!g_nativeClass) return JNI_ERR;
+    g_installApk = env->GetStaticMethodID(
+        g_nativeClass, "installApk", "(Ljava/lang/String;)Ljava/lang/String;");
+    if (!g_installApk) return JNI_ERR;
+    return JNI_VERSION_1_6;
+}
+
+bool androidInstallApk(const std::string& path, std::string& error) {
+    if (!g_jvm || !g_nativeClass || !g_installApk) {
+        error = "Android installer is not ready";
+        return false;
+    }
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    const jint envState = g_jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+    if (envState == JNI_EDETACHED) {
+        if (g_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) {
+            error = "cannot attach to the Java VM";
+            return false;
+        }
+        attached = true;
+    } else if (envState != JNI_OK || !env) {
+        error = "cannot obtain a JNI environment";
+        return false;
+    }
+    jstring jpath = env->NewStringUTF(path.c_str());
+    if (!jpath) {
+        if (attached) g_jvm->DetachCurrentThread();
+        error = "cannot pass the APK path to Java";
+        return false;
+    }
+    auto jresult = static_cast<jstring>(
+        env->CallStaticObjectMethod(g_nativeClass, g_installApk, jpath));
+    env->DeleteLocalRef(jpath);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        if (attached) g_jvm->DetachCurrentThread();
+        error = "package installer threw an exception";
+        return false;
+    }
+    bool ok = true;
+    if (jresult) {
+        const char* text = env->GetStringUTFChars(jresult, nullptr);
+        if (text && text[0] != '\0') {
+            error = text;
+            ok = false;
+        }
+        if (text) env->ReleaseStringUTFChars(jresult, text);
+        env->DeleteLocalRef(jresult);
+    }
+    if (attached) g_jvm->DetachCurrentThread();
+    return ok;
+}
 
 extern "C" JNIEXPORT void JNICALL
 Java_zone_dice_dicenext_Native_initDns(JNIEnv* env, jclass, jobject connectivityManager) {
@@ -66,7 +136,6 @@ Java_zone_dice_dicenext_Native_run(JNIEnv* env, jclass, jstring filesDir) {
     setenv("TMPDIR", (root + "/tmp").c_str(), 1);
     setenv("TMP", (root + "/tmp").c_str(), 1);
     setenv("TEMP", (root + "/tmp").c_str(), 1);
-    setenv("DICENEXT_CONTAINER", "1", 1);
     prependPath("/system/bin");
     prependPath(root + "/bin");
     const auto cert = root + "/cacert.pem";

@@ -8,6 +8,7 @@
 #include "../storage/legacy_import_resources.h"
 #include "../common/utils.h"
 #include "../common/subprocess.h"
+#include "backup_archive.h"
 #include "image_resource_service.h"
 #include "mcp_service.h"
 #include <nlohmann/json.hpp>
@@ -249,55 +250,47 @@ inline bool isSafeArchiveName(const std::string& name) {
            (name.rfind("dicenext_bak_", 0) == 0 || name.rfind("DiceNext-", 0) == 0);
 }
 
-/// An archive tool invocation: a program and its arguments, started directly.
-/// Building a command string meant a shell had to take it apart again, which on
-/// Windows put cmd.exe in the process tree of every backup and restore.
+/// Archive operation for runArchive().  Implemented in-process with miniz so
+/// Android and desktop hosts do not need a system zip/unzip/tar.
 struct ArchiveCommand {
     std::string program;
     std::vector<fs::path> args;
-    fs::path workingDirectory;   ///< empty inherits the caller's
+    fs::path workingDirectory;   ///< create: staging directory
 };
 
 inline dice::proc::Result runArchive(const ArchiveCommand& command, std::size_t outputLimit = 0) {
-    return dice::proc::runPaths(command.program, command.args, outputLimit, false,
-                                command.workingDirectory);
+    if (command.program == "zip-list" && !command.args.empty())
+        return zipList(command.args[0], outputLimit);
+    if (command.program == "zip-create" && !command.args.empty()) {
+        std::vector<fs::path> members(command.args.begin() + 1, command.args.end());
+        return zipCreate(command.workingDirectory, command.args[0], members);
+    }
+    if (command.program == "zip-extract" && command.args.size() >= 2)
+        return zipExtract(command.args[0], command.args[1]);
+    if (command.program == "zip-manifest" && !command.args.empty())
+        return zipRead(command.args[0], "manifest.json", outputLimit);
+    dice::proc::Result failed;
+    failed.output = "unknown archive command";
+    return failed;
 }
 
 inline ArchiveCommand archiveListCommand(const fs::path& archive) {
-#ifdef _WIN32
-    return {dice::proc::systemTool("tar.exe"), {"-tf", archive}, {}};
-#else
-    return {"unzip", {"-Z1", archive}, {}};
-#endif
+    return {"zip-list", {archive}, {}};
 }
 
 inline ArchiveCommand archiveCreateCommand(const fs::path& stage, const fs::path& archive) {
-#ifdef _WIN32
-    ArchiveCommand command{dice::proc::systemTool("tar.exe"),
-            {"-a", "-cf", archive, "-C", stage, "manifest.json", "config", "data"}, {}};
-#else
-    // Starting the child in the stage directory replaces the old "cd ... && zip",
-    // the one command here that genuinely needed a shell.
-    ArchiveCommand command{"zip", {"-qr", fs::absolute(archive), "manifest.json", "config", "data"}, stage};
-#endif
+    ArchiveCommand command{"zip-create",
+            {fs::absolute(archive), "manifest.json", "config", "data"}, stage};
     if (fs::is_directory(stage / "image")) command.args.push_back("image");
     return command;
 }
 
 inline ArchiveCommand archiveExtractCommand(const fs::path& archive, const fs::path& destination) {
-#ifdef _WIN32
-    return {dice::proc::systemTool("tar.exe"), {"-xf", archive, "-C", destination}, {}};
-#else
-    return {"unzip", {"-q", archive, "-d", destination}, {}};
-#endif
+    return {"zip-extract", {archive, destination}, {}};
 }
 
 inline ArchiveCommand archiveManifestCommand(const fs::path& archive) {
-#ifdef _WIN32
-    return {dice::proc::systemTool("tar.exe"), {"-xOf", archive, "manifest.json"}, {}};
-#else
-    return {"unzip", {"-p", archive, "manifest.json"}, {}};
-#endif
+    return {"zip-manifest", {archive}, {}};
 }
 
 inline bool validateArchiveFile(const fs::path& archive, std::string& error) {
@@ -418,9 +411,12 @@ inline bool createArchive(Database& db, const fs::path& configPath, fs::path& ar
     if (ec) { error = ec.message(); fs::remove_all(stage, ec); return false; }
     archive = backupDir / ("dicenext_bak_" + stamp() + ".zip");
     if (fs::exists(archive, ec)) { error = "同一秒内已有备份，请稍后重试"; fs::remove_all(stage, ec); return false; }
-    if (runArchive(archiveCreateCommand(stage, archive)).exitCode != 0 ||
-        !fs::is_regular_file(archive, ec) || !validateArchiveFile(archive, error)) {
-        if (error.empty()) error = "无法创建备份压缩包（需要系统 ZIP 工具）";
+    const dice::proc::Result packed = runArchive(archiveCreateCommand(stage, archive));
+    if (packed.exitCode != 0 || !fs::is_regular_file(archive, ec) || !validateArchiveFile(archive, error)) {
+        if (error.empty()) {
+            error = "无法创建备份压缩包";
+            if (!packed.output.empty()) error += "：" + packed.output;
+        }
         fs::remove_all(stage, ec); return false;
     }
     fs::remove_all(stage, ec);

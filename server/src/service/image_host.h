@@ -15,7 +15,7 @@
 
 #include "../config/config_manager.h"
 #include "../config/scoped_settings.h"
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 #include "../message/qq_official_message.h"
 #include "../message/log_images.h"
 #include "image_resource_service.h"
@@ -123,12 +123,38 @@ inline std::vector<std::string> genericUploadArgs(const json& c, const std::stri
 inline std::optional<std::string> uploadGeneric(ConfigManager& cfg, const std::string& localPath,
                                                 const std::string& platform = {}, const std::string& adapterId = {}) {
     const auto c = conf(cfg, platform, adapterId);
-    const auto args = genericUploadArgs(c, localPath);
-    if (args.empty()) return std::nullopt;
+    if (genericUploadArgs(c, localPath).empty()) return std::nullopt;
+    dice::http::Fetch req;
+    req.url = c.value("url", std::string());
+    req.method = "POST";
+    req.timeoutSec = 30;
+    req.allowHttp = true;
+    if (c.contains("headers") && c["headers"].is_array())
+        for (auto& h : c["headers"]) if (h.is_string()) {
+            const auto line = h.get<std::string>();
+            const auto colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::string name = line.substr(0, colon);
+            std::string value = line.substr(colon + 1);
+            while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.erase(value.begin());
+            req.headers.emplace_back(std::move(name), std::move(value));
+        }
+    const auto provider = c.value("provider", std::string());
+    const auto key = c.value("api_key", std::string());
+    if (provider == "lsky") {
+        req.headers.emplace_back("Accept", "application/json");
+        if (!key.empty()) req.headers.emplace_back("Authorization", key.starts_with("Bearer ") ? key : "Bearer " + key);
+    }
+    if (provider == "chevereto" && !key.empty()) req.headers.emplace_back("X-API-Key", key);
+    if (provider == "imgbb" && !key.empty()) req.form.push_back({"key", key, {}, {}, {}});
+    if (c.contains("extra_fields") && c["extra_fields"].is_object())
+        for (auto it = c["extra_fields"].begin(); it != c["extra_fields"].end(); ++it)
+            if (it.value().is_string()) req.form.push_back({it.key(), it.value().get<std::string>(), {}, {}, {}});
+    req.form.push_back({c.value("file_field", std::string("file")), {}, localPath, {}, {}});
+    const auto run = dice::http::fetch(req);
+    if (run.body.empty()) return std::nullopt;
     const auto resultPath = c.value("result_path", std::string("data.url"));
-    std::string out = dice::proc::curl(args).output;
-    if (out.empty()) return std::nullopt;
-    try { auto j = json::parse(out); std::string u = qqmsg::imageUrl(jsonByPath(j, resultPath)); if (!u.empty()) return u; }
+    try { auto j = json::parse(run.body); std::string u = qqmsg::imageUrl(jsonByPath(j, resultPath)); if (!u.empty()) return u; }
     catch (...) {}
     return std::nullopt;
 }

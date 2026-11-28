@@ -13,7 +13,7 @@
 #include <ctime>
 #include <cstdlib>
 
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 #include "image_resource_service.h"
 #include <cctype>
 #include <random>
@@ -66,19 +66,21 @@ inline std::string randToken() {
     std::string s; for (int i = 0; i < 6; ++i) s += hex[rng() & 15]; return s;
 }
 
-// curl 下载（-K 配置文件传参，防 shell 注入）；成功返回 true。
 inline bool download(const std::string& url, const std::string& outPath, size_t maxBytes = 0, int* exitCode = nullptr) {
-    auto escape = [](const std::string& in) { std::string out; for (char c : in) { if (c == '\n' || c == '\r') continue; if (c == '"' || c == '\\') out += '\\'; out += c; } return out; };
-    std::string cfgPath = outPath + ".curlcfg";
-    { std::ofstream cf(image_resources::fromUtf8(cfgPath), std::ios::binary);
-      cf << "url = \"" << escape(url) << "\"\noutput = \"" << escape(outPath) << "\"\n"
-         << "--max-time 6\n--connect-timeout 3\n--silent\n--fail\n--location\nproto = \"=http,https\"\nproto-redir = \"=http,https\"\n";
-      if (maxBytes) cf << "max-filesize = " << maxBytes << "\n"; }
-    // curl runs directly, never through a shell: see common/subprocess.h.
-    const int rc = dice::proc::curlConfig(cfgPath).exitCode;
-    if (exitCode) *exitCode = rc;
-    std::error_code ec; std::filesystem::remove(image_resources::fromUtf8(cfgPath), ec);
-    if (rc != 0) { std::filesystem::remove(image_resources::fromUtf8(outPath), ec); return false; }
+    dice::http::Fetch req;
+    req.url = url;
+    req.output = image_resources::fromUtf8(outPath);
+    req.connectTimeoutSec = 3;
+    req.timeoutSec = 6;
+    req.allowHttp = true;
+    if (maxBytes) req.maxBytes = maxBytes;
+    const auto run = dice::http::fetch(req);
+    if (exitCode) *exitCode = run.ok() ? 0 : (run.curlCode ? run.curlCode : run.http);
+    std::error_code ec;
+    if (!run.ok()) {
+        std::filesystem::remove(image_resources::fromUtf8(outPath), ec);
+        return false;
+    }
     return std::filesystem::exists(image_resources::fromUtf8(outPath), ec);
 }
 

@@ -157,6 +157,9 @@ const StaticHw& staticHw() {
 #include <unistd.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
 
 #if defined(__APPLE__)
 #include <sys/mount.h>
@@ -401,13 +404,42 @@ SysInfo gather(const std::filesystem::path& dataPath) {
 
 
 #elif defined(__linux__)
+#if defined(__ANDROID__)
+    s.osId = "android";
+    s.os = "Android";
+    {
+        char release[PROP_VALUE_MAX]{};
+        if (__system_property_get("ro.build.version.release", release) > 0 && release[0])
+            s.os = std::string("Android ") + release;
+        else {
+            std::ifstream prop("/system/build.prop");
+            std::string line;
+            while (std::getline(prop, line)) {
+                if (line.rfind("ro.build.version.release=", 0) == 0) {
+                    const auto ver = line.substr(25);
+                    if (!ver.empty()) s.os = "Android " + ver;
+                    break;
+                }
+            }
+        }
+    }
+#else
     auto osr = osRelease();
     s.os = osr.count("PRETTY_NAME") ? osr["PRETTY_NAME"] : "Linux";
     std::string id = osr.count("ID") ? osr["ID"] : "linux";
     if (id == "ubuntu" || id == "debian" || id == "centos" || id == "rocky") s.osId = id;
     else if (id == "rhel" || id == "fedora" || id == "almalinux") s.osId = "centos";
     else s.osId = "linux";
+#endif
     s.cpuModel = cpuinfoField("model name");
+    if (s.cpuModel.empty()) s.cpuModel = cpuinfoField("Hardware");
+#if defined(__ANDROID__)
+    if (s.cpuModel.empty()) {
+        char model[PROP_VALUE_MAX]{};
+        if (__system_property_get("ro.product.model", model) > 0 && model[0])
+            s.cpuModel = model;
+    }
+#endif
     s.cpuPhysical = linuxPhysicalCores();
     { std::string mhz = cpuinfoField("cpu MHz"); if (!mhz.empty()) s.cpuMhz = static_cast<int>(atof(mhz.c_str())); }
     s.cpuLoadPct = linuxCpuLoad();

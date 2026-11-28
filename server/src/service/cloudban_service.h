@@ -10,7 +10,7 @@
 // 本地黑名单 CRUD 经 init() 注入的回调转发到 CommandRouter（避免 header 互相包含）。
 
 #include "../common/logger.h"
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 #include "../config/config_manager.h"
 #include "../storage/database.h"   // BanlistRow
 #include "ai_gateway.h"            // dice::ai::httpPostJson —— curl 配置文件出站模板
@@ -42,34 +42,18 @@ inline std::string entryPrefix(long long id) {
     return "[\xe4\xba\x91\xe9\xbb\x91#" + std::to_string(id) + "]";
 }
 
-/// curl GET（配置文件传参防注入，模式同 ai_gateway::httpPostJson，只是不带
-/// request/data-binary 行 → curl 默认 GET）。返回 body，@p status 带回 HTTP 码（0=失败）。
 inline std::string httpGetJson(const std::string& url, int timeoutSec, int& status) {
-    namespace fs = std::filesystem;
     status = 0;
-    auto esc = [](const std::string& s) { std::string o; o.reserve(s.size() + 8);
-        for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; } return o; };
-    static std::atomic<long long> seq{0};
-    long long id = ++seq;
-    fs::path cfgF = fs::temp_directory_path() / ("dncb_" + std::to_string(id) + ".cfg");
-    std::error_code ec;
-    try {
-        std::ofstream cf(cfgF, std::ios::binary);
-        cf << "url = \"" << esc(url) << "\"\n";
-        cf << "max-time = " << timeoutSec << "\n";
-        cf << "silent\nshow-error\nlocation\n";
-        cf << "proto = \"=http,https\"\n";
-        cf << "max-filesize = 4194304\n";                 // 4 MB 上限
-        cf << "header = \"Accept: application/json\"\n";
-        cf << "write-out = \"\\n%{http_code}\"\n";
-    } catch (...) { fs::remove(cfgF, ec); return ""; }
-
-    // curl runs directly, never through a shell: see common/subprocess.h.
-    std::string out = dice::proc::curlConfig(cfgF).output;
-    fs::remove(cfgF, ec);
-    auto nl = out.find_last_of('\n');
-    if (nl != std::string::npos) { status = std::atoi(out.c_str() + nl + 1); out.erase(nl); }
-    return out;
+    dice::http::Fetch req;
+    req.url = url;
+    req.timeoutSec = timeoutSec;
+    req.maxBytes = 4194304;
+    req.allowHttp = true;
+    req.headers.emplace_back("Accept", "application/json");
+    const auto run = dice::http::fetch(req);
+    if (!run.transportOk()) return {};
+    status = run.http;
+    return run.body;
 }
 
 /// URL 查询参数百分号编码（游标是 ISO8601，含 ':' '+' 等）。

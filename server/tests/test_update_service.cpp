@@ -900,6 +900,45 @@ TEST(UpdateManifest, ParsesAndSelectsExactPlatformAsset) {
     ASSERT_TRUE(selectAsset(manifest, "windows", "arm64") == nullptr);
 }
 
+TEST(UpdateManifest, AcceptsAndroidApkAndIgnoresUnknownOs) {
+    auto root = nlohmann::json::parse(validManifest());
+    root["android_assets"].push_back({
+        {"os", "android"}, {"arch", "arm64"},
+        {"name", "DiceNext-android.apk"},
+        {"sha256", "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"},
+        {"size", 30000000}
+    });
+    root["assets"].push_back({
+        {"os", "freebsd"}, {"arch", "amd64"},
+        {"name", "DiceNext-freebsd-amd64.tar.gz"},
+        {"sha256", "aa3456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0"},
+        {"size", 111}
+    });
+    ReleaseManifest manifest;
+    std::string error;
+    ASSERT_TRUE(parseReleaseManifest(root.dump(), manifest, error));
+    ASSERT_TRUE(selectAsset(manifest, "android", "arm64") != nullptr);
+    ASSERT_TRUE(selectAsset(manifest, "freebsd", "amd64") == nullptr);
+}
+
+TEST(UpdateApk, StagesApkWithoutExtractingAnArchive) {
+    ASSERT_TRUE(looksLikeAndroidApk("DiceNext-android.apk"));
+    ASSERT_TRUE(looksLikeAndroidApk(std::filesystem::path("updates") / "DiceNext-android.APK"));
+    ASSERT_FALSE(looksLikeAndroidApk("dice-next-linux-arm64.tar.gz"));
+
+    DownloadFixture fixture;
+    const auto apk = fixture.root / "DiceNext-android.apk";
+    writeResponse(apk, "apk-bytes");
+    ReleaseManifest manifest;
+    std::string parseError;
+    ASSERT_TRUE(parseReleaseManifest(validManifest(), manifest, parseError));
+    std::string error;
+    ASSERT_TRUE(prepareApkUpdateStage(apk, manifest, error));
+    const auto staged = fixture.root / "updates" / "pending" / "DiceNext-android.apk";
+    ASSERT_TRUE(std::filesystem::is_regular_file(staged));
+    ASSERT_TRUE(std::filesystem::is_regular_file(fixture.root / "updates" / "pending" / "update.json"));
+}
+
 TEST(UpdateManifest, RejectsWrongRepositoryAndDigest) {
     ReleaseManifest manifest;
     std::string error;

@@ -13,6 +13,8 @@
 #include <bcrypt.h>
 #elif defined(__APPLE__)
 #include <sys/random.h> // Darwin declares getentropy here, not in unistd.h.
+#elif defined(__ANDROID__)
+#include <stdlib.h> // arc4random_buf; Bionic getrandom() is API 28+
 #else
 #include <sys/random.h>
 #endif
@@ -43,6 +45,11 @@ bool systemWord(std::uint64_t& value) noexcept {
     int result;
     do { result = getentropy(&value, sizeof(value)); } while (result != 0 && errno == EINTR);
     return result == 0;
+#elif defined(__ANDROID__)
+    // Bionic exposes getrandom() from API 28; minSdk is 26. arc4random_buf is
+    // ChaCha20 seeded from the kernel and is available from API 9.
+    arc4random_buf(&value, sizeof(value));
+    return true;
 #else
     // getrandom is missing on kernels before 3.17 (e.g. CentOS 7) and may be
     // blocked by old container seccomp profiles; OpenSSL then reads /dev/urandom.

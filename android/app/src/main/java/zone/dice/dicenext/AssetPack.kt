@@ -16,7 +16,7 @@ object AssetPack {
         File(files, "data").mkdirs()
         File(files, "config").mkdirs()
         val version = try {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionCode.toString()
+            context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime.toString()
         } catch (_: Exception) {
             "0"
         }
@@ -35,14 +35,14 @@ object AssetPack {
         if (needRefresh) {
             for ((asset, target) in packed) {
                 if (hasAsset(context, asset)) {
-                    target.deleteRecursively()
-                    copyAssetDir(context, asset, target)
+                    val replace = asset == "web" || asset == "docs" || asset == "i18n"
+                    copyAssetDir(context, asset, target, replace)
                 }
             }
             copyAssetFile(context, "update-mirrors.json", File(files, "update-mirrors.json"))
+            copyAssetFile(context, "cacert.pem", File(files, "cacert.pem"))
             prefs.edit().putString(KEY_PACK, version).apply()
         }
-        copyAssetFile(context, "cacert.pem", File(files, "cacert.pem"))
     }
 
     private fun hasAsset(context: Context, path: String): Boolean {
@@ -55,23 +55,26 @@ object AssetPack {
     }
 
     private fun copyAssetFile(context: Context, assetPath: String, target: File) {
+        if (target.canonicalFile != target.absoluteFile) return
+        target.parentFile?.mkdirs()
+        val temp = File.createTempFile(".asset-", ".tmp", target.parentFile)
         try {
             context.assets.open(assetPath).use { input ->
-                target.parentFile?.mkdirs()
-                target.outputStream().use { output -> input.copyTo(output) }
+                temp.outputStream().use { output -> input.copyTo(output) }
             }
-        } catch (_: Exception) {
-            // bundled file is optional
+            android.system.Os.rename(temp.path, target.path)
+        } finally {
+            temp.delete()
         }
     }
 
-    private fun copyAssetDir(context: Context, assetPath: String, target: File) {
+    private fun copyAssetDir(context: Context, assetPath: String, target: File, replace: Boolean) {
         val names = context.assets.list(assetPath) ?: return
         if (names.isEmpty()) {
-            copyAssetFile(context, assetPath, target)
+            if (replace || !target.exists()) copyAssetFile(context, assetPath, target)
             return
         }
         target.mkdirs()
-        for (name in names) copyAssetDir(context, "$assetPath/$name", File(target, name))
+        for (name in names) copyAssetDir(context, "$assetPath/$name", File(target, name), replace)
     }
 }

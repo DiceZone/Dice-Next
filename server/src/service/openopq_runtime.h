@@ -48,6 +48,8 @@ bool validAccount(const std::string& account);
 bool parseSignedManifest(const std::string& body, const std::string& publicKeyBase64,
                          Manifest& out, std::string& error);
 const Asset* assetFor(const Manifest& manifest, const std::string& os, const std::string& arch);
+/// Exact os/arch match, then Android may use the linux build of the same arch.
+const Asset* assetForBest(const Manifest& manifest, const std::string& os, const std::string& arch);
 std::string signUrlFor(const Manifest& manifest, const std::string& apiKey);
 /// 给 openopq 的 Config.json：只开 OneBot v11。
 /// 默认 DN 经它端口上的正向 WS 连过去；``reverseWsPort`` 大于 0 时另写一条反向 WS，

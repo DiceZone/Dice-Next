@@ -14,7 +14,7 @@
 #include "../common/logger.h"
 #include "ai_model_options.h"
 #include "ai_request_files.h"
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 #include "../config/config_manager.h"
 #include <nlohmann/json.hpp>
 #include <string>
@@ -202,39 +202,22 @@ inline void addUsage(ConfigManager& cfg, const std::string& modelId, long long t
     } catch (...) {}
 }
 
-// curl POST JSON（配置文件传参防注入）。返回 body，status 带回 HTTP 码（0=失败）。
 inline std::string httpPostJson(const std::string& url, const std::string& apiKey,
                                 const std::string& body, int timeoutSec, int& status) {
-    namespace fs = std::filesystem;
     status = 0;
-    auto esc = [](const std::string& s) { std::string o; o.reserve(s.size() + 8);
-        for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; } return o; };
-    std::unique_ptr<RequestFiles> files;
-    try { files = std::make_unique<RequestFiles>(); } catch (...) { return "无法创建 AI 请求临时文件"; }
-    const auto cfgF = files->file("request.cfg"), bodyF = files->file("request.body");
-    std::error_code ec;
-    try {
-        { std::ofstream bf(bodyF, std::ios::binary); bf << body; bf.flush(); if (!bf) return "无法写入 AI 请求正文"; }
-        std::ofstream cf(cfgF, std::ios::binary);
-        cf << "url = \"" << esc(url) << "\"\n";
-        cf << "request = \"POST\"\n";
-        cf << "max-time = " << timeoutSec << "\n";
-        cf << "silent\nshow-error\nlocation\n";
-        cf << "proto = \"=http,https\"\n";
-        cf << "max-filesize = 4194304\n";                 // 4 MB 上限
-        cf << "header = \"Content-Type: application/json\"\n";
-        if (!apiKey.empty()) cf << "header = \"Authorization: Bearer " << esc(apiKey) << "\"\n";
-        cf << "data-binary = \"@" << esc(bodyF.string()) << "\"\n";
-        cf << "write-out = \"\\n%{http_code}\"\n";
-        cf.flush(); if (!cf) return "无法写入 AI 请求配置";
-    } catch (...) { fs::remove(cfgF, ec); fs::remove(bodyF, ec); return ""; }
-
-    // curl runs directly, never through a shell: see common/subprocess.h.
-    std::string out = dice::proc::curlConfig(cfgF).output;
-    fs::remove(cfgF, ec); fs::remove(bodyF, ec);
-    auto nl = out.find_last_of('\n');
-    if (nl != std::string::npos) { status = std::atoi(out.c_str() + nl + 1); out.erase(nl); }
-    return out;
+    dice::http::Fetch req;
+    req.url = url;
+    req.method = "POST";
+    req.body = body;
+    req.timeoutSec = timeoutSec;
+    req.maxBytes = 4194304;
+    req.allowHttp = true;
+    req.headers.emplace_back("Content-Type", "application/json");
+    if (!apiKey.empty()) req.headers.emplace_back("Authorization", "Bearer " + apiKey);
+    const auto run = dice::http::fetch(req);
+    if (!run.transportOk()) return run.error.empty() ? std::string("无法完成 AI 请求") : run.error;
+    status = run.http;
+    return run.body;
 }
 
 // base_url → 完整的 chat/completions 端点（用户填到 /v1 即可，自动补路径）。
@@ -665,38 +648,34 @@ inline std::string transcribe(ConfigManager& cfg, const Model& m, const std::fil
     if (m.baseUrl.empty() || m.model.empty()) { error = "model not configured"; return ""; }
     if (m.tokenLimit > 0 && m.usedTokens >= m.tokenLimit) { error = "token limit reached"; return ""; }
     if (m.costLimit > 0 && m.usedCost >= m.costLimit) { error = "cost limit reached"; return ""; }
-    auto esc = [](const std::string& s) { std::string o; for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; } return o; };
-    std::unique_ptr<RequestFiles> files;
-    try { files=std::make_unique<RequestFiles>(); } catch (...) { error="无法创建语音识别请求临时文件"; return ""; }
-    const auto cfgF=files->file("speech.cfg");
     const long long no = nextRequestNo();
     const std::string url = endpointTranscribe(m.baseUrl);
     std::error_code ec;
-    try {
-        std::ofstream cf(cfgF, std::ios::binary);
-        cf << "url = \"" << esc(url) << "\"\n";
-        cf << "max-time = " << timeoutSec << "\n";
-        cf << "silent\nshow-error\nlocation\n";
-        cf << "proto = \"=http,https\"\n";
-        cf << "max-filesize = 4194304\n";
-        if (!m.apiKey.empty()) cf << "header = \"Authorization: Bearer " << esc(m.apiKey) << "\"\n";
-        cf << "form = \"file=@" << esc(audio.string()) << "\"\n";
-        cf << "form-string = \"model=" << esc(m.model) << "\"\n";
-        cf << "form-string = \"response_format=json\"\n";
-        cf << "write-out = \"\\n%{http_code}\"\n";
-    } catch (...) { fs::remove(cfgF, ec); error = "cannot write request"; return ""; }
     if (debugOn())
         DICE_LOG_DEBUG_M("AI 服务", "[{}] 语音识别请求 → 模型「{}」({}) {}，音频 {} 字节", requestTag(no),
                          m.name.empty() ? m.model : m.name, m.model, url, fs::file_size(audio, ec));
     InflightGuard busy(m.id);
     const auto started = std::time(nullptr);
     auto t0 = std::chrono::steady_clock::now();
-    std::string out = dice::proc::curlConfig(cfgF).output;
-    fs::remove(cfgF, ec);
+    dice::http::Fetch req;
+    req.url = url;
+    req.method = "POST";
+    req.timeoutSec = timeoutSec;
+    req.maxBytes = 4194304;
+    req.allowHttp = true;
+    if (!m.apiKey.empty()) req.headers.emplace_back("Authorization", "Bearer " + m.apiKey);
+    req.form.push_back({"file", {}, audio, audio.filename().string(), {}});
+    req.form.push_back({"model", m.model, {}, {}, {}});
+    req.form.push_back({"response_format", "json", {}, {}, {}});
+    const auto run = dice::http::fetch(req);
     long long latency = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-    int status = 0;
-    auto nl = out.find_last_of('\n');
-    if (nl != std::string::npos) { status = std::atoi(out.c_str() + nl + 1); out.erase(nl); }
+    int status = run.http;
+    std::string out = run.body;
+    if (!run.transportOk()) {
+        error = run.error.empty() ? std::string("无法完成语音识别请求") : run.error;
+        DICE_LOG_WARN("[AI] transcribe failed model={} latency={}ms {}", m.model, latency, error);
+        return "";
+    }
     if (status < 200 || status >= 300) {
         error = "HTTP " + std::to_string(status) + (out.empty() ? "" : ": " + out.substr(0, 200));
         DICE_LOG_WARN("[AI] transcribe HTTP {} model={} latency={}ms", status, m.model, latency);

@@ -11,6 +11,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <chrono>
 #ifdef _WIN32
@@ -33,6 +34,11 @@ void writeFile(const fs::path& p, const std::string& content) {
     fs::create_directories(p.parent_path());
     std::ofstream f(p, std::ios::binary);
     f << content;
+}
+
+std::string readFile(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
 struct RestoreWorkspace {
@@ -401,6 +407,33 @@ TEST(BackupLock, SerializesBackupRuns) {
     backup::endBackup();
     ASSERT_TRUE(backup::beginBackup());
     backup::endBackup();
+}
+
+TEST(BackupArchive, InProcessZipRoundtripDoesNotNeedSystemZip) {
+    RestoreWorkspace f;
+    writeFile("stage/manifest.json", "{\"format\":\"dice-next-backup\"}");
+    writeFile("stage/config/settings.json", "cfg");
+    writeFile("stage/data/keep.txt", "keep");
+    writeFile("stage/image/picture.png", "png");
+    const auto packed = backup::runArchive(backup::archiveCreateCommand("stage", "out.zip"));
+    ASSERT_EQ(packed.exitCode, 0);
+    ASSERT_TRUE(fs::is_regular_file("out.zip"));
+    const auto listed = backup::runArchive(backup::archiveListCommand("out.zip"));
+    ASSERT_EQ(listed.exitCode, 0);
+    auto names = listed.output;
+    std::replace(names.begin(), names.end(), '\\', '/');
+    ASSERT_TRUE(names.find("manifest.json") != std::string::npos);
+    ASSERT_TRUE(names.find("data/keep.txt") != std::string::npos);
+    ASSERT_TRUE(names.find("config/settings.json") != std::string::npos);
+    ASSERT_TRUE(names.find("image/picture.png") != std::string::npos);
+    ASSERT_TRUE(names.find("data/backups/") == std::string::npos);
+    const auto manifest = backup::runArchive(backup::archiveManifestCommand("out.zip"));
+    ASSERT_EQ(manifest.exitCode, 0);
+    ASSERT_TRUE(manifest.output.find("dice-next-backup") != std::string::npos);
+    ASSERT_EQ(backup::runArchive(backup::archiveExtractCommand("out.zip", "restored")).exitCode, 0);
+    ASSERT_EQ(readFile("restored/data/keep.txt"), std::string("keep"));
+    ASSERT_EQ(readFile("restored/config/settings.json"), std::string("cfg"));
+    ASSERT_EQ(readFile("restored/image/picture.png"), std::string("png"));
 }
 
 TEST(BackupLock, TransientLockCodesAreDetected) {

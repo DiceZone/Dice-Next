@@ -10,7 +10,7 @@
 // Provides full CRUD for adapters, replies, dice rules, and system status.
 
 #include "../storage/database.h"
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 #include "network_info_service.h"
 #include "../storage/group_account_settings.h"
 #include "../config/config_manager.h"
@@ -6291,25 +6291,19 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
             static std::atomic<long> s_dlSeq{0};
             std::string tmp = "data/tmp/gf_" + std::to_string((long long)std::time(nullptr))
                             + "_" + std::to_string(++s_dlSeq) + ".bin";
-            {   // curl 配置文件传 URL（防 shell 注入；同 AI 网关手法）
-                std::string cfgPath = tmp + ".curl";
-                std::ofstream cf(cfgPath, std::ios::binary);
-                auto esc = [](const std::string& s) {
-                    std::string o;
-                    for (char c : s) { if (c == '\n' || c == '\r') continue; if (c == '"' || c == '\\') o += '\\'; o += c; }
-                    return o;
-                };
-                cf << "url = \"" << esc(url) << "\"\noutput = \"" << esc(tmp) << "\"\n"
-                   << "location\nsilent\nfail\nmax-time = 300\nwrite-out = \"%{http_code}\"\n";
-                cf.close();
-                const auto result = dice::proc::curlConfig(cfgPath);
-                std::error_code ec; fs::remove(cfgPath, ec);
-                const int upstreamStatus = std::atoi(result.output.c_str());
-                if (result.exitCode != 0 || upstreamStatus < 200 || upstreamStatus >= 300) {
+            {
+                dice::http::Fetch req;
+                req.url = url;
+                req.output = tmp;
+                req.timeoutSec = 300;
+                req.allowHttp = true;
+                const auto result = dice::http::fetch(req);
+                std::error_code ec;
+                if (!result.ok()) {
                     fs::remove(tmp, ec);
-                    std::string detail = "group file download failed: curl=" + std::to_string(result.exitCode)
-                        + ", upstream HTTP=" + std::to_string(upstreamStatus);
-                    if (result.exitCode == 60) detail += " (TLS certificate validation failed; verify the download hostname)";
+                    std::string detail = "group file download failed: " +
+                        (result.error.empty() ? ("HTTP " + std::to_string(result.http)) : result.error);
+                    if (result.curlCode == 60) detail += " (TLS certificate validation failed; verify the download hostname)";
                     auto response = drogon::HttpResponse::newHttpResponse();
                     response->setContentTypeCode(drogon::CT_APPLICATION_JSON);
                     response->setBody(fail(detail).dump());

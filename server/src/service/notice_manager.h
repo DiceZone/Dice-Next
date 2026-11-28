@@ -12,7 +12,7 @@
 //                     smtp: { enabled, host, port, ssl, user, pass, from, to, level_mask } }
 
 #include "../config/config_manager.h"
-#include "../common/subprocess.h"
+#include "../common/libcurl_http.h"
 #include "../adapter/adapter_manager.h"
 #include "../adapter/adapter_interface.h"
 #include "notice_rules.h"
@@ -32,7 +32,6 @@
 #include <thread>
 #include <cstdlib>
 #include <ctime>
-#include <openssl/rand.h>
 
 namespace dice::notice {
 
@@ -162,53 +161,35 @@ inline void audit(int level, const std::string& msg, const std::string& op = "",
     } catch (...) {}
 }
 
-// curl 配置文件里的转义。
-inline std::string curlEsc(const std::string& s) {
-    std::string o; o.reserve(s.size() + 8);
-    for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; }
-    return o;
-}
-
-// Webhook：后台线程 POST JSON（配置文件传参防注入，超时 10s，静默失败）。
 inline void webhookPostAsync(const json& channel, const json& variables) {
     std::thread([channel, variables, context = activeProcessingContext]() {
         ProcessingScope scope(context); // Notification transport must never recursively notify.
-        namespace fs = std::filesystem;
-        struct Temp { fs::path dir; ~Temp() { if (!dir.empty()) { std::error_code ec; fs::remove_all(dir, ec); } } } temp;
         try {
             const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
             const auto request = notice_webhook::build(channel, variables, now);
-            unsigned char random[16]; if (RAND_bytes(random, sizeof(random)) != 1) throw std::runtime_error("无法创建 Webhook 临时文件");
-            std::string nonce; static const char hex[] = "0123456789abcdef";
-            for (auto c : random) { nonce += hex[c >> 4]; nonce += hex[c & 15]; }
-            const auto dir = fs::temp_directory_path() / ("dicenext-webhook-" + nonce);
-            if (!fs::create_directory(dir)) throw std::runtime_error("无法创建 Webhook 临时目录");
-            temp.dir = dir; fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace);
-            const auto cfgF = dir / "curl.cfg", bodyF = dir / "body.json";
-            { std::ofstream body(bodyF, std::ios::binary); body << request.body; body.close(); if (!body) throw std::runtime_error("无法准备 Webhook 请求体"); }
-            {
-                std::ofstream config(cfgF, std::ios::binary);
-                config << "url = \"" << curlEsc(request.url) << "\"\nrequest = \"" << request.method << "\"\n"
-                    << "max-time = 15\nconnect-timeout = 5\nsilent\nfail\ngloboff\nproto = \"=http,https\"\n";
-                bool contentType = false;
-                for (auto it = request.headers.begin(); it != request.headers.end(); ++it) {
-                    auto key = it.key(); std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                    if (key == "content-type") contentType = true;
-                    config << "header = \"" << curlEsc(it.key() + ": " + it->get<std::string>()) << "\"\n";
-                }
-                if (!contentType) config << "header = \"Content-Type: application/json; charset=utf-8\"\n";
-                config << "data-binary = \"@" << curlEsc(bodyF.string()) << "\"\nwrite-out = \"\\nDN_HTTP_STATUS:%{http_code}\"\n";
-                config.close(); if (!config) throw std::runtime_error("无法准备 Webhook 请求配置");
+            dice::http::Fetch req;
+            req.url = request.url;
+            req.method = request.method;
+            req.body = request.body;
+            req.connectTimeoutSec = 5;
+            req.timeoutSec = 15;
+            req.maxBytes = 64 * 1024;
+            req.allowHttp = true;
+            bool contentType = false;
+            for (auto it = request.headers.begin(); it != request.headers.end(); ++it) {
+                auto key = it.key();
+                std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (key == "content-type") contentType = true;
+                req.headers.emplace_back(it.key(), it->get<std::string>());
             }
-            const auto result = dice::proc::curlConfig(cfgF, 64 * 1024);
-            const auto marker = result.output.rfind("\nDN_HTTP_STATUS:");
-            int status = 0; if (marker != std::string::npos) try { status = std::stoi(result.output.substr(marker + 16)); } catch (...) {}
-            if (!result.ok() || result.truncated || status < 200 || status >= 300) {
-                DICE_LOG_WARN_M("通知", "Webhook 请求未完成（HTTP {}，curl {}），请检查通知窗口地址及服务端状态。", status, result.exitCode); return;
+            if (!contentType) req.headers.emplace_back("Content-Type", "application/json; charset=utf-8");
+            const auto result = dice::http::fetch(req);
+            if (!result.ok()) {
+                DICE_LOG_WARN_M("通知", "Webhook 请求未完成（HTTP {}），请检查通知窗口地址及服务端状态。", result.http); return;
             }
             const auto profile = channel.value("profile", std::string("generic"));
             if (profile == "wecom" || profile == "dingtalk" || profile == "feishu") {
-                const auto reply = json::parse(result.output.substr(0, marker), nullptr, false);
+                const auto reply = json::parse(result.body, nullptr, false);
                 const auto key = profile == "feishu" ? "code" : "errcode";
                 if (!reply.is_object() || !reply.contains(key) || !reply[key].is_number_integer() || reply[key] != 0)
                     DICE_LOG_WARN_M("通知", "Webhook 服务端未确认成功，请检查机器人关键词、签名密钥及推送权限。");
@@ -256,7 +237,6 @@ inline void smtpSendAsync(const json& s, const std::string& subject, const std::
             static std::atomic<long long> seq{0};
             long long id = ++seq;
             fs::path tmp = fs::temp_directory_path();
-            fs::path cfgF = tmp / ("dnsm_" + std::to_string(id) + ".cfg");
             fs::path msgF = tmp / ("dnsm_" + std::to_string(id) + ".eml");
             std::error_code ec;
             {
@@ -266,17 +246,17 @@ inline void smtpSendAsync(const json& s, const std::string& subject, const std::
                    << "MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n"
                    << "Content-Transfer-Encoding: base64\r\n\r\n" << b64(body) << "\r\n";
             }
-            {
-                std::ofstream cf(cfgF, std::ios::binary);
-                cf << "url = \"" << (ssl ? "smtps" : "smtp") << "://" << curlEsc(host) << ":" << port << "\"\n";
-                cf << "mail-from = \"" << curlEsc(from) << "\"\n";
-                cf << "mail-rcpt = \"" << curlEsc(to) << "\"\n";
-                if (!user.empty()) cf << "user = \"" << curlEsc(user + ":" + pass) << "\"\n";
-                if (!ssl) cf << "ssl\n";   // STARTTLS（尽力）
-                cf << "upload-file = \"" << curlEsc(msgF.string()) << "\"\nmax-time = 20\nsilent\n";
-            }
-            dice::proc::curlConfig(cfgF);
-            fs::remove(cfgF, ec); fs::remove(msgF, ec);
+            dice::http::Fetch req;
+            req.url = std::string(ssl ? "smtps://" : "smtp://") + host + ":" + std::to_string(port);
+            req.mailFrom = from;
+            req.mailRcpt = to;
+            req.username = user;
+            req.password = pass;
+            req.smtpStartTls = !ssl;
+            req.uploadFile = msgF;
+            req.timeoutSec = 20;
+            dice::http::fetch(req);
+            fs::remove(msgF, ec);
         } catch (...) {}
     }).detach();
 }

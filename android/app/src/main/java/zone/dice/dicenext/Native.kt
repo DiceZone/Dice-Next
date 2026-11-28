@@ -24,4 +24,8 @@ object Native {
     @JvmStatic external fun stop()
 
     @JvmStatic external fun isRunning(): Boolean
+
+    /** Native update service calls this on the worker thread to open the system installer. Empty string = ok. */
+    @JvmStatic
+    fun installApk(path: String): String = App.installUpdate(path)
 }
