@@ -47,6 +47,7 @@ Thumbs.db
 
 # Android local build (JNI, WebUI assets, Gradle, APK)
 /server/build-android/
+/server/vcpkg_installed/
 /android/.gradle/
 /android/build/
 /android/app/build/

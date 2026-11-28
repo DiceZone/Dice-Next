@@ -645,7 +645,11 @@ jobs:
           }
           clone_repo onedice-cpp-lib onedice-cpp-lib
           clone_repo dicescript-c-lib dicescript-c-lib
-          clone_repo CatOfficial CatOfficial
+          if [ "${{ github.ref_name }}" = android ]; then
+            clone_repo CatOfficial CatOfficial android
+          else
+            clone_repo CatOfficial CatOfficial
+          fi
           clone_repo Dice-Next-Doc docs
       - uses: actions/download-artifact@v4
         with:
@@ -706,6 +710,9 @@ jobs:
           mkdir -p "$jni"
           so="$(find server/build-android -name 'libdice-next.so' | head -n1)"
           cp -f "$so" "$jni/libdice-next.so"
+          wrap="$(find server/build-android -name 'libdnexecwrap.so' | head -n1)"
+          [[ -n "$wrap" ]] || { echo "libdnexecwrap.so not found" >&2; exit 1; }
+          cp -f "$wrap" "$jni/libdnexecwrap.so"
           stl="$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -name 'libc++_shared.so' | grep aarch64-linux-android | head -n1 || true)"
           [[ -n "$stl" ]] && cp -f "$stl" "$jni/libc++_shared.so"
           strip="$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -name 'llvm-strip' | head -n1 || true)"

@@ -261,6 +261,10 @@ if(ANDROID)
     find_package(c-ares CONFIG REQUIRED)
     target_link_libraries(dice-next PRIVATE c-ares::cares dl)
     target_link_options(dice-next PRIVATE -Wl,-z,max-page-size=16384)
+    add_library(dnexecwrap SHARED src/android_execwrap.c)
+    target_link_libraries(dnexecwrap PRIVATE dl)
+    target_link_options(dnexecwrap PRIVATE -Wl,-z,max-page-size=16384)
+    add_dependencies(dice-next dnexecwrap)
 else()
     add_executable(dice-next-server ${SOURCES} ${VERSION_BUILD_SOURCE})
     set(DICENEXT_CORE_TARGET dice-next-server)
@@ -297,11 +301,11 @@ target_compile_definitions(${DICENEXT_CORE_TARGET} PRIVATE
 
 target_link_libraries(${DICENEXT_CORE_TARGET} PRIVATE
     dice-secure-random
+    CURL::libcurl
     Drogon::Drogon
     OpenSSL::Crypto
     OpenSSL::SSL
     nlohmann_json::nlohmann_json
-    CURL::libcurl
     sqlite_orm::sqlite_orm
     spdlog::spdlog
     yaml-cpp

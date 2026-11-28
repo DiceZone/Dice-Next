@@ -61,6 +61,9 @@ mkdir -p "$JNI_DIR"
 SO="$(find "$BUILD_DIR" -name 'libdice-next.so' | head -n1)"
 [[ -n "$SO" ]] || { echo "libdice-next.so not found" >&2; exit 1; }
 cp -f "$SO" "$JNI_DIR/libdice-next.so"
+WRAP="$(find "$BUILD_DIR" -name 'libdnexecwrap.so' | head -n1)"
+[[ -n "$WRAP" ]] || { echo "libdnexecwrap.so not found" >&2; exit 1; }
+cp -f "$WRAP" "$JNI_DIR/libdnexecwrap.so"
 STL="$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -name 'libc++_shared.so' | grep aarch64-linux-android | head -n1 || true)"
 [[ -n "$STL" ]] && cp -f "$STL" "$JNI_DIR/libc++_shared.so"
 STRIP="$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -name 'llvm-strip' | head -n1 || true)"

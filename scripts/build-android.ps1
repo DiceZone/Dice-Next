@@ -124,6 +124,9 @@ New-Item -ItemType Directory -Force -Path $JniDir | Out-Null
 $So = Get-ChildItem $BuildDir -Recurse -Filter "libdice-next.so" | Select-Object -First 1
 if (-not $So) { throw "libdice-next.so not found" }
 Copy-Item $So.FullName (Join-Path $JniDir "libdice-next.so") -Force
+$Wrap = Get-ChildItem $BuildDir -Recurse -Filter "libdnexecwrap.so" | Select-Object -First 1
+if (-not $Wrap) { throw "libdnexecwrap.so not found" }
+Copy-Item $Wrap.FullName (Join-Path $JniDir "libdnexecwrap.so") -Force
 
 $Stl = Get-ChildItem (Join-Path $Ndk "toolchains\llvm\prebuilt") -Recurse -Filter "libc++_shared.so" |
     Where-Object { $_.FullName -match "aarch64-linux-android" } |

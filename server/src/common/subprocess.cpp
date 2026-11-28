@@ -15,6 +15,13 @@
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+#if defined(__ANDROID__)
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+extern char** environ;
+#endif
 #endif
 
 namespace dice::proc {
@@ -227,6 +234,81 @@ Result runWide(const std::wstring& commandLine, std::size_t outputLimit,
 
 #endif  // _WIN32
 
+#if defined(__ANDROID__)
+int androidElfClass(const char* path) {
+    if (!path || path[0] != '/') return 0;
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    unsigned char mag[5]{};
+    const ssize_t n = read(fd, mag, 5);
+    close(fd);
+    if (n < 5 || mag[0] != 0x7f || mag[1] != 'E' || mag[2] != 'L' || mag[3] != 'F') return 0;
+    if (mag[4] == 1 || mag[4] == 2) return mag[4];
+    return 0;
+}
+
+bool androidShouldWrap(const char* path) {
+    if (!path || path[0] != '/') return false;
+    if (std::strncmp(path, "/system/", 8) == 0 || std::strncmp(path, "/vendor/", 8) == 0 ||
+        std::strncmp(path, "/apex/", 6) == 0 || std::strncmp(path, "/bin/", 5) == 0)
+        return false;
+    return androidElfClass(path) != 0;
+}
+
+void prependEnvDir(std::string& value, const std::string& dir) {
+    if (dir.empty()) return;
+    if (value.empty()) value = dir;
+    else value = dir + ":" + value;
+}
+
+std::vector<std::string> androidChildEnv() {
+    std::vector<std::string> out;
+    const char* wrap = std::getenv("DICENEXT_EXECWRAP");
+    const char* libdir = std::getenv("DICENEXT_LIBDIR");
+    const char* home = std::getenv("HOME");
+    std::string preload = wrap && *wrap ? wrap : "";
+    std::string libpath;
+    if (home && *home) prependEnvDir(libpath, std::string(home) + "/lib");
+    prependEnvDir(libpath, ".");
+    prependEnvDir(libpath, "./lib");
+    if (libdir && *libdir) prependEnvDir(libpath, libdir);
+    bool sawPreload = false;
+    bool sawLib = false;
+    if (environ) {
+        for (char** e = environ; *e; ++e) {
+            std::string entry = *e;
+            if (entry.rfind("LD_PRELOAD=", 0) == 0) {
+                sawPreload = true;
+                if (!preload.empty()) entry = "LD_PRELOAD=" + preload + ":" + entry.substr(11);
+            } else if (entry.rfind("LD_LIBRARY_PATH=", 0) == 0) {
+                sawLib = true;
+                if (!libpath.empty()) entry = "LD_LIBRARY_PATH=" + libpath + ":" + entry.substr(16);
+            }
+            out.push_back(std::move(entry));
+        }
+    }
+    if (!sawPreload && !preload.empty()) out.push_back("LD_PRELOAD=" + preload);
+    if (!sawLib && !libpath.empty()) out.push_back("LD_LIBRARY_PATH=" + libpath);
+    return out;
+}
+
+bool androidPrepareExec(std::string& prog, std::vector<std::string>& args,
+                        std::vector<std::string>& envHold, std::vector<char*>& envPtr) {
+    if (!androidShouldWrap(prog.c_str())) return false;
+    const int klass = androidElfClass(prog.c_str());
+    const char* linker = klass == 1 ? "/system/bin/linker" : "/system/bin/linker64";
+    if (access(linker, X_OK) != 0) return false;
+    args.insert(args.begin(), prog);
+    prog = linker;
+    envHold = androidChildEnv();
+    envPtr.clear();
+    envPtr.reserve(envHold.size() + 1);
+    for (auto& entry : envHold) envPtr.push_back(entry.data());
+    envPtr.push_back(nullptr);
+    return true;
+}
+#endif
+
 }  // namespace
 
 std::string systemTool(const std::string& name) {
@@ -265,10 +347,20 @@ Result runCancellable(const std::string& program, const std::vector<std::string>
 
     // Everything execvp needs is built before the fork: only async-signal-safe
     // calls may run in the child.
+    std::string prog = program;
+    std::vector<std::string> childArgs = args;
+    std::vector<std::string> envHold;
+    std::vector<char*> envPtr;
+#if defined(__ANDROID__)
+    // App data is noexec on Android 10+; exec linker64 and let it map the ELF.
+    const bool androidWrapped = androidPrepareExec(prog, childArgs, envHold, envPtr);
+#else
+    const bool androidWrapped = false;
+#endif
     std::vector<char*> argv;
-    argv.reserve(args.size() + 2);
-    argv.push_back(const_cast<char*>(program.c_str()));
-    for (const auto& argument : args) argv.push_back(const_cast<char*>(argument.c_str()));
+    argv.reserve(childArgs.size() + 2);
+    argv.push_back(const_cast<char*>(prog.c_str()));
+    for (auto& argument : childArgs) argv.push_back(argument.data());
     argv.push_back(nullptr);
     const std::string directory =
         workingDirectory.empty() ? std::string() : workingDirectory.string();
@@ -292,7 +384,8 @@ Result runCancellable(const std::string& program, const std::vector<std::string>
             close(nullInput);
         }
         if (!directory.empty() && chdir(directory.c_str()) != 0) _exit(127);
-        execvp(program.c_str(), argv.data());
+        if (androidWrapped) execve(prog.c_str(), argv.data(), envPtr.data());
+        else execvp(prog.c_str(), argv.data());
         _exit(127);
     }
 

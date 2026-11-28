@@ -138,6 +138,20 @@ Java_zone_dice_dicenext_Native_run(JNIEnv* env, jclass, jstring filesDir) {
     setenv("TEMP", (root + "/tmp").c_str(), 1);
     prependPath("/system/bin");
     prependPath(root + "/bin");
+    Dl_info so{};
+    if (dladdr(reinterpret_cast<void*>(&Java_zone_dice_dicenext_Native_run), &so) && so.dli_fname) {
+        std::string libdir = so.dli_fname;
+        const auto slash = libdir.find_last_of('/');
+        if (slash != std::string::npos) libdir.resize(slash);
+        if (!libdir.empty()) setenv("DICENEXT_LIBDIR", libdir.c_str(), 1);
+        const std::string wrap = libdir.empty() ? std::string("libdnexecwrap.so") : libdir + "/libdnexecwrap.so";
+        if (::access(wrap.c_str(), R_OK) == 0) {
+            setenv("DICENEXT_EXECWRAP", wrap.c_str(), 1);
+            __android_log_print(ANDROID_LOG_INFO, kTag, "exec wrap %s", wrap.c_str());
+        } else {
+            __android_log_print(ANDROID_LOG_WARN, kTag, "缺少 libdnexecwrap.so，下载的协议端可能无法执行");
+        }
+    }
     const auto cert = root + "/cacert.pem";
     if (::access(cert.c_str(), R_OK) == 0) {
         setenv("SSL_CERT_FILE", cert.c_str(), 1);
