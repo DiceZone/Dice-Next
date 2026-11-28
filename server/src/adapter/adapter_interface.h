@@ -242,6 +242,9 @@ public:
     /// Send a message to the platform
     virtual void sendMessage(const Message& msg) = 0;
 
+    virtual bool supportsMessageLike() const { return false; }
+    virtual bool likeMessage(const Message&) { return false; }
+
     /// Reply to a specific message (platform-specific quoting)
     virtual void sendReply(const Message& original, const std::string& replyText) = 0;
     /// Format-aware path used by the core reply pipeline. Existing plugin and

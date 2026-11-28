@@ -16,8 +16,7 @@ namespace dice::aichat {
 
 enum class TurnAction { Reply, Wait, Skip, Recheck, DropFirst };
 
-// The first message owns the reply target, identity and tools. Later speakers
-// contribute context but never lend their permissions to that first message.
+// The anchor owns the task and its permissions. The decision may address another speaker.
 class ConversationTurns {
 public:
     using Clock = std::chrono::steady_clock;
@@ -41,7 +40,7 @@ public:
         return role;
     }
 
-    bool offer(const Key& key, const Message& message, Task task) {
+    bool offer(const Key& key, const Message& message, Task task, uint64_t observation = 0) {
         std::lock_guard lock(mutex_);
         prune();
         if (!states_.contains(key) && states_.size() >= 128) return false;
@@ -51,12 +50,64 @@ public:
         if (state.lines.size() >= 24) return false;
         auto time = now_();
         bool first = state.lines.empty();
-        state.lines.push_back({message, std::make_shared<Task>(std::move(task)), time});
+        state.lines.push_back({message, std::make_shared<Task>(std::move(task)), time, observation ? observation : ++sequence_});
         state.touched = time;
         if (!first) return true;
         state.waited = false;
         state.role = key[3];
+        state.updates = std::make_shared<std::deque<Update>>();
         return arm(key, time + quiet);
+    }
+
+    struct Update {
+        std::string senderId, sender, text, quoted;
+        std::vector<std::string> mentions;
+        uint64_t sequence = 0;
+        std::string messageId;
+    };
+    template<class ReadText>
+    uint64_t observe(const Message& m, ReadText readText) {
+        std::vector<std::shared_ptr<std::deque<Update>>> active;
+        uint64_t sequence;
+        {
+            std::lock_guard lock(mutex_);
+            sequence = ++sequence_;
+            auto it = states_.lower_bound({m.platform, m.adapterId, m.targetId, ""});
+            for (; it != states_.end() && it->first[0] == m.platform && it->first[1] == m.adapterId
+                   && it->first[2] == m.targetId; ++it)
+                if (it->second.updates) active.push_back(it->second.updates);
+        }
+        if (active.empty()) return sequence;
+        const std::string text = readText();
+        if (text.empty()) return sequence;
+        auto quote = m.extra.find("quoted_message_id");
+        Update update{m.senderId, m.senderName, text,
+                      quote != m.extra.end() && quote->is_string() ? quote->get<std::string>() : std::string(),
+                      m.atList, sequence, m.id};
+        std::lock_guard lock(mutex_);
+        for (auto& queue : active) {
+            if (queue->size() == 16) queue->pop_front();
+            queue->push_back(update);
+        }
+        return sequence;
+    }
+    std::vector<Update> updates(const Key& key, size_t batchSize = 1, size_t selected = 0) {
+        std::lock_guard lock(mutex_);
+        auto it = states_.find(key);
+        if (it == states_.end() || !it->second.updates) return {};
+        const auto& state = it->second;
+        if (selected >= state.lines.size()) return {};
+        const auto end = state.lines.begin() + std::min(batchSize, state.lines.size());
+        std::vector<Update> result;
+        for (const auto& update : *state.updates) {
+            if (update.sequence <= state.lines[selected].sequence) continue;
+            // An admitted supplement is already visible to the planner, even on platforms without IDs.
+            if (std::any_of(state.lines.begin(), end, [&](const Entry& e) {
+                return e.sequence == update.sequence || (!update.messageId.empty() && e.message.id == update.messageId);
+            })) continue;
+            result.push_back(update);
+        }
+        return result;
     }
 
     void resolvedRole(const Key& key, const std::string& role) {
@@ -65,12 +116,13 @@ public:
     }
 
 private:
-    struct Entry { Message message; std::shared_ptr<Task> task; Clock::time_point at; };
+    struct Entry { Message message; std::shared_ptr<Task> task; Clock::time_point at; uint64_t sequence; };
     struct State {
         std::deque<Entry> lines;
         std::string role;
         Clock::time_point touched{}, expires{};
         bool waited = false;
+        std::shared_ptr<std::deque<Update>> updates;
     };
     static constexpr auto quiet = std::chrono::milliseconds(1300);
     void prune() {
@@ -122,9 +174,10 @@ private:
         s.waited = false;
         if (action == TurnAction::Reply) s.expires = now_() + std::chrono::seconds(40);
         if (!s.lines.empty()) arm(key, now_() + quiet);
-        else prune();
+        else { s.updates.reset(); prune(); }
     }
 
+    uint64_t sequence_ = 0;
     std::mutex mutex_;
     std::map<Key, State> states_;
     Schedule schedule_;

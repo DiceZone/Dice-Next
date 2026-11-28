@@ -142,6 +142,15 @@ public:
                      msg.type == MessageType::kGroup ? msg.targetId : std::string(), std::move(parsed));
     }
 
+    bool supportsMessageLike() const override { return true; }
+    bool likeMessage(const Message& msg) override {
+        auto group = parseId(msg.targetId), seq = parseId(msg.id);
+        if (!isConnected() || msg.type != MessageType::kGroup || group <= 0 || seq <= 0) return false;
+        sendAction("send_group_message_reaction", {{"group_id", group}, {"message_seq", seq},
+            {"reaction", "76"}, {"is_add", true}}, {});
+        return true;
+    }
+
     void sendReply(const Message& original, const std::string& text) override {
         sendReplyFormatted(original, text, ContentFormat::kPlainText);
     }

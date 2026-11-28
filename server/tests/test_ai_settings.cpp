@@ -140,6 +140,106 @@ TEST(AiConversation, WaitsForAnotherSpeakerAndRepliesOnceForTheBatch) {
     ASSERT_FALSE(h.turns.currentRole(h.key).has_value());
 }
 
+TEST(AiConversation, SelectedSpeakerOwnsImageQuoteAndChronology) {
+    const aichat::History lines{{"甲","看看红图",false,false,"红图"},
+                               {"乙","这个蓝图呢？",false,false,"蓝图",true},
+                               {"丙","我去吃饭",false,false,"",true}};
+    std::vector<Message> batch(3);
+    batch[0].id = "red"; batch[1].id = "blue"; batch[2].id = "food";
+    aichat::History history{{"","",false,true}};
+    aichat::appendBatchContext(history, lines, {0,1,2}, 1, batch, "red");
+    const auto& selected = lines[1];
+    auto turn = json::parse(aichat::conversationTurn(history,selected.sender,selected.text,selected.image));
+    ASSERT_EQ(turn.at("当前发言人").get<std::string>(), std::string("乙"));
+    ASSERT_EQ(turn.at("当前附件的识图观察（可能有误）").get<std::string>(), std::string("蓝图"));
+    ASSERT_EQ(turn.at("当前发言引用的原消息").at("内容").get<std::string>(), std::string("看看红图"));
+    ASSERT_EQ(turn.at("当前发言之后的补充（从早到晚）").size(), size_t(1));
+    ASSERT_FALSE(turn.contains("此前对话（从早到晚）"));
+}
+
+TEST(AiConversation, DraftReviewRequiresEvidenceFromThisRoomAndTheRightSpeaker) {
+    using Action = aichat::TurnAction;
+    TurnHarness h;
+    Message first = h.msg("question", "A");
+    auto observe = [&](std::string group, std::string who, std::string words) {
+        Message m; m.platform = h.key[0]; m.adapterId = h.key[1]; m.targetId = group;
+        m.senderId = who; m.content = words;
+        h.turns.observe(m, [&]{ return m.content; });
+    };
+    std::vector<aichat::ConversationTurns::Update> updates;
+    h.turns.offer(h.key, first, [&](const auto&, bool, const auto&) {
+        observe("another-group","K","明天吧");
+        observe("group","K","今晚八点");
+        observe("group","A","知道了，不用查了");
+        observe("group","B","我去买菜");
+        updates = h.turns.updates(h.key);
+        return Action::Reply;
+    });
+    h.advance(2000);
+    ASSERT_EQ(updates.size(),size_t(3));
+    auto resolved = [&](const std::string& response) {
+        return aichat::resolutionSupported(ai::Result{true,response}, updates, first.senderId);
+    };
+    ASSERT_TRUE(resolved(R"({"status":"answered","evidence":1})"));
+    ASSERT_TRUE(resolved(R"({"status":"withdrawn","evidence":2})"));
+    ASSERT_FALSE(resolved(R"({"status":"withdrawn","evidence":3})"));
+    ASSERT_FALSE(resolved(R"({"status":"keep","evidence":3})"));
+    ASSERT_FALSE(resolved(R"({"status":"answered","evidence":4})"));
+    ASSERT_FALSE(resolved("invalid"));
+    ASSERT_TRUE(h.turns.updates(h.key).empty());
+}
+
+TEST(AiConversation, LikeRequiresAnExplicitMessageTargetAndReplyDecision) {
+    ASSERT_TRUE(aichat::parseFocus(R"({"action":"reply","reaction":"like","target":2})",2).like);
+    ASSERT_EQ(aichat::parseFocus("invalid", 2, 2).target, size_t(2));
+    ASSERT_FALSE(aichat::parseFocus(R"({"action":"skip","reaction":"like","target":1})",2).like);
+    ASSERT_FALSE(aichat::parseFocus(R"({"action":"reply","reaction":"like","target":0})",2).like);
+    ASSERT_FALSE(aichat::parseFocus(R"({"action":"reply","reaction":"like","target":3})",2).like);
+}
+
+TEST(AiConversation, WaitingRetainsSideAnswersAcrossRecheckAndDoesNotReplayBatchMessages) {
+    using Action = aichat::TurnAction;
+    TurnHarness h;
+    auto message = [&](std::string id, std::string sender) {
+        auto m = h.msg(id, sender);
+        m.platform = h.key[0]; m.adapterId = h.key[1]; m.targetId = h.key[2];
+        return m;
+    };
+    std::vector<aichat::ConversationTurns::Update> first, second;
+    h.turns.offer(h.key, message("question","A"), [&](const auto& batch, bool canWait, const auto&) {
+        if (canWait) return Action::Wait;
+        first = h.turns.updates(h.key, batch.size(), 0);
+        second = h.turns.updates(h.key, batch.size(), 1);
+        return Action::Skip;
+    });
+    h.advance(1500);
+    auto answer = message("answer","KP");
+    answer.atList = {"A"};
+    h.turns.observe(answer, [] { return "今晚八点"; });
+    auto follow = message("","B");
+    auto token = h.turns.observe(follow, [] { return "那下一团呢"; });
+    h.turns.offer(h.key, follow, [](const auto&, bool, const auto&) { return Action::Reply; }, token);
+    h.advance(6100);
+    ASSERT_EQ(first.size(), size_t(1));
+    ASSERT_EQ(first.front().mentions.front(), std::string("A"));
+    ASSERT_TRUE(second.empty());
+    ASSERT_TRUE(h.turns.updates(h.key).empty());
+}
+
+TEST(AiConversation, ThreadSelectionKeepsExplicitQuotesAndHandlesOlderDecisionModels) {
+    aichat::History history{{"丙","路由器掉线",false}, {"骰娘","走哪条路？",true}, {"甲","旧地图",false,true}};
+    history[0].ref = "h3"; history[1].ref = "h4"; history[2].ref = "h5";
+    auto filtered = history;
+    aichat::retainThread(filtered, aichat::parseFocus(R"({"thread":["h4","h999"]})",1));
+    ASSERT_EQ(filtered.size(),size_t(2));
+    ASSERT_TRUE(filtered.front().self && filtered.back().quoted);
+    aichat::retainThread(filtered, aichat::parseFocus(R"({"thread":[]})",1));
+    ASSERT_EQ(filtered.size(),size_t(1));
+    ASSERT_TRUE(filtered.front().quoted);
+    aichat::retainThread(history, aichat::parseFocus(R"({"target":1})",1));
+    aichat::retainThread(history, aichat::parseFocus(R"({"thread":"h4"})",1));
+    ASSERT_EQ(history.size(),size_t(3));
+}
 TEST(AiConversation, NewInputDuringDecisionIsReplannedAndRoomsAreIsolated) {
     using Action = aichat::TurnAction;
     TurnHarness h;
@@ -313,6 +413,73 @@ struct TempConfig {
 
 // Run through tools/test-ai-http.py: two processes share the OS temporary
 // directory and send real curl requests to a local, deterministic fake API.
+TEST(AiHttpIntegration, GroupPersonaAndLateAnswers) {
+    const auto* endpoint = std::getenv("DICENEXT_AI_TEST_ENDPOINT");
+    if (!endpoint) { std::cout << "(HTTP integration requires tools/test-ai-http.py) "; return; }
+    TempConfig t;
+    json model = {{"id","group-review"},{"model","group-review"},{"base_url",endpoint}};
+    t.cfg.set<json>("dice/ai", {{"enabled",true},{"models",json::array({model})},
+        {"chat",{{"persona","只在讨论团务时主动接话"}}},
+        {"usages",{{"reply",{{"models",json::array({{{"id","group-review"}}})}}}}}});
+    Message asker;
+    asker.id = "q"; asker.senderId = "A"; asker.senderName = "甲";
+    const std::string question = "今晚几点开团？";
+    const std::string draft = "今晚八点。";
+    aichat::TurnFocus focus;
+    ASSERT_TRUE(aichat::planTurn(t.cfg, {}, "甲", question, "", "", true, true, "", &focus) == aichat::TurnAction::Reply);
+    ASSERT_FALSE(aichat::draftSuperseded(t.cfg,false,asker,question,draft,{},""));
+    ASSERT_TRUE(aichat::draftSuperseded(t.cfg,false,asker,question,draft,{{"K","主持人","今晚八点","q"}},""));
+    ASSERT_FALSE(aichat::draftSuperseded(t.cfg,false,asker,question,draft,{{"B","乙","我去买菜",""}},""));
+    ASSERT_TRUE(aichat::planTurn(t.cfg, {}, "甲", "乙，你家网络也断了吗？", "", "", true, false) == aichat::TurnAction::Skip);
+
+    aichat::History lines{{"甲","这是我的地图",false,false,"红图"},
+                          {"乙","骰娘，我这张地图画的是哪里？",false,false,"蓝图",true}};
+    ASSERT_TRUE(aichat::planTurn(t.cfg, {lines[1]}, lines[0].sender, lines[0].text, lines[0].image,
+                                "", true, true, "", &focus) == aichat::TurnAction::Reply);
+    ASSERT_EQ(focus.target, size_t(2));
+    const auto selected = focus.target - 1;
+    const auto& subject = lines[selected];
+    std::vector<Message> batch(2);
+    batch[0].id = "first-map"; batch[1].id = "second-map";
+    aichat::History history;
+    aichat::appendBatchContext(history, lines, {0,1}, selected, batch, "first-map");
+    const auto reply = aichat::generate(t.cfg, history, subject.sender, subject.text, "", nullptr,
+                                        "", "", "", subject.image, "乙");
+    ASSERT_EQ(reply, std::string("乙，蓝图画的是港口。"));
+
+    aichat::History parallel{{"骰娘","要走哪条路？",true}, {"甲","你家网络也掉线了？",false}};
+    parallel[0].ref = "h4"; parallel[1].ref = "h5"; parallel[1].speakerId = "another-player";
+    aichat::HistoryLine choice{"甲","走左边。",false};
+    choice.ref = "m1"; choice.speakerId = "A";
+    ASSERT_TRUE(aichat::planTurn(t.cfg, parallel, choice.sender, choice.text, "", "", true, false, "", &focus,
+                                 "", false, &choice) == aichat::TurnAction::Reply);
+    aichat::retainThread(parallel, focus);
+    ASSERT_EQ(aichat::generate(t.cfg, parallel, choice.sender, choice.text, "", nullptr, "", "", "", "", "甲", &choice),
+              std::string("那就走左边的小路。"));
+
+    TurnHarness h;
+    int sent = 0, reviews = 0;
+    aichat::HistoryLine requested{"甲",question,false};
+    requested.ref = "m1"; requested.speakerId = "A"; requested.messageId = "q";
+    h.turns.offer(h.key, asker, [&](const auto&, bool canWait, const auto&) {
+        if (canWait) return aichat::TurnAction::Wait;
+        ++reviews;
+        const auto decision = aichat::planTurn(t.cfg, {}, "甲", question, "", "", false, true, "", &focus,
+                                               "", false, &requested, h.turns.updates(h.key));
+        if (decision != aichat::TurnAction::Reply) return decision;
+        ++sent;
+        return aichat::TurnAction::Reply;
+    });
+    h.advance(1800);
+    Message answer;
+    answer.platform = h.key[0]; answer.adapterId = h.key[1]; answer.targetId = h.key[2];
+    answer.senderId = "KP"; answer.atList = {"A"};
+    h.turns.observe(answer, [] { return "八点集合"; });
+    h.advance(6000);
+    ASSERT_EQ(reviews, 1);
+    ASSERT_EQ(sent, 0);
+}
+
 TEST(AiHttpIntegration, VisionFallbackCacheAndConcurrentRequestIsolation) {
     const char* endpoint=std::getenv("DICENEXT_AI_TEST_ENDPOINT");
     if (!endpoint) { std::cout << "(HTTP integration requires tools/test-ai-http.py) "; return; }

@@ -984,6 +984,7 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                     {"max_chars", chj.value("max_chars", (long long)200)},
                     {"cooldown_sec", chj.value("cooldown_sec", (long long)5)},
                     {"reply_at", chj.value("reply_at", false)},
+                    {"reaction_enabled", chj.value("reaction_enabled", false)},
                     {"no_emoji", chj.value("no_emoji", true)},   // 默认不发 emoji
                     {"filters", cfilters}                        // 用户自定义过滤词
                 };
@@ -1092,8 +1093,9 @@ inline void registerApiRoutes(Database& db, ConfigManager& cfg, AdapterManager& 
                 cur["chat"] = J{{"enabled", false}, {"persona", std::string()},
                                 {"prompt", std::string()}, {"at_bot", true}, {"keywords", J::array()},
                                 {"standby_prob", 0}, {"decision", false}, {"context_rounds", 10}, {"max_chars", 200},
-                                {"cooldown_sec", 5}, {"reply_at", false}, {"no_emoji", true}, {"filters", J::array()}};
-            else { if (!cur["chat"].contains("no_emoji")) cur["chat"]["no_emoji"] = true;
+                                {"cooldown_sec", 5}, {"reply_at", false}, {"no_emoji", true}, {"reaction_enabled", false}, {"filters", J::array()}};
+            else { if (!cur["chat"].contains("reaction_enabled")) cur["chat"]["reaction_enabled"] = false;
+                   if (!cur["chat"].contains("no_emoji")) cur["chat"]["no_emoji"] = true;
                    if (!cur["chat"].contains("filters")) cur["chat"]["filters"] = J::array(); }
             if (!cur.contains("memory") || !cur["memory"].is_object()) cur["memory"] = J::object();
             if (!cur["memory"].contains("short") || !cur["memory"]["short"].is_object())

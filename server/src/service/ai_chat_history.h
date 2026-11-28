@@ -38,6 +38,9 @@ History loadTurnHistory(ConfigManager& cfg, Store* cst, const Message& msg, int 
             auto append = [&](const dice::ChatMsgRow& row, bool quoted) {
                 dice::aichat::HistoryLine line{row.sender, dice::aichat::cleanForAi(cfg, row.content), row.self != 0};
                 line.quoted = quoted;
+                line.ref = "h" + std::to_string(row.id);
+                line.speakerId = row.userId;
+                if (row.adapterId == msg.adapterId) line.messageId = row.msgId;
                 if (quoted) line.text = dice::aichat::truncateChars(line.text, 1500);
                 if (vision && row.adapterId == msg.adapterId && (quoted || row.msgId == priorImageId))
                     line.image = dice::aichat::recentImages().find(imageKey(row.msgId));

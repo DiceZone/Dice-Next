@@ -126,6 +126,17 @@ public:
     void sendReplyFormatted(const Message& original, const std::string& text, ContentFormat format) override {
         sendTo(original, text, format);
     }
+    bool supportsMessageLike() const override { return true; }
+    bool likeMessage(const Message& msg) override {
+        const std::string channel = nativeId(msg.targetId, identity::Kind::Group);
+        const auto snowflake = [](const std::string& s) {
+            return !s.empty() && s.size() <= 20 && s.find_first_not_of("0123456789") == std::string::npos;
+        };
+        if (msg.type != MessageType::kGroup || !isConnected() || !snowflake(channel) || !snowflake(msg.id)) return false;
+        restRequest("PUT", "/api/v10/channels/" + channel + "/messages/" + msg.id + "/reactions/%F0%9F%91%8D/@me", json(), nullptr);
+        return true;
+    }
+
     void sendGroupMessage(const std::string& channelId, const std::string& text) override {
         sendGroupMessageFormatted(channelId, text, ContentFormat::kPlainText);
     }
