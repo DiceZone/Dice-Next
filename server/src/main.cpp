@@ -2941,8 +2941,10 @@ static int realMain(int argc, char* argv[]) {
                     });
                 }
                 dice::notice::LeaveIntents::instance().take(e.adapterId, e.platform, e.groupId);
-                if (diceFlag("listen_group_add", true))
-                    cmdRouter.notifyMasters(dice::notice::groupJoined(e, groupNameForNotice(e.groupId), resolveUserNick(e.operatorId, e.groupId)), e.adapterId);
+                if (diceFlag("listen_group_add", true)) {
+                    const auto inviter = dice::notice::joinInviter(e);
+                    cmdRouter.notifyMasters(dice::notice::groupJoined(e, groupNameForNotice(e.groupId), inviter, resolveUserNick(inviter, e.groupId)), e.adapterId);
+                }
                 if (runLegacyHook("GroupAdd")) return;
                 std::string g = ev.value("group_joined", std::string());
                 if (g.empty()) g = i18n.tr(loc, "event.group_joined");
@@ -3547,7 +3549,7 @@ static int realMain(int argc, char* argv[]) {
                 try {
                     dice::ProcessingScope errorScope(report.processing);
                     dice::notice::notify(configMgr, adapterMgr, dice::notice::kError,
-                        report.text(), report.processing.origin.platform, report.processing.origin.groupId,
+                        report.body(), report.processing.origin.platform, report.processing.origin.groupId,
                         "error", report.processing.origin.adapterId);
                 } catch (...) {
                     // notify() may fail before reaching a transport (for

@@ -287,6 +287,38 @@ TEST(NoticeRules, ActualDispatcherRespectsSelectedAccountsAndDoesNotFallbackOrSe
     dice::notice::notify(cfg, adapters, 2, "fake notification", "onebot_v11", "elsewhere", "friend_add", "1");
     ASSERT_EQ(b->sent.size(), size_t(1));
 }
+TEST(NoticeRules, OnlyTheOriginatingAdapterOmitsItsContextLabel) {
+    NoticePaths paths;
+    dice::Database db;
+    ASSERT_TRUE(db.open((paths.root / "test.db").string()));
+    dice::ConfigManager cfg((paths.root / "config").string());
+    dice::AdapterManager adapters(db);
+    auto source = std::make_shared<NoticeAdapter>("111111", "onebot_v11");
+    auto other = std::make_shared<NoticeAdapter>("222222", "onebot_v11");
+    adapters.registerAdapter(source);
+    adapters.registerAdapter(other);
+    auto r = rule();
+    auto& channel = r["channels"][0];
+    channel["delivery"] = "selected";
+    channel["adapter_ids"] = Json::array({source->id(), other->id()});
+    cfg.set<Json>("dice/notice", {{"rules", Json::array({r})}});
+    for (const auto* op : {"group_left", "error"}) {
+        auto before = source->sent.size();
+        dice::notice::notify(cfg, adapters, std::string_view(op) == "error" ? 8 : 2, "测试正文", source->platform(), "999999", op, source->id());
+        ASSERT_EQ(source->sent.size(), before + 1);
+        ASSERT_EQ(other->sent.size(), before + 1);
+        ASSERT_TRUE(source->sent.back().content.find("适配器") == std::string::npos);
+        ASSERT_TRUE(source->sent.back().content.find("群(999999)") != std::string::npos);
+        ASSERT_TRUE(other->sent.back().content.find("适配器 OneBot:111111") != std::string::npos);
+    }
+    source->online = false;
+    channel["delivery"] = "auto";
+    cfg.set<Json>("dice/notice", {{"rules", Json::array({r})}});
+    dice::notice::notify(cfg, adapters, 2, "自动回退", source->platform(), "", "group_left", source->id());
+    ASSERT_EQ(other->sent.size(), size_t(3));
+    ASSERT_TRUE(other->sent.back().content.find("自动回退") != std::string::npos);
+    ASSERT_TRUE(other->sent.back().content.find("适配器 OneBot:111111") != std::string::npos);
+}
 TEST(NoticeRules, ActualDispatcherDoesNotSendExplicitlyEmptySubscriptionsAndTargetsTests) {
     NoticePaths paths;
     dice::Database db;
@@ -327,7 +359,7 @@ TEST(NoticeContent, ErrorContainsBusinessContextAndOriginalCauseWithoutDiagnosti
          {"details", {{"operation", "执行"}, {"reason", "缺少签文配置"}, {"code", 42}}}},
         processing};
     const auto text =
-        dice::notice::notificationText(8, "error", report.text(), processing, "2026-10-21 04:00:00");
+        dice::notice::notificationText(8, "error", report.body(), processing, "2026-10-21 04:00:00");
     for (const auto *expected : {"[插件错误] 插件「求签」执行失败", "随春生(12345)", "周末调查团(90001)",
                                  "OneBot:10000", "main.lua:27: attempt to index a nil value", "缺少签文配置"})
         ASSERT_TRUE(text.find(expected) != std::string::npos);
@@ -749,20 +781,41 @@ TEST(NoticeEvents, KickerAndDissolverAlwaysOverrideRecentLeaveRequest) {
         const auto text = dice::notice::groupDeparture(departure(subtype), "未归星璇", "管理员小明", dismissIntent());
         ASSERT_EQ(text.operation, std::string("group_left"));
         ASSERT_EQ(text.title, std::string("骰娘被踢出群聊"));
-        ASSERT_EQ(text.body, std::string("骰娘被管理员小明(3569827618)踢出群未归星璇(792364383)。"));
+        ASSERT_EQ(text.body, std::string("未归星璇(792364383)，操作者：管理员小明(3569827618)"));
         ASSERT_TRUE(text.body.find("dismiss") == std::string::npos);
     }
-    const auto text = dice::notice::groupDeparture(departure("disband"), "未归星璇", "群主", dismissIntent());
+    auto event = departure("disband");
+    const auto text = dice::notice::groupDeparture(event, "未归星璇", "小林", dismissIntent());
     ASSERT_EQ(text.title, std::string("群聊已解散"));
-    ASSERT_TRUE(text.body.find("群主(3569827618)解散") != std::string::npos);
-    ASSERT_TRUE(text.body.find("dismiss") == std::string::npos);
+    ASSERT_EQ(text.body, std::string("未归星璇(792364383)，群主：小林(3569827618)"));
+    for (const auto* missing : {"", "0"}) {
+        event.operatorId = missing;
+        ASSERT_EQ(dice::notice::groupDeparture(event, "未归星璇", "", dismissIntent()).body, std::string("未归星璇(792364383)"));
+    }
+}
+TEST(NoticeEvents, GroupJoinOnlyNamesAnInviterNotAnApprover) {
+    dice::BotEvent e;
+    e.groupId = "10001"; e.selfId = "30003"; e.operatorId = "20002"; e.subType = "invite";
+    auto render = [&] {
+        const auto id = dice::notice::joinInviter(e);
+        const auto text = dice::notice::groupJoined(e, "周末团", id, id == "20002" ? "小林" : "");
+        return dice::notice::notificationText(text.level, text.operation, text.body, {}, "", text.title);
+    };
+    const std::string known = "[骰娘已入群] 新加入群：周末团(10001)，邀请人：小林(20002)";
+    const std::string unknown = "[骰娘已入群] 新加入群：周末团(10001)，邀请人未知。";
+    ASSERT_EQ(render(), known);
+    e.subType = "approve"; ASSERT_EQ(render(), unknown);
+    e.extra = {{"invitor_id", 20002}}; e.operatorId = "40004"; ASSERT_EQ(render(), known);
+    e.extra.clear(); e.subType = "invite";
+    for (const auto* invalid : {"", "0", "30003"}) {
+        e.operatorId = invalid; ASSERT_EQ(render(), unknown);
+    }
 }
 TEST(NoticeEvents, SubmittedRequestIsNotConfirmationAndUnknownEventsNeverInventCause) {
     auto intent = dismissIntent(); intent.reason = "骰主主动请离";
     const auto requested = dice::notice::leaveRequested("792364383", intent);
     ASSERT_EQ(requested.operation, std::string("dismiss"));
-    ASSERT_TRUE(requested.body.find("希亚(1707642)通过指令 .dismiss") != std::string::npos);
-    ASSERT_TRUE(requested.body.find("等待平台确认") != std::string::npos);
+    ASSERT_EQ(requested.body, std::string("希亚(1707642)发送退群指令请求骰娘退出群未归星璇(792364383)，待平台确认。\n原因：骰主主动请离"));
     auto event = departure("leave");
     const auto confirmed = dice::notice::groupDeparture(event, "", "", intent);
     ASSERT_EQ(confirmed.title, std::string("骰娘退群已确认"));
@@ -776,7 +829,7 @@ TEST(NoticeEvents, SubmittedRequestIsNotConfirmationAndUnknownEventsNeverInventC
     ASSERT_EQ(unknown.title, std::string("骰娘离群（原因未知）"));
     ASSERT_TRUE(unknown.body.find("不能据此认定") != std::string::npos);
     event.subType = "kick_me"; event.operatorId.clear();
-    ASSERT_TRUE(dice::notice::groupDeparture(event, "", "").body.find("平台未提供操作者") != std::string::npos);
+    ASSERT_EQ(dice::notice::groupDeparture(event, "未归星璇", "").body, std::string("未归星璇(792364383)"));
 }
 TEST(NoticeEvents, UnattributedKickAfterDismissConfirmsLeaveAndSkipsBlacklist) {
     auto intent = dismissIntent(); intent.reason = "礼貌退群";
@@ -786,16 +839,13 @@ TEST(NoticeEvents, UnattributedKickAfterDismissConfirmsLeaveAndSkipsBlacklist) {
         auto text = dice::notice::groupDeparture(event, "未归星璇", "", intent);
         ASSERT_EQ(text.operation, std::string("group_left"));
         ASSERT_EQ(text.title, std::string("骰娘退群已确认"));
-        ASSERT_TRUE(text.body.find("希亚(1707642)通过指令 .dismiss") != std::string::npos);
-        ASSERT_TRUE(text.body.find("礼貌退群") != std::string::npos);
-        ASSERT_TRUE(text.body.find("云黑名单") != std::string::npos);
-        ASSERT_TRUE(text.body.find("被群管理员") == std::string::npos);
+        ASSERT_EQ(text.body, std::string("平台已确认骰娘退出群未归星璇(792364383)。由退群指令优雅退群。\n原因：礼貌退群"));
         event.operatorId = "0";
         ASSERT_EQ(dice::notice::groupDeparture(event, "未归星璇", "", intent).title, std::string("骰娘退群已确认"));
         event.operatorId = event.selfId;
         text = dice::notice::groupDeparture(event, "未归星璇", "骰娘", intent);
         ASSERT_EQ(text.title, std::string("骰娘退群已确认"));
-        ASSERT_TRUE(text.body.find("没有提供其他操作者") != std::string::npos);
+        ASSERT_TRUE(text.body.find("由退群指令优雅退群。") != std::string::npos);
     }
     auto named = departure("kick_me");
     ASSERT_EQ(dice::notice::groupDeparture(named, "未归星璇", "管理员小明", intent).title, std::string("骰娘被踢出群聊"));
@@ -812,7 +862,7 @@ TEST(NoticeEvents, UnattributedKickAfterDismissConfirmsLeaveAndSkipsBlacklist) {
     const auto echoed = dice::notice::groupDeparture(event, "未归星璇", "", intent);
     ASSERT_EQ(echoed.title, std::string("骰娘退群已确认"));
     ASSERT_TRUE(echoed.body.find("未归星璇(792364383)") != std::string::npos);
-    ASSERT_TRUE(echoed.body.find("标成了「踢出」") != std::string::npos);
+    ASSERT_TRUE(echoed.body.find("由退群指令优雅退群。") != std::string::npos);
     auto stillKick = departure("kick");
     stillKick.adapterId = event.adapterId; stillKick.platform = event.platform; stillKick.groupId = event.groupId;
     dice::notice::reconcileOwnLeaveEcho(stillKick);
@@ -948,7 +998,7 @@ TEST(NoticeEvents, LeaveSubmissionValidatesAccountCapabilityAndCancelsFailures) 
     ASSERT_TRUE(dice::notice::requestGroupLeave(cfg, adapters, a, "792364383", intent));
     ASSERT_EQ(a->leaveCalls.size(), size_t(1));
     ASSERT_TRUE(dice::notice::LeaveIntents::instance().take(a->id(), a->platform(), "792364383").has_value());
-    ASSERT_TRUE(a->sent.back().content.find("等待平台确认") != std::string::npos);
+    ASSERT_TRUE(a->sent.back().content.find("待平台确认") != std::string::npos);
     a->online = false;
     ASSERT_FALSE(dice::notice::requestGroupLeave(cfg, adapters, a, "792364383", intent));
     ASSERT_EQ(a->leaveCalls.size(), size_t(1));

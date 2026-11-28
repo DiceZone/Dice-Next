@@ -1,5 +1,6 @@
 #pragma once
 #include "notice_content.h"
+#include "../adapter/group_notice_semantics.h"
 #include <chrono>
 #include <map>
 #include <mutex>
@@ -84,13 +85,13 @@ private:
     std::mutex mutex_; std::map<Key, Entry> items_; uint64_t sequence_ = 0;
 };
 inline std::string requestedBy(const LeaveIntent& intent) {
-    if (intent.cause == "指令 .dismiss") return operatorIdentity(intent.actor) + "通过指令 .dismiss";
+    if (intent.cause == "指令 .dismiss") return operatorIdentity(intent.actor) + "发送退群指令";
     if (intent.cause == "面板退群") return operatorIdentity(intent.actor) + "通过管理面板";
     return readable(intent.cause, 300);
 }
 inline EventText leaveRequested(const std::string& groupId, const LeaveIntent& intent) {
     auto body = requestedBy(intent) + "请求骰娘退出" + groupIdentity(intent.groupName, groupId) +
-        "；退群请求已提交，等待平台确认。";
+        "，待平台确认。";
     if (!intent.reason.empty()) body += "\n原因：" + readable(intent.reason, 800);
     return {intent.operation, "退群请求已提交", std::move(body), 2};
 }
@@ -121,31 +122,24 @@ inline void reconcileOwnLeaveEcho(BotEvent& event) {
 }
 inline EventText groupDeparture(const BotEvent& event, const std::string& groupName,
                                const std::string& operatorName, const std::optional<LeaveIntent>& intent = {}) {
-    const auto group = groupIdentity(groupName.empty() && intent ? intent->groupName : groupName, event.groupId);
+    const auto label = identity(groupName.empty() && intent ? intent->groupName : groupName, event.groupId, "");
+    const auto group = "群" + label;
     const bool actorKnown = !event.operatorId.empty() && event.operatorId != "0";
     const auto actor = actorKnown ? identity(operatorName, event.operatorId) : std::string();
-    auto confirmRequested = [&](const std::string& platformLabel) {
-        auto body = "平台已确认骰娘退出" + group + "；此前由" + requestedBy(*intent) + "发起退群。";
+    auto confirmRequested = [&]() {
+        auto body = "平台已确认骰娘退出" + group + "。";
+        body += intent->operation == "dismiss" ? "由退群指令优雅退群。" : "此前由" + requestedBy(*intent) + "发起退群。";
         if (!intent->reason.empty()) body += "\n原因：" + readable(intent->reason, 800);
-        if (!platformLabel.empty())
-            body += "\n平台把这次离群标成了「" + platformLabel + "」，但没有提供其他操作者。按此前提交的退群请求确认为主动退出。本程序不会因此写入黑名单或云黑名单。";
         return EventText{"group_left", "骰娘退群已确认", std::move(body), 2};
     };
     if (reportedAsKick(event.subType)) {
-        if (intent && !namesAnotherOperator(event)) return confirmRequested("踢出");
-        return {"group_left", "骰娘被踢出群聊", "骰娘被" + (actorKnown ? actor : "群管理员（平台未提供操作者）") + "踢出" + group + "。", 2};
+        if (intent && !namesAnotherOperator(event)) return confirmRequested();
+        return {"group_left", "骰娘被踢出群聊", label + (actorKnown ? "，操作者：" + actor : ""), 2};
     }
     if (event.subType == "disband")
-        return {"group_left", "群聊已解散", group + (actorKnown ? "已被" + actor + "解散，骰娘已离开该群。" : "已解散，骰娘已离开该群（平台未提供操作者）。"), 2};
+        return {"group_left", "群聊已解散", label + (actorKnown ? "，群主：" + actor : ""), 2};
     if (event.subType == "leave") {
-        if (intent) {
-            std::string label;
-            if (event.extra.is_object()) {
-                const auto marked = event.extra.value("platform_departure", std::string());
-                if (reportedAsKick(marked)) label = "踢出";
-            }
-            return confirmRequested(label);
-        }
+        if (intent) return confirmRequested();
         return {"group_left", "骰娘主动退出群聊", "骰娘主动退出" + group + "；未关联到本程序近期提交的退群请求，可能来自其他客户端或已失效的历史请求。", 2};
     }
     auto body = "骰娘已离开" + group + "；平台未提供明确的离群原因，无法确认是被踢还是主动退出。";
@@ -177,9 +171,16 @@ inline EventText groupModeration(const BotEvent& event, const std::string& group
     const auto duration = event.extra.is_object() ? event.extra.value("duration", nlohmann::json()) : nlohmann::json();
     return {"group_ban", "骰娘被禁言", "骰娘在" + group + "中" + by + "禁言" + durationText(duration) + unknown + "。", 2};
 }
-inline EventText groupJoined(const BotEvent& event, const std::string& groupName, const std::string& operatorName) {
-    return {"group_joined", "骰娘已加入群聊", "骰娘已加入" + groupIdentity(groupName, event.groupId) + "。" +
-        (!event.operatorId.empty() && event.operatorId != "0" && event.operatorId != event.selfId ? "\n邀请／批准人：" + identity(operatorName, event.operatorId) + "。" : "\n平台未提供邀请／批准人。"), 2};
+inline std::string joinInviter(const BotEvent& event) {
+    // An approval operator is not necessarily the person who invited the bot.
+    auto id = noticeId(event.extra, "invitor_id");
+    if (id.empty()) id = noticeId(event.extra, "inviter_id");
+    if (id.empty() && event.subType == "invite") id = event.operatorId;
+    return id == "0" || id == event.selfId ? std::string() : id;
+}
+inline EventText groupJoined(const BotEvent& event, const std::string& groupName, const std::string& inviterId, const std::string& inviterName) {
+    return {"group_joined", "骰娘已入群", "新加入群：" + identity(groupName, event.groupId, "") +
+        (inviterId.empty() ? "，邀请人未知。" : "，邀请人：" + identity(inviterName, inviterId)), 2};
 }
 inline EventText listChanged(int type, int list, const std::string& id, const std::string& name,
                              bool added, const std::string& reason = "") {

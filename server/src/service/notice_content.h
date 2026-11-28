@@ -96,7 +96,7 @@ inline std::string adapterLabel(const ProcessingOrigin &o) {
     return o.accountName.empty() ? readable(platform, 80)
                                  : readable(platform, 80) + "「" + readable(o.accountName, 240) + "」";
 }
-inline std::string contextText(const ProcessingOrigin &o, const std::string &body = "") {
+inline std::string contextText(const ProcessingOrigin &o, const std::string &body = "", bool includeAdapter = true) {
     std::vector<std::string> parts;
     if (!o.groupId.empty() && body.find(o.groupId) == std::string::npos)
         parts.push_back("群" + identity(o.groupName, o.groupId, ""));
@@ -107,7 +107,7 @@ inline std::string contextText(const ProcessingOrigin &o, const std::string &bod
         parts.push_back(o.targetId == "*" ? "所有符合条件的群组"
                                           : std::string(o.targetType == "group" ? "目标群" : "目标用户") +
                                                 identity(o.targetName, o.targetId, ""));
-    if ((!o.accountId.empty() || !o.accountName.empty()) &&
+    if (includeAdapter && (!o.accountId.empty() || !o.accountName.empty()) &&
         (o.accountId.empty() || body.find(o.accountId) == std::string::npos))
         parts.push_back("适配器 " + adapterLabel(o));
     std::string text;
@@ -147,14 +147,12 @@ inline std::string levelNames(int mask) {
 }
 inline std::string notificationText(int /*level*/, const std::string &op, const std::string &message,
                                     const ProcessingContext &processing, const std::string & /*time*/,
-                                    const std::string& title = "") {
-    // ErrorReport already contains its business title and useful context.
-    if (op == "error")
-        return readable(message, 6000);
+                                    const std::string& title = "", bool includeAdapter = true) {
     const bool management = op == "trust" || op == "alias" || op == "global" || op == "admin" || op == "blacklist" || op == "schedule_manage" || op == "notice_manage" || op == "group_control";
-    std::string text = "[" + (title.empty() ? eventTitle(op) : readable(title, 120)) + "] " +
+    // Error reports supply their own title, but share the per-destination context.
+    std::string text = op == "error" ? readable(message, 6000) : "[" + (title.empty() ? eventTitle(op) : readable(title, 120)) + "] " +
         (management ? operationActor(processing) + "：" : "") + readable(message, 10000);
-    const auto context = contextText(processing.origin, text);
+    const auto context = contextText(processing.origin, text, includeAdapter);
     if (!context.empty())
         text += "\n" + context;
     return text;
@@ -163,7 +161,7 @@ struct ErrorReport {
     nlohmann::json record;
     ProcessingContext processing;
     size_t suppressed = 0;
-    std::string text() const {
+    std::string body() const {
         auto value = [](const nlohmann::json &object, const char *key) {
             const auto i = object.is_object() ? object.find(key) : object.end();
             return i != object.end() && i->is_string() ? i->get<std::string>() : std::string();
@@ -244,12 +242,12 @@ struct ErrorReport {
             if (!reason.empty() && text.find(readable(reason, 1000)) == std::string::npos)
                 text += "；" + readable(reason, 1000);
         }
-        const auto context = contextText(processing.origin, text);
-        if (!context.empty())
-            text += "\n" + context;
         if (suppressed)
             text += "（过去 24 小时内相同错误另出现 " + std::to_string(suppressed) + " 次，已合并）";
         return text;
+    }
+    std::string text() const {
+        return notificationText(8, "error", body(), processing, "");
     }
 };
 } // namespace dice::notice
